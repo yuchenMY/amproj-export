@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AMProj Debug</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f5f7;
+      --surface: #ffffff;
+      --line: #d8dce2;
+      --text: #20242a;
+      --muted: #68707c;
+      --green: #147d52;
+      --red: #b42318;
+      --blue: #1769aa;
+      --amber: #9a6700;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0; }
+    header { height: 58px; border-bottom: 1px solid var(--line); background: var(--surface); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
+    h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: 0; }
+    .connection { display: flex; gap: 8px; align-items: center; color: var(--muted); }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--red); }
+    .dot.live { background: var(--green); }
+    main { max-width: 1500px; margin: 0 auto; padding: 18px 24px 28px; }
+    .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-bottom: 16px; }
+    .segmented { display: inline-grid; grid-template-columns: repeat(3, minmax(104px, 1fr)); border: 1px solid #aeb5bf; border-radius: 6px; overflow: hidden; background: var(--surface); }
+    .segmented button { border: 0; border-right: 1px solid #aeb5bf; border-radius: 0; background: transparent; min-height: 34px; padding: 7px 14px; color: var(--text); }
+    .segmented button:last-child { border-right: 0; }
+    .segmented button.active { background: #e7f1f8; color: #0d568b; box-shadow: inset 0 -2px 0 var(--blue); }
+    button, select, input { font: inherit; letter-spacing: 0; }
+    button { min-height: 34px; border: 1px solid #9ea6b1; border-radius: 5px; background: var(--surface); padding: 7px 12px; cursor: pointer; }
+    button:hover { border-color: #626b77; }
+    button.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
+    button.primary.armed { border-color: var(--amber); background: var(--amber); }
+    .spacer { flex: 1; }
+    .status-text { color: var(--muted); }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); border: 1px solid var(--line); background: var(--surface); margin-bottom: 16px; }
+    .metric { min-height: 78px; padding: 13px 16px; border-right: 1px solid var(--line); }
+    .metric:last-child { border-right: 0; }
+    .metric label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .metric strong { display: block; font-size: 19px; font-weight: 600; overflow-wrap: anywhere; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; }
+    section, aside { border: 1px solid var(--line); background: var(--surface); }
+    .section-head { height: 48px; padding: 0 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
+    h2 { margin: 0; font-size: 14px; font-weight: 650; letter-spacing: 0; }
+    .filters { margin-left: auto; display: flex; gap: 8px; }
+    select, input { min-height: 30px; border: 1px solid #b8bec7; border-radius: 4px; background: #fff; padding: 4px 8px; color: var(--text); }
+    input { width: 190px; }
+    .table-wrap { overflow: auto; height: calc(100vh - 272px); min-height: 360px; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th { position: sticky; top: 0; z-index: 1; background: #f7f8fa; color: var(--muted); font-size: 12px; text-align: left; font-weight: 600; border-bottom: 1px solid var(--line); padding: 8px 10px; }
+    td { border-bottom: 1px solid #e7e9ed; padding: 8px 10px; vertical-align: top; overflow-wrap: anywhere; }
+    tr.watchdog td { background: #fff5e1; }
+    .time { width: 110px; }
+    .level { width: 64px; text-transform: uppercase; font-size: 11px; }
+    .stage { width: 135px; }
+    .session { width: 120px; color: var(--muted); }
+    .empty { text-align: center; color: var(--muted); padding: 48px 20px; }
+    aside .section-head { justify-content: space-between; }
+    .sessions { max-height: calc(100vh - 272px); overflow: auto; min-height: 360px; }
+    .session-row { padding: 12px 14px; border-bottom: 1px solid #e7e9ed; }
+    .session-row strong, .session-row span { display: block; overflow-wrap: anywhere; }
+    .session-row span { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .ok { color: var(--green); }
+    .warn { color: var(--amber); }
+    .bad { color: var(--red); }
+    @media (max-width: 850px) {
+      header { padding: 0 14px; }
+      main { padding: 14px; }
+      .summary { grid-template-columns: repeat(2, 1fr); }
+      .metric:nth-child(2) { border-right: 0; }
+      .metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .workspace { grid-template-columns: 1fr; }
+      aside { order: -1; }
+      .sessions { min-height: 0; max-height: 180px; }
+      .table-wrap { height: 520px; }
+      .spacer { display: none; }
+      .status-text { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AMProj Debug</h1>
+    <div class="connection"><span class="dot" id="connectionDot"></span><span id="connectionText">正在连接</span></div>
+  </header>
+  <main>
+    <div class="toolbar">
+      <div class="segmented" aria-label="导出模式">
+        <button type="button" data-mode="observe">Observe</button>
+        <button type="button" data-mode="placeholder">Placeholder</button>
+        <button type="button" data-mode="full">Full</button>
+      </div>
+      <button type="button" class="primary" id="captureButton">捕获下一次导出</button>
+      <div class="spacer"></div>
+      <span class="status-text" id="commandStatus">等待设备</span>
+    </div>
+
+    <div class="summary">
+      <div class="metric"><label>设备</label><strong id="deviceMetric">0 在线</strong></div>
+      <div class="metric"><label>当前阶段</label><strong id="stageMetric">-</strong></div>
+      <div class="metric"><label>导出进度</label><strong id="progressMetric">-</strong></div>
+      <div class="metric"><label>99% Watchdog</label><strong id="watchdogMetric">未触发</strong></div>
+    </div>
+
+    <div class="workspace">
+      <section>
+        <div class="section-head">
+          <h2>阶段时间线</h2>
+          <div class="filters">
+            <select id="levelFilter" aria-label="级别筛选">
+              <option value="">全部级别</option>
+              <option value="debug">Debug</option>
+              <option value="info">Info</option>
+              <option value="warning">Warning</option>
+              <option value="error">Error</option>
+            </select>
+            <input id="searchFilter" type="search" placeholder="筛选阶段或消息" aria-label="日志筛选">
+          </div>
+        </div>
+        <div class="table-wrap" id="tableWrap">
+          <table>
+            <thead><tr><th class="time">时间</th><th class="level">级别</th><th class="stage">阶段</th><th>消息</th><th class="session">会话</th></tr></thead>
+            <tbody id="eventRows"><tr><td class="empty" colspan="5">尚无设备事件</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+      <aside>
+        <div class="section-head"><h2>设备会话</h2><span id="sessionCount">0</span></div>
+        <div class="sessions" id="sessions"><div class="empty">尚无设备连接</div></div>
+      </aside>
+    </div>
+  </main>
+  <script>
+    const TOKEN = __AMPROJ_DEBUG_TOKEN_JSON__;
+    const state = { events: [], sessions: [], config: null, streamAfter: 0, connected: false };
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, options = {}) {
+      const headers = new Headers(options.headers || {});
+      headers.set("Authorization", `Bearer ${TOKEN}`);
+      if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+      const response = await fetch(path, { ...options, headers, cache: "no-store" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${response.status}`);
+      }
+      return response.json();
+    }
+
+    function eventText(event) {
+      const payload = event.payload || {};
+      const fields = payload.fields || {};
+      return String(event.message || payload.message || fields.message || fields.detail || fields.error ||
+        (Object.keys(fields).length ? JSON.stringify(fields) : ""));
+    }
+
+    function renderEvents() {
+      const level = $("levelFilter").value;
+      const query = $("searchFilter").value.trim().toLowerCase();
+      const filtered = state.events.filter((event) => {
+        if (level && event.level !== level) return false;
+        const haystack = `${event.stage || ""} ${event.type || ""} ${eventText(event)}`.toLowerCase();
+        return !query || haystack.includes(query);
+      }).slice(-1000).reverse();
+      if (!filtered.length) {
+        $("eventRows").innerHTML = '<tr><td class="empty" colspan="5">没有匹配的事件</td></tr>';
+        return;
+      }
+      $("eventRows").replaceChildren(...filtered.map((event) => {
+        const row = document.createElement("tr");
+        if (String(event.type).includes("watchdog") || event.stage === "watchdog-99") row.className = "watchdog";
+        const values = [
+          new Date(event.timestamp || event.received_at).toLocaleTimeString(),
+          event.level || "info",
+          event.stage || event.type || "-",
+          eventText(event) || JSON.stringify(event.payload || {}),
+          event.session_id || "-"
+        ];
+        const classes = ["time", "level", "stage", "", "session"];
+        values.forEach((value, index) => {
+          const cell = document.createElement("td");
+          cell.className = classes[index];
+          cell.textContent = value;
+          row.appendChild(cell);
+        });
+        return row;
+      }));
+    }
+
+    function renderSessions() {
+      const now = Date.now();
+      const online = state.sessions.filter((session) => now - Date.parse(session.last_seen) < 30000).length;
+      $("deviceMetric").textContent = `${online} 在线 / ${state.sessions.length} 会话`;
+      $("sessionCount").textContent = String(state.sessions.length);
+      if (!state.sessions.length) {
+        $("sessions").innerHTML = '<div class="empty">尚无设备连接</div>';
+        return;
+      }
+      $("sessions").replaceChildren(...state.sessions.map((session) => {
+        const row = document.createElement("div");
+        row.className = "session-row";
+        const name = document.createElement("strong");
+        name.textContent = session.device_model || session.device_id || "未知设备";
+        const version = document.createElement("span");
+        version.textContent = `iOS ${session.os_version || "?"} · App ${session.app_version || "?"}`;
+        const seen = document.createElement("span");
+        seen.textContent = `最后活动 ${new Date(session.last_seen).toLocaleTimeString()} · ${session.session_id}`;
+        row.append(name, version, seen);
+        return row;
+      }));
+    }
+
+    function renderConfig(config) {
+      state.config = config;
+      document.querySelectorAll("[data-mode]").forEach((button) => button.classList.toggle("active", button.dataset.mode === config.mode));
+      $("captureButton").classList.toggle("armed", Boolean(config.capture_next));
+      $("captureButton").textContent = config.capture_next ? "已等待下一次导出" : "捕获下一次导出";
+      $("commandStatus").textContent = `${config.mode} · 配置版本 ${config.revision}`;
+    }
+
+    function updateSummary(event) {
+      const payload = event.payload || {};
+      const fields = payload.fields || {};
+      if (event.stage || event.type) $("stageMetric").textContent = String(event.stage || event.type);
+      const progress = payload.progress ?? payload.percent ?? fields.progress ?? fields.percent;
+      if (progress !== undefined) $("progressMetric").textContent = `${progress}%`;
+      if (String(event.type).includes("watchdog") || event.stage === "watchdog-99") {
+        $("watchdogMetric").textContent = "已触发";
+        $("watchdogMetric").className = "warn";
+      }
+    }
+
+    async function refresh() {
+      const [sessions, events, commands] = await Promise.all([
+        api("/api/v1/sessions"), api("/api/v1/events?limit=1000"), api("/api/v1/commands")
+      ]);
+      state.sessions = sessions.sessions;
+      state.events = events.events;
+      renderSessions();
+      renderEvents();
+      renderConfig(commands.config);
+      state.events.forEach(updateSummary);
+    }
+
+    async function setCommand(command) {
+      try {
+        const result = await api("/api/v1/commands", { method: "POST", body: JSON.stringify(command) });
+        renderConfig(result);
+      } catch (error) {
+        $("commandStatus").textContent = error.message;
+      }
+    }
+
+    async function connectStream() {
+      while (true) {
+        try {
+          const response = await fetch(`/api/v1/stream?after=${state.streamAfter}`, {
+            headers: { Authorization: `Bearer ${TOKEN}` }, cache: "no-store"
+          });
+          if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+          state.connected = true;
+          $("connectionDot").classList.add("live");
+          $("connectionText").textContent = "后端已连接";
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) throw new Error("stream closed");
+            buffer += decoder.decode(value, { stream: true });
+            const frames = buffer.split("\n\n");
+            buffer = frames.pop();
+            for (const frame of frames) {
+              const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+              if (!dataLine) continue;
+              const update = JSON.parse(dataLine.slice(6));
+              state.streamAfter = Math.max(state.streamAfter, update.stream_id || 0);
+              if (update.topic === "event") {
+                const event = { ...update.data };
+                delete event.record_type;
+                if (!state.events.some((existing) => existing.id === event.id)) state.events.push(event);
+                updateSummary(event);
+                renderEvents();
+              } else if (update.topic === "session") {
+                const found = state.sessions.findIndex((item) => item.session_id === update.data.session.session_id);
+                if (found >= 0) state.sessions[found] = update.data.session; else state.sessions.unshift(update.data.session);
+                renderSessions();
+              } else if (update.topic === "command") {
+                renderConfig(update.data);
+              }
+            }
+          }
+        } catch (_error) {
+          state.connected = false;
+          $("connectionDot").classList.remove("live");
+          $("connectionText").textContent = "正在重连";
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+    }
+
+    document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => setCommand({ mode: button.dataset.mode })));
+    $("captureButton").addEventListener("click", () => setCommand({ capture_next: !state.config?.capture_next }));
+    $("levelFilter").addEventListener("change", renderEvents);
+    $("searchFilter").addEventListener("input", renderEvents);
+    refresh().catch((error) => { $("commandStatus").textContent = error.message; });
+    connectStream();
+    setInterval(() => api("/api/v1/sessions").then((result) => { state.sessions = result.sessions; renderSessions(); }).catch(() => {}), 10000);
+  </script>
+</body>
+</html>

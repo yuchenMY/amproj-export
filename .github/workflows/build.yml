@@ -1,9 +1,13 @@
-name: Build AMProjExport.dylib
+name: Build AMProjExport dylibs
 
 on:
   push:
     paths:
       - 'AMProjExport/**'
+      - 'debug_backend/**'
+      - 'inject_dylib.py'
+      - 'tests/**'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 jobs:
@@ -12,12 +16,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build dylib
+      - name: Test Windows tooling and debug backend
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 -m unittest debug_backend.test_server -v
+
+      - name: Build release and debug dylibs
         working-directory: AMProjExport
         run: make
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AMProjExport.dylib
-          path: AMProjExport/AMProjExport.dylib
+          name: AMProjExport-dylibs
+          path: |
+            AMProjExport/AMProjExport.dylib
+            AMProjExport/AMProjExportDebug.dylib
