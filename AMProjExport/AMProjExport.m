@@ -20,6 +20,7 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 
@@ -487,10 +488,12 @@ static void hooked_presentVC(id self, SEL _cmd, id vc, BOOL animated, id complet
 // MARK: - Constructor
 // ═══════════════════════════════════════════
 
-__attribute__((constructor))
-static void AMProjExportInit(void) {
-    @autoreleasepool {
-        NSLog(@"[AMProjExport] ===== Loading v0.2 (package-intercept mode) =====");
+static id amproj_launchObserver = nil;
+
+static void amproj_installHooks(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSLog(@"[AMProjExport] Installing hooks after app launch");
 
         // Hook 1: UIActivityViewController 初始化 — 替换 items
         @try {
@@ -521,5 +524,33 @@ static void AMProjExportInit(void) {
         }
 
         NSLog(@"[AMProjExport] ===== Ready — waiting for package export =====");
+    });
+}
+
+__attribute__((constructor))
+static void AMProjExportInit(void) {
+    @autoreleasepool {
+        NSLog(@"[AMProjExport] ===== Loading v0.3 (deferred-hook mode) =====");
+
+        // Do not touch UIKit class implementations while dyld is still running
+        // initializers. UIApplication posts this notification on the main thread
+        // after application:didFinishLaunchingWithOptions: has returned.
+        amproj_launchObserver = [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidFinishLaunchingNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(__unused NSNotification *notification) {
+            id observer = amproj_launchObserver;
+            amproj_launchObserver = nil;
+            if (observer) {
+                [[NSNotificationCenter defaultCenter] removeObserver:observer];
+            }
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                amproj_installHooks();
+            });
+        }];
+
+        NSLog(@"[AMProjExport] Hook installation deferred until app launch completes");
     }
 }
