@@ -21,6 +21,11 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
+
+// Forward declarations
+static NSString* amproj_serializeLayer(id layer);
+static NSString* amproj_tagForType(NSString *type);
 
 // ═══════════════════════════════════════════
 // MARK: - ZIP Creator
@@ -145,8 +150,8 @@ static id am_findScene(id obj, int depth) {
     unsigned int ic;
     Ivar *ivars = class_copyIvarList([obj class], &ic);
     for (unsigned int i = 0; i < ic; i++) {
-        if ([NSString stringWithUTF8String:ivar_getName(ivars[i])].lowercaseString
-            containsString:@"scene"]) {
+        NSString *ivn = [NSString stringWithUTF8String:ivar_getName(ivars[i])];
+        if ([ivn.lowercaseString containsString:@"scene"]) {
             @try {
                 id v = object_getIvar(obj, ivars[i]);
                 if (v) { id f = am_findScene(v, depth+1); if (f) { free(ivars); return f; } }
