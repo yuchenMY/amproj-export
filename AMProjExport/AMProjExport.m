@@ -581,6 +581,7 @@ static NSString *const AMProjUTI = @"com.alightcreative.motion.amproj";
 
 @interface AMProjXMLProbe : NSObject <NSXMLParserDelegate>
 @property(nonatomic) BOOL validRoot;
+@property(nonatomic) BOOL sawRootElement;
 @property(nonatomic) NSUInteger depth;
 @property(nonatomic) NSUInteger rootDepth;
 @property(nonatomic) NSUInteger layerCount;
@@ -607,7 +608,8 @@ static NSString *const AMProjUTI = @"com.alightcreative.motion.amproj";
     (void)parser;
     (void)namespaceURI;
     (void)qualifiedName;
-    if (!self.validRoot) {
+    if (!self.sawRootElement) {
+        self.sawRootElement = YES;
         self.validRoot = [elementName isEqualToString:@"scene"];
         self.rootDepth = self.depth;
         if (self.validRoot) {
@@ -757,7 +759,11 @@ static void amproj_addPathCandidate(id value, NSMutableOrderedSet<NSURL *> *cand
         URL = [string hasPrefix:@"file://"] ? [NSURL URLWithString:string] :
             ([string hasPrefix:@"/"] ? [NSURL fileURLWithPath:string] : nil);
     }
-    if (URL.isFileURL) [candidates addObject:URL.URLByStandardizingPath];
+    if (URL.isFileURL) {
+        NSURL *standard = URL.URLByStandardizingPath;
+        NSString *home = NSURL.fileURLWithPath(NSHomeDirectory()).URLByStandardizingPath.path;
+        if ([standard.path hasPrefix:home]) [candidates addObject:standard];
+    }
 }
 
 static void amproj_collectPathCandidatesRecursive(id object, NSUInteger depth,
@@ -822,7 +828,10 @@ static NSArray<NSURL *>* amproj_collectPathCandidates(NSArray *roots) {
 static NSArray<NSURL *>* amproj_expandXMLCandidates(NSArray<NSURL *> *roots) {
     NSFileManager *manager = NSFileManager.defaultManager;
     NSMutableOrderedSet<NSURL *> *results = [NSMutableOrderedSet orderedSet];
+    NSUInteger inspected = 0;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3.0];
     for (NSURL *root in roots) {
+        if (inspected >= 10000 || [deadline timeIntervalSinceNow] <= 0) break;
         NSNumber *directory = nil;
         [root getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil];
         if (!directory.boolValue) {
@@ -839,7 +848,9 @@ static NSArray<NSURL *>* amproj_expandXMLCandidates(NSArray<NSURL *> *roots) {
             return YES;
         }];
         for (NSURL *URL in enumerator) {
-            if (results.count >= 2048) break;
+            inspected++;
+            if (inspected >= 10000 || results.count >= 2048 ||
+                [deadline timeIntervalSinceNow] <= 0) break;
             if ([URL.pathExtension.lowercaseString isEqualToString:@"xml"]) [results addObject:URL];
         }
     }
@@ -863,9 +874,10 @@ static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionar
         NSInteger expectedWidth = [expected[@"width"] integerValue];
         NSInteger expectedHeight = [expected[@"height"] integerValue];
         NSUInteger expectedLayers = [expected[@"layers"] unsignedIntegerValue];
+        BOOL layersKnown = [expected[@"layers_known"] boolValue];
         if (expectedWidth > 0 && expectedWidth != probe.width) continue;
         if (expectedHeight > 0 && expectedHeight != probe.height) continue;
-        if (expectedLayers > 0 && probe.layerCount != expectedLayers) continue;
+        if (layersKnown && probe.layerCount != expectedLayers) continue;
 
         NSInteger score = 1;
         NSString *expectedTitle = expected[@"title"];
@@ -1242,12 +1254,13 @@ static void amproj_beginDirectFlow(void) {
 }
 
 static NSDictionary* amproj_expectedSceneMetadata(id scene, NSDate *saveStarted) {
-    NSArray *layers = am_arr(scene, @"layers") ?: @[];
+    NSArray *layers = am_arr(scene, @"layers");
     return @{
         @"title": am_str(scene, @"title") ?: @"",
         @"width": @(am_int(scene, @"width")),
         @"height": @(am_int(scene, @"height")),
         @"layers": @(layers.count),
+        @"layers_known": @(layers != nil),
         @"save_started": saveStarted ?: NSDate.date
     };
 }
@@ -1262,9 +1275,10 @@ static BOOL amproj_validateXMLAgainstScene(NSData *xmlData, NSDictionary *expect
     NSInteger width = [expected[@"width"] integerValue];
     NSInteger height = [expected[@"height"] integerValue];
     NSUInteger layers = [expected[@"layers"] unsignedIntegerValue];
-    if ((width > 0 && width != probe.width) ||
-        (height > 0 && height != probe.height) ||
-        (layers > 0 && probe.layerCount != layers)) {
+    BOOL layersKnown = [expected[@"layers_known"] boolValue];
+    if (width <= 0 || height <= 0 ||
+        width != probe.width || height != probe.height ||
+        (layersKnown && probe.layerCount != layers)) {
         if (error) *error = amproj_directError(31,
             [NSString stringWithFormat:@"XML validation failed (expected %lu layers, found %lu)",
              (unsigned long)layers, (unsigned long)probe.layerCount]);
@@ -1299,10 +1313,18 @@ static void amproj_presentDirectShare(AMProjDirectRequest *request, NSURL *fileU
             }
             AMProjActivityItemSource *item = [AMProjActivityItemSource new];
             item.fileURL = fileURL;
-            amproj_constructingDirectShare = YES;
-            UIActivityViewController *activity = [[UIActivityViewController alloc]
-                initWithActivityItems:@[item] applicationActivities:nil];
-            amproj_constructingDirectShare = NO;
+            UIActivityViewController *activity = nil;
+            @try {
+                amproj_constructingDirectShare = YES;
+                activity = [[UIActivityViewController alloc]
+                    initWithActivityItems:@[item] applicationActivities:nil];
+            } @catch (NSException *exception) {
+                amproj_finishDirectFailure(request,
+                    amproj_directError(43, exception.reason ?: @"Unable to create share sheet"));
+                return;
+            } @finally {
+                amproj_constructingDirectShare = NO;
+            }
             activity.modalPresentationStyle = UIModalPresentationAutomatic;
             UIPopoverPresentationController *popover = activity.popoverPresentationController;
             if (popover) {
@@ -1327,6 +1349,7 @@ static void amproj_presentDirectShare(AMProjDirectRequest *request, NSURL *fileU
             @try {
                 orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
                                activity, YES, ^{
+                    request.originalCompletion = nil;
                     amproj_debugEvent(@"direct.share_presented", @{
                         @"filename": fileURL.lastPathComponent ?: @"",
                         @"uti": AMProjUTI
@@ -1411,7 +1434,7 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
         NSDate *now = NSDate.date;
         amproj_writeDirectArchive(request, amproj_placeholderXML(), nil,
             @{@"title": @"AMProj_Placeholder", @"width": @1280, @"height": @720,
-              @"layers": @0, @"save_started": now}, @"placeholder");
+              @"layers": @0, @"layers_known": @YES, @"save_started": now}, @"placeholder");
         return;
     }
     UIViewController *presenter = request.presenter;
@@ -1443,6 +1466,13 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
         return;
     }
     NSDictionary *expected = amproj_expectedSceneMetadata(scene, saveStarted);
+    if ([expected[@"width"] integerValue] <= 0 ||
+        [expected[@"height"] integerValue] <= 0 ||
+        ![expected[@"layers_known"] boolValue]) {
+        amproj_finishDirectFailure(request,
+            amproj_directError(52, @"The current project metadata is incomplete; width, height, or layers are unavailable"));
+        return;
+    }
     NSArray<NSURL *> *paths = amproj_collectPathCandidates(roots);
     amproj_debugEvent(@"direct.scene_found", @{
         @"holder": holder ? NSStringFromClass([holder class]) : @"",
@@ -1452,7 +1482,6 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
         @"path_candidates": @(paths.count)
     });
 
-    __strong id capturedScene = scene;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSDictionary *native = amproj_selectNativeXML(paths, expected);
         if (native) {
@@ -1465,15 +1494,8 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
             return;
         }
         amproj_debugEvent(@"direct.native_xml", @{@"found": @NO});
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSData *reflectedXML = amproj_buildXML(capturedScene);
-            NSError *validationError = nil;
-            if (!amproj_validateXMLAgainstScene(reflectedXML, expected, NULL, &validationError)) {
-                amproj_finishDirectFailure(request, validationError ?: amproj_directError(51, @"Unable to serialize the project"));
-                return;
-            }
-            amproj_writeDirectArchive(request, reflectedXML, nil, expected, @"reflection");
-        });
+        amproj_finishDirectFailure(request,
+            amproj_directError(51, @"Unable to locate Alight Motion's saved project XML; no incomplete fallback package was created"));
     });
 }
 
@@ -1501,9 +1523,6 @@ static void amproj_startDirectExport(UIViewController *presenter,
     });
     orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
                    request.progressAlert, YES, ^{
-        void (^originalCompletion)(void) = request.originalCompletion;
-        request.originalCompletion = nil;
-        if (originalCompletion) originalCompletion();
         dispatch_async(dispatch_get_main_queue(), ^{ amproj_buildDirectPackage(request); });
     });
 }
@@ -1518,6 +1537,7 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
         UIViewController *presenter = request.presenter;
         UIViewController *originalController = request.originalController;
         BOOL animated = request.animated;
+        void (^originalCompletion)(void) = request.originalCompletion;
         void (^showFailure)(void) = ^{
             amproj_directRequest = nil;
             amproj_finishDirectFlow(@"failed");
@@ -1527,12 +1547,12 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
                 preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"重试" style:UIAlertActionStyleDefault
                 handler:^(__unused UIAlertAction *action) {
-                    amproj_startDirectExport(presenter, originalController, animated, nil);
+                    amproj_startDirectExport(presenter, originalController, animated, originalCompletion);
                 }]];
             [alert addAction:[UIAlertAction actionWithTitle:@"使用原版二维码"
                 style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
                     orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
-                                   originalController, animated, nil);
+                                   originalController, animated, originalCompletion);
                 }]];
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
             orig_presentVC(presenter, @selector(presentViewController:animated:completion:), alert, YES, nil);
@@ -1582,9 +1602,25 @@ static BOOL amproj_isPackageControllerName(NSString *className) {
     return className.length && [className containsString:@"Package"];
 }
 
+static BOOL amproj_isSharePackageControllerRecursive(UIViewController *controller,
+                                                      NSUInteger depth,
+                                                      NSMutableSet<NSValue *> *visited) {
+    if (!controller || depth > 5) return NO;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
+    if ([visited containsObject:identity]) return NO;
+    [visited addObject:identity];
+    if ([NSStringFromClass(controller.class) containsString:@"ShareProjectPackageVC"]) return YES;
+    for (UIViewController *child in controller.childViewControllers) {
+        if (amproj_isSharePackageControllerRecursive(child, depth + 1, visited)) return YES;
+    }
+    if (controller.presentedViewController &&
+        amproj_isSharePackageControllerRecursive(controller.presentedViewController,
+                                                  depth + 1, visited)) return YES;
+    return NO;
+}
+
 static BOOL amproj_isSharePackageController(UIViewController *controller) {
-    NSString *className = controller ? NSStringFromClass(controller.class) : nil;
-    return [className containsString:@"ShareProjectPackageVC"];
+    return amproj_isSharePackageControllerRecursive(controller, 0, [NSMutableSet set]);
 }
 
 static BOOL amproj_hasPackageController(NSArray<NSString*> *classes) {
@@ -1639,27 +1675,16 @@ static id hooked_initWithItems(id self, SEL _cmd, NSArray *activityItems,
     NSDictionary<NSString *, NSNumber *> *zipMetrics = nil;
     if (isPackageExport && ![mode isEqualToString:@"observe"]) {
         @try {
-            id sceneInfo = nil;
             NSDictionary *expected = nil;
             if ([mode isEqualToString:@"placeholder"]) {
                 xmlData = amproj_placeholderXML();
                 expected = @{@"title": @"AMProj_Placeholder", @"width": @1280,
-                             @"height": @720, @"layers": @0,
+                             @"height": @720, @"layers": @0, @"layers_known": @YES,
                              @"save_started": NSDate.date};
             } else {
-                amproj_setPhase(AMProjDebugPhaseSceneFind, @{});
-                id delegate = [UIApplication sharedApplication].delegate;
-                sceneInfo = delegate ? am_findScene(delegate) : nil;
-                amproj_debugEvent(@"scene_find.result", @{
-                    @"found": @(sceneInfo != nil),
-                    @"class": sceneInfo ? NSStringFromClass([sceneInfo class]) : @""
+                amproj_debugEvent(@"activity_fallback.full_skipped", @{
+                    @"reason": @"native project XML is only exported by the direct ShareProjectPackageVC path"
                 });
-
-                amproj_setPhase(AMProjDebugPhaseXML, @{@"scene_found": @(sceneInfo != nil)});
-                if (sceneInfo) {
-                    expected = amproj_expectedSceneMetadata(sceneInfo, NSDate.date);
-                    xmlData = amproj_buildXML(sceneInfo);
-                }
             }
 
             NSError *prepareError = nil;
