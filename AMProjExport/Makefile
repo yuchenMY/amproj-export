@@ -7,7 +7,7 @@ CC   = $(shell xcrun --sdk iphoneos -f clang)
 CFLAGS = -arch arm64 -dynamiclib -isysroot $(SDK) \
          -miphoneos-version-min=14.0 -fobjc-arc -O2
 LDLIBS = -framework Foundation -framework UIKit -framework QuartzCore \
-         -framework CoreGraphics -lz
+         -framework CoreGraphics -framework Photos -lz
 
 all: AMProjExport.dylib AMProjExportDebug.dylib
 

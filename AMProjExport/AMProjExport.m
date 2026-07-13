@@ -20,6 +20,7 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <Photos/Photos.h>
 #import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -27,6 +28,7 @@
 #import <stdatomic.h>
 #import <string.h>
 #import <math.h>
+#import <float.h>
 #import "AMProjArchiveWriter.h"
 
 #if AMPROJ_DEBUG
@@ -42,6 +44,8 @@ static NSData* amproj_buildXMLInternal(id sceneInfo, NSMutableSet<NSValue*> *vis
                                        NSUInteger depth, BOOL includeDeclaration);
 static NSString* amproj_serializeLayer(id layer, NSMutableSet<NSValue*> *visited, NSUInteger depth);
 static NSString* amproj_tagForType(NSString *type);
+static UIWindow* amproj_keyWindow(void);
+static NSURL* amproj_directExportRoot(void);
 
 static void amproj_debugEvent(NSString *name, NSDictionary *fields) {
 #if AMPROJ_DEBUG
@@ -284,6 +288,36 @@ static NSInteger am_int(id obj, NSString *key) {
 static CGFloat am_flt(id obj, NSString *key) {
     id v = am_get(obj, key);
     return [v respondsToSelector:@selector(doubleValue)] ? [(NSNumber*)v doubleValue] : 0.0;
+}
+
+static Ivar amproj_instanceIvar(id object, NSString *name) {
+    if (!object || !name.length) return NULL;
+    return class_getInstanceVariable([object class], name.UTF8String);
+}
+
+static id amproj_swiftReferenceIvar(id object, NSString *name) {
+    if (![name isEqualToString:@"holder"]) return nil;
+    Ivar ivar = amproj_instanceIvar(object, name);
+    if (!ivar) return nil;
+    const char *type = ivar_getTypeEncoding(ivar);
+    if (type && type[0] && type[0] != '@' && type[0] != '#') return nil;
+    void *raw = NULL;
+    const uint8_t *address = (const uint8_t *)(__bridge const void *)object + ivar_getOffset(ivar);
+    memcpy(&raw, address, sizeof(raw));
+    return raw ? (__bridge id)raw : nil;
+}
+
+static BOOL amproj_swiftIntegerIvar(id object, NSString *name, NSInteger *value) {
+    if (![name isEqualToString:@"selectedRow"]) return NO;
+    Ivar ivar = amproj_instanceIvar(object, name);
+    if (!ivar) return NO;
+    const char *type = ivar_getTypeEncoding(ivar);
+    if (type && type[0] && strchr("cCsSiIlLqQ", type[0]) == NULL) return NO;
+    NSInteger raw = 0;
+    const uint8_t *address = (const uint8_t *)(__bridge const void *)object + ivar_getOffset(ivar);
+    memcpy(&raw, address, sizeof(raw));
+    if (value) *value = raw;
+    return YES;
 }
 
 static NSArray* am_arr(id obj, NSString *key) {
@@ -633,7 +667,7 @@ static NSString *const AMProjUTI = @"com.alightcreative.motion.amproj";
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         resourceKeys = [NSSet setWithArray:@[
-            @"uri", @"source", @"fillImage", @"font", @"file"
+            @"uri", @"source", @"src", @"fillImage", @"fillVideo", @"font", @"file"
         ]];
     });
     [attributes enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
@@ -649,8 +683,10 @@ static NSString *const AMProjUTI = @"com.alightcreative.motion.amproj";
                 @"ttf", @"otf"
             ]];
         });
+        NSString *scheme = [NSURLComponents componentsWithString:value].scheme.lowercaseString;
         if ([value hasPrefix:@"file://"] || [value hasPrefix:@"/"] ||
-            [value hasPrefix:@"amproj:"] || [resourceExtensions containsObject:extension]) {
+            [value hasPrefix:@"amproj:"] || [scheme hasPrefix:@"phasset-"] ||
+            [resourceExtensions containsObject:extension]) {
             [self.resourceReferences addObject:value];
         }
     }];
@@ -687,6 +723,17 @@ static AMProjXMLProbe* amproj_probeXML(NSData *xmlData) {
     parser.delegate = probe;
     BOOL parsed = [parser parse];
     return parsed && probe.validRoot && !probe.parseError ? probe : nil;
+}
+
+static NSString* amproj_normalizedProjectTitle(NSString *title) {
+    NSString *value = [title ?: @"" stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSCharacterSet *suffixes = [NSCharacterSet characterSetWithCharactersInString:@"-–—"];
+    while (value.length && [suffixes characterIsMember:[value characterAtIndex:value.length - 1]]) {
+        value = [[value substringToIndex:value.length - 1]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    }
+    return value;
 }
 
 static BOOL amproj_shouldTraverseObject(id object) {
@@ -812,15 +859,16 @@ static void amproj_collectPathCandidatesRecursive(id object, NSUInteger depth,
 
 static NSArray<NSURL *>* amproj_collectPathCandidates(NSArray *roots) {
     NSMutableOrderedSet<NSURL *> *candidates = [NSMutableOrderedSet orderedSet];
+    NSFileManager *manager = NSFileManager.defaultManager;
+    for (NSNumber *directory in @[@(NSApplicationSupportDirectory),
+                                   @(NSDocumentDirectory), @(NSLibraryDirectory)]) {
+        NSURL *URL = [manager URLsForDirectory:directory.unsignedIntegerValue
+                                      inDomains:NSUserDomainMask].firstObject;
+        if (URL) [candidates addObject:URL];
+    }
     NSMutableSet<NSValue *> *visited = [NSMutableSet set];
     for (id root in roots) {
         amproj_collectPathCandidatesRecursive(root, 0, visited, candidates);
-    }
-    NSFileManager *manager = NSFileManager.defaultManager;
-    for (NSNumber *directory in @[@(NSLibraryDirectory), @(NSDocumentDirectory)]) {
-        NSURL *URL = [manager URLsForDirectory:directory.unsignedIntegerValue
-                                     inDomains:NSUserDomainMask].firstObject;
-        if (URL) [candidates addObject:URL];
     }
     return candidates.array;
 }
@@ -839,9 +887,20 @@ static NSArray<NSURL *>* amproj_expandXMLCandidates(NSArray<NSURL *> *roots) {
                 [manager fileExistsAtPath:root.path]) [results addObject:root];
             continue;
         }
+        NSArray<NSURL *> *topLevel = [manager contentsOfDirectoryAtURL:root
+            includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLContentModificationDateKey]
+                               options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
+        for (NSURL *URL in topLevel) {
+            inspected++;
+            if (inspected >= 10000 || results.count >= 2048 ||
+                [deadline timeIntervalSinceNow] <= 0) break;
+            if ([URL.pathExtension.lowercaseString isEqualToString:@"xml"]) [results addObject:URL];
+        }
         NSDirectoryEnumerator<NSURL *> *enumerator = [manager enumeratorAtURL:root
-            includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLFileSizeKey, NSURLContentModificationDateKey]
-                               options:NSDirectoryEnumerationSkipsHiddenFiles
+            includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLIsDirectoryKey,
+                                         NSURLFileSizeKey, NSURLContentModificationDateKey]
+                               options:(NSDirectoryEnumerationSkipsHiddenFiles |
+                                        NSDirectoryEnumerationSkipsPackageDescendants)
                           errorHandler:^BOOL(NSURL *URL, NSError *error) {
             (void)URL;
             (void)error;
@@ -851,6 +910,13 @@ static NSArray<NSURL *>* amproj_expandXMLCandidates(NSArray<NSURL *> *roots) {
             inspected++;
             if (inspected >= 10000 || results.count >= 2048 ||
                 [deadline timeIntervalSinceNow] <= 0) break;
+            NSNumber *isDirectory = nil;
+            [URL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+            if (isDirectory.boolValue &&
+                [URL.lastPathComponent caseInsensitiveCompare:@"Caches"] == NSOrderedSame) {
+                [enumerator skipDescendants];
+                continue;
+            }
             if ([URL.pathExtension.lowercaseString isEqualToString:@"xml"]) [results addObject:URL];
         }
     }
@@ -860,8 +926,12 @@ static NSArray<NSURL *>* amproj_expandXMLCandidates(NSArray<NSURL *> *roots) {
 static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionary *expected) {
     NSDictionary *best = nil;
     NSInteger bestScore = NSIntegerMin;
+    NSTimeInterval bestModified = -DBL_MAX;
     BOOL ambiguous = NO;
-    for (NSURL *URL in amproj_expandXMLCandidates(roots)) {
+    NSUInteger validCount = 0;
+    NSUInteger eligibleCount = 0;
+    NSArray<NSURL *> *candidates = amproj_expandXMLCandidates(roots);
+    for (NSURL *URL in candidates) {
         NSNumber *size = nil;
         NSDate *modified = nil;
         [URL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
@@ -869,7 +939,8 @@ static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionar
         if (!size || size.unsignedLongLongValue < 64 || size.unsignedLongLongValue > 64 * 1024 * 1024) continue;
         NSData *data = [NSData dataWithContentsOfURL:URL options:NSDataReadingMappedIfSafe error:nil];
         AMProjXMLProbe *probe = amproj_probeXML(data);
-        if (!probe) continue;
+        if (!probe || probe.width <= 0 || probe.height <= 0) continue;
+        validCount++;
 
         NSInteger expectedWidth = [expected[@"width"] integerValue];
         NSInteger expectedHeight = [expected[@"height"] integerValue];
@@ -879,23 +950,41 @@ static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionar
         if (expectedHeight > 0 && expectedHeight != probe.height) continue;
         if (layersKnown && probe.layerCount != expectedLayers) continue;
 
-        NSInteger score = 1;
         NSString *expectedTitle = expected[@"title"];
-        if (expectedTitle.length && [probe.title isEqualToString:expectedTitle]) score += 8;
-        if (expectedWidth == probe.width) score += 4;
-        if (expectedHeight == probe.height) score += 4;
-        if (expectedLayers == probe.layerCount) score += 8;
+        NSString *normalizedExpectedTitle = amproj_normalizedProjectTitle(expectedTitle);
+        NSString *normalizedProbeTitle = amproj_normalizedProjectTitle(probe.title);
+        BOOL titleMatches = normalizedExpectedTitle.length &&
+            [normalizedProbeTitle isEqualToString:normalizedExpectedTitle];
         NSDate *saveStarted = expected[@"save_started"];
-        if (modified && saveStarted && [modified timeIntervalSinceDate:saveStarted] > -5.0) score += 16;
-        if (!best || score > bestScore) {
+        BOOL modifiedForSave = modified && saveStarted &&
+            [modified timeIntervalSinceDate:saveStarted] > -5.0;
+        if (!titleMatches && !modifiedForSave) continue;
+        eligibleCount++;
+
+        NSInteger score = 1;
+        if (titleMatches) score += 16;
+        if (expectedWidth > 0 && expectedWidth == probe.width) score += 4;
+        if (expectedHeight > 0 && expectedHeight == probe.height) score += 4;
+        if (layersKnown && expectedLayers == probe.layerCount) score += 8;
+        if (modifiedForSave) score += 32;
+        NSTimeInterval modifiedTime = modified ? modified.timeIntervalSince1970 : -DBL_MAX;
+        if (!best || score > bestScore ||
+            (score == bestScore && modifiedTime > bestModified + 1.0)) {
             bestScore = score;
+            bestModified = modifiedTime;
             ambiguous = NO;
             best = @{@"data": data, @"url": URL, @"probe": probe,
-                     @"modified": modified ?: NSDate.distantPast, @"score": @(score)};
-        } else if (score == bestScore) {
+                      @"modified": modified ?: NSDate.distantPast, @"score": @(score)};
+        } else if (score == bestScore && fabs(modifiedTime - bestModified) <= 1.0) {
             ambiguous = YES;
         }
     }
+    amproj_debugEvent(@"direct.native_xml_candidates", @{
+        @"scanned": @(candidates.count),
+        @"valid": @(validCount),
+        @"eligible": @(eligibleCount),
+        @"ambiguous": @(ambiguous)
+    });
     return ambiguous ? nil : best;
 }
 
@@ -910,8 +999,87 @@ static NSString* amproj_safeFilename(NSString *value, NSString *fallback) {
     return name;
 }
 
+static NSString* amproj_photoAssetIdentifier(NSString *reference) {
+    NSURLComponents *components = [NSURLComponents componentsWithString:reference];
+    NSString *scheme = components.scheme.lowercaseString;
+    if (![scheme hasPrefix:@"phasset-"]) return nil;
+    NSMutableString *identifier = [NSMutableString string];
+    if (components.host.length) [identifier appendString:components.host];
+    NSString *path = components.path ?: @"";
+    if (components.host.length && path.length) {
+        [identifier appendString:path];
+    } else if (path.length) {
+        [identifier appendString:[path hasPrefix:@"//"] ? [path substringFromIndex:2] : path];
+    }
+    while ([identifier hasPrefix:@"/"]) [identifier deleteCharactersInRange:NSMakeRange(0, 1)];
+    return identifier.stringByRemovingPercentEncoding ?: identifier;
+}
+
+static PHAssetResource* amproj_photoAssetResource(PHAsset *asset, NSString *scheme) {
+    NSArray<PHAssetResource *> *resources = [PHAssetResource assetResourcesForAsset:asset];
+    for (PHAssetResource *resource in resources) {
+        if ([scheme isEqualToString:@"phasset-image"] &&
+            (resource.type == PHAssetResourceTypePhoto ||
+             resource.type == PHAssetResourceTypeFullSizePhoto)) return resource;
+        if ([scheme isEqualToString:@"phasset-video"] &&
+            (resource.type == PHAssetResourceTypeVideo ||
+             resource.type == PHAssetResourceTypeFullSizeVideo)) return resource;
+        if ([scheme isEqualToString:@"phasset-audio"] &&
+            resource.type == PHAssetResourceTypeAudio) return resource;
+    }
+    return resources.firstObject;
+}
+
+static NSURL* amproj_exportPhotoAsset(NSString *reference) {
+    NSString *identifier = amproj_photoAssetIdentifier(reference);
+    NSString *scheme = [NSURLComponents componentsWithString:reference].scheme.lowercaseString;
+    if (!identifier.length) return nil;
+    PHAsset *asset = [PHAsset fetchAssetsWithLocalIdentifiers:@[identifier] options:nil].firstObject;
+    if (!asset) {
+        amproj_debugEvent(@"direct.phasset", @{
+            @"scheme": scheme ?: @"",
+            @"found": @NO,
+            @"reason": @"asset_not_found"
+        });
+        return nil;
+    }
+    PHAssetResource *resource = amproj_photoAssetResource(asset, scheme);
+    if (!resource) return nil;
+    NSURL *directory = [[amproj_directExportRoot()
+        URLByAppendingPathComponent:@"Resolved" isDirectory:YES]
+        URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
+    NSError *directoryError = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtURL:directory
+                                withIntermediateDirectories:YES attributes:nil
+                                                     error:&directoryError]) return nil;
+    NSString *filename = resource.originalFilename.lastPathComponent;
+    if (!filename.length) filename = [NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"bin"];
+    NSURL *outputURL = [directory URLByAppendingPathComponent:filename];
+    PHAssetResourceRequestOptions *options = [PHAssetResourceRequestOptions new];
+    options.networkAccessAllowed = YES;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSError *writeError = nil;
+    [[PHAssetResourceManager defaultManager] writeDataForAssetResource:resource
+        toFile:outputURL options:options completionHandler:^(NSError *error) {
+            writeError = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+    long waitResult = dispatch_semaphore_wait(
+        semaphore, dispatch_time(DISPATCH_TIME_NOW, 90 * NSEC_PER_SEC));
+    BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:outputURL.path];
+    amproj_debugEvent(@"direct.phasset", @{
+        @"scheme": scheme ?: @"",
+        @"found": @(exists && waitResult == 0 && !writeError),
+        @"filename": filename,
+        @"error": writeError.localizedDescription ?: (waitResult ? @"timeout" : @"")
+    });
+    return exists && waitResult == 0 && !writeError ? outputURL : nil;
+}
+
 static NSURL* amproj_resolveResourceReference(NSString *reference, NSURL *XMLURL) {
     if (!reference.length) return nil;
+    NSString *scheme = [NSURLComponents componentsWithString:reference].scheme.lowercaseString;
+    if ([scheme hasPrefix:@"phasset-"]) return amproj_exportPhotoAsset(reference);
     NSURL *URL = nil;
     if ([reference hasPrefix:@"file://"]) URL = [NSURL URLWithString:reference];
     else if ([reference hasPrefix:@"/"]) URL = [NSURL fileURLWithPath:reference];
@@ -987,6 +1155,34 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
 
 static id (*orig_initWithItems)(id, SEL, NSArray *, NSArray *) = NULL;
 static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
+static void (*orig_executePendingSaveProjectSync)(id, SEL) = NULL;
+static void (*orig_shareNCOnTapExport)(id, SEL, id) = NULL;
+static __weak id amproj_lastSavedProjectHolder = nil;
+static BOOL amproj_bypassPackagePresentation = NO;
+static NSUInteger amproj_bypassPackageGeneration = 0;
+
+static void hooked_executePendingSaveProjectSync(id self, SEL _cmd) {
+    amproj_lastSavedProjectHolder = self;
+    amproj_debugEvent(@"project_holder.cached", @{
+        @"class": NSStringFromClass([self class]) ?: @"",
+        @"source": @"executePendingSaveProjectSync"
+    });
+    if (orig_executePendingSaveProjectSync) {
+        orig_executePendingSaveProjectSync(self, _cmd);
+    }
+}
+
+static void amproj_allowOriginalPackagePresentation(void) {
+    amproj_bypassPackagePresentation = YES;
+    NSUInteger generation = ++amproj_bypassPackageGeneration;
+    amproj_debugEvent(@"direct.original_bypass", @{@"enabled": @YES});
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * 60 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        if (amproj_bypassPackageGeneration == generation) {
+            amproj_bypassPackagePresentation = NO;
+        }
+    });
+}
 
 @interface AMProjActivityItemSource : NSObject <UIActivityItemSource>
 @property(nonatomic, strong) NSURL *fileURL;
@@ -1025,6 +1221,10 @@ static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void))
 @property(nonatomic, strong) UIAlertController *progressAlert;
 @property(nonatomic, copy) NSString *mode;
 @property(nonatomic, strong) NSURL *outputURL;
+@property(nonatomic, strong) id projectHolder;
+@property(nonatomic, copy) NSArray *contextRoots;
+@property(nonatomic, copy) NSString *projectTitle;
+@property(nonatomic, copy) void (^fallbackAction)(void);
 @end
 
 @implementation AMProjDirectRequest
@@ -1440,8 +1640,20 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
     UIViewController *presenter = request.presenter;
     UIViewController *packageController = request.originalController;
     id delegate = UIApplication.sharedApplication.delegate;
-    NSArray *roots = @[packageController ?: NSNull.null, presenter ?: NSNull.null, delegate ?: NSNull.null];
-    id holder = amproj_findObjectByClass(roots, @"ProjectHolder");
+    NSMutableArray *roots = request.contextRoots ? [request.contextRoots mutableCopy] : [NSMutableArray array];
+    if (request.projectHolder) [roots addObject:request.projectHolder];
+    if (packageController) [roots addObject:packageController];
+    if (presenter) [roots addObject:presenter];
+    if (delegate) [roots addObject:delegate];
+    UIViewController *rootController = amproj_keyWindow().rootViewController;
+    if (rootController) [roots addObject:rootController];
+    id holder = request.projectHolder;
+    if (!holder && amproj_lastSavedProjectHolder &&
+        [NSStringFromClass([amproj_lastSavedProjectHolder class]) containsString:@"ProjectHolder"]) {
+        holder = amproj_lastSavedProjectHolder;
+    }
+    if (!holder) holder = amproj_findObjectByClass(roots, @"ProjectHolder");
+    if (holder) amproj_lastSavedProjectHolder = holder;
     NSDate *saveStarted = NSDate.date;
     if (holder && [holder respondsToSelector:NSSelectorFromString(@"executePendingSaveProjectSync")]) {
         @try {
@@ -1453,30 +1665,43 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
                                                        @"error": exception.reason ?: @""});
         }
     }
-    id scene = holder ? (am_get(holder, @"rootScene") ?: am_get(holder, @"_rootScene")) : nil;
+    id scene = holder ? am_get(holder, @"rootScene") : nil;
     if (!scene) {
         for (id root in roots) {
-            if (root == NSNull.null) continue;
             scene = am_findScene(root);
             if (scene) break;
         }
     }
-    if (!scene) {
-        amproj_finishDirectFailure(request, amproj_directError(50, @"Unable to locate the current project scene"));
+    if (!holder && !scene) {
+        amproj_finishDirectFailure(request, amproj_directError(50, @"Unable to locate the current project holder"));
         return;
     }
-    NSDictionary *expected = amproj_expectedSceneMetadata(scene, saveStarted);
-    if ([expected[@"width"] integerValue] <= 0 ||
-        [expected[@"height"] integerValue] <= 0 ||
-        ![expected[@"layers_known"] boolValue]) {
-        amproj_finishDirectFailure(request,
-            amproj_directError(52, @"The current project metadata is incomplete; width, height, or layers are unavailable"));
-        return;
+    NSDictionary *expected = nil;
+    if (scene) {
+        expected = amproj_expectedSceneMetadata(scene, saveStarted);
+        if ([expected[@"width"] integerValue] <= 0 ||
+            [expected[@"height"] integerValue] <= 0 ||
+            ![expected[@"layers_known"] boolValue]) {
+            amproj_debugEvent(@"direct.scene_unusable", @{
+                @"class": NSStringFromClass([scene class]) ?: @"",
+                @"reason": @"metadata_incomplete"
+            });
+            scene = nil;
+            expected = nil;
+        }
     }
+    if (!expected) expected = @{
+        @"title": request.projectTitle ?: @"",
+        @"width": @0,
+        @"height": @0,
+        @"layers": @0,
+        @"layers_known": @NO,
+        @"save_started": saveStarted
+    };
     NSArray<NSURL *> *paths = amproj_collectPathCandidates(roots);
-    amproj_debugEvent(@"direct.scene_found", @{
+    amproj_debugEvent(scene ? @"direct.scene_found" : @"direct.scene_native_only", @{
         @"holder": holder ? NSStringFromClass([holder class]) : @"",
-        @"scene": NSStringFromClass([scene class]) ?: @"",
+        @"scene": scene ? NSStringFromClass([scene class]) : @"Swift.Scene",
         @"title": expected[@"title"],
         @"layers": expected[@"layers"],
         @"path_candidates": @(paths.count)
@@ -1485,12 +1710,21 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSDictionary *native = amproj_selectNativeXML(paths, expected);
         if (native) {
+            AMProjXMLProbe *probe = native[@"probe"];
+            NSDictionary *validatedExpected = scene ? expected : @{
+                @"title": probe.title ?: request.projectTitle ?: @"",
+                @"width": @(probe.width),
+                @"height": @(probe.height),
+                @"layers": @(probe.layerCount),
+                @"layers_known": @YES,
+                @"save_started": saveStarted
+            };
             amproj_debugEvent(@"direct.native_xml", @{
                 @"found": @YES,
                 @"path": [native[@"url"] lastPathComponent] ?: @"",
                 @"score": native[@"score"] ?: @0
             });
-            amproj_writeDirectArchive(request, native[@"data"], native[@"url"], expected, @"native");
+            amproj_writeDirectArchive(request, native[@"data"], native[@"url"], validatedExpected, @"native");
             return;
         }
         amproj_debugEvent(@"direct.native_xml", @{@"found": @NO});
@@ -1501,7 +1735,9 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
 
 static void amproj_startDirectExport(UIViewController *presenter,
                                      UIViewController *originalController,
-                                     BOOL animated, void (^completion)(void)) {
+                                     BOOL animated, void (^completion)(void),
+                                     id projectHolder, NSArray *contextRoots,
+                                     NSString *projectTitle, void (^fallbackAction)(void)) {
     if (amproj_directRequest) {
         if (completion) completion();
         return;
@@ -1511,6 +1747,10 @@ static void amproj_startDirectExport(UIViewController *presenter,
     request.originalController = originalController;
     request.animated = animated;
     request.originalCompletion = completion;
+    request.projectHolder = projectHolder;
+    request.contextRoots = contextRoots;
+    request.projectTitle = projectTitle;
+    request.fallbackAction = fallbackAction;
     request.mode = amproj_exportMode();
     request.progressAlert = [UIAlertController alertControllerWithTitle:@"正在生成 .amproj"
         message:@"正在读取项目与媒体文件，请稍候…" preferredStyle:UIAlertControllerStyleAlert];
@@ -1519,6 +1759,8 @@ static void amproj_startDirectExport(UIViewController *presenter,
     amproj_debugEvent(@"direct.intercept", @{
         @"presenter": NSStringFromClass([presenter class]) ?: @"",
         @"controller": NSStringFromClass([originalController class]) ?: @"",
+        @"holder": projectHolder ? NSStringFromClass([projectHolder class]) : @"",
+        @"source": fallbackAction ? @"share_export_button" : @"package_presentation",
         @"mode": request.mode ?: @""
     });
     orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
@@ -1538,6 +1780,10 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
         UIViewController *originalController = request.originalController;
         BOOL animated = request.animated;
         void (^originalCompletion)(void) = request.originalCompletion;
+        id projectHolder = request.projectHolder;
+        NSArray *contextRoots = request.contextRoots;
+        NSString *projectTitle = request.projectTitle;
+        void (^fallbackAction)(void) = request.fallbackAction;
         void (^showFailure)(void) = ^{
             amproj_directRequest = nil;
             amproj_finishDirectFlow(@"failed");
@@ -1547,12 +1793,17 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
                 preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"重试" style:UIAlertActionStyleDefault
                 handler:^(__unused UIAlertAction *action) {
-                    amproj_startDirectExport(presenter, originalController, animated, originalCompletion);
+                    amproj_startDirectExport(presenter, originalController, animated, originalCompletion,
+                                             projectHolder, contextRoots, projectTitle, fallbackAction);
                 }]];
             [alert addAction:[UIAlertAction actionWithTitle:@"使用原版二维码"
                 style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-                    orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
-                                   originalController, animated, originalCompletion);
+                    if (fallbackAction) {
+                        fallbackAction();
+                    } else {
+                        orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
+                                       originalController, animated, originalCompletion);
+                    }
                 }]];
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
             orig_presentVC(presenter, @selector(presentViewController:animated:completion:), alert, YES, nil);
@@ -1777,6 +2028,73 @@ static BOOL amproj_isIPAFireWelcome(UIViewController *controller) {
          [content containsString:@"شكراً لاستخدامك تطبيقاتنا"]);
 }
 
+static NSString* amproj_projectTitleRecursive(UIViewController *controller, NSUInteger depth,
+                                               NSMutableSet<NSValue *> *visited) {
+    if (!controller || depth > 8) return nil;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+    NSString *className = NSStringFromClass(controller.class);
+    if ([className containsString:@"ProjectEdit"] || [className containsString:@"EditNavRoot"]) {
+        NSString *title = controller.title ?: controller.navigationItem.title;
+        if (title.length) return title;
+    }
+    if ([controller isKindOfClass:UINavigationController.class]) {
+        NSString *title = amproj_projectTitleRecursive(
+            ((UINavigationController *)controller).visibleViewController, depth + 1, visited);
+        if (title.length) return title;
+    }
+    for (UIViewController *child in controller.childViewControllers) {
+        NSString *title = amproj_projectTitleRecursive(child, depth + 1, visited);
+        if (title.length) return title;
+    }
+    return amproj_projectTitleRecursive(controller.presentedViewController, depth + 1, visited);
+}
+
+static NSString* amproj_currentProjectTitle(UIViewController *shareController) {
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    UIViewController *presenter = shareController.presentingViewController;
+    while (presenter) {
+        NSString *title = amproj_projectTitleRecursive(presenter, 0, visited);
+        if (title.length) return title;
+        presenter = presenter.presentingViewController;
+    }
+    return amproj_projectTitleRecursive(amproj_keyWindow().rootViewController, 0, visited);
+}
+
+static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
+    UIViewController *shareController = [self isKindOfClass:UIViewController.class] ? self : nil;
+    UIViewController *contentController = [self isKindOfClass:UINavigationController.class] ?
+        ((UINavigationController *)self).topViewController : nil;
+    NSInteger selectedRow = NSNotFound;
+    BOOL hasSelectedRow = amproj_swiftIntegerIvar(contentController, @"selectedRow", &selectedRow);
+    BOOL isProjectPackage = hasSelectedRow && selectedRow == 1;
+    NSString *mode = amproj_exportMode();
+    id holder = isProjectPackage ? amproj_swiftReferenceIvar(contentController, @"holder") : nil;
+    if (!holder && isProjectPackage) holder = amproj_lastSavedProjectHolder;
+    amproj_debugEvent(@"direct.export_button", @{
+        @"mode": mode ?: @"",
+        @"selected_row": hasSelectedRow ? @(selectedRow) : @(-1),
+        @"package": @(isProjectPackage),
+        @"controller": contentController ? NSStringFromClass(contentController.class) : @"",
+        @"holder": holder ? NSStringFromClass([holder class]) : @""
+    });
+    if (!isProjectPackage || [mode isEqualToString:@"observe"] || !shareController) {
+        orig_shareNCOnTapExport(self, _cmd, sender);
+        return;
+    }
+    NSMutableArray *roots = [NSMutableArray array];
+    if (contentController) [roots addObject:contentController];
+    [roots addObject:shareController];
+    if (holder) [roots addObject:holder];
+    NSString *title = amproj_currentProjectTitle(shareController);
+    void (^fallbackAction)(void) = ^{
+        amproj_allowOriginalPackagePresentation();
+        orig_shareNCOnTapExport(self, _cmd, sender);
+    };
+    amproj_startDirectExport(shareController, nil, YES, nil, holder, roots, title, fallbackAction);
+}
+
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
     if (amproj_isIPAFireWelcome(controller)) {
@@ -1787,9 +2105,16 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
 
     NSString *mode = amproj_exportMode();
+    if (amproj_bypassPackagePresentation && amproj_isSharePackageController(controller)) {
+        amproj_bypassPackagePresentation = NO;
+        amproj_debugEvent(@"direct.original_bypass", @{@"consumed": @YES});
+        orig_presentVC(self, _cmd, controller, animated, completion);
+        return;
+    }
     if (amproj_isSharePackageController(controller) &&
         ![mode isEqualToString:@"observe"]) {
-        amproj_startDirectExport(self, controller, animated, completion);
+        amproj_startDirectExport(self, controller, animated, completion,
+                                 nil, nil, nil, nil);
         return;
     }
 
@@ -1993,6 +2318,57 @@ static Method amproj_ownInstanceMethod(Class cls, SEL selector) {
     return found;
 }
 
+static void amproj_installProjectHolderHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class holderClass = NSClassFromString(@"AlightMotion.ProjectHolder");
+        if (!holderClass) holderClass = objc_getClass("_TtC12AlightMotion13ProjectHolder");
+        SEL selector = NSSelectorFromString(@"executePendingSaveProjectSync");
+        Method method = class_getInstanceMethod(holderClass, selector);
+        if (!method) {
+            amproj_debugEvent(@"project_holder.hook", @{
+                @"installed": @NO,
+                @"class": holderClass ? NSStringFromClass(holderClass) : @"",
+                @"reason": holderClass ? @"selector_missing" : @"class_missing"
+            });
+            return;
+        }
+        IMP previous = amproj_installMethodHook(
+            method, (IMP)hooked_executePendingSaveProjectSync, 2,
+            @"ProjectHolder.executePendingSaveProjectSync");
+        if (previous) orig_executePendingSaveProjectSync = (void *)previous;
+        amproj_debugEvent(@"project_holder.hook", @{
+            @"installed": @(previous != NULL),
+            @"class": NSStringFromClass(holderClass) ?: @""
+        });
+    });
+}
+
+static void amproj_installShareExportHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class shareClass = NSClassFromString(@"AlightMotion.ShareNC");
+        if (!shareClass) shareClass = objc_getClass("_TtC12AlightMotion7ShareNC");
+        SEL selector = NSSelectorFromString(@"onTapExport:");
+        Method method = class_getInstanceMethod(shareClass, selector);
+        if (!method) {
+            amproj_debugEvent(@"share_export.hook", @{
+                @"installed": @NO,
+                @"class": shareClass ? NSStringFromClass(shareClass) : @"",
+                @"reason": shareClass ? @"selector_missing" : @"class_missing"
+            });
+            return;
+        }
+        IMP previous = amproj_installMethodHook(
+            method, (IMP)hooked_shareNCOnTapExport, 3, @"ShareNC.onTapExport");
+        if (previous) orig_shareNCOnTapExport = (void *)previous;
+        amproj_debugEvent(@"share_export.hook", @{
+            @"installed": @(previous != NULL),
+            @"class": NSStringFromClass(shareClass) ?: @""
+        });
+    });
+}
+
 #if AMPROJ_DEBUG
 static Class amproj_findPackageControllerClass(void) {
     int count = objc_getClassList(NULL, 0);
@@ -2042,6 +2418,8 @@ static void amproj_installExportHooks(void) {
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing export hooks after app launch");
         amproj_installPresentationHook();
+        amproj_installProjectHolderHook();
+        amproj_installShareExportHook();
 
         @try {
             Method method = class_getInstanceMethod(
