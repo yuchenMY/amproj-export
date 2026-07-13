@@ -1062,7 +1062,6 @@ static NSURLSessionDataTask* hooked_dataTaskWithRequest(id self, SEL _cmd, NSURL
 // MARK: - Constructor
 // ═══════════════════════════════════════════
 
-static id amproj_willLaunchObserver = nil;
 static id amproj_didLaunchObserver = nil;
 
 static IMP amproj_installMethodHook(Method method, IMP replacement,
@@ -1255,20 +1254,6 @@ static void AMProjExportInit(void) {
         NSLog(@"[AMProjExport] ===== Loading v0.4 =====");
 #endif
 
-        amproj_willLaunchObserver = [[NSNotificationCenter defaultCenter]
-            addObserverForName:UIApplicationWillFinishLaunchingNotification
-                        object:nil
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(__unused NSNotification *notification) {
-            id observer = amproj_willLaunchObserver;
-            amproj_willLaunchObserver = nil;
-            if (observer) [[NSNotificationCenter defaultCenter] removeObserver:observer];
-#if AMPROJ_DEBUG
-            if (amproj_mainThread == MACH_PORT_NULL) amproj_mainThread = mach_thread_self();
-#endif
-            amproj_installPresentationHook();
-        }];
-
         amproj_didLaunchObserver = [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidFinishLaunchingNotification
                         object:nil
@@ -1278,9 +1263,15 @@ static void AMProjExportInit(void) {
             amproj_didLaunchObserver = nil;
             if (observer) [[NSNotificationCenter defaultCenter] removeObserver:observer];
 
+#if AMPROJ_DEBUG
+            if (amproj_mainThread == MACH_PORT_NULL) amproj_mainThread = mach_thread_self();
+#endif
+            // Install only the narrow alert/presentation filter synchronously.
+            // Export and telemetry hooks wait until this launch callback unwinds.
+            amproj_installPresentationHook();
+
             dispatch_async(dispatch_get_main_queue(), ^{
 #if AMPROJ_DEBUG
-                if (amproj_mainThread == MACH_PORT_NULL) amproj_mainThread = mach_thread_self();
                 [[AMDebugTransport shared] start];
 #endif
                 amproj_installExportHooks();
