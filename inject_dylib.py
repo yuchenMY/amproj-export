@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -21,8 +22,12 @@ from typing import Optional
 AMPROJ_UTI = "com.alightcreative.motion.amproj"
 DEBUG_CONFIG_NAME = "AMProjDebugConfig.plist"
 DEFAULT_SERVER_PORT = 8765
-DEFAULT_DEBUG_MODE = "observe"
+DEFAULT_DEBUG_MODE = "full"
 DEBUG_MODES = ("observe", "placeholder", "full")
+CPU_TYPE_ARM64 = 0x0100000C
+MH_DYLIB = 0x6
+LC_LOAD_DYLIB = 0x0C
+LC_SEGMENT_64 = 0x19
 RFC1918_NETWORKS = tuple(
     ipaddress.ip_network(network)
     for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
@@ -39,29 +44,116 @@ class DebugSettings:
     mode: str = DEFAULT_DEBUG_MODE
 
 
-def parse_macho(path):
-    """Parse the fields needed from a thin 64-bit Mach-O header."""
-    with open(path, "rb") as file:
-        magic_data = file.read(4)
-        if len(magic_data) != 4:
-            raise ValueError("Mach-O header is truncated")
-        magic = struct.unpack("<I", magic_data)[0]
-        if magic != 0xFEEDFACF:
-            raise ValueError(f"Not a thin arm64 Mach-O: 0x{magic:x}")
+def parse_macho_data(data, label="<memory>"):
+    """Validate and inspect a thin 64-bit little-endian Mach-O image."""
+    if len(data) < 32:
+        raise ValueError(f"Mach-O header is truncated: {label}")
 
-        header = file.read(28)
-        if len(header) != 28:
-            raise ValueError("Mach-O header is truncated")
-        _, _, filetype, ncmds, sizeofcmds, _, _ = struct.unpack(
-            "<IIIIIII", header
-        )
+    (
+        magic,
+        cputype,
+        cpusubtype,
+        filetype,
+        ncmds,
+        sizeofcmds,
+        flags,
+        reserved,
+    ) = struct.unpack_from("<IIIIIIII", data, 0)
+    if magic != 0xFEEDFACF:
+        raise ValueError(f"Not a thin 64-bit Mach-O: 0x{magic:x} ({label})")
+
+    commands_end = 32 + sizeofcmds
+    if commands_end > len(data):
+        raise ValueError(f"Mach-O load commands are truncated: {label}")
+
+    offset = 32
+    first_section_offset = len(data)
+    load_dylibs = []
+    for index in range(ncmds):
+        if offset + 8 > commands_end:
+            raise ValueError(f"Invalid load command {index} at 0x{offset:x}: {label}")
+        cmd, cmdsize = struct.unpack_from("<II", data, offset)
+        if cmdsize < 8 or cmdsize % 8 or offset + cmdsize > commands_end:
+            raise ValueError(f"Invalid load command {index} at 0x{offset:x}: {label}")
+
+        if cmd == LC_SEGMENT_64:
+            if cmdsize < 72:
+                raise ValueError(f"Invalid LC_SEGMENT_64 at 0x{offset:x}: {label}")
+            nsects = struct.unpack_from("<I", data, offset + 64)[0]
+            section_offset = offset + 72
+            if section_offset + (nsects * 80) > offset + cmdsize:
+                raise ValueError(f"Invalid section table at 0x{offset:x}: {label}")
+            for _ in range(nsects):
+                file_offset = struct.unpack_from("<I", data, section_offset + 48)[0]
+                if file_offset:
+                    if file_offset > len(data):
+                        raise ValueError(
+                            f"Mach-O section starts beyond EOF at 0x{file_offset:x}: {label}"
+                        )
+                    first_section_offset = min(first_section_offset, file_offset)
+                section_offset += 80
+
+        if cmd == LC_LOAD_DYLIB:
+            if cmdsize < 24:
+                raise ValueError(f"Invalid LC_LOAD_DYLIB at 0x{offset:x}: {label}")
+            name_offset = struct.unpack_from("<I", data, offset + 8)[0]
+            if name_offset < 24 or name_offset >= cmdsize:
+                raise ValueError(
+                    f"Invalid LC_LOAD_DYLIB name offset at 0x{offset:x}: {label}"
+                )
+            name_start = offset + name_offset
+            name_end = data.find(b"\x00", name_start, offset + cmdsize)
+            if name_end < 0:
+                raise ValueError(
+                    f"Unterminated LC_LOAD_DYLIB name at 0x{offset:x}: {label}"
+                )
+            try:
+                load_dylibs.append(data[name_start:name_end].decode("utf-8"))
+            except UnicodeDecodeError as error:
+                raise ValueError(
+                    f"Invalid LC_LOAD_DYLIB UTF-8 at 0x{offset:x}: {label}"
+                ) from error
+
+        offset += cmdsize
+
+    if offset != commands_end:
+        raise ValueError(f"Mach-O load command size does not match header: {label}")
+    if first_section_offset < commands_end:
+        raise ValueError(f"Mach-O load commands overlap the first section: {label}")
 
     return {
-        "path": path,
+        "path": label,
+        "cputype": cputype,
+        "cpusubtype": cpusubtype,
+        "filetype": filetype,
         "ncmds": ncmds,
         "sizeofcmds": sizeofcmds,
-        "filetype": filetype,
+        "flags": flags,
+        "reserved": reserved,
+        "load_commands_end": commands_end,
+        "first_section_offset": first_section_offset,
+        "load_dylibs": load_dylibs,
     }
+
+
+def parse_macho(path):
+    """Validate and inspect a thin 64-bit little-endian Mach-O file."""
+    with open(path, "rb") as file:
+        return parse_macho_data(file.read(), str(path))
+
+
+def verify_dylib_architecture(path):
+    """Require a thin arm64 MH_DYLIB, matching the target application ABI."""
+    info = parse_macho(path)
+    if info["cputype"] != CPU_TYPE_ARM64:
+        raise ValueError(
+            f"Dylib is not arm64 (cputype=0x{info['cputype']:x}): {path}"
+        )
+    if info["filetype"] != MH_DYLIB:
+        raise ValueError(
+            f"Injected file is not an MH_DYLIB (filetype={info['filetype']}): {path}"
+        )
+    return info
 
 
 def insert_load_dylib(macho_path, dylib_path):
@@ -72,7 +164,7 @@ def insert_load_dylib(macho_path, dylib_path):
         data = bytearray(file.read())
 
     dylib_name = f"@executable_path/Frameworks/{os.path.basename(dylib_path)}"
-    if (dylib_name.encode("utf-8") + b"\x00") in data:
+    if dylib_name in info["load_dylibs"]:
         print(f"[!] {dylib_name} already injected, skipping")
         return False
 
@@ -93,35 +185,8 @@ def insert_load_dylib(macho_path, dylib_path):
 
     # Moving bytes here invalidates every section and LINKEDIT file offset.
     # The command must fit entirely in the existing zero-filled header padding.
-    load_commands_end = 32 + info["sizeofcmds"]
-    first_section_offset = len(data)
-    offset = 32
-    for index in range(info["ncmds"]):
-        if offset + 8 > load_commands_end:
-            raise ValueError(f"Invalid load command {index} at 0x{offset:x}")
-        cmd, cmdsize = struct.unpack_from("<II", data, offset)
-        if cmdsize < 8 or offset + cmdsize > load_commands_end:
-            raise ValueError(f"Invalid load command {index} at 0x{offset:x}")
-
-        if cmd == 0x19:  # LC_SEGMENT_64
-            if cmdsize < 72:
-                raise ValueError(f"Invalid LC_SEGMENT_64 at 0x{offset:x}")
-            nsects = struct.unpack_from("<I", data, offset + 64)[0]
-            section_offset = offset + 72
-            if section_offset + (nsects * 80) > offset + cmdsize:
-                raise ValueError(f"Invalid section table at 0x{offset:x}")
-            for _ in range(nsects):
-                file_offset = struct.unpack_from(
-                    "<I", data, section_offset + 48
-                )[0]
-                if file_offset:
-                    first_section_offset = min(first_section_offset, file_offset)
-                section_offset += 80
-
-        offset += cmdsize
-
-    if offset != load_commands_end:
-        raise ValueError("Mach-O load command size does not match header")
+    load_commands_end = info["load_commands_end"]
+    first_section_offset = info["first_section_offset"]
 
     available_padding = first_section_offset - load_commands_end
     if available_padding < cmd_size:
@@ -496,6 +561,132 @@ def _repack_ipa(extraction_dir, output_path):
     shutil.move(str(archive), str(output))
 
 
+def _validate_patched_info_plist(plist, settings, expected_bundle_identifier):
+    if not isinstance(plist, dict):
+        raise RuntimeError("Info.plist root is not a dictionary")
+    if expected_bundle_identifier is not None and (
+        plist.get("CFBundleIdentifier") != expected_bundle_identifier
+    ):
+        raise RuntimeError("Injection changed CFBundleIdentifier")
+    if not _has_amproj_document_type(plist) or not _has_amproj_uti(plist):
+        raise RuntimeError("Info.plist is missing the .amproj document registration")
+    if settings.enabled:
+        if not isinstance(plist.get("NSLocalNetworkUsageDescription"), str):
+            raise RuntimeError("Info.plist is missing NSLocalNetworkUsageDescription")
+        ats = plist.get("NSAppTransportSecurity")
+        if not isinstance(ats, dict):
+            raise RuntimeError("Info.plist is missing NSAppTransportSecurity")
+        for key in ("NSAllowsLocalNetworking", "NSAllowsArbitraryLoads"):
+            if ats.get(key) is not True or not isinstance(ats.get(key), bool):
+                raise RuntimeError(f"Info.plist {key} must be a Boolean true")
+
+
+def verify_injected_ipa(
+    ipa_path,
+    dylib_path,
+    settings,
+    expected_config=None,
+    expected_bundle_identifier=None,
+):
+    """Verify the final archive, embedded files, Mach-O layout, and config."""
+    ipa_path = Path(ipa_path)
+    dylib_path = Path(dylib_path)
+    expected_dylib = dylib_path.read_bytes()
+
+    try:
+        with zipfile.ZipFile(ipa_path, "r") as archive:
+            bad_entry = archive.testzip()
+            if bad_entry is not None:
+                raise RuntimeError(f"IPA ZIP CRC failed for {bad_entry}")
+
+            names = [entry.filename for entry in archive.infolist()]
+            app_roots = {
+                "/".join(name.split("/")[:2])
+                for name in names
+                if len(name.split("/")) >= 2
+                and name.split("/")[0] == "Payload"
+                and name.split("/")[1].endswith(".app")
+            }
+            if len(app_roots) != 1:
+                raise RuntimeError(
+                    f"IPA must contain exactly one top-level .app; found {len(app_roots)}"
+                )
+            app_root = next(iter(app_roots))
+
+            def read_unique(relative_path):
+                name = f"{app_root}/{relative_path}"
+                if names.count(name) != 1:
+                    raise RuntimeError(
+                        f"IPA must contain exactly one {relative_path}; "
+                        f"found {names.count(name)}"
+                    )
+                return archive.read(name)
+
+            try:
+                plist = plistlib.loads(read_unique("Info.plist"))
+            except (plistlib.InvalidFileException, ValueError) as error:
+                raise RuntimeError("Injected Info.plist is invalid") from error
+            _validate_patched_info_plist(
+                plist, settings, expected_bundle_identifier
+            )
+
+            executable_name = plist.get("CFBundleExecutable") or Path(app_root).stem
+            executable_data = read_unique(executable_name)
+            executable_info = parse_macho_data(
+                executable_data, f"{ipa_path}!/{app_root}/{executable_name}"
+            )
+            if executable_info["cputype"] != CPU_TYPE_ARM64:
+                raise RuntimeError("Application executable is not arm64")
+
+            dylib_relative = f"Frameworks/{dylib_path.name}"
+            embedded_dylib = read_unique(dylib_relative)
+            if embedded_dylib != expected_dylib:
+                raise RuntimeError("Embedded dylib differs from the input dylib")
+            dylib_info = parse_macho_data(
+                embedded_dylib, f"{ipa_path}!/{app_root}/{dylib_relative}"
+            )
+            if (
+                dylib_info["cputype"] != CPU_TYPE_ARM64
+                or dylib_info["filetype"] != MH_DYLIB
+            ):
+                raise RuntimeError("Embedded dylib is not a thin arm64 MH_DYLIB")
+
+            load_name = f"@executable_path/Frameworks/{dylib_path.name}"
+            load_count = executable_info["load_dylibs"].count(load_name)
+            if load_count != 1:
+                raise RuntimeError(
+                    f"Expected exactly one {load_name} load command; found {load_count}"
+                )
+
+            if settings.enabled:
+                try:
+                    embedded_config = plistlib.loads(
+                        read_unique(DEBUG_CONFIG_NAME)
+                    )
+                except (plistlib.InvalidFileException, ValueError) as error:
+                    raise RuntimeError("Embedded debug config is invalid") from error
+                if embedded_config != expected_config:
+                    raise RuntimeError("Embedded debug config differs from generated config")
+
+    except zipfile.BadZipFile as error:
+        raise RuntimeError(f"Invalid IPA ZIP archive: {ipa_path}") from error
+
+    result = {
+        "app": app_root,
+        "bundle_identifier": plist.get("CFBundleIdentifier", ""),
+        "executable": executable_name,
+        "dylib": dylib_path.name,
+        "mode": expected_config.get("DefaultMode")
+        if isinstance(expected_config, dict)
+        else None,
+    }
+    print(
+        "[+] Verified IPA: ZIP CRC, Info.plist, arm64 dylib, "
+        "Mach-O layout, and unique load command"
+    )
+    return result
+
+
 def inject_ipa(ipa_path, dylib_path, output_path, debug_settings=None):
     """Inject one dylib and return the generated/copied debug config, if any."""
     ipa_path = Path(ipa_path)
@@ -507,12 +698,18 @@ def inject_ipa(ipa_path, dylib_path, output_path, debug_settings=None):
         raise FileNotFoundError(f"IPA not found: {ipa_path}")
     if not dylib_path.is_file():
         raise FileNotFoundError(f"Dylib not found: {dylib_path}")
+    verify_dylib_architecture(dylib_path)
 
     with tempfile.TemporaryDirectory(prefix="amproj_inject_") as temp_dir:
         print(f"[*] Temp dir: {temp_dir}")
         print(f"[*] Extracting {ipa_path}...")
         shutil.unpack_archive(str(ipa_path), temp_dir, "zip")
         app_dir = _find_app_bundle(temp_dir)
+        with (app_dir / "Info.plist").open("rb") as file:
+            original_info = plistlib.load(file)
+        if not isinstance(original_info, dict):
+            raise ValueError("Info.plist root must be a dictionary")
+        original_bundle_identifier = original_info.get("CFBundleIdentifier")
 
         frameworks = app_dir / "Frameworks"
         frameworks.mkdir(parents=True, exist_ok=True)
@@ -536,6 +733,13 @@ def inject_ipa(ipa_path, dylib_path, output_path, debug_settings=None):
 
         print(f"[*] Repacking to {output_path}...")
         _repack_ipa(temp_dir, output_path)
+        verify_injected_ipa(
+            output_path,
+            dylib_path,
+            settings,
+            expected_config=config,
+            expected_bundle_identifier=original_bundle_identifier,
+        )
         print(f"[+] Done: {output_path}")
         return config
 
@@ -589,7 +793,13 @@ def main(argv=None):
     )
     try:
         inject_ipa(args.ipa, args.dylib, output, settings)
-    except (OSError, ValueError, RuntimeError, shutil.ReadError) as error:
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        shutil.ReadError,
+        zipfile.BadZipFile,
+    ) as error:
         parser.exit(1, f"error: {error}\n")
     return 0
 

@@ -25,6 +25,28 @@ jobs:
         working-directory: AMProjExport
         run: make
 
+      - name: Verify built dylib architectures
+        run: |
+          python3 - <<'PY'
+          from inject_dylib import verify_dylib_architecture
+
+          for path in (
+              "AMProjExport/AMProjExport.dylib",
+              "AMProjExport/AMProjExportDebug.dylib",
+          ):
+              info = verify_dylib_architecture(path)
+              print(f"verified {path}: arm64 MH_DYLIB, {info['ncmds']} load commands")
+          PY
+
+      - name: Test streaming project archive writer
+        run: |
+          clang -fobjc-arc -framework Foundation -lz \
+            -IAMProjExport AMProjExport/AMProjZIPWriter.m \
+            tests/AMProjZIPWriterSmoke.m \
+            -o "$RUNNER_TEMP/amproj-writer-smoke"
+          "$RUNNER_TEMP/amproj-writer-smoke" "$RUNNER_TEMP/writer-output.amproj"
+          python3 -c 'import sys, zipfile; z=zipfile.ZipFile(sys.argv[1]); assert z.namelist() == ["scene.xml", "resource.bin"]; assert z.testzip() is None; assert z.read("scene.xml").startswith(b"<?xml"); assert len(z.read("resource.bin")) == 200000' "$RUNNER_TEMP/writer-output.amproj"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

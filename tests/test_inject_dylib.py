@@ -10,14 +10,19 @@ from unittest import mock
 import inject_dylib
 
 
-def make_macho(path, section_offset=0x400):
+def make_macho(
+    path,
+    section_offset=0x400,
+    filetype=2,
+    cputype=inject_dylib.CPU_TYPE_ARM64,
+):
     segment_size = 72 + 80
     header = struct.pack(
         "<IIIIIIII",
         0xFEEDFACF,
-        0x0100000C,
+        cputype,
         0,
-        2,
+        filetype,
         1,
         segment_size,
         0,
@@ -79,6 +84,10 @@ class MachOTests(unittest.TestCase):
                 b"@executable_path/Frameworks/AMProjExportDebug.dylib\0",
                 patched,
             )
+            self.assertEqual(
+                info["load_dylibs"],
+                ["@executable_path/Frameworks/AMProjExportDebug.dylib"],
+            )
 
     def test_insert_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -90,6 +99,29 @@ class MachOTests(unittest.TestCase):
 
             self.assertFalse(inject_dylib.insert_load_dylib(binary, dylib))
             self.assertEqual(inject_dylib.parse_macho(binary)["ncmds"], 2)
+
+    def test_dylib_architecture_requires_arm64_mh_dylib(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            valid = root / "valid.dylib"
+            executable = root / "executable"
+            wrong_arch = root / "wrong-arch.dylib"
+            make_macho(valid, filetype=inject_dylib.MH_DYLIB)
+            make_macho(executable)
+            make_macho(
+                wrong_arch,
+                filetype=inject_dylib.MH_DYLIB,
+                cputype=0x01000007,
+            )
+
+            self.assertEqual(
+                inject_dylib.verify_dylib_architecture(valid)["filetype"],
+                inject_dylib.MH_DYLIB,
+            )
+            with self.assertRaisesRegex(ValueError, "MH_DYLIB"):
+                inject_dylib.verify_dylib_architecture(executable)
+            with self.assertRaisesRegex(ValueError, "not arm64"):
+                inject_dylib.verify_dylib_architecture(wrong_arch)
 
 
 class PlistTests(unittest.TestCase):
@@ -227,7 +259,7 @@ class InjectionTests(unittest.TestCase):
                 for path in source.rglob("*"):
                     archive.write(path, path.relative_to(source))
             dylib = root / "AMProjExportDebug.dylib"
-            dylib.write_bytes(b"debug-dylib")
+            dylib_bytes = make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
             output = root / "output.ipa"
             settings = inject_dylib.DebugSettings(
                 enabled=True,
@@ -243,7 +275,7 @@ class InjectionTests(unittest.TestCase):
             result_app = extracted / "Payload" / "Fixture.app"
             self.assertEqual(
                 (result_app / "Frameworks" / dylib.name).read_bytes(),
-                b"debug-dylib",
+                dylib_bytes,
             )
             self.assertFalse((result_app / "_CodeSignature").exists())
             with (result_app / "Info.plist").open("rb") as file:
@@ -257,7 +289,72 @@ class InjectionTests(unittest.TestCase):
                 "rb"
             ) as file:
                 config = plistlib.load(file)
-            self.assertEqual(config["DefaultMode"], "observe")
+            self.assertEqual(config["DefaultMode"], "full")
+
+            verification = inject_dylib.verify_injected_ipa(
+                output,
+                dylib,
+                settings,
+                expected_config=config,
+                expected_bundle_identifier="com.example.fixture",
+            )
+            self.assertEqual(verification["mode"], "full")
+            self.assertEqual(
+                verification["bundle_identifier"], "com.example.fixture"
+            )
+
+    def test_final_verifier_rejects_missing_load_command(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            app = source / "Payload" / "Fixture.app"
+            frameworks = app / "Frameworks"
+            frameworks.mkdir(parents=True)
+            with (app / "Info.plist").open("wb") as file:
+                plistlib.dump(
+                    {
+                        "CFBundleExecutable": "Fixture",
+                        "CFBundleIdentifier": "com.example.fixture",
+                    },
+                    file,
+                )
+            inject_dylib.patch_info_plist(app)
+            make_macho(app / "Fixture")
+            dylib = root / "AMProjExport.dylib"
+            dylib_bytes = make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
+            (frameworks / dylib.name).write_bytes(dylib_bytes)
+            ipa = root / "missing-command.ipa"
+            with zipfile.ZipFile(ipa, "w", zipfile.ZIP_DEFLATED) as archive:
+                for path in source.rglob("*"):
+                    archive.write(path, path.relative_to(source))
+
+            with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                inject_dylib.verify_injected_ipa(
+                    ipa,
+                    dylib,
+                    inject_dylib.DebugSettings(),
+                    expected_bundle_identifier="com.example.fixture",
+                )
+
+    def test_final_verifier_rejects_bad_zip_crc(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ipa = root / "bad-crc.ipa"
+            payload = b"CRC-PAYLOAD-" * 16
+            with zipfile.ZipFile(ipa, "w", zipfile.ZIP_STORED) as archive:
+                archive.writestr("Payload/Fixture.app/Info.plist", payload)
+            archive_data = bytearray(ipa.read_bytes())
+            payload_offset = archive_data.find(payload)
+            self.assertGreaterEqual(payload_offset, 0)
+            archive_data[payload_offset] ^= 0xFF
+            ipa.write_bytes(archive_data)
+            dylib = root / "AMProjExport.dylib"
+            make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
+
+            with self.assertRaisesRegex(RuntimeError, "CRC"):
+                inject_dylib.verify_injected_ipa(
+                    ipa, dylib, inject_dylib.DebugSettings()
+                )
 
 
 class ArgumentTests(unittest.TestCase):
@@ -273,7 +370,7 @@ class ArgumentTests(unittest.TestCase):
         args = parser.parse_args(["input.ipa", "AMProjExportDebug.dylib"])
         settings = inject_dylib._debug_settings_from_args(args, parser)
         self.assertTrue(settings.enabled)
-        self.assertEqual(settings.mode, "observe")
+        self.assertEqual(settings.mode, "full")
         self.assertEqual(settings.server_port, 8765)
 
     def test_debug_token_must_match_backend_minimum_length(self):

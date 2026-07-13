@@ -1,6 +1,7 @@
 #import "AMDebugTransport.h"
 
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <dispatch/dispatch.h>
 #import <math.h>
 
@@ -17,7 +18,124 @@ static const NSUInteger kAMDebugMaxEventPayloadBytes = 128 * 1024;
 static const NSUInteger kAMDebugMaxArtifactBytes = 32 * 1024 * 1024;
 static const NSTimeInterval kAMDebugHelloInterval = 10.0;
 static const NSTimeInterval kAMDebugHelloRetryInterval = 5.0;
+static NSString *const kAMDebugPluginVersion = @"3";
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
+
+typedef NS_ENUM(NSInteger, AMDebugBackendState) {
+    AMDebugBackendStateUnknown = 0,
+    AMDebugBackendStateConnecting,
+    AMDebugBackendStateConnected,
+    AMDebugBackendStateUnavailable,
+    AMDebugBackendStateDisabled,
+};
+
+static __weak UIView *AMDebugStatusBanner;
+static NSUInteger AMDebugStatusGeneration = 0;
+
+static UIWindow *AMDebugForegroundWindow(void) {
+    UIApplication *application = UIApplication.sharedApplication;
+    UIWindow *fallback = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in application.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class] ||
+                scene.activationState == UISceneActivationStateUnattached) continue;
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            for (UIWindow *window in windowScene.windows) {
+                if (window.hidden || window.alpha <= 0.0) continue;
+                if (window.isKeyWindow) return window;
+                if (!fallback && window.windowLevel == UIWindowLevelNormal) fallback = window;
+            }
+        }
+    }
+    if (fallback) return fallback;
+    for (UIWindow *window in application.windows) {
+        if (!window.hidden && window.alpha > 0.0) {
+            if (window.isKeyWindow) return window;
+            if (!fallback && window.windowLevel == UIWindowLevelNormal) fallback = window;
+        }
+    }
+    return fallback;
+}
+
+static NSString *AMDebugBackendStateText(AMDebugBackendState state) {
+    switch (state) {
+        case AMDebugBackendStateConnecting: return @"后端连接中";
+        case AMDebugBackendStateConnected: return @"后端已连接";
+        case AMDebugBackendStateUnavailable: return @"后端不可达，导出不受影响";
+        case AMDebugBackendStateDisabled: return @"后端未配置，导出不受影响";
+        default: return @"调试已启动";
+    }
+}
+
+static UIColor *AMDebugBackendStateColor(AMDebugBackendState state) {
+    switch (state) {
+        case AMDebugBackendStateConnected:
+            return [UIColor colorWithRed:0.08 green:0.47 blue:0.27 alpha:0.94];
+        case AMDebugBackendStateUnavailable:
+        case AMDebugBackendStateDisabled:
+            return [UIColor colorWithRed:0.64 green:0.27 blue:0.08 alpha:0.94];
+        default:
+            return [UIColor colorWithRed:0.12 green:0.16 blue:0.25 alpha:0.94];
+    }
+}
+
+static void AMDebugShowStatusAttempt(NSString *mode, AMDebugBackendState state,
+                                     NSUInteger attempt, NSUInteger generation) {
+    if (generation != AMDebugStatusGeneration) return;
+    UIWindow *window = AMDebugForegroundWindow();
+    if (!window) {
+        if (attempt < 8) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2),
+                           dispatch_get_main_queue(), ^{
+                AMDebugShowStatusAttempt(mode, state, attempt + 1, generation);
+            });
+        }
+        return;
+    }
+
+    UILabel *banner = [AMDebugStatusBanner isKindOfClass:UILabel.class]
+        ? (UILabel *)AMDebugStatusBanner : nil;
+    if (!banner || banner.superview != window) {
+        [banner removeFromSuperview];
+        banner = [[UILabel alloc] initWithFrame:CGRectZero];
+        banner.userInteractionEnabled = NO;
+        banner.textAlignment = NSTextAlignmentCenter;
+        banner.textColor = UIColor.whiteColor;
+        banner.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+        banner.layer.cornerRadius = 10.0;
+        banner.layer.masksToBounds = YES;
+        banner.numberOfLines = 1;
+        banner.alpha = 0.0;
+        banner.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+                                  UIViewAutoresizingFlexibleBottomMargin;
+        [window addSubview:banner];
+        AMDebugStatusBanner = banner;
+    }
+
+    CGFloat top = MAX(window.safeAreaInsets.top, 8.0) + 5.0;
+    banner.frame = CGRectMake(12.0, top, MAX(window.bounds.size.width - 24.0, 120.0), 34.0);
+    banner.text = [NSString stringWithFormat:@"AMProj v%@ · %@ · %@",
+                   kAMDebugPluginVersion, mode.length ? mode : @"full",
+                   AMDebugBackendStateText(state)];
+    banner.backgroundColor = AMDebugBackendStateColor(state);
+    [window bringSubviewToFront:banner];
+
+    [UIView animateWithDuration:0.18 animations:^{ banner.alpha = 1.0; }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        if (generation != AMDebugStatusGeneration || banner != AMDebugStatusBanner) return;
+        [UIView animateWithDuration:0.22 animations:^{ banner.alpha = 0.0; }
+                         completion:^(__unused BOOL finished) { [banner removeFromSuperview]; }];
+    });
+}
+
+static void AMDebugShowStatus(NSString *mode, AMDebugBackendState state) {
+    NSString *modeSnapshot = [mode copy];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        AMDebugStatusGeneration += 1;
+        AMDebugShowStatusAttempt(modeSnapshot, state, 0, AMDebugStatusGeneration);
+    });
+}
 
 static NSNumber *AMDebugNowMilliseconds(void) {
     return @((long long)(NSDate.date.timeIntervalSince1970 * 1000.0));
@@ -112,6 +230,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
 @property(nonatomic) BOOL helloDelivered;
 @property(nonatomic) BOOL pollInFlight;
 @property(nonatomic) BOOL captureNextPending;
+@property(nonatomic) AMDebugBackendState backendState;
 @property(nonatomic) NSTimeInterval eventRetryDelay;
 @property(nonatomic) NSTimeInterval nextEventAttempt;
 @property(nonatomic) NSTimeInterval nextHelloAttempt;
@@ -166,7 +285,8 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
     _capturedTransactions = [NSMutableSet set];
     _notificationTokens = @[];
     _sessionIdentifier = NSUUID.UUID.UUIDString.lowercaseString;
-    _mode = AMDebugExportModeObserve;
+    _mode = AMDebugExportModeFull;
+    _backendState = AMDebugBackendStateUnknown;
     _eventRetryDelay = 1.0;
     _eventBatchCountLimit = kAMDebugEventBatchSize;
 
@@ -215,7 +335,19 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
 }
 
 - (void)start {
-    if (!self.enabled) return;
+    if (!self.enabled) {
+        AMDebugShowStatus(self.currentMode, AMDebugBackendStateDisabled);
+        return;
+    }
+
+    __block BOOL shouldStart = NO;
+    [self performSync:^{
+        if (!self.started) {
+            self.started = YES;
+            shouldStart = YES;
+        }
+    }];
+    if (!shouldStart) return;
 
     UIDevice *device = UIDevice.currentDevice;
     NSBundle *bundle = NSBundle.mainBundle;
@@ -235,14 +367,15 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             @"system_version": device.systemVersion ?: @""
         },
         @"plugin": @{
-            @"version": @"1"
+            @"version": kAMDebugPluginVersion
         }
     };
 
+    AMDebugShowStatus(self.currentMode, AMDebugBackendStateConnecting);
+
     dispatch_async(self.queue, ^{
-        if (self.started) return;
-        self.started = YES;
         self.foreground = initiallyForeground;
+        self.backendState = AMDebugBackendStateConnecting;
         self.helloMetadata = metadata;
 
         NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
@@ -289,7 +422,20 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             [strongSelf flushEvents];
         });
     }];
-    self.notificationTokens = @[background, foreground];
+    id active = [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                                    object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
+        AMDebugTransport *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        dispatch_async(strongSelf.queue, ^{
+            strongSelf.foreground = YES;
+            strongSelf.nextHelloAttempt = 0;
+            [strongSelf startTimers];
+            [strongSelf sendHelloForce:YES];
+            [strongSelf pollCommands];
+            [strongSelf flushEvents];
+        });
+    }];
+    self.notificationTokens = @[background, foreground, active];
 }
 
 - (void)startTimers {
@@ -490,9 +636,23 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             strongSelf.helloInFlight = NO;
             NSInteger status = [(NSHTTPURLResponse *)response statusCode];
             strongSelf.helloDelivered = !error && status >= 200 && status < 300;
+            AMDebugBackendState nextState = strongSelf.helloDelivered
+                ? AMDebugBackendStateConnected : AMDebugBackendStateUnavailable;
+            AMDebugBackendState previousState = strongSelf.backendState;
+            strongSelf.backendState = nextState;
+            [strongSelf appendEvent:@"transport.hello" fields:@{
+                @"connected": @(strongSelf.helloDelivered),
+                @"status": @(status),
+                @"error": error ? AMDebugJSONValue(error, 0) : NSNull.null,
+                @"base_url": strongSelf.baseURL.absoluteString ?: @""
+            }];
+            if (previousState != nextState) {
+                AMDebugShowStatus(strongSelf.mode, nextState);
+            }
             NSTimeInterval delay = strongSelf.helloDelivered ?
                 kAMDebugHelloInterval : kAMDebugHelloRetryInterval;
             strongSelf.nextHelloAttempt = NSProcessInfo.processInfo.systemUptime + delay;
+            if (strongSelf.helloDelivered) [strongSelf flushEvents];
         });
     }] resume];
 }
@@ -673,6 +833,9 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             [self appendEvent:@"control.mode_changed" fields:@{
                 @"previous": previous ?: @"", @"mode": mode
             }];
+            if (![previous isEqualToString:mode]) {
+                AMDebugShowStatus(mode, self.backendState);
+            }
         }
     } else if ([kind isEqualToString:@"capture_next"]) {
         id enabled = command[@"enabled"] ?: arguments[@"enabled"];

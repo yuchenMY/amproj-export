@@ -63,7 +63,7 @@ class BackendHTTPTests(unittest.TestCase):
             {"session_id": "s1", "device_id": "phone", "os_version": "26.1", "app_version": "7.0"},
         )
         self.assertEqual(status, 200)
-        self.assertEqual(hello["config"]["mode"], "observe")
+        self.assertEqual(hello["config"]["mode"], "full")
         status, result = self.request(
             "/api/v1/events",
             "POST",

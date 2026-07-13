@@ -105,7 +105,7 @@ class BackendState:
         self.event_id = 0
         self.stream_id = 0
         self.config: dict[str, Any] = {
-            "mode": "observe",
+            "mode": "full",
             "capture_next": False,
             "revision": 0,
             "updated_at": utc_now(),
