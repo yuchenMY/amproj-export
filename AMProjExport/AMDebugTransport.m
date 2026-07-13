@@ -15,6 +15,8 @@ static const NSUInteger kAMDebugMaxBufferedEvents = 4096;
 static const NSUInteger kAMDebugEventBatchSize = 64;
 static const NSUInteger kAMDebugMaxEventPayloadBytes = 128 * 1024;
 static const NSUInteger kAMDebugMaxArtifactBytes = 32 * 1024 * 1024;
+static const NSTimeInterval kAMDebugHelloInterval = 10.0;
+static const NSTimeInterval kAMDebugHelloRetryInterval = 5.0;
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
 
 static NSNumber *AMDebugNowMilliseconds(void) {
@@ -461,7 +463,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
 - (void)sendHelloForce:(BOOL)force {
     if (!self.started || !self.foreground || self.helloInFlight) return;
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    if (!force && (self.helloDelivered || now < self.nextHelloAttempt)) return;
+    if (!force && now < self.nextHelloAttempt) return;
 
     NSMutableDictionary *payload = [@{
         @"protocol_version": self.protocolVersion,
@@ -488,9 +490,9 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             strongSelf.helloInFlight = NO;
             NSInteger status = [(NSHTTPURLResponse *)response statusCode];
             strongSelf.helloDelivered = !error && status >= 200 && status < 300;
-            if (!strongSelf.helloDelivered) {
-                strongSelf.nextHelloAttempt = NSProcessInfo.processInfo.systemUptime + 15.0;
-            }
+            NSTimeInterval delay = strongSelf.helloDelivered ?
+                kAMDebugHelloInterval : kAMDebugHelloRetryInterval;
+            strongSelf.nextHelloAttempt = NSProcessInfo.processInfo.systemUptime + delay;
         });
     }] resume];
 }

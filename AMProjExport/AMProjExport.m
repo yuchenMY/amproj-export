@@ -597,16 +597,18 @@ typedef NS_ENUM(int, AMProjDebugPhase) {
 };
 
 static atomic_bool amproj_packageFlowActive = false;
-static atomic_bool amproj_watchdogScheduled = false;
 static atomic_bool amproj_mainStallReported = false;
 static _Atomic(float) amproj_lastProgress = 0.0f;
 static atomic_int amproj_currentPhase = AMProjDebugPhaseIdle;
 static atomic_uint_fast64_t amproj_flowGeneration = 0;
+static atomic_uint_fast64_t amproj_progressGeneration = 0;
 static atomic_uint_fast64_t amproj_lastMainHeartbeatMs = 0;
 static NSString *amproj_currentTransaction = nil;
 static BOOL amproj_captureCurrentTransaction = NO;
 static mach_port_t amproj_mainThread = MACH_PORT_NULL;
 static dispatch_source_t amproj_heartbeatTimer = nil;
+static const float amproj_stallProgressThreshold = 0.95f;
+static const uint64_t amproj_progressStallMilliseconds = 5000;
 
 static uint64_t amproj_uptimeMilliseconds(void) {
     return (uint64_t)([NSProcessInfo processInfo].systemUptime * 1000.0);
@@ -678,7 +680,7 @@ static void amproj_beginPackageFlow(NSString *source) {
     if (wasActive) return;
 
     atomic_store(&amproj_lastProgress, 0.0f);
-    atomic_store(&amproj_watchdogScheduled, false);
+    atomic_fetch_add(&amproj_progressGeneration, 1);
     atomic_store(&amproj_getterTraceCount, 0);
     atomic_fetch_add(&amproj_flowGeneration, 1);
     amproj_currentTransaction = [[AMDebugTransport shared]
@@ -692,7 +694,7 @@ static void amproj_beginPackageFlow(NSString *source) {
 static void amproj_endPackageFlow(NSString *result) {
     if (!atomic_exchange(&amproj_packageFlowActive, false)) return;
     atomic_fetch_add(&amproj_flowGeneration, 1);
-    atomic_store(&amproj_watchdogScheduled, false);
+    atomic_fetch_add(&amproj_progressGeneration, 1);
     amproj_setPhase(AMProjDebugPhaseComplete, @{@"result": result ?: @"finished"});
     if (amproj_currentTransaction) {
         [[AMDebugTransport shared] endExportTransaction:amproj_currentTransaction
@@ -702,23 +704,24 @@ static void amproj_endPackageFlow(NSString *result) {
     amproj_captureCurrentTransaction = NO;
 }
 
-static void amproj_scheduleProgressWatchdog(void) {
-    if (atomic_exchange(&amproj_watchdogScheduled, true)) return;
-    uint64_t generation = atomic_load(&amproj_flowGeneration);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+static void amproj_scheduleProgressWatchdog(uint64_t progressGeneration) {
+    uint64_t flowGeneration = atomic_load(&amproj_flowGeneration);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 amproj_progressStallMilliseconds * NSEC_PER_MSEC),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         BOOL stalled = atomic_load(&amproj_packageFlowActive) &&
-                       atomic_load(&amproj_flowGeneration) == generation &&
-                       atomic_load(&amproj_lastProgress) >= 0.98f;
+                       atomic_load(&amproj_flowGeneration) == flowGeneration &&
+                       atomic_load(&amproj_progressGeneration) == progressGeneration &&
+                       atomic_load(&amproj_lastProgress) >= amproj_stallProgressThreshold;
         if (stalled) {
             AMProjDebugPhase phase = (AMProjDebugPhase)atomic_load(&amproj_currentPhase);
             amproj_debugEvent(@"export.stall", @{
                 @"progress": @(atomic_load(&amproj_lastProgress)),
+                @"stalled_ms": @(amproj_progressStallMilliseconds),
                 @"phase": amproj_phaseName(phase),
                 @"main_thread": amproj_mainThreadSnapshot()
             });
         }
-        atomic_store(&amproj_watchdogScheduled, false);
     });
 }
 
@@ -998,10 +1001,14 @@ static void hooked_packageViewDidDisappear(id self, SEL _cmd, BOOL animated) {
 
 static void amproj_recordProgress(float progress, NSString *source) {
     if (!atomic_load(&amproj_packageFlowActive)) return;
-    float previous = atomic_exchange(&amproj_lastProgress, progress);
+    float previous = atomic_load(&amproj_lastProgress);
     if (fabsf(previous - progress) < 0.0001f) return;
+    uint64_t progressGeneration = atomic_fetch_add(&amproj_progressGeneration, 1) + 1;
+    atomic_store(&amproj_lastProgress, progress);
     amproj_debugEvent(@"export.progress", @{@"value": @(progress), @"source": source ?: @""});
-    if (progress >= 0.98f) amproj_scheduleProgressWatchdog();
+    if (progress >= amproj_stallProgressThreshold) {
+        amproj_scheduleProgressWatchdog(progressGeneration);
+    }
 }
 
 static void hooked_setProgressAnimated(id self, SEL _cmd, float progress, BOOL animated) {
@@ -1014,13 +1021,34 @@ static void hooked_setProgress(id self, SEL _cmd, float progress) {
     amproj_recordProgress(progress, @"UIProgressView");
 }
 
+static BOOL amproj_parseProgressLabel(NSString *text, float *progress) {
+    NSRange percentRange = [text rangeOfString:@"%"];
+    if (percentRange.location == NSNotFound) return NO;
+
+    NSCharacterSet *whitespace = NSCharacterSet.whitespaceAndNewlineCharacterSet;
+    NSCharacterSet *numberCharacters =
+        [NSCharacterSet characterSetWithCharactersInString:@"0123456789.,"];
+    NSUInteger end = percentRange.location;
+    while (end > 0 && [whitespace characterIsMember:[text characterAtIndex:end - 1]]) end--;
+    NSUInteger start = end;
+    while (start > 0 && [numberCharacters characterIsMember:[text characterAtIndex:start - 1]]) start--;
+    if (start == end) return NO;
+
+    NSString *number = [[text substringWithRange:NSMakeRange(start, end - start)]
+        stringByReplacingOccurrencesOfString:@"," withString:@"."];
+    double value = number.doubleValue;
+    if (!isfinite(value) || value < 0.0 || value > 100.0) return NO;
+    if (progress) *progress = (float)(value / 100.0);
+    return YES;
+}
+
 static void hooked_labelSetText(id self, SEL _cmd, NSString *text) {
     orig_labelSetText(self, _cmd, text);
     if (atomic_load(&amproj_packageFlowActive) && [text containsString:@"%"] && text.length < 32) {
         amproj_debugEvent(@"export.progress_label", @{@"text": text});
-        if ([text containsString:@"99%"] || [text containsString:@"100%"] ) {
-            atomic_store(&amproj_lastProgress, [text containsString:@"100%"] ? 1.0f : 0.99f);
-            amproj_scheduleProgressWatchdog();
+        float progress = 0.0f;
+        if (amproj_parseProgressLabel(text, &progress)) {
+            amproj_recordProgress(progress, @"UILabel");
         }
     }
 }
