@@ -761,7 +761,7 @@ static void amproj_addPathCandidate(id value, NSMutableOrderedSet<NSURL *> *cand
     }
     if (URL.isFileURL) {
         NSURL *standard = URL.URLByStandardizingPath;
-        NSString *home = NSURL.fileURLWithPath(NSHomeDirectory()).URLByStandardizingPath.path;
+        NSString *home = [[NSURL fileURLWithPath:NSHomeDirectory()] URLByStandardizingPath].path;
         if ([standard.path hasPrefix:home]) [candidates addObject:standard];
     }
 }

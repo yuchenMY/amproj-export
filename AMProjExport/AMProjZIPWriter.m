@@ -9,7 +9,7 @@
 
 NSString *const AMProjZIPErrorDomain = @"com.amproj.export.zip";
 
-static const size_t kAMProjZIPBufferSize = 64 * 1024;
+enum { kAMProjZIPBufferSize = 64 * 1024 };
 static const uint64_t kAMProjZIPSpaceReserve = 8 * 1024 * 1024;
 static const uint16_t kAMProjZIPUTF8Flag = 0x0800;
 
