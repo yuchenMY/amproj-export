@@ -23,9 +23,9 @@ def parse_macho(path):
         magic = struct.unpack('<I', f.read(4))[0]
         assert magic == 0xfeedfacf, f"Not arm64: 0x{magic:x}"
 
-        hdr = f.read(28)
+        hdr = f.read(28)  # remaining after magic: 32 - 4 = 28 bytes
         cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved = \
-            struct.unpack('<IIIIIIII', hdr)
+            struct.unpack('<IIIIIII', hdr)  # 7 fields = 28 bytes
 
         return {
             'path': path,
