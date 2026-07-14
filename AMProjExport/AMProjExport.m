@@ -51,6 +51,7 @@ static NSString* amproj_serializeLayer(id layer, NSMutableSet<NSValue*> *visited
 static NSString* amproj_tagForType(NSString *type);
 static UIWindow* amproj_keyWindow(void);
 static NSURL* amproj_directExportRoot(void);
+static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source);
 
 static void amproj_debugEvent(NSString *name, NSDictionary *fields) {
 #if AMPROJ_DEBUG
@@ -2286,6 +2287,294 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
     });
 }
 
+// MARK: - Local .amproj import bridge
+
+typedef BOOL (*AMProjApplicationOpenURLIMP)(id, SEL, UIApplication *, NSURL *, NSDictionary *);
+static AMProjApplicationOpenURLIMP orig_applicationOpenURL = NULL;
+static NSURL *amproj_pendingImportURL = nil;
+static NSString *amproj_pendingImportName = nil;
+static NSUInteger amproj_pendingImportGeneration = 0;
+static CFAbsoluteTime amproj_pendingImportDeadline = 0;
+static NSString *amproj_lastIncomingURLKey = nil;
+static CFAbsoluteTime amproj_lastIncomingURLTime = 0;
+
+static NSURL* amproj_importCacheRoot(void) {
+    NSURL *caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory
+                                                         inDomains:NSUserDomainMask].firstObject;
+    return [caches URLByAppendingPathComponent:@"AMProjImports" isDirectory:YES];
+}
+
+static void amproj_purgeOldImports(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSFileManager *manager = NSFileManager.defaultManager;
+        NSURL *root = amproj_importCacheRoot();
+        NSArray<NSURL *> *entries = [manager contentsOfDirectoryAtURL:root
+                                          includingPropertiesForKeys:@[NSURLContentModificationDateKey]
+                                                             options:NSDirectoryEnumerationSkipsHiddenFiles
+                                                               error:nil];
+        NSDate *cutoff = [NSDate dateWithTimeIntervalSinceNow:-7.0 * 24.0 * 60.0 * 60.0];
+        for (NSURL *entry in entries) {
+            NSDate *modified = nil;
+            [entry getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
+            if (!modified || [modified compare:cutoff] == NSOrderedAscending) {
+                [manager removeItemAtURL:entry error:nil];
+            }
+        }
+    });
+}
+
+static BOOL amproj_isIncomingProjectURL(NSURL *URL) {
+    if (![URL isKindOfClass:NSURL.class] || !URL.isFileURL) return NO;
+    return [URL.pathExtension caseInsensitiveCompare:@"amproj"] == NSOrderedSame;
+}
+
+static UIViewController* amproj_findTemplatesControllerRecursive(
+    UIViewController *controller, NSUInteger depth, NSMutableSet<NSValue *> *visited) {
+    if (!controller || depth > 12) return nil;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+
+    SEL importSelector = NSSelectorFromString(@"documentPicker:didPickDocumentsAtURLs:");
+    NSString *className = NSStringFromClass(controller.class);
+    if ([className containsString:@"TemplatesListVC"] &&
+        [controller respondsToSelector:importSelector]) {
+        return controller;
+    }
+
+    UIViewController *found = amproj_findTemplatesControllerRecursive(
+        controller.presentedViewController, depth + 1, visited);
+    if (found) return found;
+    for (UIViewController *child in controller.childViewControllers) {
+        found = amproj_findTemplatesControllerRecursive(child, depth + 1, visited);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static UIViewController* amproj_findTemplatesController(void) {
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    UIApplication *application = UIApplication.sharedApplication;
+    for (UIScene *scene in application.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            UIViewController *found = amproj_findTemplatesControllerRecursive(
+                window.rootViewController, 0, visited);
+            if (found) return found;
+        }
+    }
+
+    UIWindow *delegateWindow = nil;
+    id delegate = application.delegate;
+    if ([delegate respondsToSelector:@selector(window)]) {
+        @try {
+            delegateWindow = ((UIWindow *(*)(id, SEL))(void *)objc_msgSend)(delegate, @selector(window));
+        } @catch (__unused NSException *exception) {
+            delegateWindow = nil;
+        }
+    }
+    return amproj_findTemplatesControllerRecursive(delegateWindow.rootViewController, 0, visited);
+}
+
+static UIViewController* amproj_topViewController(UIViewController *controller) {
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    while (controller) {
+        NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
+        if ([visited containsObject:identity]) break;
+        [visited addObject:identity];
+
+        UIViewController *next = controller.presentedViewController;
+        if (!next && [controller isKindOfClass:UINavigationController.class]) {
+            next = ((UINavigationController *)controller).visibleViewController;
+        }
+        if (!next && [controller isKindOfClass:UITabBarController.class]) {
+            next = ((UITabBarController *)controller).selectedViewController;
+        }
+        if (!next) break;
+        controller = next;
+    }
+    return controller;
+}
+
+static void amproj_presentImportError(NSString *message) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *presenter = amproj_topViewController(amproj_keyWindow().rootViewController);
+        if (!presenter || [presenter isKindOfClass:UIAlertController.class] ||
+            presenter.presentedViewController) return;
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"无法导入 .amproj"
+                             message:message.length ? message : @"请返回 QQ 或文件 App 后重新打开项目包。"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"知道了"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:nil]];
+        [presenter presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+static void amproj_tryDispatchPendingImport(NSUInteger generation) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (generation != amproj_pendingImportGeneration || !amproj_pendingImportURL) return;
+
+        UIApplication *application = UIApplication.sharedApplication;
+        UIViewController *controller = application.applicationState == UIApplicationStateActive ?
+            amproj_findTemplatesController() : nil;
+        SEL selector = NSSelectorFromString(@"documentPicker:didPickDocumentsAtURLs:");
+        if (controller && [controller respondsToSelector:selector]) {
+            NSURL *URL = amproj_pendingImportURL;
+            NSString *name = amproj_pendingImportName ?: @"project.amproj";
+            amproj_pendingImportURL = nil;
+            amproj_pendingImportName = nil;
+            amproj_debugEvent(@"import.dispatch", @{
+                @"controller": NSStringFromClass(controller.class) ?: @"",
+                @"filename": name,
+                @"bridge_filename": URL.lastPathComponent ?: @""
+            });
+            @try {
+                ((void (*)(id, SEL, id, NSArray *))(void *)objc_msgSend)(
+                    controller, selector, nil, @[URL]);
+                amproj_debugEvent(@"import.dispatched", @{@"success": @YES});
+            } @catch (NSException *exception) {
+                amproj_debugEvent(@"import.dispatched", @{
+                    @"success": @NO,
+                    @"exception": exception.name ?: @"",
+                    @"reason": exception.reason ?: @""
+                });
+                amproj_presentImportError(@"Alight Motion 的原生导入入口调用失败，请重新打开项目包。");
+            }
+            return;
+        }
+
+        if (CFAbsoluteTimeGetCurrent() >= amproj_pendingImportDeadline) {
+            NSString *name = amproj_pendingImportName ?: @"project.amproj";
+            amproj_pendingImportURL = nil;
+            amproj_pendingImportName = nil;
+            amproj_debugEvent(@"import.controller_timeout", @{
+                @"filename": name,
+                @"selector_available": @(NSClassFromString(@"AlightMotion.TemplatesListVC") != Nil ||
+                                           objc_getClass("_TtC12AlightMotion15TemplatesListVC") != Nil)
+            });
+            amproj_presentImportError(@"Alight Motion 的项目列表尚未加载，请进入项目列表后再从 QQ 或文件 App 打开一次。");
+            return;
+        }
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            amproj_tryDispatchPendingImport(generation);
+        });
+    });
+}
+
+static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        amproj_pendingImportURL = URL;
+        amproj_pendingImportName = originalName.length ? originalName : @"project.amproj";
+        amproj_pendingImportDeadline = CFAbsoluteTimeGetCurrent() + 60.0;
+        NSUInteger generation = ++amproj_pendingImportGeneration;
+        amproj_debugEvent(@"import.queued", @{
+            @"filename": amproj_pendingImportName,
+            @"wait_seconds": @60
+        });
+        amproj_tryDispatchPendingImport(generation);
+    });
+}
+
+static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source) {
+    if (!amproj_isIncomingProjectURL(URL)) return NO;
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSString *URLKey = URL.absoluteString ?: URL.path ?: @"";
+    if (URLKey.length && [URLKey isEqualToString:amproj_lastIncomingURLKey] &&
+        now - amproj_lastIncomingURLTime < 3.0) {
+        amproj_debugEvent(@"import.duplicate", @{
+            @"source": source ?: @"",
+            @"filename": URL.lastPathComponent ?: @""
+        });
+        return YES;
+    }
+    amproj_lastIncomingURLKey = [URLKey copy];
+    amproj_lastIncomingURLTime = now;
+
+    NSString *originalName = URL.lastPathComponent ?: @"project.amproj";
+    amproj_debugEvent(@"import.url_received", @{
+        @"source": source ?: @"",
+        @"filename": originalName,
+        @"file_url": @YES
+    });
+
+    // Acquire the sandbox extension before the delegate callback returns.
+    BOOL scoped = [URL startAccessingSecurityScopedResource];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSFileManager *manager = NSFileManager.defaultManager;
+        NSError *error = nil;
+        NSURL *root = amproj_importCacheRoot();
+        NSURL *directory = [root URLByAppendingPathComponent:NSUUID.UUID.UUIDString
+                                                 isDirectory:YES];
+        if (![manager createDirectoryAtURL:directory withIntermediateDirectories:YES
+                                attributes:nil error:&error]) {
+            if (scoped) [URL stopAccessingSecurityScopedResource];
+            amproj_debugEvent(@"import.copy", @{
+                @"success": @NO,
+                @"scoped": @(scoped),
+                @"error": error.localizedDescription ?: @"Unable to create import cache"
+            });
+            amproj_presentImportError(@"无法创建导入缓存，请检查设备剩余空间后重试。");
+            return;
+        }
+
+        NSURL *destination = [directory URLByAppendingPathComponent:@"projectfiles.zip"];
+        __block NSError *copyError = nil;
+        __block BOOL copied = NO;
+        NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+        NSError *coordinationError = nil;
+        [coordinator coordinateReadingItemAtURL:URL
+                                        options:NSFileCoordinatorReadingWithoutChanges
+                                          error:&coordinationError
+                                     byAccessor:^(NSURL *coordinatedURL) {
+            copied = [manager copyItemAtURL:coordinatedURL toURL:destination error:&copyError];
+        }];
+        if (!copied && !copyError) copyError = coordinationError;
+        if (scoped) [URL stopAccessingSecurityScopedResource];
+
+        NSNumber *fileSize = nil;
+        if (copied) {
+            [destination getResourceValue:&fileSize forKey:NSURLFileSizeKey error:&copyError];
+            if (fileSize.unsignedLongLongValue == 0) {
+                copied = NO;
+                copyError = [NSError errorWithDomain:@"com.amproj.import"
+                                                code:2
+                                            userInfo:@{NSLocalizedDescriptionKey: @"Project package is empty"}];
+            }
+        }
+        if (!copied) {
+            [manager removeItemAtURL:directory error:nil];
+            amproj_debugEvent(@"import.copy", @{
+                @"success": @NO,
+                @"scoped": @(scoped),
+                @"error": copyError.localizedDescription ?: @"Unable to copy project package"
+            });
+            amproj_presentImportError(@"无法读取 QQ 或文件 App 提供的项目包，请返回后重新打开一次。");
+            return;
+        }
+
+        amproj_debugEvent(@"import.copy", @{
+            @"success": @YES,
+            @"scoped": @(scoped),
+            @"bytes": fileSize ?: @0,
+            @"bridge_filename": destination.lastPathComponent ?: @""
+        });
+        amproj_queuePreparedImport(destination, originalName);
+    });
+    return YES;
+}
+
+static BOOL hooked_applicationOpenURL(id self, SEL _cmd, UIApplication *application,
+                                      NSURL *URL, NSDictionary *options) {
+    if (amproj_handleIncomingProjectURL(URL, @"application_open_url")) return YES;
+    return orig_applicationOpenURL ?
+        orig_applicationOpenURL(self, _cmd, application, URL, options) : NO;
+}
+
 static UIWindow* amproj_keyWindow(void) {
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -2783,6 +3072,27 @@ static Method amproj_ownInstanceMethod(Class cls, SEL selector) {
     return found;
 }
 
+static void amproj_installImportHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class appDelegateClass = NSClassFromString(@"AlightMotion.AppDelegate");
+        if (!appDelegateClass) {
+            appDelegateClass = objc_getClass("_TtC12AlightMotion11AppDelegate");
+        }
+        SEL selector = @selector(application:openURL:options:);
+        Method method = amproj_ownInstanceMethod(appDelegateClass, selector);
+        if (!method) method = class_getInstanceMethod(appDelegateClass, selector);
+        IMP previous = amproj_installMethodHook(
+            method, (IMP)hooked_applicationOpenURL, 5, @"AppDelegate.application.openURL");
+        if (previous) orig_applicationOpenURL = (AMProjApplicationOpenURLIMP)previous;
+        amproj_debugEvent(@"import.hook", @{
+            @"installed": @(previous != NULL),
+            @"class": appDelegateClass ? NSStringFromClass(appDelegateClass) : @"",
+            @"selector": NSStringFromSelector(selector)
+        });
+    });
+}
+
 static void amproj_installShareExportHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -2970,10 +3280,12 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
         if (amproj_mainThread == MACH_PORT_NULL) amproj_mainThread = mach_thread_self();
 #endif
         amproj_installPresentationHook();
+        amproj_installImportHook();
 
         NSString *startupTrigger = [trigger copy] ?: @"unknown";
         dispatch_async(dispatch_get_main_queue(), ^{
             amproj_purgeOldDirectExports();
+            amproj_purgeOldImports();
 #if AMPROJ_DEBUG
             [[AMDebugTransport shared] start];
             amproj_debugEvent(@"bootstrap.ready", @{@"trigger": startupTrigger});
@@ -2987,9 +3299,9 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v7-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v8-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v7 =====");
+        NSLog(@"[AMProjExport] ===== Loading v8 =====");
 #endif
 
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
@@ -2999,6 +3311,10 @@ static void AMProjExportInit(void) {
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(__unused NSNotification *notification) {
             amproj_bootstrapAfterLaunch(@"did_finish_launching");
+            NSURL *launchURL = [notification.userInfo objectForKey:UIApplicationLaunchOptionsURLKey];
+            if ([launchURL isKindOfClass:NSURL.class]) {
+                amproj_handleIncomingProjectURL(launchURL, @"launch_options");
+            }
         }];
         amproj_didBecomeActiveObserver = [center
             addObserverForName:UIApplicationDidBecomeActiveNotification

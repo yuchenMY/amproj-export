@@ -20,6 +20,7 @@ from typing import Optional
 
 
 AMPROJ_UTI = "com.alightcreative.motion.amproj"
+AMPROJ_UTI_CONFORMANCES = ("public.data", "public.archive", "public.zip-archive")
 DEBUG_CONFIG_NAME = "AMProjDebugConfig.plist"
 DEFAULT_SERVER_PORT = 8765
 DEFAULT_DEBUG_MODE = "full"
@@ -232,6 +233,18 @@ def _has_amproj_uti(plist):
     )
 
 
+def _amproj_uti_declaration(plist):
+    return next(
+        (
+            declaration
+            for declaration in plist.get("UTExportedTypeDeclarations", [])
+            if isinstance(declaration, dict)
+            and declaration.get("UTTypeIdentifier") == AMPROJ_UTI
+        ),
+        None,
+    )
+
+
 def patch_info_plist(app_dir, enable_debug_network=False):
     """Patch the .amproj UTI and, for debug builds, local-network settings."""
     info_path = os.path.join(app_dir, "Info.plist")
@@ -256,19 +269,51 @@ def patch_info_plist(app_dir, enable_debug_network=False):
         plist["CFBundleDocumentTypes"] = document_types
         changed = True
 
-    if not _has_amproj_uti(plist):
-        declarations.append(
-            {
-                "UTTypeIdentifier": AMPROJ_UTI,
-                "UTTypeDescription": "Alight Motion Project",
-                "UTTypeConformsTo": ["public.data", "public.archive"],
-                "UTTypeTagSpecification": {
-                    "public.filename-extension": ["amproj"],
-                    "public.mime-type": ["application/x-amproj"],
-                },
-            }
-        )
+    amproj_declaration = _amproj_uti_declaration(plist)
+    if amproj_declaration is None:
+        amproj_declaration = {
+            "UTTypeIdentifier": AMPROJ_UTI,
+            "UTTypeDescription": "Alight Motion Project",
+            "UTTypeConformsTo": list(AMPROJ_UTI_CONFORMANCES),
+            "UTTypeTagSpecification": {
+                "public.filename-extension": ["amproj"],
+                "public.mime-type": ["application/x-amproj"],
+            },
+        }
+        declarations.append(amproj_declaration)
         changed = True
+    else:
+        conformances = amproj_declaration.get("UTTypeConformsTo")
+        if not isinstance(conformances, list):
+            conformances = []
+        normalized = list(conformances)
+        for conformance in AMPROJ_UTI_CONFORMANCES:
+            if conformance not in normalized:
+                normalized.append(conformance)
+        if normalized != amproj_declaration.get("UTTypeConformsTo"):
+            amproj_declaration["UTTypeConformsTo"] = normalized
+            changed = True
+
+        tags = amproj_declaration.get("UTTypeTagSpecification")
+        if not isinstance(tags, dict):
+            tags = {}
+            amproj_declaration["UTTypeTagSpecification"] = tags
+            changed = True
+        expected_tags = {
+            "public.filename-extension": ["amproj"],
+            "public.mime-type": ["application/x-amproj"],
+        }
+        for key, values in expected_tags.items():
+            current = tags.get(key)
+            if not isinstance(current, list):
+                current = []
+            normalized_values = list(current)
+            for value in values:
+                if value not in normalized_values:
+                    normalized_values.append(value)
+            if normalized_values != tags.get(key):
+                tags[key] = normalized_values
+                changed = True
 
     if not _has_amproj_document_type(plist):
         document_types.append(
@@ -570,6 +615,12 @@ def _validate_patched_info_plist(plist, settings, expected_bundle_identifier):
         raise RuntimeError("Injection changed CFBundleIdentifier")
     if not _has_amproj_document_type(plist) or not _has_amproj_uti(plist):
         raise RuntimeError("Info.plist is missing the .amproj document registration")
+    declaration = _amproj_uti_declaration(plist)
+    if "public.zip-archive" not in declaration.get("UTTypeConformsTo", []):
+        raise RuntimeError("Info.plist .amproj UTI must conform to public.zip-archive")
+    tags = declaration.get("UTTypeTagSpecification", {})
+    if "amproj" not in tags.get("public.filename-extension", []):
+        raise RuntimeError("Info.plist .amproj UTI is missing its filename extension")
     if settings.enabled:
         if not isinstance(plist.get("NSLocalNetworkUsageDescription"), str):
             raise RuntimeError("Info.plist is missing NSLocalNetworkUsageDescription")

@@ -154,6 +154,15 @@ class PlistTests(unittest.TestCase):
             self.assertIs(ats["NSAllowsArbitraryLoads"], True)
             self.assertEqual(len(result["CFBundleDocumentTypes"]), 1)
             self.assertEqual(len(result["UTExportedTypeDeclarations"]), 1)
+            self.assertIn(
+                "public.zip-archive",
+                result["UTExportedTypeDeclarations"][0]["UTTypeConformsTo"],
+            )
+            self.assertIn(
+                "amproj",
+                result["UTExportedTypeDeclarations"][0]["UTTypeTagSpecification"]
+                ["public.filename-extension"],
+            )
 
 
 class AddressSelectionTests(unittest.TestCase):
