@@ -29,6 +29,8 @@
 #import <string.h>
 #import <math.h>
 #import <float.h>
+#import <fcntl.h>
+#import <unistd.h>
 #import "AMProjArchiveWriter.h"
 
 #if AMPROJ_DEBUG
@@ -54,6 +56,28 @@ static void amproj_debugEvent(NSString *name, NSDictionary *fields) {
     (void)name;
     (void)fields;
 #endif
+}
+
+static NSString* amproj_stageFilePath(void) {
+    NSString *caches = NSSearchPathForDirectoriesInDomains(
+        NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+    return [caches stringByAppendingPathComponent:@"AMProjExport.laststage"];
+}
+
+static void amproj_setPersistentStage(NSString *stage) {
+    NSString *path = amproj_stageFilePath();
+    if (!path.length) return;
+    if (!stage.length) {
+        unlink(path.fileSystemRepresentation);
+        return;
+    }
+    NSData *data = [stage dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data.length || data.length > 96) return;
+    int descriptor = open(path.fileSystemRepresentation,
+                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (descriptor < 0) return;
+    (void)write(descriptor, data.bytes, data.length);
+    close(descriptor);
 }
 
 static NSString* amproj_exportMode(void) {
@@ -295,24 +319,13 @@ static Ivar amproj_instanceIvar(id object, NSString *name) {
     return class_getInstanceVariable([object class], name.UTF8String);
 }
 
-static id amproj_swiftReferenceIvar(id object, NSString *name) {
-    if (![name isEqualToString:@"holder"]) return nil;
-    Ivar ivar = amproj_instanceIvar(object, name);
-    if (!ivar) return nil;
-    const char *type = ivar_getTypeEncoding(ivar);
-    if (type && type[0] && type[0] != '@' && type[0] != '#') return nil;
-    void *raw = NULL;
-    const uint8_t *address = (const uint8_t *)(__bridge const void *)object + ivar_getOffset(ivar);
-    memcpy(&raw, address, sizeof(raw));
-    return raw ? (__bridge id)raw : nil;
-}
-
 static BOOL amproj_swiftIntegerIvar(id object, NSString *name, NSInteger *value) {
     if (![name isEqualToString:@"selectedRow"]) return NO;
+    if (![NSStringFromClass([object class]) containsString:@"ShareVC"]) return NO;
     Ivar ivar = amproj_instanceIvar(object, name);
     if (!ivar) return NO;
     const char *type = ivar_getTypeEncoding(ivar);
-    if (type && type[0] && strchr("cCsSiIlLqQ", type[0]) == NULL) return NO;
+    if (type && type[0] && type[0] != 'q' && type[0] != 'Q') return NO;
     NSInteger raw = 0;
     const uint8_t *address = (const uint8_t *)(__bridge const void *)object + ivar_getOffset(ivar);
     memcpy(&raw, address, sizeof(raw));
@@ -1155,22 +1168,9 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
 
 static id (*orig_initWithItems)(id, SEL, NSArray *, NSArray *) = NULL;
 static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
-static void (*orig_executePendingSaveProjectSync)(id, SEL) = NULL;
 static void (*orig_shareNCOnTapExport)(id, SEL, id) = NULL;
-static __weak id amproj_lastSavedProjectHolder = nil;
 static BOOL amproj_bypassPackagePresentation = NO;
 static NSUInteger amproj_bypassPackageGeneration = 0;
-
-static void hooked_executePendingSaveProjectSync(id self, SEL _cmd) {
-    amproj_lastSavedProjectHolder = self;
-    amproj_debugEvent(@"project_holder.cached", @{
-        @"class": NSStringFromClass([self class]) ?: @"",
-        @"source": @"executePendingSaveProjectSync"
-    });
-    if (orig_executePendingSaveProjectSync) {
-        orig_executePendingSaveProjectSync(self, _cmd);
-    }
-}
 
 static void amproj_allowOriginalPackagePresentation(void) {
     amproj_bypassPackagePresentation = YES;
@@ -1221,8 +1221,6 @@ static void amproj_allowOriginalPackagePresentation(void) {
 @property(nonatomic, strong) UIAlertController *progressAlert;
 @property(nonatomic, copy) NSString *mode;
 @property(nonatomic, strong) NSURL *outputURL;
-@property(nonatomic, strong) id projectHolder;
-@property(nonatomic, copy) NSArray *contextRoots;
 @property(nonatomic, copy) NSString *projectTitle;
 @property(nonatomic, copy) void (^fallbackAction)(void);
 @end
@@ -1504,6 +1502,7 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
 static void amproj_presentDirectShare(AMProjDirectRequest *request, NSURL *fileURL) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (amproj_directRequest != request) return;
+        amproj_setPersistentStage(@"activity_init");
         request.outputURL = fileURL;
         UIViewController *presenter = request.presenter;
         void (^presentShare)(void) = ^{
@@ -1544,12 +1543,15 @@ static void amproj_presentDirectShare(AMProjDirectRequest *request, NSURL *fileU
                     @"error": shareError.localizedDescription ?: @""
                 });
                 if (amproj_directRequest == strongRequest) amproj_directRequest = nil;
+                amproj_setPersistentStage(nil);
                 amproj_finishDirectFlow(completed ? @"shared" : @"share_cancelled");
             };
             @try {
+                amproj_setPersistentStage(@"activity_present");
                 orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
                                activity, YES, ^{
                     request.originalCompletion = nil;
+                    amproj_setPersistentStage(nil);
                     amproj_debugEvent(@"direct.share_presented", @{
                         @"filename": fileURL.lastPathComponent ?: @"",
                         @"uti": AMProjUTI
@@ -1574,10 +1576,12 @@ static void amproj_writeDirectArchive(AMProjDirectRequest *request, NSData *xmlD
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
         AMProjXMLProbe *validated = nil;
+        amproj_setPersistentStage(@"xml_validate");
         if (!amproj_validateXMLAgainstScene(xmlData, expected, &validated, &error)) {
             amproj_finishDirectFailure(request, error);
             return;
         }
+        amproj_setPersistentStage(@"resource_rewrite");
         NSDictionary *prepared = amproj_collectResourcesAndRewriteXML(xmlData, XMLURL, &error);
         if (!prepared) {
             amproj_finishDirectFailure(request, error);
@@ -1592,6 +1596,7 @@ static void amproj_writeDirectArchive(AMProjDirectRequest *request, NSData *xmlD
         NSString *title = [expected[@"title"] length] ? expected[@"title"] : validated.title;
         NSURL *outputURL = amproj_createOutputURL(title, &error);
         NSDictionary<NSString *, NSNumber *> *zipMetrics = nil;
+        amproj_setPersistentStage(@"zip_write");
         if (!outputURL || !AMProjZIPWriteProjectArchive(
                 outputURL, rewrittenXML, resources, &zipMetrics, &error)) {
             amproj_finishDirectFailure(request, error ?: amproj_directError(42, @"Unable to write .amproj archive"));
@@ -1630,6 +1635,7 @@ static void amproj_writeDirectArchive(AMProjDirectRequest *request, NSData *xmlD
 
 static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
     if (amproj_directRequest != request) return;
+    amproj_setPersistentStage(@"build_enter");
     if ([request.mode isEqualToString:@"placeholder"]) {
         NSDate *now = NSDate.date;
         amproj_writeDirectArchive(request, amproj_placeholderXML(), nil,
@@ -1637,60 +1643,8 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
               @"layers": @0, @"layers_known": @YES, @"save_started": now}, @"placeholder");
         return;
     }
-    UIViewController *presenter = request.presenter;
-    UIViewController *packageController = request.originalController;
-    id delegate = UIApplication.sharedApplication.delegate;
-    NSMutableArray *roots = request.contextRoots ? [request.contextRoots mutableCopy] : [NSMutableArray array];
-    if (request.projectHolder) [roots addObject:request.projectHolder];
-    if (packageController) [roots addObject:packageController];
-    if (presenter) [roots addObject:presenter];
-    if (delegate) [roots addObject:delegate];
-    UIViewController *rootController = amproj_keyWindow().rootViewController;
-    if (rootController) [roots addObject:rootController];
-    id holder = request.projectHolder;
-    if (!holder && amproj_lastSavedProjectHolder &&
-        [NSStringFromClass([amproj_lastSavedProjectHolder class]) containsString:@"ProjectHolder"]) {
-        holder = amproj_lastSavedProjectHolder;
-    }
-    if (!holder) holder = amproj_findObjectByClass(roots, @"ProjectHolder");
-    if (holder) amproj_lastSavedProjectHolder = holder;
     NSDate *saveStarted = NSDate.date;
-    if (holder && [holder respondsToSelector:NSSelectorFromString(@"executePendingSaveProjectSync")]) {
-        @try {
-            ((void (*)(id, SEL))objc_msgSend)(holder, NSSelectorFromString(@"executePendingSaveProjectSync"));
-            amproj_debugEvent(@"direct.native_save", @{@"success": @YES,
-                                                       @"class": NSStringFromClass([holder class]) ?: @""});
-        } @catch (NSException *exception) {
-            amproj_debugEvent(@"direct.native_save", @{@"success": @NO,
-                                                       @"error": exception.reason ?: @""});
-        }
-    }
-    id scene = holder ? am_get(holder, @"rootScene") : nil;
-    if (!scene) {
-        for (id root in roots) {
-            scene = am_findScene(root);
-            if (scene) break;
-        }
-    }
-    if (!holder && !scene) {
-        amproj_finishDirectFailure(request, amproj_directError(50, @"Unable to locate the current project holder"));
-        return;
-    }
-    NSDictionary *expected = nil;
-    if (scene) {
-        expected = amproj_expectedSceneMetadata(scene, saveStarted);
-        if ([expected[@"width"] integerValue] <= 0 ||
-            [expected[@"height"] integerValue] <= 0 ||
-            ![expected[@"layers_known"] boolValue]) {
-            amproj_debugEvent(@"direct.scene_unusable", @{
-                @"class": NSStringFromClass([scene class]) ?: @"",
-                @"reason": @"metadata_incomplete"
-            });
-            scene = nil;
-            expected = nil;
-        }
-    }
-    if (!expected) expected = @{
+    NSDictionary *expected = @{
         @"title": request.projectTitle ?: @"",
         @"width": @0,
         @"height": @0,
@@ -1698,20 +1652,23 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
         @"layers_known": @NO,
         @"save_started": saveStarted
     };
-    NSArray<NSURL *> *paths = amproj_collectPathCandidates(roots);
-    amproj_debugEvent(scene ? @"direct.scene_found" : @"direct.scene_native_only", @{
-        @"holder": holder ? NSStringFromClass([holder class]) : @"",
-        @"scene": scene ? NSStringFromClass([scene class]) : @"Swift.Scene",
+    amproj_setPersistentStage(@"path_scan");
+    NSArray<NSURL *> *paths = amproj_collectPathCandidates(@[]);
+    amproj_debugEvent(@"direct.scene_native_only", @{
+        @"holder": @"not_accessed",
+        @"scene": @"not_accessed",
         @"title": expected[@"title"],
         @"layers": expected[@"layers"],
         @"path_candidates": @(paths.count)
     });
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        amproj_setPersistentStage(@"native_xml_scan");
         NSDictionary *native = amproj_selectNativeXML(paths, expected);
         if (native) {
+            amproj_setPersistentStage(@"native_xml_found");
             AMProjXMLProbe *probe = native[@"probe"];
-            NSDictionary *validatedExpected = scene ? expected : @{
+            NSDictionary *validatedExpected = @{
                 @"title": probe.title ?: request.projectTitle ?: @"",
                 @"width": @(probe.width),
                 @"height": @(probe.height),
@@ -1736,7 +1693,6 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
 static void amproj_startDirectExport(UIViewController *presenter,
                                      UIViewController *originalController,
                                      BOOL animated, void (^completion)(void),
-                                     id projectHolder, NSArray *contextRoots,
                                      NSString *projectTitle, void (^fallbackAction)(void)) {
     if (amproj_directRequest) {
         if (completion) completion();
@@ -1747,19 +1703,18 @@ static void amproj_startDirectExport(UIViewController *presenter,
     request.originalController = originalController;
     request.animated = animated;
     request.originalCompletion = completion;
-    request.projectHolder = projectHolder;
-    request.contextRoots = contextRoots;
     request.projectTitle = projectTitle;
     request.fallbackAction = fallbackAction;
     request.mode = amproj_exportMode();
     request.progressAlert = [UIAlertController alertControllerWithTitle:@"正在生成 .amproj"
         message:@"正在读取项目与媒体文件，请稍候…" preferredStyle:UIAlertControllerStyleAlert];
     amproj_directRequest = request;
+    amproj_setPersistentStage(@"progress_present");
     amproj_beginDirectFlow();
     amproj_debugEvent(@"direct.intercept", @{
         @"presenter": NSStringFromClass([presenter class]) ?: @"",
         @"controller": NSStringFromClass([originalController class]) ?: @"",
-        @"holder": projectHolder ? NSStringFromClass([projectHolder class]) : @"",
+        @"holder": @"not_accessed",
         @"source": fallbackAction ? @"share_export_button" : @"package_presentation",
         @"mode": request.mode ?: @""
     });
@@ -1772,6 +1727,7 @@ static void amproj_startDirectExport(UIViewController *presenter,
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (amproj_directRequest != request) return;
+        amproj_setPersistentStage(nil);
         amproj_debugEvent(@"direct.failed", @{
             @"code": @(error.code),
             @"error": error.localizedDescription ?: @"Unknown export error"
@@ -1780,8 +1736,6 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
         UIViewController *originalController = request.originalController;
         BOOL animated = request.animated;
         void (^originalCompletion)(void) = request.originalCompletion;
-        id projectHolder = request.projectHolder;
-        NSArray *contextRoots = request.contextRoots;
         NSString *projectTitle = request.projectTitle;
         void (^fallbackAction)(void) = request.fallbackAction;
         void (^showFailure)(void) = ^{
@@ -1794,7 +1748,7 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
             [alert addAction:[UIAlertAction actionWithTitle:@"重试" style:UIAlertActionStyleDefault
                 handler:^(__unused UIAlertAction *action) {
                     amproj_startDirectExport(presenter, originalController, animated, originalCompletion,
-                                             projectHolder, contextRoots, projectTitle, fallbackAction);
+                                             projectTitle, fallbackAction);
                 }]];
             [alert addAction:[UIAlertAction actionWithTitle:@"使用原版二维码"
                 style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
@@ -2070,29 +2024,23 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
     BOOL hasSelectedRow = amproj_swiftIntegerIvar(contentController, @"selectedRow", &selectedRow);
     BOOL isProjectPackage = hasSelectedRow && selectedRow == 1;
     NSString *mode = amproj_exportMode();
-    id holder = isProjectPackage ? amproj_swiftReferenceIvar(contentController, @"holder") : nil;
-    if (!holder && isProjectPackage) holder = amproj_lastSavedProjectHolder;
     amproj_debugEvent(@"direct.export_button", @{
         @"mode": mode ?: @"",
         @"selected_row": hasSelectedRow ? @(selectedRow) : @(-1),
         @"package": @(isProjectPackage),
         @"controller": contentController ? NSStringFromClass(contentController.class) : @"",
-        @"holder": holder ? NSStringFromClass([holder class]) : @""
+        @"holder": @"not_accessed"
     });
     if (!isProjectPackage || [mode isEqualToString:@"observe"] || !shareController) {
         orig_shareNCOnTapExport(self, _cmd, sender);
         return;
     }
-    NSMutableArray *roots = [NSMutableArray array];
-    if (contentController) [roots addObject:contentController];
-    [roots addObject:shareController];
-    if (holder) [roots addObject:holder];
     NSString *title = amproj_currentProjectTitle(shareController);
     void (^fallbackAction)(void) = ^{
         amproj_allowOriginalPackagePresentation();
         orig_shareNCOnTapExport(self, _cmd, sender);
     };
-    amproj_startDirectExport(shareController, nil, YES, nil, holder, roots, title, fallbackAction);
+    amproj_startDirectExport(shareController, nil, YES, nil, title, fallbackAction);
 }
 
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
@@ -2114,7 +2062,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     if (amproj_isSharePackageController(controller) &&
         ![mode isEqualToString:@"observe"]) {
         amproj_startDirectExport(self, controller, animated, completion,
-                                 nil, nil, nil, nil);
+                                 nil, nil);
         return;
     }
 
@@ -2318,32 +2266,6 @@ static Method amproj_ownInstanceMethod(Class cls, SEL selector) {
     return found;
 }
 
-static void amproj_installProjectHolderHook(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class holderClass = NSClassFromString(@"AlightMotion.ProjectHolder");
-        if (!holderClass) holderClass = objc_getClass("_TtC12AlightMotion13ProjectHolder");
-        SEL selector = NSSelectorFromString(@"executePendingSaveProjectSync");
-        Method method = class_getInstanceMethod(holderClass, selector);
-        if (!method) {
-            amproj_debugEvent(@"project_holder.hook", @{
-                @"installed": @NO,
-                @"class": holderClass ? NSStringFromClass(holderClass) : @"",
-                @"reason": holderClass ? @"selector_missing" : @"class_missing"
-            });
-            return;
-        }
-        IMP previous = amproj_installMethodHook(
-            method, (IMP)hooked_executePendingSaveProjectSync, 2,
-            @"ProjectHolder.executePendingSaveProjectSync");
-        if (previous) orig_executePendingSaveProjectSync = (void *)previous;
-        amproj_debugEvent(@"project_holder.hook", @{
-            @"installed": @(previous != NULL),
-            @"class": NSStringFromClass(holderClass) ?: @""
-        });
-    });
-}
-
 static void amproj_installShareExportHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -2418,7 +2340,6 @@ static void amproj_installExportHooks(void) {
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing export hooks after app launch");
         amproj_installPresentationHook();
-        amproj_installProjectHolderHook();
         amproj_installShareExportHook();
 
         @try {

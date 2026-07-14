@@ -18,7 +18,7 @@ static const NSUInteger kAMDebugMaxEventPayloadBytes = 128 * 1024;
 static const NSUInteger kAMDebugMaxArtifactBytes = 32 * 1024 * 1024;
 static const NSTimeInterval kAMDebugHelloInterval = 10.0;
 static const NSTimeInterval kAMDebugHelloRetryInterval = 5.0;
-static NSString *const kAMDebugPluginVersion = @"4";
+static NSString *const kAMDebugPluginVersion = @"5";
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
 
 typedef NS_ENUM(NSInteger, AMDebugBackendState) {
@@ -31,6 +31,25 @@ typedef NS_ENUM(NSInteger, AMDebugBackendState) {
 
 static __weak UIView *AMDebugStatusBanner;
 static NSUInteger AMDebugStatusGeneration = 0;
+static NSString *AMDebugPreviousInterruptedStage = nil;
+
+static NSString *AMDebugStageFilePath(void) {
+    NSString *caches = NSSearchPathForDirectoriesInDomains(
+        NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+    return [caches stringByAppendingPathComponent:@"AMProjExport.laststage"];
+}
+
+static void AMDebugLoadPreviousInterruptedStage(void) {
+    NSData *data = [NSData dataWithContentsOfFile:AMDebugStageFilePath()
+                                         options:NSDataReadingMappedIfSafe error:nil];
+    if (!data.length || data.length > 96) return;
+    NSString *stage = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSCharacterSet *invalid = [[NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyz0123456789_"] invertedSet];
+    if (stage.length && [stage rangeOfCharacterFromSet:invalid].location == NSNotFound) {
+        AMDebugPreviousInterruptedStage = stage;
+    }
+}
 
 static UIWindow *AMDebugForegroundWindow(void) {
     UIApplication *application = UIApplication.sharedApplication;
@@ -114,10 +133,19 @@ static void AMDebugShowStatusAttempt(NSString *mode, AMDebugBackendState state,
 
     CGFloat top = MAX(window.safeAreaInsets.top, 8.0) + 5.0;
     banner.frame = CGRectMake(12.0, top, MAX(window.bounds.size.width - 24.0, 120.0), 34.0);
-    banner.text = [NSString stringWithFormat:@"AMProj v%@ · %@ · %@",
-                   kAMDebugPluginVersion, mode.length ? mode : @"full",
-                   AMDebugBackendStateText(state)];
-    banner.backgroundColor = AMDebugBackendStateColor(state);
+    NSString *interruptedStage = AMDebugPreviousInterruptedStage;
+    if (interruptedStage.length) {
+        banner.text = [NSString stringWithFormat:@"AMProj v%@ · 上次中断：%@",
+                       kAMDebugPluginVersion, interruptedStage];
+        banner.backgroundColor = [UIColor colorWithRed:0.68 green:0.10 blue:0.10 alpha:0.95];
+        AMDebugPreviousInterruptedStage = nil;
+        [NSFileManager.defaultManager removeItemAtPath:AMDebugStageFilePath() error:nil];
+    } else {
+        banner.text = [NSString stringWithFormat:@"AMProj v%@ · %@ · %@",
+                       kAMDebugPluginVersion, mode.length ? mode : @"full",
+                       AMDebugBackendStateText(state)];
+        banner.backgroundColor = AMDebugBackendStateColor(state);
+    }
     [window bringSubviewToFront:banner];
 
     [UIView animateWithDuration:0.18 animations:^{ banner.alpha = 1.0; }];
@@ -371,6 +399,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         }
     };
 
+    AMDebugLoadPreviousInterruptedStage();
     AMDebugShowStatus(self.currentMode, AMDebugBackendStateConnecting);
 
     dispatch_async(self.queue, ^{
