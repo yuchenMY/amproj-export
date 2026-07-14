@@ -1109,6 +1109,13 @@ static NSURL* amproj_canonicalSandboxURL(NSURL *URL, BOOL requireRegularFile) {
     return [NSURL fileURLWithPath:path isDirectory:!requireRegularFile];
 }
 
+static NSString* amproj_fileIdentity(NSURL *URL) {
+    struct stat information = {0};
+    if (stat(URL.path.fileSystemRepresentation, &information) != 0) return nil;
+    return [NSString stringWithFormat:@"%llu:%llu",
+        (unsigned long long)information.st_dev, (unsigned long long)information.st_ino];
+}
+
 static NSString* amproj_internalResourceFilename(NSString *reference) {
     NSURLComponents *components = [NSURLComponents componentsWithString:reference];
     if (![components.scheme.lowercaseString isEqualToString:@"am-internal"] ||
@@ -1175,7 +1182,8 @@ static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
             matchesByName[URL.lastPathComponent.lowercaseString];
         if (!matches) return;
         NSURL *match = amproj_canonicalSandboxURL(URL, YES);
-        if (match) matches[match.path] = match;
+        NSString *identity = match ? amproj_fileIdentity(match) : nil;
+        if (identity) matches[identity] = match;
     };
 
     for (NSURL *candidateRoot in roots) {
@@ -1202,8 +1210,7 @@ static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
         NSDirectoryEnumerator<NSURL *> *enumerator = [manager enumeratorAtURL:root
             includingPropertiesForKeys:@[NSURLIsDirectoryKey, NSURLIsRegularFileKey,
                                          NSURLIsSymbolicLinkKey]
-                               options:(NSDirectoryEnumerationSkipsHiddenFiles |
-                                        NSDirectoryEnumerationSkipsPackageDescendants)
+                               options:0
                           errorHandler:^BOOL(NSURL *URL, NSError *error) {
             (void)URL;
             (void)error;
