@@ -1178,12 +1178,12 @@ static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
         if (match) matches[match.path] = match;
     };
 
-    for (NSURL *root in roots) {
+    for (NSURL *candidateRoot in roots) {
         if (searchCount >= searchLimit || [deadline timeIntervalSinceNow] <= 0) {
             truncated = YES;
             break;
         }
-        root = amproj_canonicalSandboxURL(root, NO);
+        NSURL *root = amproj_canonicalSandboxURL(candidateRoot, NO);
         NSString *rootPath = root.path;
         if (!rootPath.length || [visitedPaths containsObject:rootPath]) continue;
         [visitedPaths addObject:rootPath];
