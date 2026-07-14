@@ -8,13 +8,21 @@
 |------|---|
 | 容器格式 | ZIP (标准 PKZIP) |
 | 压缩方式 | deflate |
-| 必需文件 | 恰好 1 个 `.xml` 文件 |
-| 可选文件 | `.png` / `.jpg` / `.jpeg` / `.webp` (图片), `.ttf` / `.otf` (字体) |
+| 必需文件 | 单项目包恰好 1 个 UUID 命名的 `.xml`；`manifest.txt` |
+| 可选文件 | 图片、视频、音频、字体等 XML 引用的资源文件 |
+
+官方包按“资源文件 → XML → `manifest.txt`”排列。`manifest.txt` 不包含 XML，
+只列资源文件；每行格式为 `大写 SHA1:文件名`，行间使用 LF，最后一行不加换行。例如：
+
+```text
+CF5C7CF10149B91E4A49D6D48DE8AC1740AFCA33:example.png
+```
 
 ### 1.2 文件发现规则
 
 ZIP 内文件的发现依赖于文件名扩展:
 - `name.endsWith(".xml")` → 场景 XML
+- `name == "manifest.txt"` → 资源完整性清单
 - `name.endsWith(".png")` / `.jpg` / `.jpeg` / `.webp` → 嵌入图片 (URI 格式: `amproj:filename`)
 - `name.endsWith(".ttf")` / `.otf` → 嵌入字体
 

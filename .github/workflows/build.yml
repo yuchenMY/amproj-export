@@ -45,7 +45,24 @@ jobs:
             tests/AMProjZIPWriterSmoke.m \
             -o "$RUNNER_TEMP/amproj-writer-smoke"
           "$RUNNER_TEMP/amproj-writer-smoke" "$RUNNER_TEMP/writer-output.amproj"
-          python3 -c 'import sys, zipfile; z=zipfile.ZipFile(sys.argv[1]); assert z.namelist() == ["scene.xml", "resource.bin"]; assert z.testzip() is None; assert z.read("scene.xml").startswith(b"<?xml"); assert len(z.read("resource.bin")) == 200000' "$RUNNER_TEMP/writer-output.amproj"
+          python3 - "$RUNNER_TEMP/writer-output.amproj" <<'PY'
+          import hashlib
+          import re
+          import sys
+          import zipfile
+
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              names = archive.namelist()
+              assert names[0] == "resource.bin"
+              assert re.fullmatch(r"[0-9a-f-]{36}\.xml", names[1])
+              assert names[2] == "manifest.txt"
+              assert archive.testzip() is None
+              assert archive.read(names[1]).startswith(b"<?xml")
+              resource = archive.read("resource.bin")
+              assert len(resource) == 200000
+              expected = f"{hashlib.sha1(resource).hexdigest().upper()}:resource.bin".encode()
+              assert archive.read("manifest.txt") == expected
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

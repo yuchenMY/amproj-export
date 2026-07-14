@@ -1,5 +1,6 @@
 #import "AMProjArchiveWriter.h"
 
+#import <CommonCrypto/CommonDigest.h>
 #import <errno.h>
 #import <fcntl.h>
 #import <limits.h>
@@ -24,6 +25,7 @@ static const uint16_t kAMProjZIPUTF8Flag = 0x0800;
 @property(nonatomic) uint32_t crc;
 @property(nonatomic) uint32_t compressedSize;
 @property(nonatomic) uint32_t uncompressedSize;
+@property(nonatomic, copy, nullable) NSString *sha1Hex;
 @end
 
 @implementation AMProjZIPEntry
@@ -124,6 +126,46 @@ static BOOL AMProjZIPAddChecked(uint64_t *total, uint64_t value) {
     return YES;
 }
 
+static NSString *AMProjZIPUpperHex(const unsigned char *bytes, size_t length) {
+    static const char digits[] = "0123456789ABCDEF";
+    char output[CC_SHA1_DIGEST_LENGTH * 2];
+    if (length != CC_SHA1_DIGEST_LENGTH) return nil;
+    for (size_t index = 0; index < length; index++) {
+        output[index * 2] = digits[bytes[index] >> 4];
+        output[index * 2 + 1] = digits[bytes[index] & 0x0f];
+    }
+    return [[NSString alloc] initWithBytes:output length:sizeof(output)
+                                  encoding:NSASCIIStringEncoding];
+}
+
+static NSData *AMProjZIPManifestData(NSArray<AMProjZIPEntry *> *entries,
+                                     BOOL requireHashes, NSError **error) {
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    NSMutableSet<NSString *> *seenHashes = [NSMutableSet set];
+    for (AMProjZIPEntry *entry in entries) {
+        if (!entry.sourceURL) continue;
+        NSString *hash = entry.sha1Hex;
+        if (hash.length != CC_SHA1_DIGEST_LENGTH * 2) {
+            if (requireHashes) {
+                AMProjZIPFail(error, AMProjZIPErrorVerification,
+                              @"Unable to create the project resource manifest",
+                              @{ @"entry": entry.name ?: @"" });
+                return nil;
+            }
+            hash = @"0000000000000000000000000000000000000000";
+        }
+        if (requireHashes && [seenHashes containsObject:hash]) {
+            AMProjZIPFail(error, AMProjZIPErrorInvalidEntry,
+                          @"Project resources contain duplicate SHA-1 manifest keys",
+                          @{ @"entry": entry.name ?: @"", @"sha1": hash });
+            return nil;
+        }
+        if (requireHashes) [seenHashes addObject:hash];
+        [lines addObject:[NSString stringWithFormat:@"%@:%@", hash, entry.name]];
+    }
+    return [[lines componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+}
+
 static BOOL AMProjZIPPrepareEntries(NSData *sceneXML,
                                     NSDictionary<NSString *, NSURL *> *resourceURLs,
                                     NSArray<AMProjZIPEntry *> **preparedEntries,
@@ -134,20 +176,25 @@ static BOOL AMProjZIPPrepareEntries(NSData *sceneXML,
         return AMProjZIPFail(error, AMProjZIPErrorInvalidArgument,
                              @"Scene XML is empty", nil);
     }
-    if (sceneXML.length > UINT32_MAX || resourceURLs.count >= UINT16_MAX) {
+    if (sceneXML.length > UINT32_MAX || resourceURLs.count > UINT16_MAX - 2) {
         return AMProjZIPFail(error, AMProjZIPErrorZIP32Limit,
                              @"Project contents exceed ZIP32 limits", nil);
     }
 
     NSMutableArray<AMProjZIPEntry *> *entries = [NSMutableArray array];
     AMProjZIPEntry *xmlEntry = [AMProjZIPEntry new];
-    xmlEntry.name = @"scene.xml";
+    xmlEntry.name = [[NSUUID.UUID.UUIDString lowercaseString]
+        stringByAppendingPathExtension:@"xml"];
     xmlEntry.nameData = [xmlEntry.name dataUsingEncoding:NSUTF8StringEncoding];
     xmlEntry.data = sceneXML;
     xmlEntry.sourceLength = sceneXML.length;
-    [entries addObject:xmlEntry];
 
-    NSMutableSet<NSString *> *seenNames = [NSMutableSet setWithObject:xmlEntry.name.lowercaseString];
+    AMProjZIPEntry *manifestEntry = [AMProjZIPEntry new];
+    manifestEntry.name = @"manifest.txt";
+    manifestEntry.nameData = [manifestEntry.name dataUsingEncoding:NSUTF8StringEncoding];
+
+    NSMutableSet<NSString *> *seenNames = [NSMutableSet setWithObjects:
+        xmlEntry.name.lowercaseString, manifestEntry.name.lowercaseString, nil];
     NSArray<NSString *> *resourceNames = [resourceURLs.allKeys
         sortedArrayUsingSelector:@selector(compare:)];
     NSFileManager *fileManager = [NSFileManager defaultManager];
@@ -187,6 +234,12 @@ static BOOL AMProjZIPPrepareEntries(NSData *sceneXML,
         [entries addObject:entry];
         [seenNames addObject:foldedName];
     }
+
+    [entries addObject:xmlEntry];
+    manifestEntry.data = AMProjZIPManifestData(entries, NO, error);
+    if (!manifestEntry.data) return NO;
+    manifestEntry.sourceLength = manifestEntry.data.length;
+    [entries addObject:manifestEntry];
 
     uint64_t uncompressed = 0;
     uint64_t worstCase = 22;
@@ -268,6 +321,9 @@ static BOOL AMProjZIPDeflateEntry(AMProjZIPEntry *entry, int outputFD,
     uint8_t outputBuffer[kAMProjZIPBufferSize];
     uint64_t inputOffset = 0;
     uLong crcValue = crc32(0L, Z_NULL, 0);
+    BOOL hashResource = entry.sourceURL != nil;
+    CC_SHA1_CTX sha1Context;
+    if (hashResource) CC_SHA1_Init(&sha1Context);
     BOOL success = YES;
     while (inputOffset < entry.sourceLength && success) {
         size_t requested = (size_t)MIN((uint64_t)kAMProjZIPBufferSize,
@@ -293,6 +349,7 @@ static BOOL AMProjZIPDeflateEntry(AMProjZIPEntry *entry, int outputFD,
         if (!success) break;
 
         crcValue = crc32(crcValue, inputBytes, (uInt)requested);
+        if (hashResource) CC_SHA1_Update(&sha1Context, inputBytes, (CC_LONG)requested);
         stream.next_in = (Bytef *)inputBytes;
         stream.avail_in = (uInt)requested;
         do {
@@ -347,6 +404,11 @@ static BOOL AMProjZIPDeflateEntry(AMProjZIPEntry *entry, int outputFD,
     }
 
     entry.crc = (uint32_t)crcValue;
+    if (hashResource) {
+        unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+        CC_SHA1_Final(digest, &sha1Context);
+        entry.sha1Hex = AMProjZIPUpperHex(digest, sizeof(digest));
+    }
     entry.compressedSize = (uint32_t)compressedSize;
     entry.uncompressedSize = (uint32_t)entry.sourceLength;
     uint64_t endOffset = *outputOffset;
@@ -540,6 +602,18 @@ BOOL AMProjZIPWriteProjectArchive(
     uint64_t outputOffset = 0;
     BOOL success = YES;
     for (AMProjZIPEntry *entry in entries) {
+        if ([entry.name caseInsensitiveCompare:@"manifest.txt"] == NSOrderedSame) {
+            NSData *manifest = AMProjZIPManifestData(entries, YES, error);
+            if (!manifest || manifest.length != entry.sourceLength) {
+                if (manifest && error && !*error) {
+                    AMProjZIPFail(error, AMProjZIPErrorVerification,
+                                  @"Project resource manifest size changed", nil);
+                }
+                success = NO;
+                break;
+            }
+            entry.data = manifest;
+        }
         if (!AMProjZIPDeflateEntry(entry, outputFD, &outputOffset, error)) {
             success = NO;
             break;
@@ -603,12 +677,14 @@ BOOL AMProjZIPWriteProjectArchive(
         *metrics = @{
             @"entry_count": @(entries.count),
             @"xml_count": @1,
+            @"manifest_count": @1,
             @"uncompressed_bytes": @(uncompressedBytes),
             @"compressed_bytes": @(compressedBytes),
             @"archive_bytes": @(archiveBytes),
             @"required_bytes": @(spaceNeeded),
             @"free_bytes_before": @(freeBytes),
             @"crc_verified": @YES,
+            @"manifest_verified": @YES,
         };
     }
     return YES;

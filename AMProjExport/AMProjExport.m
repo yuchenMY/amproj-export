@@ -21,6 +21,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -29,6 +30,7 @@
 #import <string.h>
 #import <math.h>
 #import <float.h>
+#import <errno.h>
 #import <fcntl.h>
 #import <sys/stat.h>
 #import <unistd.h>
@@ -1116,6 +1118,149 @@ static NSString* amproj_fileIdentity(NSURL *URL) {
         (unsigned long long)information.st_dev, (unsigned long long)information.st_ino];
 }
 
+static NSString* amproj_SHA1ForFileURL(NSURL *URL) {
+    int descriptor = open(URL.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0) return nil;
+    CC_SHA1_CTX context;
+    CC_SHA1_Init(&context);
+    uint8_t buffer[64 * 1024];
+    BOOL success = YES;
+    while (YES) {
+        ssize_t amount = read(descriptor, buffer, sizeof(buffer));
+        if (amount < 0 && errno == EINTR) continue;
+        if (amount < 0) {
+            success = NO;
+            break;
+        }
+        if (amount == 0) break;
+        CC_SHA1_Update(&context, buffer, (CC_LONG)amount);
+    }
+    close(descriptor);
+    if (!success) return nil;
+    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+    CC_SHA1_Final(digest, &context);
+    static const char digits[] = "0123456789ABCDEF";
+    char hex[CC_SHA1_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA1_DIGEST_LENGTH; index++) {
+        hex[index * 2] = digits[digest[index] >> 4];
+        hex[index * 2 + 1] = digits[digest[index] & 0x0f];
+    }
+    return [[NSString alloc] initWithBytes:hex length:sizeof(hex)
+                                  encoding:NSASCIIStringEncoding];
+}
+
+static NSString* amproj_expectedInternalSHA1(NSString *filename) {
+    NSString *stem = filename.stringByDeletingPathExtension;
+    if (stem.length != CC_SHA1_DIGEST_LENGTH * 2) return nil;
+    NSCharacterSet *hex = [NSCharacterSet characterSetWithCharactersInString:
+        @"0123456789abcdefABCDEF"];
+    if ([stem rangeOfCharacterFromSet:hex.invertedSet].location != NSNotFound) return nil;
+    return stem.uppercaseString;
+}
+
+static NSURL* amproj_internalResourceCacheRoot(void) {
+    NSURL *caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory
+                                                         inDomains:NSUserDomainMask].firstObject;
+    if (!caches) return nil;
+    return [[caches URLByAppendingPathComponent:@"AMProjExport" isDirectory:YES]
+        URLByAppendingPathComponent:@"InternalResources" isDirectory:YES];
+}
+
+static NSObject* amproj_internalResourceCacheLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static void amproj_purgeInternalResourceCache(void) {
+    @synchronized (amproj_internalResourceCacheLock()) {
+        NSURL *directory = amproj_internalResourceCacheRoot();
+        if (!directory) return;
+        NSFileManager *manager = NSFileManager.defaultManager;
+        NSArray<NSURL *> *entries = [manager contentsOfDirectoryAtURL:directory
+            includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLFileSizeKey,
+                                         NSURLContentModificationDateKey]
+                               options:0 error:nil];
+        NSDate *cutoff = [NSDate dateWithTimeIntervalSinceNow:-(7 * 24 * 60 * 60)];
+        NSMutableArray<NSDictionary *> *survivors = [NSMutableArray array];
+        unsigned long long totalBytes = 0;
+        for (NSURL *URL in entries) {
+            NSNumber *regular = nil;
+            NSNumber *size = nil;
+            NSDate *modified = nil;
+            [URL getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
+            [URL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+            [URL getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
+            BOOL partial = [URL.lastPathComponent hasSuffix:@".partial"];
+            if (!regular.boolValue || partial || !modified ||
+                [modified compare:cutoff] == NSOrderedAscending) {
+                if (regular.boolValue) [manager removeItemAtURL:URL error:nil];
+                continue;
+            }
+            unsigned long long bytes = size.unsignedLongLongValue;
+            totalBytes += bytes;
+            [survivors addObject:@{@"url": URL, @"modified": modified, @"bytes": @(bytes)}];
+        }
+        const unsigned long long maximumBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+        if (totalBytes <= maximumBytes) return;
+        [survivors sortUsingComparator:^NSComparisonResult(NSDictionary *left,
+                                                           NSDictionary *right) {
+            return [left[@"modified"] compare:right[@"modified"]];
+        }];
+        for (NSDictionary *entry in survivors) {
+            if (totalBytes <= maximumBytes) break;
+            NSURL *URL = entry[@"url"];
+            unsigned long long bytes = [entry[@"bytes"] unsignedLongLongValue];
+            if ([manager removeItemAtURL:URL error:nil]) {
+                totalBytes = bytes > totalBytes ? 0 : totalBytes - bytes;
+            }
+        }
+    }
+}
+
+static NSURL* amproj_cacheInternalResource(NSURL *source, NSString *filename,
+                                           NSString *verifiedSHA1) {
+    if (!source.isFileURL || !filename.length || !verifiedSHA1.length) return source;
+    @synchronized (amproj_internalResourceCacheLock()) {
+        NSURL *directory = amproj_internalResourceCacheRoot();
+        if (!directory) return source;
+        NSError *directoryError = nil;
+        if (![NSFileManager.defaultManager createDirectoryAtURL:directory
+                                    withIntermediateDirectories:YES attributes:nil
+                                                         error:&directoryError]) return source;
+        NSURL *destination = [directory URLByAppendingPathComponent:filename isDirectory:NO];
+        NSString *destinationSHA1 = amproj_SHA1ForFileURL(destination);
+        if ([destinationSHA1 isEqualToString:verifiedSHA1]) {
+            [NSFileManager.defaultManager setAttributes:@{NSFileModificationDate: NSDate.date}
+                                           ofItemAtPath:destination.path error:nil];
+            return destination;
+        }
+
+        NSURL *temporary = [directory URLByAppendingPathComponent:
+            [NSString stringWithFormat:@".%@.%@.partial", filename, NSUUID.UUID.UUIDString]
+                                                   isDirectory:NO];
+        NSFileManager *manager = NSFileManager.defaultManager;
+        NSError *copyError = nil;
+        if (![manager copyItemAtURL:source toURL:temporary error:&copyError]) return source;
+        NSString *temporarySHA1 = amproj_SHA1ForFileURL(temporary);
+        if (![temporarySHA1 isEqualToString:verifiedSHA1]) {
+            [manager removeItemAtURL:temporary error:nil];
+            return source;
+        }
+        [manager removeItemAtURL:destination error:nil];
+        NSError *moveError = nil;
+        if (![manager moveItemAtURL:temporary toURL:destination error:&moveError]) {
+            [manager removeItemAtURL:temporary error:nil];
+            return source;
+        }
+        amproj_debugEvent(@"direct.am_internal_cache", @{
+            @"filename": filename, @"cached": @YES
+        });
+        return destination;
+    }
+}
+
 static NSString* amproj_internalResourceFilename(NSString *reference) {
     NSURLComponents *components = [NSURLComponents componentsWithString:reference];
     if (![components.scheme.lowercaseString isEqualToString:@"am-internal"] ||
@@ -1132,10 +1277,16 @@ static NSString* amproj_internalResourceFilename(NSString *reference) {
 }
 
 static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
-        NSArray<NSString *> *references, NSURL *XMLURL) {
+        NSArray<NSString *> *references, NSURL *XMLURL,
+        NSDictionary<NSString *, NSString *> **failureReasons) {
+    NSMutableDictionary<NSString *, NSString *> *failures = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSString *> *filenameByReference =
         [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSURL *> *> *matchesByName =
+        [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSURL *> *> *fallbackByExtension =
+        [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *expectedByExtension =
         [NSMutableDictionary dictionary];
     for (NSString *reference in references) {
         NSString *filename = amproj_internalResourceFilename(reference);
@@ -1145,14 +1296,28 @@ static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
                 @"search_count": @0, @"truncated": @NO, @"search_complete": @YES,
                 @"reason": @"invalid_reference"
             });
+            failures[reference] = @"Internal resource URI is invalid";
             continue;
         }
         filenameByReference[reference] = filename;
         NSString *key = filename.lowercaseString;
         if (!matchesByName[key]) matchesByName[key] = [NSMutableDictionary dictionary];
+        NSString *expectedSHA1 = amproj_expectedInternalSHA1(filename);
+        NSString *extension = filename.pathExtension.lowercaseString;
+        if (expectedSHA1 && extension.length) {
+            if (!fallbackByExtension[extension]) {
+                fallbackByExtension[extension] = [NSMutableDictionary dictionary];
+                expectedByExtension[extension] = [NSMutableSet set];
+            }
+            [expectedByExtension[extension] addObject:expectedSHA1];
+        }
     }
-    if (!matchesByName.count) return @{};
+    if (!matchesByName.count) {
+        if (failureReasons) *failureReasons = failures;
+        return @{};
+    }
 
+    amproj_purgeInternalResourceCache();
     NSFileManager *manager = NSFileManager.defaultManager;
     NSMutableOrderedSet<NSURL *> *roots = [NSMutableOrderedSet orderedSet];
     NSURL *XMLDirectory = XMLURL.URLByDeletingLastPathComponent;
@@ -1172,6 +1337,8 @@ static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
     NSMutableSet<NSString *> *visitedPaths = [NSMutableSet set];
     const NSUInteger searchLimit = 50000;
     __block NSUInteger searchCount = 0;
+    __block NSUInteger fallbackCandidateCount = 0;
+    __block BOOL fallbackCandidatesTruncated = NO;
     BOOL truncated = NO;
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
     void (^considerURL)(NSURL *) = ^(NSURL *URL) {
@@ -1180,10 +1347,20 @@ static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
         searchCount++;
         NSMutableDictionary<NSString *, NSURL *> *matches =
             matchesByName[URL.lastPathComponent.lowercaseString];
-        if (!matches) return;
+        NSMutableDictionary<NSString *, NSURL *> *fallbacks =
+            fallbackByExtension[URL.pathExtension.lowercaseString];
+        if (!matches && !fallbacks) return;
         NSURL *match = amproj_canonicalSandboxURL(URL, YES);
         NSString *identity = match ? amproj_fileIdentity(match) : nil;
         if (identity) matches[identity] = match;
+        if (identity && fallbacks && !fallbacks[identity]) {
+            if (fallbackCandidateCount < 4096) {
+                fallbacks[identity] = match;
+                fallbackCandidateCount++;
+            } else {
+                fallbackCandidatesTruncated = YES;
+            }
+        }
     };
 
     for (NSURL *candidateRoot in roots) {
@@ -1239,12 +1416,127 @@ static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
         if (truncated) break;
     }
 
+    NSMutableDictionary<NSString *, NSString *> *digestByIdentity = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSURL *> *matchByExpectedSHA1 = [NSMutableDictionary dictionary];
+    __block NSUInteger contentHashFiles = 0;
+    __block unsigned long long contentHashBytes = 0;
+
+    for (NSString *filename in [NSSet setWithArray:filenameByReference.allValues]) {
+        NSString *expectedSHA1 = amproj_expectedInternalSHA1(filename);
+        if (!expectedSHA1) continue;
+        NSDictionary<NSString *, NSURL *> *matches = matchesByName[filename.lowercaseString];
+        [matches enumerateKeysAndObjectsUsingBlock:
+            ^(NSString *identity, NSURL *URL, BOOL *stop) {
+            if (matchByExpectedSHA1[expectedSHA1]) {
+                *stop = YES;
+                return;
+            }
+            NSString *digest = digestByIdentity[identity];
+            if (!digest) {
+                digest = amproj_SHA1ForFileURL(URL);
+                if (digest) {
+                    digestByIdentity[identity] = digest;
+                    contentHashFiles++;
+                    NSNumber *size = nil;
+                    [URL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+                    contentHashBytes += size.unsignedLongLongValue;
+                }
+            }
+            if ([digest isEqualToString:expectedSHA1]) {
+                matchByExpectedSHA1[expectedSHA1] = URL;
+                *stop = YES;
+            }
+        }];
+    }
+
+    BOOL contentScanTruncated = fallbackCandidatesTruncated;
+    const unsigned long long contentScanByteLimit = 1024ULL * 1024ULL * 1024ULL;
+    NSDate *contentDeadline = [NSDate dateWithTimeIntervalSinceNow:8.0];
+    for (NSString *extension in fallbackByExtension) {
+        NSSet<NSString *> *expectedHashes = expectedByExtension[extension];
+        BOOL needsMatch = NO;
+        for (NSString *expectedSHA1 in expectedHashes) {
+            if (!matchByExpectedSHA1[expectedSHA1]) {
+                needsMatch = YES;
+                break;
+            }
+        }
+        if (!needsMatch) continue;
+
+        NSDictionary<NSString *, NSURL *> *candidates = fallbackByExtension[extension];
+        for (NSString *identity in candidates) {
+            if ([contentDeadline timeIntervalSinceNow] <= 0) {
+                contentScanTruncated = YES;
+                break;
+            }
+            NSURL *URL = candidates[identity];
+            NSString *digest = digestByIdentity[identity];
+            if (!digest) {
+                NSNumber *size = nil;
+                [URL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+                unsigned long long bytes = size.unsignedLongLongValue;
+                if (bytes > contentScanByteLimit - MIN(contentHashBytes, contentScanByteLimit)) {
+                    contentScanTruncated = YES;
+                    continue;
+                }
+                digest = amproj_SHA1ForFileURL(URL);
+                if (!digest) continue;
+                digestByIdentity[identity] = digest;
+                contentHashFiles++;
+                contentHashBytes += bytes;
+            }
+            if ([expectedHashes containsObject:digest] && !matchByExpectedSHA1[digest]) {
+                matchByExpectedSHA1[digest] = URL;
+            }
+            BOOL allMatched = YES;
+            for (NSString *expectedSHA1 in expectedHashes) {
+                if (!matchByExpectedSHA1[expectedSHA1]) {
+                    allMatched = NO;
+                    break;
+                }
+            }
+            if (allMatched) break;
+        }
+    }
+
     NSMutableDictionary<NSString *, NSURL *> *resolved = [NSMutableDictionary dictionary];
     [filenameByReference enumerateKeysAndObjectsUsingBlock:
         ^(NSString *reference, NSString *filename, BOOL *stop) {
         (void)stop;
         NSDictionary<NSString *, NSURL *> *matches = matchesByName[filename.lowercaseString];
-        BOOL found = !truncated && matches.count == 1;
+        NSURL *selected = nil;
+        NSString *reason = truncated ? @"search_limit" : @"not_found";
+        __block NSUInteger hashedCount = 0;
+        NSUInteger contentMatchCount = 0;
+        NSString *expectedSHA1 = amproj_expectedInternalSHA1(filename);
+        if (expectedSHA1 && matchByExpectedSHA1[expectedSHA1]) {
+            selected = matchByExpectedSHA1[expectedSHA1];
+            contentMatchCount = 1;
+            reason = [matches.allValues containsObject:selected] ?
+                @"content_hash_match" : @"content_scan_match";
+            selected = amproj_cacheInternalResource(selected, filename, expectedSHA1);
+        } else if (!expectedSHA1 && !truncated && matches.count == 1) {
+            selected = matches.allValues.firstObject;
+            reason = @"unique_match";
+        } else if (!expectedSHA1 && !truncated && matches.count > 1) {
+            NSMutableDictionary<NSString *, NSURL *> *firstByDigest = [NSMutableDictionary dictionary];
+            [matches enumerateKeysAndObjectsUsingBlock:
+                ^(NSString *identity, NSURL *URL, BOOL *innerStop) {
+                (void)innerStop;
+                NSString *digest = digestByIdentity[identity] ?: amproj_SHA1ForFileURL(URL);
+                if (!digest) return;
+                digestByIdentity[identity] = digest;
+                hashedCount++;
+                if (!firstByDigest[digest]) firstByDigest[digest] = URL;
+            }];
+            if (hashedCount == matches.count && firstByDigest.count == 1) {
+                selected = firstByDigest.allValues.firstObject;
+                reason = @"duplicate_identical";
+            } else {
+                reason = @"ambiguous_content";
+            }
+        }
+        BOOL found = selected != nil;
         amproj_debugEvent(@"direct.am_internal", @{
             @"filename": filename,
             @"found": @(found),
@@ -1252,11 +1544,32 @@ static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
             @"search_count": @(searchCount),
             @"truncated": @(truncated),
             @"search_complete": @(!truncated),
-            @"reason": found ? @"unique_match" : (truncated ? @"search_limit" :
-                (matches.count > 1 ? @"ambiguous" : @"not_found"))
+            @"hashed_count": @(hashedCount),
+            @"content_match_count": @(contentMatchCount),
+            @"content_hash_files": @(contentHashFiles),
+            @"content_hash_bytes": @(contentHashBytes),
+            @"fallback_candidates": @(fallbackCandidateCount),
+            @"content_scan_truncated": @(contentScanTruncated),
+            @"expected_sha1": expectedSHA1 ?: @"",
+            @"reason": reason
         });
-        if (found) resolved[reference] = matches.allValues.firstObject;
+        if (found) {
+            resolved[reference] = selected;
+        } else if (truncated || contentScanTruncated) {
+            failures[reference] = [NSString stringWithFormat:
+                @"Internal resource scan reached its safety limit (%lu files, %llu hashed bytes)",
+                (unsigned long)searchCount, contentHashBytes];
+        } else if (!matches.count) {
+            failures[reference] = [NSString stringWithFormat:
+                @"Internal resource was not found after scanning %lu files",
+                (unsigned long)searchCount];
+        } else {
+            failures[reference] = [NSString stringWithFormat:
+                @"Found %lu different files for the same internal resource",
+                (unsigned long)matches.count];
+        }
     }];
+    if (failureReasons) *failureReasons = failures;
     return resolved;
 }
 
@@ -1295,6 +1608,8 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
 
     NSMutableDictionary<NSString *, NSURL *> *resources = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSString *> *sourceNames = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSString *> *sourceDigests = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSString *> *digestNames = [NSMutableDictionary dictionary];
     NSMutableString *rewritten = [XML mutableCopy];
     NSUInteger sequence = 0;
     NSMutableArray<NSString *> *internalReferences = [NSMutableArray array];
@@ -1302,12 +1617,15 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
         NSString *scheme = [NSURLComponents componentsWithString:reference].scheme.lowercaseString;
         if ([scheme isEqualToString:@"am-internal"]) [internalReferences addObject:reference];
     }
+    NSDictionary<NSString *, NSString *> *internalFailures = nil;
     NSDictionary<NSString *, NSURL *> *internalResources =
-        amproj_resolveInternalResources(internalReferences, XMLURL);
+        amproj_resolveInternalResources(internalReferences, XMLURL, &internalFailures);
     for (NSString *reference in probe.resourceReferences) {
         NSURL *source = amproj_resolveResourceReference(reference, XMLURL, internalResources);
         if (!source) {
-            if (error) *error = amproj_directError(22,
+            NSString *failure = internalFailures[reference];
+            if (error) *error = amproj_directError(22, failure.length ?
+                [NSString stringWithFormat:@"%@\n%@", failure, reference] :
                 [NSString stringWithFormat:@"Unable to resolve required resource: %@", reference]);
             return nil;
         }
@@ -1321,17 +1639,31 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
         NSString *sourceKey = source.path;
         NSString *archiveName = sourceNames[sourceKey];
         if (!archiveName) {
-            NSString *base = amproj_safeFilename(source.lastPathComponent, @"resource");
-            NSString *extension = source.pathExtension.lowercaseString;
-            if (extension.length) base = [base stringByAppendingPathExtension:extension];
-            archiveName = base;
-            while (resources[archiveName]) {
-                sequence++;
-                NSString *stem = archiveName.stringByDeletingPathExtension;
-                archiveName = [NSString stringWithFormat:@"%@_%lu", stem, (unsigned long)sequence];
-                if (extension.length) archiveName = [archiveName stringByAppendingPathExtension:extension];
+            NSString *digest = sourceDigests[sourceKey] ?: amproj_SHA1ForFileURL(source);
+            if (!digest.length) {
+                if (error) *error = amproj_directError(23,
+                    [NSString stringWithFormat:@"Unable to hash required resource: %@",
+                     source.lastPathComponent ?: reference]);
+                return nil;
             }
-            resources[archiveName] = source;
+            sourceDigests[sourceKey] = digest;
+            archiveName = digestNames[digest];
+            if (!archiveName) {
+                NSString *base = amproj_safeFilename(source.lastPathComponent, @"resource");
+                NSString *extension = source.pathExtension.lowercaseString;
+                if (extension.length) base = [base stringByAppendingPathExtension:extension];
+                archiveName = base;
+                while (resources[archiveName]) {
+                    sequence++;
+                    NSString *stem = archiveName.stringByDeletingPathExtension;
+                    archiveName = [NSString stringWithFormat:@"%@_%lu", stem,
+                                   (unsigned long)sequence];
+                    if (extension.length) archiveName = [archiveName
+                        stringByAppendingPathExtension:extension];
+                }
+                resources[archiveName] = source;
+                digestNames[digest] = archiveName;
+            }
             sourceNames[sourceKey] = archiveName;
         }
         NSString *escapedOriginal = amproj_escapeXML(reference, YES);
@@ -1792,6 +2124,8 @@ static void amproj_writeDirectArchive(AMProjDirectRequest *request, NSData *xmlD
             @"resource_count": @(resources.count),
             @"archive_bytes": fileSize ?: @0,
             @"crc_verified": zipMetrics[@"crc_verified"] ?: @NO,
+            @"manifest_verified": zipMetrics[@"manifest_verified"] ?: @NO,
+            @"entry_count": zipMetrics[@"entry_count"] ?: @0,
             @"filename": outputURL.lastPathComponent ?: @""
         });
 #if AMPROJ_DEBUG
@@ -2117,7 +2451,8 @@ static id hooked_initWithItems(id self, SEL _cmd, NSArray *activityItems,
                 @"success": @YES,
                 @"filename": replacementURL.lastPathComponent ?: @"",
                 @"bytes": archiveSize ?: @0,
-                @"crc_verified": zipMetrics[@"crc_verified"] ?: @NO
+                @"crc_verified": zipMetrics[@"crc_verified"] ?: @NO,
+                @"manifest_verified": zipMetrics[@"manifest_verified"] ?: @NO
             });
 
 #if AMPROJ_DEBUG
@@ -2652,9 +2987,9 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v6-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v7-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v6 =====");
+        NSLog(@"[AMProjExport] ===== Loading v7 =====");
 #endif
 
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;

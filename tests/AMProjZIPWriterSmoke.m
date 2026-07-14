@@ -28,7 +28,10 @@ int main(int argc, const char *argv[]) {
         BOOL written = AMProjZIPWriteProjectArchive(
             outputURL, xml, @{@"resource.bin": resourceURL}, &metrics, &error);
         if (!written || ![metrics[@"crc_verified"] boolValue] ||
-            [metrics[@"xml_count"] unsignedIntegerValue] != 1) {
+            ![metrics[@"manifest_verified"] boolValue] ||
+            [metrics[@"xml_count"] unsignedIntegerValue] != 1 ||
+            [metrics[@"manifest_count"] unsignedIntegerValue] != 1 ||
+            [metrics[@"entry_count"] unsignedIntegerValue] != 3) {
             NSLog(@"archive write failed: %@ metrics=%@", error, metrics);
             return 4;
         }
