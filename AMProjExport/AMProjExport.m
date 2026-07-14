@@ -30,6 +30,7 @@
 #import <math.h>
 #import <float.h>
 #import <fcntl.h>
+#import <sys/stat.h>
 #import <unistd.h>
 #import "AMProjArchiveWriter.h"
 
@@ -1089,10 +1090,177 @@ static NSURL* amproj_exportPhotoAsset(NSString *reference) {
     return exists && waitResult == 0 && !writeError ? outputURL : nil;
 }
 
-static NSURL* amproj_resolveResourceReference(NSString *reference, NSURL *XMLURL) {
+static BOOL amproj_pathIsWithinDirectory(NSString *path, NSString *directory) {
+    if (!path.length || !directory.length) return NO;
+    if ([path isEqualToString:directory]) return YES;
+    NSString *prefix = [directory hasSuffix:@"/"] ? directory :
+        [directory stringByAppendingString:@"/"];
+    return [path hasPrefix:prefix];
+}
+
+static NSURL* amproj_canonicalSandboxURL(NSURL *URL, BOOL requireRegularFile) {
+    if (!URL.isFileURL || !URL.path.length) return nil;
+    NSString *home = NSHomeDirectory().stringByStandardizingPath.stringByResolvingSymlinksInPath;
+    NSString *path = URL.path.stringByStandardizingPath.stringByResolvingSymlinksInPath;
+    if (!amproj_pathIsWithinDirectory(path, home)) return nil;
+    struct stat information = {0};
+    if (stat(path.fileSystemRepresentation, &information) != 0) return nil;
+    if (requireRegularFile ? !S_ISREG(information.st_mode) : !S_ISDIR(information.st_mode)) return nil;
+    return [NSURL fileURLWithPath:path isDirectory:!requireRegularFile];
+}
+
+static NSString* amproj_internalResourceFilename(NSString *reference) {
+    NSURLComponents *components = [NSURLComponents componentsWithString:reference];
+    if (![components.scheme.lowercaseString isEqualToString:@"am-internal"] ||
+        components.host.length || components.user.length || components.password.length ||
+        components.port || components.query != nil || components.fragment != nil) return nil;
+    NSString *path = components.percentEncodedPath.stringByRemovingPercentEncoding;
+    while ([path hasPrefix:@"/"]) path = [path substringFromIndex:1];
+    if (!path.length || path.length > 255 || [path isEqualToString:@"."] ||
+        [path isEqualToString:@".."] || [path containsString:@"/"] ||
+        [path containsString:@"\\"] || !path.pathExtension.length ||
+        [path rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound ||
+        ![path.lastPathComponent isEqualToString:path]) return nil;
+    return path;
+}
+
+static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
+        NSArray<NSString *> *references, NSURL *XMLURL) {
+    NSMutableDictionary<NSString *, NSString *> *filenameByReference =
+        [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSURL *> *> *matchesByName =
+        [NSMutableDictionary dictionary];
+    for (NSString *reference in references) {
+        NSString *filename = amproj_internalResourceFilename(reference);
+        if (!filename.length) {
+            amproj_debugEvent(@"direct.am_internal", @{
+                @"filename": @"", @"found": @NO, @"match_count": @0,
+                @"search_count": @0, @"truncated": @NO, @"search_complete": @YES,
+                @"reason": @"invalid_reference"
+            });
+            continue;
+        }
+        filenameByReference[reference] = filename;
+        NSString *key = filename.lowercaseString;
+        if (!matchesByName[key]) matchesByName[key] = [NSMutableDictionary dictionary];
+    }
+    if (!matchesByName.count) return @{};
+
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSMutableOrderedSet<NSURL *> *roots = [NSMutableOrderedSet orderedSet];
+    NSURL *XMLDirectory = XMLURL.URLByDeletingLastPathComponent;
+    if (XMLDirectory) {
+        [roots addObject:XMLDirectory];
+        for (NSString *subdirectory in @[@"Media", @"Assets", @"Resources"]) {
+            [roots addObject:[XMLDirectory URLByAppendingPathComponent:subdirectory isDirectory:YES]];
+        }
+    }
+    for (NSNumber *directory in @[@(NSApplicationSupportDirectory),
+                                   @(NSDocumentDirectory), @(NSLibraryDirectory)]) {
+        NSURL *URL = [manager URLsForDirectory:directory.unsignedIntegerValue
+                                      inDomains:NSUserDomainMask].firstObject;
+        if (URL) [roots addObject:URL];
+    }
+
+    NSMutableSet<NSString *> *visitedPaths = [NSMutableSet set];
+    const NSUInteger searchLimit = 50000;
+    __block NSUInteger searchCount = 0;
+    BOOL truncated = NO;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
+    void (^considerURL)(NSURL *) = ^(NSURL *URL) {
+        if (!URL.path.length || [visitedPaths containsObject:URL.path]) return;
+        [visitedPaths addObject:URL.path];
+        searchCount++;
+        NSMutableDictionary<NSString *, NSURL *> *matches =
+            matchesByName[URL.lastPathComponent.lowercaseString];
+        if (!matches) return;
+        NSURL *match = amproj_canonicalSandboxURL(URL, YES);
+        if (match) matches[match.path] = match;
+    };
+
+    for (NSURL *root in roots) {
+        if (searchCount >= searchLimit || [deadline timeIntervalSinceNow] <= 0) {
+            truncated = YES;
+            break;
+        }
+        root = amproj_canonicalSandboxURL(root, NO);
+        NSString *rootPath = root.path;
+        if (!rootPath.length || [visitedPaths containsObject:rootPath]) continue;
+        [visitedPaths addObject:rootPath];
+        for (NSString *filename in [NSSet setWithArray:filenameByReference.allValues]) {
+            if (searchCount >= searchLimit || [deadline timeIntervalSinceNow] <= 0) {
+                truncated = YES;
+                break;
+            }
+            considerURL([root URLByAppendingPathComponent:filename isDirectory:NO]);
+        }
+        if (truncated) break;
+
+        NSNumber *isDirectory = nil;
+        [root getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+        if (!isDirectory.boolValue) continue;
+        NSDirectoryEnumerator<NSURL *> *enumerator = [manager enumeratorAtURL:root
+            includingPropertiesForKeys:@[NSURLIsDirectoryKey, NSURLIsRegularFileKey,
+                                         NSURLIsSymbolicLinkKey]
+                               options:(NSDirectoryEnumerationSkipsHiddenFiles |
+                                        NSDirectoryEnumerationSkipsPackageDescendants)
+                          errorHandler:^BOOL(NSURL *URL, NSError *error) {
+            (void)URL;
+            (void)error;
+            return YES;
+        }];
+        for (NSURL *URL in enumerator) {
+            if (searchCount >= searchLimit || [deadline timeIntervalSinceNow] <= 0) {
+                truncated = YES;
+                break;
+            }
+            NSNumber *symbolicLink = nil;
+            [URL getResourceValue:&symbolicLink forKey:NSURLIsSymbolicLinkKey error:nil];
+            if (symbolicLink.boolValue) {
+                [enumerator skipDescendants];
+                continue;
+            }
+            NSString *path = URL.path.stringByStandardizingPath;
+            if ([visitedPaths containsObject:path]) {
+                NSNumber *directory = nil;
+                [URL getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil];
+                if (directory.boolValue) [enumerator skipDescendants];
+                continue;
+            }
+            considerURL(URL);
+        }
+        if (truncated) break;
+    }
+
+    NSMutableDictionary<NSString *, NSURL *> *resolved = [NSMutableDictionary dictionary];
+    [filenameByReference enumerateKeysAndObjectsUsingBlock:
+        ^(NSString *reference, NSString *filename, BOOL *stop) {
+        (void)stop;
+        NSDictionary<NSString *, NSURL *> *matches = matchesByName[filename.lowercaseString];
+        BOOL found = !truncated && matches.count == 1;
+        amproj_debugEvent(@"direct.am_internal", @{
+            @"filename": filename,
+            @"found": @(found),
+            @"match_count": @(matches.count),
+            @"search_count": @(searchCount),
+            @"truncated": @(truncated),
+            @"search_complete": @(!truncated),
+            @"reason": found ? @"unique_match" : (truncated ? @"search_limit" :
+                (matches.count > 1 ? @"ambiguous" : @"not_found"))
+        });
+        if (found) resolved[reference] = matches.allValues.firstObject;
+    }];
+    return resolved;
+}
+
+static NSURL* amproj_resolveResourceReference(NSString *reference, NSURL *XMLURL,
+                                               NSDictionary<NSString *, NSURL *> *internalResources) {
     if (!reference.length) return nil;
     NSString *scheme = [NSURLComponents componentsWithString:reference].scheme.lowercaseString;
     if ([scheme hasPrefix:@"phasset-"]) return amproj_exportPhotoAsset(reference);
+    if ([scheme isEqualToString:@"am-internal"]) {
+        return internalResources[reference];
+    }
     NSURL *URL = nil;
     if ([reference hasPrefix:@"file://"]) URL = [NSURL URLWithString:reference];
     else if ([reference hasPrefix:@"/"]) URL = [NSURL fileURLWithPath:reference];
@@ -1122,8 +1290,15 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
     NSMutableDictionary<NSString *, NSString *> *sourceNames = [NSMutableDictionary dictionary];
     NSMutableString *rewritten = [XML mutableCopy];
     NSUInteger sequence = 0;
+    NSMutableArray<NSString *> *internalReferences = [NSMutableArray array];
     for (NSString *reference in probe.resourceReferences) {
-        NSURL *source = amproj_resolveResourceReference(reference, XMLURL);
+        NSString *scheme = [NSURLComponents componentsWithString:reference].scheme.lowercaseString;
+        if ([scheme isEqualToString:@"am-internal"]) [internalReferences addObject:reference];
+    }
+    NSDictionary<NSString *, NSURL *> *internalResources =
+        amproj_resolveInternalResources(internalReferences, XMLURL);
+    for (NSString *reference in probe.resourceReferences) {
+        NSURL *source = amproj_resolveResourceReference(reference, XMLURL, internalResources);
         if (!source) {
             if (error) *error = amproj_directError(22,
                 [NSString stringWithFormat:@"Unable to resolve required resource: %@", reference]);
@@ -2470,9 +2645,9 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v0.4-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v6-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v0.4 =====");
+        NSLog(@"[AMProjExport] ===== Loading v6 =====");
 #endif
 
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
