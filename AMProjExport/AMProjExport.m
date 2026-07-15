@@ -2428,7 +2428,7 @@ static void amproj_showImportStatusAttempt(NSString *text, BOOL error,
 }
 
 static void amproj_showImportStatus(NSString *text, BOOL error) {
-    NSString *snapshot = [text copy] ?: @"AMProj v10 import";
+    NSString *snapshot = [text copy] ?: @"AMProj v11 import";
     dispatch_async(dispatch_get_main_queue(), ^{
         NSUInteger generation = ++amproj_importStatusGeneration;
         amproj_showImportStatusAttempt(snapshot, error, generation, 0);
@@ -2469,11 +2469,13 @@ typedef NS_ENUM(NSInteger, AMProjImportFileError) {
     AMProjImportFileErrorUnsupportedZIP = 31,
 };
 
+static NSString* amproj_copyDiagnosticSummary(NSError *error);
+
 static NSString* amproj_visibleImportFileError(NSError *error) {
     NSString *message = nil;
     switch (error.code) {
         case AMProjImportFileErrorOpenSource:
-            message = @"\u65e0\u6cd5\u6253\u5f00 QQ \u63d0\u4f9b\u7684\u6587\u4ef6";
+            message = @"\u65e0\u6cd5\u6253\u5f00 QQ/\u6587\u4ef6 App \u63d0\u4f9b\u7684\u6587\u4ef6";
             break;
         case AMProjImportFileErrorReadSource:
             message = @"\u8bfb\u53d6 QQ \u6587\u4ef6\u65f6\u4e2d\u65ad";
@@ -2494,7 +2496,12 @@ static NSString* amproj_visibleImportFileError(NSError *error) {
             message = @"\u9879\u76ee\u5305\u8bfb\u53d6\u5931\u8d25";
             break;
     }
-    return [NSString stringWithFormat:@"AMProj v10 \u00b7 %@ (E%ld)",
+    NSString *diagnostics = amproj_copyDiagnosticSummary(error);
+    if (diagnostics.length) {
+        return [NSString stringWithFormat:@"AMProj v11 \u00b7 %@ (E%ld \u00b7 %@)",
+                                          message, (long)error.code, diagnostics];
+    }
+    return [NSString stringWithFormat:@"AMProj v11 \u00b7 %@ (E%ld)",
                                       message, (long)error.code];
 }
 
@@ -2507,6 +2514,75 @@ static NSError* amproj_importFileError(AMProjImportFileError code,
     if (posixError) details[@"posix_errno"] = @(posixError);
     if (underlyingError) details[NSUnderlyingErrorKey] = underlyingError;
     return [NSError errorWithDomain:@"com.amproj.import.file" code:code userInfo:details];
+}
+
+static NSNumber* amproj_posixNumberFromError(NSError *error) {
+    if (!error) return nil;
+    NSNumber *recorded = error.userInfo[@"posix_errno"];
+    if ([recorded isKindOfClass:NSNumber.class] && recorded.intValue) return recorded;
+    if ([error.domain isEqualToString:NSPOSIXErrorDomain] && error.code) {
+        return @(error.code);
+    }
+    NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
+    if ([underlying isKindOfClass:NSError.class] && underlying != error) {
+        return amproj_posixNumberFromError(underlying);
+    }
+    return nil;
+}
+
+static NSDictionary* amproj_copyAttemptDiagnostic(NSString *method, NSError *error) {
+    NSError *reported = error;
+    NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
+    if ([error.domain isEqualToString:@"com.amproj.import.file"] &&
+        [underlying isKindOfClass:NSError.class]) {
+        reported = underlying;
+    }
+    NSMutableDictionary *diagnostic = [@{
+        @"method": method ?: @"unknown",
+        @"domain": reported.domain ?: error.domain ?: @"unknown",
+        @"code": @(reported ? reported.code : 0),
+        @"error": reported.localizedDescription ?: error.localizedDescription ?: @"Unknown error"
+    } mutableCopy];
+    NSNumber *posix = amproj_posixNumberFromError(error);
+    if (posix) diagnostic[@"posix_errno"] = posix;
+    return diagnostic;
+}
+
+static NSError* amproj_aggregateCopyError(NSArray<NSDictionary *> *attempts,
+                                          NSError *lastError) {
+    AMProjImportFileError code = AMProjImportFileErrorOpenSource;
+    if ([lastError.domain isEqualToString:@"com.amproj.import.file"] &&
+        lastError.code >= AMProjImportFileErrorOpenSource &&
+        lastError.code <= AMProjImportFileErrorFinalizeCache) {
+        code = (AMProjImportFileError)lastError.code;
+    }
+    NSMutableDictionary *details = [NSMutableDictionary dictionaryWithObject:
+        @"All supported File Provider read methods failed"
+                                                                    forKey:NSLocalizedDescriptionKey];
+    if (attempts.count) details[@"copy_attempts"] = attempts;
+    NSNumber *posix = amproj_posixNumberFromError(lastError);
+    if (posix) details[@"posix_errno"] = posix;
+    if (lastError) details[NSUnderlyingErrorKey] = lastError;
+    return [NSError errorWithDomain:@"com.amproj.import.file" code:code userInfo:details];
+}
+
+static NSString* amproj_copyDiagnosticSummary(NSError *error) {
+    NSArray *attempts = error.userInfo[@"copy_attempts"];
+    if (![attempts isKindOfClass:NSArray.class] || !attempts.count) return @"";
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSDictionary *attempt in attempts) {
+        if (![attempt isKindOfClass:NSDictionary.class]) continue;
+        NSString *method = attempt[@"method"] ?: @"?";
+        NSString *domain = attempt[@"domain"] ?: @"?";
+        NSNumber *code = attempt[@"code"] ?: @0;
+        NSNumber *posix = attempt[@"posix_errno"];
+        NSString *part = [NSString stringWithFormat:@"%@=%@/%@", method, domain, code];
+        if (posix.intValue) {
+            part = [part stringByAppendingFormat:@" errno=%@", posix];
+        }
+        [parts addObject:part];
+    }
+    return [parts componentsJoinedByString:@"; "];
 }
 
 static BOOL amproj_readExactlyAt(int descriptor, void *buffer, size_t length,
@@ -2735,12 +2811,193 @@ static NSString* amproj_importCacheFilename(NSString *originalName) {
     return [base stringByAppendingPathExtension:@"amproj"];
 }
 
-// Copy while the coordinated File Provider URL is valid. This deliberately does
-// not use NSData or copyItemAtURL: so large media packages remain constant-memory
-// and provider-specific extended attributes cannot make an otherwise readable
-// document fail to copy.
-static BOOL amproj_streamCopyIncomingFile(NSURL *sourceURL, NSURL *destinationURL,
-                                          uint64_t *copiedBytes, NSError **error) {
+static BOOL amproj_finalizeIncomingPartial(NSFileManager *manager, NSURL *partialURL,
+                                           NSURL *destinationURL, uint64_t *copiedBytes,
+                                           NSError **error) {
+    NSNumber *fileSize = nil;
+    NSError *sizeError = nil;
+    if (![partialURL getResourceValue:&fileSize forKey:NSURLFileSizeKey error:&sizeError] ||
+        ![fileSize isKindOfClass:NSNumber.class]) {
+        if (error) *error = amproj_importFileError(
+            AMProjImportFileErrorWriteCache,
+            @"Unable to inspect the copied project package", 0, sizeError);
+        return NO;
+    }
+    NSError *moveError = nil;
+    if (![manager moveItemAtURL:partialURL toURL:destinationURL error:&moveError]) {
+        if (error) *error = amproj_importFileError(
+            AMProjImportFileErrorFinalizeCache,
+            @"Unable to finalize the local project package cache", 0, moveError);
+        return NO;
+    }
+    if (copiedBytes) *copiedBytes = fileSize.unsignedLongLongValue;
+    return YES;
+}
+
+static BOOL amproj_foundationCopyIncomingFile(NSURL *sourceURL, NSURL *destinationURL,
+                                               uint64_t *copiedBytes, NSError **error) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSURL *directoryURL = destinationURL.URLByDeletingLastPathComponent;
+    NSURL *partialURL = [directoryURL URLByAppendingPathComponent:
+        [NSString stringWithFormat:@".%@.%@.partial",
+            destinationURL.lastPathComponent ?: @"project.amproj", NSUUID.UUID.UUIDString]];
+    NSError *copyError = nil;
+    if (![manager copyItemAtURL:sourceURL toURL:partialURL error:&copyError]) {
+        [manager removeItemAtURL:partialURL error:nil];
+        if (error) *error = amproj_importFileError(
+            AMProjImportFileErrorOpenSource,
+            @"NSFileManager could not copy the coordinated project package", 0, copyError);
+        return NO;
+    }
+    BOOL success = amproj_finalizeIncomingPartial(
+        manager, partialURL, destinationURL, copiedBytes, error);
+    if (!success) [manager removeItemAtURL:partialURL error:nil];
+    return success;
+}
+
+static BOOL amproj_fileHandleCopyIncomingFile(NSURL *sourceURL, NSURL *destinationURL,
+                                               uint64_t *copiedBytes, NSError **error) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSURL *directoryURL = destinationURL.URLByDeletingLastPathComponent;
+    NSURL *partialURL = [directoryURL URLByAppendingPathComponent:
+        [NSString stringWithFormat:@".%@.%@.partial",
+            destinationURL.lastPathComponent ?: @"project.amproj", NSUUID.UUID.UUIDString]];
+    NSError *copyError = nil;
+    NSError *openError = nil;
+    NSError *flushError = nil;
+    NSError *closeError = nil;
+    NSFileHandle *input = [NSFileHandle fileHandleForReadingFromURL:sourceURL error:&openError];
+    NSFileHandle *output = nil;
+    uint64_t total = 0;
+    BOOL success = NO;
+
+    if (!input) {
+        copyError = amproj_importFileError(
+            AMProjImportFileErrorOpenSource,
+            @"NSFileHandle could not open the coordinated project package", 0, openError);
+        goto cleanup;
+    }
+    errno = 0;
+    if (![manager createFileAtPath:partialURL.path contents:nil attributes:nil]) {
+        int savedErrno = errno ?: EIO;
+        copyError = amproj_importFileError(
+            AMProjImportFileErrorWriteCache,
+            @"Unable to create the local project package cache", savedErrno, nil);
+        goto cleanup;
+    }
+    output = [NSFileHandle fileHandleForWritingToURL:partialURL error:&openError];
+    if (!output) {
+        copyError = amproj_importFileError(
+            AMProjImportFileErrorWriteCache,
+            @"NSFileHandle could not open the local project package cache", 0, openError);
+        goto cleanup;
+    }
+
+    for (;;) {
+        NSError *readError = nil;
+        NSData *chunk = [input readDataUpToLength:256 * 1024 error:&readError];
+        if (!chunk) {
+            copyError = amproj_importFileError(
+                AMProjImportFileErrorReadSource,
+                @"NSFileHandle stopped while reading the File Provider document", 0, readError);
+            goto cleanup;
+        }
+        if (!chunk.length) break;
+        NSError *writeError = nil;
+        if (![output writeData:chunk error:&writeError]) {
+            copyError = amproj_importFileError(
+                AMProjImportFileErrorWriteCache,
+                @"NSFileHandle could not write the local project package cache", 0, writeError);
+            goto cleanup;
+        }
+        total += chunk.length;
+    }
+
+    if (![output synchronizeAndReturnError:&flushError]) {
+        copyError = amproj_importFileError(
+            AMProjImportFileErrorWriteCache,
+            @"Unable to flush the local project package cache", 0, flushError);
+        goto cleanup;
+    }
+    if (![output closeAndReturnError:&closeError]) {
+        copyError = amproj_importFileError(
+            AMProjImportFileErrorWriteCache,
+            @"Unable to close the local project package cache", 0, closeError);
+        goto cleanup;
+    }
+    output = nil;
+    (void)[input closeAndReturnError:nil];
+    input = nil;
+    success = amproj_finalizeIncomingPartial(
+        manager, partialURL, destinationURL, copiedBytes, &copyError);
+    if (success && copiedBytes && *copiedBytes != total) {
+        success = NO;
+        copyError = amproj_importFileError(
+            AMProjImportFileErrorReadSource,
+            @"NSFileHandle returned an incomplete project package", EIO, nil);
+        [manager removeItemAtURL:destinationURL error:nil];
+    }
+
+cleanup:
+    if (output) (void)[output closeAndReturnError:nil];
+    if (input) (void)[input closeAndReturnError:nil];
+    if (!success) [manager removeItemAtURL:partialURL error:nil];
+    if (!success && error) *error = copyError ?: amproj_importFileError(
+        AMProjImportFileErrorReadSource,
+        @"NSFileHandle could not copy the project package", 0, nil);
+    return success;
+}
+
+static BOOL amproj_mappedDataCopyIncomingFile(NSURL *sourceURL, NSURL *destinationURL,
+                                               uint64_t *copiedBytes, NSError **error) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSURL *directoryURL = destinationURL.URLByDeletingLastPathComponent;
+    NSURL *partialURL = [directoryURL URLByAppendingPathComponent:
+        [NSString stringWithFormat:@".%@.%@.partial",
+            destinationURL.lastPathComponent ?: @"project.amproj", NSUUID.UUID.UUIDString]];
+    NSNumber *sourceSize = nil;
+    NSError *sizeError = nil;
+    if (![sourceURL getResourceValue:&sourceSize forKey:NSURLFileSizeKey error:&sizeError] ||
+        ![sourceSize isKindOfClass:NSNumber.class]) {
+        if (error) *error = amproj_importFileError(
+            AMProjImportFileErrorOpenSource,
+            @"The File Provider did not report a safe mapped-data size", 0, sizeError);
+        return NO;
+    }
+    if (sourceSize.unsignedLongLongValue > 512ULL * 1024ULL * 1024ULL) {
+        if (error) *error = amproj_importFileError(
+            AMProjImportFileErrorOpenSource,
+            @"The project package is too large for the mapped-data fallback", EFBIG, nil);
+        return NO;
+    }
+    NSError *readError = nil;
+    NSData *data = [NSData dataWithContentsOfURL:sourceURL
+                                        options:NSDataReadingMappedIfSafe
+                                          error:&readError];
+    if (!data) {
+        if (error) *error = amproj_importFileError(
+            AMProjImportFileErrorOpenSource,
+            @"NSData could not map the coordinated project package", 0, readError);
+        return NO;
+    }
+    NSError *writeError = nil;
+    if (![data writeToURL:partialURL options:NSDataWritingAtomic error:&writeError]) {
+        [manager removeItemAtURL:partialURL error:nil];
+        if (error) *error = amproj_importFileError(
+            AMProjImportFileErrorWriteCache,
+            @"NSData could not write the local project package cache", 0, writeError);
+        return NO;
+    }
+    BOOL success = amproj_finalizeIncomingPartial(
+        manager, partialURL, destinationURL, copiedBytes, error);
+    if (!success) [manager removeItemAtURL:partialURL error:nil];
+    return success;
+}
+
+// Last-resort path for ordinary local files. Some document-provider URLs reject
+// POSIX open() even while their NSFileCoordinator accessor is active.
+static BOOL amproj_posixCopyIncomingFile(NSURL *sourceURL, NSURL *destinationURL,
+                                         uint64_t *copiedBytes, NSError **error) {
     if (copiedBytes) *copiedBytes = 0;
     NSFileManager *manager = NSFileManager.defaultManager;
     NSURL *directoryURL = destinationURL.URLByDeletingLastPathComponent;
@@ -2754,25 +3011,12 @@ static BOOL amproj_streamCopyIncomingFile(NSURL *sourceURL, NSURL *destinationUR
     NSError *copyError = nil;
     NSError *moveError = nil;
     uint64_t total = 0;
-    struct stat sourceInfo = {0};
 
     input = open(sourceURL.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
     if (input < 0) {
         copyError = amproj_importFileError(
             AMProjImportFileErrorOpenSource,
             @"Unable to open the security-scoped project package", errno, nil);
-        goto cleanup;
-    }
-    if (fstat(input, &sourceInfo) != 0) {
-        copyError = amproj_importFileError(
-            AMProjImportFileErrorOpenSource,
-            @"Unable to inspect the security-scoped project package", errno, nil);
-        goto cleanup;
-    }
-    if (!S_ISREG(sourceInfo.st_mode)) {
-        copyError = amproj_importFileError(
-            AMProjImportFileErrorOpenSource,
-            @"The security-scoped project package is not a regular file", EINVAL, nil);
         goto cleanup;
     }
     output = open(partialURL.fileSystemRepresentation,
@@ -2816,12 +3060,6 @@ static BOOL amproj_streamCopyIncomingFile(NSURL *sourceURL, NSURL *destinationUR
             total += (uint64_t)amount;
         }
     }
-    if (sourceInfo.st_size >= 0 && total != (uint64_t)sourceInfo.st_size) {
-        copyError = amproj_importFileError(
-            AMProjImportFileErrorReadSource,
-            @"The File Provider returned an incomplete project package", EIO, nil);
-        goto cleanup;
-    }
     if (fsync(output) != 0) {
         copyError = amproj_importFileError(
             AMProjImportFileErrorWriteCache,
@@ -2853,6 +3091,105 @@ cleanup:
     if (!success && error) *error = copyError ?: amproj_importFileError(
         AMProjImportFileErrorReadSource, @"Unable to copy the project package", 0, nil);
     return success;
+}
+
+static NSError* amproj_importCopyException(NSException *exception) {
+    NSMutableDictionary *details = [NSMutableDictionary dictionaryWithObject:
+        @"A File Provider read method raised an exception"
+                                                                    forKey:NSLocalizedDescriptionKey];
+    if (exception.name.length) details[@"exception_name"] = exception.name;
+    if (exception.reason.length) details[@"exception_reason"] = exception.reason;
+    return [NSError errorWithDomain:@"com.amproj.import.file"
+                               code:AMProjImportFileErrorOpenSource
+                           userInfo:details];
+}
+
+static void amproj_removeIncomingPartials(NSURL *destinationURL) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSURL *directoryURL = destinationURL.URLByDeletingLastPathComponent;
+    NSString *prefix = [NSString stringWithFormat:@".%@.",
+        destinationURL.lastPathComponent ?: @"project.amproj"];
+    NSArray<NSURL *> *entries = [manager contentsOfDirectoryAtURL:directoryURL
+                                      includingPropertiesForKeys:nil
+                                                         options:0
+                                                           error:nil];
+    for (NSURL *entry in entries) {
+        NSString *name = entry.lastPathComponent ?: @"";
+        if ([name hasPrefix:prefix] && [name hasSuffix:@".partial"]) {
+            [manager removeItemAtURL:entry error:nil];
+        }
+    }
+}
+
+// Run every read strategy synchronously while NSFileCoordinator and the security
+// scope are still active. Foundation paths are first because iOS File Provider
+// URLs may be valid documents without being directly openable POSIX paths.
+static BOOL amproj_streamCopyIncomingFile(NSURL *sourceURL, NSURL *destinationURL,
+                                          uint64_t *copiedBytes, NSString **copyMethod,
+                                          NSError **error) {
+    if (copiedBytes) *copiedBytes = 0;
+    if (copyMethod) *copyMethod = nil;
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSMutableArray<NSDictionary *> *attempts = [NSMutableArray array];
+    NSError *attemptError = nil;
+
+    @try {
+        if (amproj_foundationCopyIncomingFile(
+                sourceURL, destinationURL, copiedBytes, &attemptError)) {
+            if (copyMethod) *copyMethod = @"copy_item";
+            return YES;
+        }
+    } @catch (NSException *exception) {
+        attemptError = amproj_importCopyException(exception);
+    }
+    [attempts addObject:amproj_copyAttemptDiagnostic(@"copy_item", attemptError)];
+    [manager removeItemAtURL:destinationURL error:nil];
+    amproj_removeIncomingPartials(destinationURL);
+
+    attemptError = nil;
+    @try {
+        if (amproj_fileHandleCopyIncomingFile(
+                sourceURL, destinationURL, copiedBytes, &attemptError)) {
+            if (copyMethod) *copyMethod = @"file_handle";
+            return YES;
+        }
+    } @catch (NSException *exception) {
+        attemptError = amproj_importCopyException(exception);
+    }
+    [attempts addObject:amproj_copyAttemptDiagnostic(@"file_handle", attemptError)];
+    [manager removeItemAtURL:destinationURL error:nil];
+    amproj_removeIncomingPartials(destinationURL);
+
+    attemptError = nil;
+    @try {
+        if (amproj_mappedDataCopyIncomingFile(
+                sourceURL, destinationURL, copiedBytes, &attemptError)) {
+            if (copyMethod) *copyMethod = @"mapped_data";
+            return YES;
+        }
+    } @catch (NSException *exception) {
+        attemptError = amproj_importCopyException(exception);
+    }
+    [attempts addObject:amproj_copyAttemptDiagnostic(@"mapped_data", attemptError)];
+    [manager removeItemAtURL:destinationURL error:nil];
+    amproj_removeIncomingPartials(destinationURL);
+
+    attemptError = nil;
+    @try {
+        if (amproj_posixCopyIncomingFile(
+                sourceURL, destinationURL, copiedBytes, &attemptError)) {
+            if (copyMethod) *copyMethod = @"posix";
+            return YES;
+        }
+    } @catch (NSException *exception) {
+        attemptError = amproj_importCopyException(exception);
+    }
+    [attempts addObject:amproj_copyAttemptDiagnostic(@"posix", attemptError)];
+    [manager removeItemAtURL:destinationURL error:nil];
+    amproj_removeIncomingPartials(destinationURL);
+
+    if (error) *error = amproj_aggregateCopyError(attempts, attemptError);
+    return NO;
 }
 
 static BOOL amproj_isIncomingProjectURL(NSURL *URL, NSDictionary *options) {
@@ -2993,7 +3330,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             amproj_pendingImportURL = nil;
             amproj_pendingImportName = nil;
             amproj_captureTemplatesController(controller, @"dispatch");
-            amproj_showImportStatus(@"AMProj v10 \u00b7 4/4 \u5df2\u4ea4\u7ed9\u539f\u751f\u5bfc\u5165\u5668", NO);
+            amproj_showImportStatus(@"AMProj v11 \u00b7 4/4 \u5df2\u4ea4\u7ed9\u539f\u751f\u5bfc\u5165\u5668", NO);
             amproj_debugEvent(@"import.dispatch", @{
                 @"controller": NSStringFromClass(controller.class) ?: @"",
                 @"filename": name,
@@ -3004,7 +3341,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                     controller, selector, nil, @[URL]);
                 amproj_debugEvent(@"import.dispatched", @{@"success": @YES});
                 amproj_showImportStatus(
-                    @"AMProj v10 \u00b7 \u539f\u751f\u5bfc\u5165\u5df2\u542f\u52a8\uff0c\u8bf7\u4fdd\u6301 AM \u6253\u5f00", NO);
+                    @"AMProj v11 \u00b7 \u539f\u751f\u5bfc\u5165\u5df2\u542f\u52a8\uff0c\u8bf7\u4fdd\u6301 AM \u6253\u5f00", NO);
             } @catch (NSException *exception) {
                 amproj_debugEvent(@"import.dispatched", @{
                     @"success": @NO,
@@ -3012,7 +3349,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                     @"reason": exception.reason ?: @""
                 });
                 amproj_showImportStatus(
-                    @"AMProj v10 \u00b7 \u539f\u751f\u5bfc\u5165\u5668\u8c03\u7528\u5931\u8d25", YES);
+                    @"AMProj v11 \u00b7 \u539f\u751f\u5bfc\u5165\u5668\u8c03\u7528\u5931\u8d25", YES);
                 amproj_presentImportError(@"Alight Motion 的原生导入入口调用失败，请重新打开项目包。");
             }
             return;
@@ -3028,7 +3365,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                                            objc_getClass("_TtC12AlightMotion15TemplatesListVC") != Nil)
             });
             amproj_showImportStatus(
-                @"AMProj v10 \u00b7 \u672a\u627e\u5230 AM \u9879\u76ee/\u6a21\u677f\u5217\u8868", YES);
+                @"AMProj v11 \u00b7 \u672a\u627e\u5230 AM \u9879\u76ee/\u6a21\u677f\u5217\u8868", YES);
             amproj_presentImportError(@"Alight Motion 的项目列表尚未加载，请进入项目列表后再从 QQ 或文件 App 打开一次。");
             return;
         }
@@ -3051,7 +3388,7 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName) {
             @"wait_seconds": @90
         });
         amproj_showImportStatus(
-            @"AMProj v10 \u00b7 3/4 \u6b63\u5728\u5bfb\u627e AM \u539f\u751f\u9879\u76ee\u5217\u8868", NO);
+            @"AMProj v11 \u00b7 3/4 \u6b63\u5728\u5bfb\u627e AM \u539f\u751f\u9879\u76ee\u5217\u8868", NO);
         amproj_tryDispatchPendingImport(generation);
     });
 }
@@ -3080,7 +3417,7 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
         @"file_url": @YES,
         @"extension": URL.pathExtension ?: @""
     });
-    amproj_showImportStatus(@"AMProj v10 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587\u4ef6", NO);
+    amproj_showImportStatus(@"AMProj v11 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587\u4ef6", NO);
 
     // Acquire the sandbox extension before the delegate callback returns.
     BOOL scoped = [URL startAccessingSecurityScopedResource];
@@ -3098,7 +3435,7 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
                 @"scoped": @(scoped),
                 @"error": error.localizedDescription ?: @"Unable to create import cache"
             });
-            amproj_showImportStatus(@"AMProj v10 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25", YES);
+            amproj_showImportStatus(@"AMProj v11 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25", YES);
             amproj_presentImportError(@"无法创建导入缓存，请检查设备剩余空间后重试。");
             return;
         }
@@ -3109,16 +3446,21 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
         __block BOOL copied = NO;
         __block BOOL accessorCalled = NO;
         __block uint64_t copiedBytes = 0;
+        __block NSString *copyMethod = nil;
         NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
         NSError *coordinationError = nil;
-        [coordinator coordinateReadingItemAtURL:URL
-                                        options:NSFileCoordinatorReadingWithoutChanges
-                                          error:&coordinationError
-                                      byAccessor:^(NSURL *coordinatedURL) {
-            accessorCalled = YES;
-            copied = amproj_streamCopyIncomingFile(coordinatedURL, destination,
-                                                   &copiedBytes, &copyError);
-        }];
+        @try {
+            [coordinator coordinateReadingItemAtURL:URL
+                                            options:NSFileCoordinatorReadingWithoutChanges
+                                              error:&coordinationError
+                                          byAccessor:^(NSURL *coordinatedURL) {
+                accessorCalled = YES;
+                copied = amproj_streamCopyIncomingFile(
+                    coordinatedURL, destination, &copiedBytes, &copyMethod, &copyError);
+            }];
+        } @catch (NSException *exception) {
+            copyError = amproj_importCopyException(exception);
+        }
         if (!copied && !copyError) {
             copyError = amproj_importFileError(
                 AMProjImportFileErrorOpenSource,
@@ -3137,10 +3479,17 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
                 @"error_domain": copyError.domain ?: @"",
                 @"error_code": @(copyError.code),
                 @"error": copyError.localizedDescription ?: @"Unable to copy project package",
-                @"underlying": [copyError.userInfo[NSUnderlyingErrorKey] localizedDescription] ?: @""
+                @"underlying": [copyError.userInfo[NSUnderlyingErrorKey] localizedDescription] ?: @"",
+                @"attempts": copyError.userInfo[@"copy_attempts"] ?: @[],
+                @"posix_errno": copyError.userInfo[@"posix_errno"] ?: @0
             });
             amproj_showImportStatus(amproj_visibleImportFileError(copyError), YES);
-            amproj_presentImportError(@"无法读取 QQ 或文件 App 提供的项目包，请返回后重新打开一次。");
+            NSString *diagnostics = amproj_copyDiagnosticSummary(copyError);
+            NSString *message = @"无法读取 QQ 或文件 App 提供的项目包，请返回后重新打开一次。";
+            if (diagnostics.length) {
+                message = [message stringByAppendingFormat:@"\n\n诊断：%@", diagnostics];
+            }
+            amproj_presentImportError(message);
             return;
         }
 
@@ -3149,6 +3498,7 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
             @"phase": @"copy",
             @"scoped": @(scoped),
             @"bytes": @(copiedBytes),
+            @"method": copyMethod ?: @"unknown",
             @"bridge_filename": destination.lastPathComponent ?: @""
         });
 
@@ -3182,7 +3532,7 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
             @"xml_count": validationMetrics[@"xml_count"] ?: @0,
             @"manifest": validationMetrics[@"manifest"] ?: @NO
         });
-        amproj_showImportStatus(@"AMProj v10 \u00b7 2/4 \u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c", NO);
+        amproj_showImportStatus(@"AMProj v11 \u00b7 2/4 \u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c", NO);
         amproj_queuePreparedImport(destination, originalName);
     });
     return YES;
@@ -3339,7 +3689,7 @@ static void hooked_templatesViewDidAppear(id self, SEL _cmd, BOOL animated) {
     amproj_captureTemplatesController((UIViewController *)self, @"view_did_appear");
     if (amproj_pendingImportURL) {
         amproj_showImportStatus(
-            @"AMProj v10 \u00b7 \u5df2\u8fdb\u5165\u9879\u76ee\u5217\u8868\uff0c\u6b63\u5728\u7ee7\u7eed\u5bfc\u5165", NO);
+            @"AMProj v11 \u00b7 \u5df2\u8fdb\u5165\u9879\u76ee\u5217\u8868\uff0c\u6b63\u5728\u7ee7\u7eed\u5bfc\u5165", NO);
         amproj_tryDispatchPendingImport(amproj_pendingImportGeneration);
     }
 }
@@ -4216,9 +4566,9 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v10-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v11-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v10 =====");
+        NSLog(@"[AMProjExport] ===== Loading v11 =====");
 #endif
 
         // ObjC classes are registered before image constructors. Installing only
