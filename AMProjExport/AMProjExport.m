@@ -2337,10 +2337,12 @@ static AMProjImportPickerDelegate *amproj_importPickerDelegate = nil;
 static NSUInteger amproj_importStatusGeneration = 0;
 static NSString *amproj_latestImportErrorMessage = nil;
 static NSUInteger amproj_importErrorGeneration = 0;
+static BOOL amproj_latestImportErrorOffersPicker = YES;
 static __thread NSUInteger amproj_openURLForwardDepth = 0;
 static __thread NSUInteger amproj_handleOpenURLForwardDepth = 0;
 static __thread NSUInteger amproj_activityForwardDepth = 0;
 static __thread NSUInteger amproj_didFinishForwardDepth = 0;
+static __thread NSUInteger amproj_legacyOpenURLForwardDepth = 0;
 
 static void amproj_tryDispatchPendingImport(NSUInteger generation);
 static void amproj_activateNextPendingImport(void);
@@ -3454,28 +3456,36 @@ static void amproj_presentImportErrorAttempt(NSString *message,
         alertControllerWithTitle:@"无法导入 .amproj"
                          message:message
                   preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"选择项目包"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *action) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC),
-                       dispatch_get_main_queue(), ^{
-            amproj_presentImportDocumentPicker();
-        });
-    }]];
+    if (amproj_latestImportErrorOffersPicker) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"选择项目包"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction *action) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{
+                amproj_presentImportDocumentPicker();
+            });
+        }]];
+    }
     [alert addAction:[UIAlertAction actionWithTitle:@"知道了"
                                               style:UIAlertActionStyleCancel
                                             handler:nil]];
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-static void amproj_presentImportError(NSString *message) {
+static void amproj_presentImportErrorOfferingPicker(NSString *message,
+                                                     BOOL offerPicker) {
     NSString *snapshot = message.length ? [message copy] :
         @"请返回 QQ 或文件 App 后重新打开项目包。";
     dispatch_async(dispatch_get_main_queue(), ^{
         amproj_latestImportErrorMessage = snapshot;
+        amproj_latestImportErrorOffersPicker = offerPicker;
         NSUInteger generation = ++amproj_importErrorGeneration;
         amproj_presentImportErrorAttempt(snapshot, generation, 0);
     });
+}
+
+static void amproj_presentImportError(NSString *message) {
+    amproj_presentImportErrorOfferingPicker(message, YES);
 }
 
 static void amproj_activateNextPendingImport(void) {
@@ -3502,17 +3512,6 @@ static void amproj_activateNextPendingImport(void) {
     amproj_showImportStatus(
         @"AMProj v14 \u00b7 3/4 \u6b63\u5728\u5bfb\u627e AM \u539f\u751f\u9879\u76ee\u5217\u8868", NO);
     amproj_tryDispatchPendingImport(generation);
-}
-
-static void amproj_finishPendingDispatchAfterDelay(NSTimeInterval delay) {
-    amproj_importDispatchCoolingDown = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                 (int64_t)(MAX(delay, 0.0) * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        amproj_importDispatchCoolingDown = NO;
-        amproj_activateNextPendingImport();
-        amproj_scanLocalImportInboxes(@"after_native_dispatch", nil);
-    });
 }
 
 static void amproj_tryDispatchPendingImport(NSUInteger generation) {
@@ -3542,7 +3541,6 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                 amproj_debugEvent(@"import.dispatched", @{@"success": @YES});
                 amproj_showImportStatus(
                     @"AMProj v14 \u00b7 \u539f\u751f\u5bfc\u5165\u5df2\u542f\u52a8\uff0c\u8bf7\u4fdd\u6301 AM \u6253\u5f00", NO);
-                amproj_finishPendingDispatchAfterDelay(1.0);
             } @catch (NSException *exception) {
                 amproj_debugEvent(@"import.dispatched", @{
                     @"success": @NO,
@@ -3552,7 +3550,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                 amproj_showImportStatus(
                     @"AMProj v14 \u00b7 \u539f\u751f\u5bfc\u5165\u5668\u8c03\u7528\u5931\u8d25", YES);
                 amproj_presentImportError(@"Alight Motion 的原生导入入口调用失败，请重新打开项目包。");
-                amproj_finishPendingDispatchAfterDelay(1.0);
+                amproj_importDispatchCoolingDown = NO;
             }
             return;
         }
@@ -3567,8 +3565,9 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             });
             amproj_showImportStatus(
                 @"AMProj v14 \u00b7 \u672a\u627e\u5230 AM \u9879\u76ee/\u6a21\u677f\u5217\u8868", YES);
-            amproj_presentImportError(
-                @"项目包已保留，但 Alight Motion 的项目/模板列表尚未加载。请进入该列表，插件会自动继续导入。");
+            amproj_presentImportErrorOfferingPicker(
+                @"项目包已保留，但 Alight Motion 的项目/模板列表尚未加载。请进入该列表，插件会自动继续导入。",
+                NO);
             return;
         }
 
@@ -3594,6 +3593,23 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName) {
         });
         amproj_activateNextPendingImport();
     });
+}
+
+static void amproj_resumeQueuedImports(NSString *source) {
+    if (amproj_pendingImportURL) {
+        amproj_tryDispatchPendingImport(amproj_pendingImportGeneration);
+        return;
+    }
+    if (amproj_importDispatchCoolingDown) {
+        amproj_importDispatchCoolingDown = NO;
+        amproj_debugEvent(@"import.cooldown_finished", @{
+            @"source": source ?: @""
+        });
+    }
+    amproj_activateNextPendingImport();
+    if (!amproj_pendingImportURL) {
+        amproj_scanLocalImportInboxes(source.length ? source : @"resume", nil);
+    }
 }
 
 static BOOL amproj_handleImportCommandURL(NSURL *URL, NSString *source) {
@@ -3898,6 +3914,7 @@ static void amproj_scanDocumentsInboxNow(NSString *source) {
                 @"filename": file.lastPathComponent ?: @""
             });
         }
+        break;
     }
 }
 
@@ -4012,6 +4029,7 @@ static void amproj_scanShareInboxNow(NSString *source, NSString *requestedID) {
             @"bytes": actualSize ?: @0
         });
         if (prepared) [manager removeItemAtURL:requestDirectory error:nil];
+        break;
     }
 
     if (!matchedRequestedID) {
@@ -4184,12 +4202,19 @@ static BOOL hooked_applicationLegacyOpenURL(id self, SEL _cmd, UIApplication *ap
     if (amproj_handleIncomingProjectURL(URL, @"application_legacy_open_url", options)) {
         return YES;
     }
-    IMP original = amproj_originalHookForReceiver(
-        amproj_legacyOpenURLHooks,
-        sizeof(amproj_legacyOpenURLHooks) / sizeof(amproj_legacyOpenURLHooks[0]), self);
+    IMP original = amproj_legacyOpenURLForwardDepth
+        ? amproj_originalHookForReceiverSkippingExact(
+              amproj_legacyOpenURLHooks,
+              sizeof(amproj_legacyOpenURLHooks) / sizeof(amproj_legacyOpenURLHooks[0]), self)
+        : amproj_originalHookForReceiver(
+              amproj_legacyOpenURLHooks,
+              sizeof(amproj_legacyOpenURLHooks) / sizeof(amproj_legacyOpenURLHooks[0]), self);
     if (!original || original == (IMP)hooked_applicationLegacyOpenURL) return NO;
-    return ((AMProjApplicationLegacyOpenURLIMP)original)(
+    amproj_legacyOpenURLForwardDepth += 1;
+    BOOL handled = ((AMProjApplicationLegacyOpenURLIMP)original)(
         self, _cmd, application, URL, sourceApplication, annotation);
+    amproj_legacyOpenURLForwardDepth -= 1;
+    return handled;
 }
 
 static void hooked_sceneOpenURLContexts(id self, SEL _cmd, UIScene *scene,
@@ -4227,6 +4252,8 @@ static void hooked_templatesViewDidAppear(id self, SEL _cmd, BOOL animated) {
         amproj_showImportStatus(
             @"AMProj v14 \u00b7 \u5df2\u8fdb\u5165\u9879\u76ee\u5217\u8868\uff0c\u6b63\u5728\u7ee7\u7eed\u5bfc\u5165", NO);
         amproj_tryDispatchPendingImport(amproj_pendingImportGeneration);
+    } else {
+        amproj_resumeQueuedImports(@"templates_view_did_appear");
     }
 }
 
@@ -5201,9 +5228,16 @@ static void AMProjExportInit(void) {
                     usingBlock:^(__unused NSNotification *notification) {
             amproj_bootstrapAfterLaunch(@"did_become_active");
             amproj_installImportHook();
-            amproj_scanLocalImportInboxes(@"did_become_active", nil);
             if (amproj_pendingImportURL) {
                 amproj_tryDispatchPendingImport(amproj_pendingImportGeneration);
+            } else if (amproj_importDispatchCoolingDown) {
+                UIViewController *top = amproj_topViewController(
+                    amproj_keyWindow().rootViewController);
+                if (amproj_isTemplatesController(top)) {
+                    amproj_resumeQueuedImports(@"did_become_active_templates");
+                }
+            } else {
+                amproj_scanLocalImportInboxes(@"did_become_active", nil);
             }
         }];
         if (@available(iOS 13.0, *)) {
