@@ -326,12 +326,12 @@ static BOOL AMProjTypeConformsTo(NSString *identifier, NSString *parentIdentifie
 
         NSError *stageError = nil;
         NSString *requestIdentifier = nil;
-        if ([item isKindOfClass:NSURL.class]) {
+        if ([(id)item isKindOfClass:NSURL.class]) {
             requestIdentifier = [self stageURL:(NSURL *)item
                                       provider:provider
                              hasDeclaredAMProj:hasDeclaredAMProj
                                          error:&stageError];
-        } else if ([item isKindOfClass:NSData.class]) {
+        } else if ([(id)item isKindOfClass:NSData.class]) {
             requestIdentifier = [self stageData:(NSData *)item
                                        provider:provider
                               hasDeclaredAMProj:hasDeclaredAMProj
