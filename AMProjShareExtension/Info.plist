@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleDisplayName</key>
+    <string>导入到 AM</string>
+    <key>CFBundleExecutable</key>
+    <string>AMProjShareExtension</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.alightmotion.meow.amprojshare</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>AMProjShareExtension</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>14.0</string>
+    <key>CFBundleVersion</key>
+    <string>14</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>iPhoneOS</string>
+    </array>
+    <key>MinimumOSVersion</key>
+    <string>14.0</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>NSExtensionActivationRule</key>
+            <dict>
+                <key>NSExtensionActivationSupportsFileWithMaxCount</key>
+                <integer>1</integer>
+            </dict>
+        </dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.share-services</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>AMProjShareViewController</string>
+    </dict>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.zip-archive</string>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeDescription</key>
+            <string>Alight Motion Project</string>
+            <key>UTTypeIdentifier</key>
+            <string>com.alightcreative.motion.amproj</string>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>amproj</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>application/x-alight-motion-project</string>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

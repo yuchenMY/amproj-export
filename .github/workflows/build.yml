@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'AMProjExport/**'
+      - 'AMProjShareExtension/**'
       - 'debug_backend/**'
       - 'inject_dylib.py'
       - 'tests/**'
@@ -25,6 +26,9 @@ jobs:
         working-directory: AMProjExport
         run: make
 
+      - name: Build Share Extension
+        run: make -C AMProjShareExtension
+
       - name: Verify built dylib architectures
         run: |
           python3 - <<'PY'
@@ -36,6 +40,23 @@ jobs:
           ):
               info = verify_dylib_architecture(path)
               print(f"verified {path}: arm64 MH_DYLIB, {info['ncmds']} load commands")
+          PY
+
+      - name: Verify Share Extension bundle
+        run: |
+          python3 - <<'PY'
+          from inject_dylib import verify_share_extension_bundle
+
+          path = "AMProjShareExtension/build/AMProjShareExtension.appex"
+          info = verify_share_extension_bundle(
+              path,
+              "com.alightmotion.meow.amprojshare",
+              "group.com.alightmotion.meow.amprojshare",
+          )
+          print(
+              f"verified {path}: {info['bundle_identifier']}, "
+              f"{info['app_group_id']}, arm64 MH_EXECUTE/share-services"
+          )
           PY
 
       - name: Test streaming project archive writer
@@ -71,3 +92,5 @@ jobs:
           path: |
             AMProjExport/AMProjExport.dylib
             AMProjExport/AMProjExportDebug.dylib
+            AMProjShareExtension/build/AMProjShareExtension.appex
+            AMProjShareExtension/build/AMProjShareExtension.entitlements

@@ -1,78 +1,67 @@
-# .amproj 项目文件格式 — 逆向分析总结
+# AMProjExport
 
-## 来源
+为 Alight Motion iOS v27b 注入 `.amproj` 导出与本地导入能力。项目包含：
 
-从 Android 版 Alight Motion X (AMX) 提取分析,并结合开源 Rust crate [`amproj`](https://github.com/Bli-AIk/amproj) 的解析代码交叉验证。
+- `AMProjExport.dylib`：离线 Release 版。
+- `AMProjExportDebug.dylib`：带 Windows 调试后端遥测的 Debug 版；后端不可达不会阻塞导入或导出。
+- `AMProjShareExtension.appex`：实验性“导入到 AM”分享扩展。
+- `inject_dylib.py`：Windows IPA 注入、Info.plist 修补和产物验证工具。
 
-## 概要
+## `.amproj` 格式
 
-`.amproj` 是 Alight Motion 的项目导出格式,本质上是一个 **ZIP 压缩包**,内部结构非常简单:
+`.amproj` 是 ZIP32 容器，必须包含：
 
-```
+```text
 project.amproj
-├── scene.xml          ← 唯一的 XML 场景描述文件 (必需)
-├── image1.png         ← 嵌入图片 (可选, .png/.jpg/.jpeg/.webp)
-├── image2.jpg
-├── font.ttf           ← 嵌入字体 (可选, .ttf/.otf)
-└── ...更多资源...
+├── <UUID>.xml       # 恰好一个场景 XML
+├── manifest.txt     # 恰好一个资源清单，可以为空
+└── media/font/...   # XML 引用的可选资源
 ```
 
-## 核心原理
+完整格式见 `format_spec.md`。
 
-1. **序列化**: 项目数据 → XML (遵循下方 schema) + 图片/字体资源
-2. **打包**: XML + 资源文件 → 标准 ZIP (deflate 压缩)
-3. **命名**: 扩展名改为 `.amproj`
+## v14 导入入口
 
-AM iOS/Android 客户端**原生支持读取**此格式,所以注入的关键是在 iOS 端实现**写入**(序列化+打包)。
+稳定入口是 QQ/文件 App 的“用其他应用打开 → Alight Motion”。注入器强制使用 copy-in 文档交付，插件把系统交付到 `Documents/Inbox` 的文件复制到自己的缓存，校验 ZIP 后调用 AM 原生导入器。失败弹窗中的“选择项目包”会用复制模式打开系统文档选择器。
 
-## 本目录文件
+实验入口是 QQ 分享面板中的“导入到 AM”。扩展先把一个 `.amproj` 原子写入 App Group，再尝试用 `alightmotion://amproj-import` 唤起主 App。免费自签不一定能保留 App Group 或允许扩展自动唤起，因此实验包与稳定包分开生成。
 
-| 文件 | 内容 |
-|------|------|
-| `README.md` | 本文件 |
-| `SUMMARY.md` | 总结 |
-| `format_spec.md` | **完整格式规范** (497行) |
-| `xml_schema.md` | XML 模板速查 |
-| `ghidra_findings.md` | Ghidra 静态分析结果 |
-| `ios_reverse_findings.md` | iOS 二进制逆向发现 |
-| `ios_injection_plan.md` | iOS 注入方案 |
-| `easing_reference.md` | 8 种缓动函数 |
-| `effects_list.md` | 效果列表 |
-| `example_annotated.xml` | 真实项目 XML |
-| **`AMProjExport/AMProjExport.m`** | **dylib 源码 (ObjC)** |
-| `AMProjExport/Makefile` | macOS 编译 |
-| `AMProjExport.xm` | Logos tweak 版本 (需 theos) |
-| `.github/workflows/build.yml` | **GitHub Actions 自动编译** |
-| `build_and_inject.bat` | **Windows 一键注入脚本** |
-| `inject_dylib.py` | Python IPA 注入脚本 |
-| `frida_find_export.js` | Frida 追踪脚本 |
+导入不依赖 VPN、网络或调试后端。
 
-## Windows 操作流程 (无需 Mac, 无需越狱)
+## GitHub Actions 构建
 
-### 1. 获取 dylib (二选一)
+推送源码后，Actions 会构建并验证：
 
-**A. GitHub Actions (推荐, 零成本)**
-```
-Fork 这个 repo → 推送代码 → Actions 自动编译 → 下载 Artifact
+```text
+AMProjExport/AMProjExport.dylib
+AMProjExport/AMProjExportDebug.dylib
+AMProjShareExtension/build/AMProjShareExtension.appex
+AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-**B. 或者用我给的 dylib**
-```
-(如果已有编译好的 AMProjExport.dylib)
+## 从干净 IPA 生成 v14
+
+必须以未注入的 `AM_v27b.ipa` 为输入，不要用 v12/v13 包继续叠加。
+
+稳定版：
+
+```powershell
+python inject_dylib.py AM_v27b.ipa AMProjExportDebug.dylib AM_v27b_direct_v14.ipa
 ```
 
-### 2. 注入 IPA (Windows)
-```bat
-build_and_inject.bat AlightMotion_v27b.ipa
+实验版：
+
+```powershell
+python inject_dylib.py AM_v27b.ipa AMProjExportDebug.dylib AM_v27b_direct_v14_share_exp.ipa `
+  --share-extension AMProjShareExtension.appex `
+  --app-group-id group.com.alightmotion.meow.amprojshare
 ```
 
-### 3. 签名 + 侧载 (Windows)
-- **AltStore** (altstore.io) — Windows 端侧载工具
-- **Sideloadly** (sideloadly.io) — 支持 Windows
-- **TrollStore** — 如果设备支持 (iOS 14-16)
+注入器会验证 arm64、Mach-O load command、ZIP CRC、UTI/copy-in 配置以及实验扩展的 Bundle ID、extension point 和 App Group 模板。输出 IPA 仍需使用 Sideloadly 签名安装。
 
-### 原理
-- dylib 使用纯 ObjC, 通过 `method_exchangeImplementations` hook (不需要 substrate)
-- 拦截 `UIAlertController.addAction:` 检测导出弹窗
-- 添加 "📦 .amproj Package" 选项
-- 选项触发: 获取场景 XML → ZIP 打包 → 系统分享面板
+## 本地测试
+
+```powershell
+python -m unittest discover -s tests -v
+python -m unittest debug_backend.test_server -v
+```

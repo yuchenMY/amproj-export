@@ -26,9 +26,15 @@ DEFAULT_SERVER_PORT = 8765
 DEFAULT_DEBUG_MODE = "full"
 DEBUG_MODES = ("observe", "placeholder", "full")
 CPU_TYPE_ARM64 = 0x0100000C
+MH_EXECUTE = 0x2
 MH_DYLIB = 0x6
 LC_LOAD_DYLIB = 0x0C
 LC_SEGMENT_64 = 0x19
+SHARE_EXTENSION_POINT = "com.apple.share-services"
+SHARE_EXTENSION_BUNDLE_SUFFIX = ".amprojshare"
+APPLICATION_GROUPS_ENTITLEMENT = "com.apple.security.application-groups"
+SHARE_APP_GROUP_INFO_KEY = "AMProjShareAppGroupIdentifier"
+AMPROJ_URL_SCHEME = "alightmotion"
 RFC1918_NETWORKS = tuple(
     ipaddress.ip_network(network)
     for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
@@ -218,10 +224,18 @@ def insert_load_dylib(macho_path, dylib_path):
 
 
 def _has_amproj_document_type(plist):
-    return any(
-        AMPROJ_UTI in document_type.get("LSItemContentTypes", [])
-        for document_type in plist.get("CFBundleDocumentTypes", [])
-        if isinstance(document_type, dict)
+    return _amproj_document_type(plist) is not None
+
+
+def _amproj_document_type(plist):
+    return next(
+        (
+            document_type
+            for document_type in plist.get("CFBundleDocumentTypes", [])
+            if isinstance(document_type, dict)
+            and AMPROJ_UTI in document_type.get("LSItemContentTypes", [])
+        ),
+        None,
     )
 
 
@@ -315,7 +329,8 @@ def patch_info_plist(app_dir, enable_debug_network=False):
                 tags[key] = normalized_values
                 changed = True
 
-    if not _has_amproj_document_type(plist):
+    amproj_document_type = _amproj_document_type(plist)
+    if amproj_document_type is None:
         document_types.append(
             {
                 "CFBundleTypeName": "Alight Motion Project",
@@ -325,10 +340,26 @@ def patch_info_plist(app_dir, enable_debug_network=False):
             }
         )
         changed = True
+    else:
+        expected_document_values = {
+            "CFBundleTypeName": "Alight Motion Project",
+            "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Owner",
+        }
+        for key, value in expected_document_values.items():
+            if amproj_document_type.get(key) != value:
+                amproj_document_type[key] = value
+                changed = True
 
-    if "UISupportsDocumentBrowser" not in plist:
-        plist["UISupportsDocumentBrowser"] = False
-        changed = True
+    for key in (
+        "LSSupportsOpeningDocumentsInPlace",
+        "UISupportsDocumentBrowser",
+    ):
+        # These must be real plist Booleans.  Copy-in delivery is what makes
+        # provider-owned QQ/Files URLs readable without a security scope.
+        if plist.get(key) is not False or not isinstance(plist.get(key), bool):
+            plist[key] = False
+            changed = True
 
     if enable_debug_network:
         description = "Connect to the AMProj debug server on your local network."
@@ -356,6 +387,41 @@ def patch_info_plist(app_dir, enable_debug_network=False):
 
     print("[+] Patched Info.plist")
     return True
+
+
+def _has_url_scheme(plist, scheme):
+    return any(
+        scheme in url_type.get("CFBundleURLSchemes", [])
+        for url_type in plist.get("CFBundleURLTypes", [])
+        if isinstance(url_type, dict)
+    )
+
+
+def patch_share_extension_host_info(app_dir, app_group_id):
+    """Configure the host-side App Group lookup and import callback scheme."""
+    _validate_app_group_id(app_group_id)
+    info_path = Path(app_dir) / "Info.plist"
+    with info_path.open("rb") as file:
+        plist = plistlib.load(file)
+    if not isinstance(plist, dict):
+        raise ValueError("Info.plist root must be a dictionary")
+
+    plist[SHARE_APP_GROUP_INFO_KEY] = app_group_id
+    url_types = plist.get("CFBundleURLTypes")
+    if not isinstance(url_types, list):
+        url_types = []
+        plist["CFBundleURLTypes"] = url_types
+    if not _has_url_scheme(plist, AMPROJ_URL_SCHEME):
+        url_types.append(
+            {
+                "CFBundleURLName": "AMProj Import",
+                "CFBundleURLSchemes": [AMPROJ_URL_SCHEME],
+            }
+        )
+
+    with info_path.open("wb") as file:
+        plistlib.dump(plist, file, fmt=plistlib.FMT_BINARY)
+    print(f"[+] Configured Share Extension App Group {app_group_id}")
 
 
 def is_rfc1918(address):
@@ -581,6 +647,194 @@ def _bundle_executable(app_dir):
     return path
 
 
+def _validate_app_group_id(app_group_id):
+    if not isinstance(app_group_id, str) or not app_group_id.startswith("group."):
+        raise ValueError("App Group identifier must start with 'group.'")
+    if any(not component for component in app_group_id.split(".")):
+        raise ValueError("App Group identifier contains an empty component")
+    return app_group_id
+
+
+def _share_entitlements_candidates(appex_path):
+    appex_path = Path(appex_path)
+    name = appex_path.stem
+    return (
+        appex_path / f"{name}.entitlements",
+        appex_path / "Entitlements.plist",
+        appex_path / "archived-expanded-entitlements.xcent",
+        appex_path.parent / f"{name}.entitlements",
+        appex_path.parent / "AMProjShareExtension.entitlements",
+    )
+
+
+def _load_share_entitlements(appex_path):
+    for candidate in _share_entitlements_candidates(appex_path):
+        if not candidate.is_file():
+            continue
+        try:
+            with candidate.open("rb") as file:
+                entitlements = plistlib.load(file)
+        except plistlib.InvalidFileException as error:
+            raise ValueError(
+                f"Share Extension entitlements are invalid: {candidate}"
+            ) from error
+        if not isinstance(entitlements, dict):
+            raise ValueError(
+                f"Share Extension entitlements root must be a dictionary: {candidate}"
+            )
+        return candidate, entitlements
+    raise FileNotFoundError(
+        "Share Extension entitlements not found beside or inside the .appex"
+    )
+
+
+def _validate_share_extension_metadata(
+    plist,
+    executable_info,
+    entitlements,
+    expected_bundle_identifier,
+    app_group_id,
+):
+    if not isinstance(plist, dict):
+        raise ValueError("Share Extension Info.plist root must be a dictionary")
+    bundle_identifier = plist.get("CFBundleIdentifier")
+    if bundle_identifier != expected_bundle_identifier:
+        raise ValueError(
+            "Share Extension bundle identifier must be "
+            f"{expected_bundle_identifier}; found {bundle_identifier!r}"
+        )
+    extension = plist.get("NSExtension")
+    if not isinstance(extension, dict) or (
+        extension.get("NSExtensionPointIdentifier") != SHARE_EXTENSION_POINT
+    ):
+        raise ValueError(
+            "Share Extension NSExtensionPointIdentifier must be "
+            f"{SHARE_EXTENSION_POINT}"
+        )
+    executable_name = plist.get("CFBundleExecutable")
+    if not isinstance(executable_name, str) or not executable_name:
+        raise ValueError("Share Extension CFBundleExecutable is missing")
+    if executable_info["cputype"] != CPU_TYPE_ARM64:
+        raise ValueError("Share Extension executable is not arm64")
+    if executable_info["filetype"] != MH_EXECUTE:
+        raise ValueError(
+            "Share Extension executable is not an MH_EXECUTE "
+            f"(filetype={executable_info['filetype']})"
+        )
+    groups = entitlements.get(APPLICATION_GROUPS_ENTITLEMENT)
+    if not isinstance(groups, list) or app_group_id not in groups:
+        raise ValueError(
+            "Share Extension entitlements do not contain App Group "
+            f"{app_group_id}"
+        )
+    return {
+        "bundle_identifier": bundle_identifier,
+        "executable": executable_name,
+        "app_group_id": app_group_id,
+    }
+
+
+def verify_share_extension_bundle(
+    appex_path,
+    expected_bundle_identifier,
+    app_group_id,
+):
+    """Validate an unsigned/sideload-ready Share Extension bundle."""
+    appex_path = Path(appex_path)
+    _validate_app_group_id(app_group_id)
+    if appex_path.suffix != ".appex" or not appex_path.is_dir():
+        raise ValueError(f"Share Extension must be a .appex directory: {appex_path}")
+
+    info_path = appex_path / "Info.plist"
+    if not info_path.is_file():
+        raise FileNotFoundError(f"Share Extension Info.plist not found: {info_path}")
+    try:
+        with info_path.open("rb") as file:
+            plist = plistlib.load(file)
+    except plistlib.InvalidFileException as error:
+        raise ValueError(f"Share Extension Info.plist is invalid: {info_path}") from error
+
+    executable_name = plist.get("CFBundleExecutable") if isinstance(plist, dict) else None
+    executable_path = appex_path / str(executable_name or "")
+    if not executable_name or not executable_path.is_file():
+        raise FileNotFoundError(
+            f"Share Extension executable not found: {executable_path}"
+        )
+    executable_info = parse_macho(executable_path)
+    entitlements_path, entitlements = _load_share_entitlements(appex_path)
+    result = _validate_share_extension_metadata(
+        plist,
+        executable_info,
+        entitlements,
+        expected_bundle_identifier,
+        app_group_id,
+    )
+    result["path"] = appex_path
+    result["entitlements_path"] = entitlements_path
+    return result
+
+
+def install_share_extension(
+    app_dir,
+    share_extension_path,
+    app_group_id,
+    host_bundle_identifier,
+):
+    """Validate and install one Share Extension under the app PlugIns folder."""
+    if not isinstance(host_bundle_identifier, str) or not host_bundle_identifier:
+        raise ValueError("Host app CFBundleIdentifier is required for Share Extension")
+    expected_bundle_identifier = (
+        host_bundle_identifier + SHARE_EXTENSION_BUNDLE_SUFFIX
+    )
+    source = Path(share_extension_path)
+    source_info = verify_share_extension_bundle(
+        source,
+        expected_bundle_identifier,
+        app_group_id,
+    )
+
+    plugins_dir = Path(app_dir) / "PlugIns"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    destination = plugins_dir / source.name
+    if destination.exists():
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    shutil.copytree(source, destination)
+
+    # The Actions build emits the signing entitlement template next to the
+    # .appex.  Keep a copy in the bundle so the final IPA remains auditable
+    # after it is downloaded to Windows and re-signed by Sideloadly.
+    destination_entitlements = destination / f"{destination.stem}.entitlements"
+    source_entitlements = Path(source_info["entitlements_path"])
+    if source_entitlements.resolve() != destination_entitlements.resolve():
+        shutil.copy2(source_entitlements, destination_entitlements)
+
+    result = verify_share_extension_bundle(
+        destination,
+        expected_bundle_identifier,
+        app_group_id,
+    )
+    print(f"[+] Installed Share Extension at {destination}")
+    return result
+
+
+def _remove_code_signature_directories(bundle_dir):
+    """Remove stale CodeResources from the app and all nested bundles."""
+    paths = sorted(
+        Path(bundle_dir).rglob("_CodeSignature"),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for path in paths:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+    return len(paths)
+
+
 def _try_resign(app_dir):
     try:
         subprocess.run(
@@ -606,7 +860,12 @@ def _repack_ipa(extraction_dir, output_path):
     shutil.move(str(archive), str(output))
 
 
-def _validate_patched_info_plist(plist, settings, expected_bundle_identifier):
+def _validate_patched_info_plist(
+    plist,
+    settings,
+    expected_bundle_identifier,
+    expected_app_group_id=None,
+):
     if not isinstance(plist, dict):
         raise RuntimeError("Info.plist root is not a dictionary")
     if expected_bundle_identifier is not None and (
@@ -615,12 +874,35 @@ def _validate_patched_info_plist(plist, settings, expected_bundle_identifier):
         raise RuntimeError("Injection changed CFBundleIdentifier")
     if not _has_amproj_document_type(plist) or not _has_amproj_uti(plist):
         raise RuntimeError("Info.plist is missing the .amproj document registration")
+    document_type = _amproj_document_type(plist)
+    if (
+        document_type.get("CFBundleTypeRole") != "Editor"
+        or document_type.get("LSHandlerRank") != "Owner"
+    ):
+        raise RuntimeError(
+            "Info.plist .amproj document type must be Editor with Owner rank"
+        )
     declaration = _amproj_uti_declaration(plist)
     if "public.zip-archive" not in declaration.get("UTTypeConformsTo", []):
         raise RuntimeError("Info.plist .amproj UTI must conform to public.zip-archive")
     tags = declaration.get("UTTypeTagSpecification", {})
     if "amproj" not in tags.get("public.filename-extension", []):
         raise RuntimeError("Info.plist .amproj UTI is missing its filename extension")
+    for key in (
+        "LSSupportsOpeningDocumentsInPlace",
+        "UISupportsDocumentBrowser",
+    ):
+        if plist.get(key) is not False or not isinstance(plist.get(key), bool):
+            raise RuntimeError(f"Info.plist {key} must be a Boolean false")
+    if expected_app_group_id is not None:
+        if plist.get(SHARE_APP_GROUP_INFO_KEY) != expected_app_group_id:
+            raise RuntimeError(
+                f"Info.plist {SHARE_APP_GROUP_INFO_KEY} does not match the App Group"
+            )
+        if not _has_url_scheme(plist, AMPROJ_URL_SCHEME):
+            raise RuntimeError(
+                f"Info.plist is missing the {AMPROJ_URL_SCHEME} URL scheme"
+            )
     if settings.enabled:
         if not isinstance(plist.get("NSLocalNetworkUsageDescription"), str):
             raise RuntimeError("Info.plist is missing NSLocalNetworkUsageDescription")
@@ -632,17 +914,85 @@ def _validate_patched_info_plist(plist, settings, expected_bundle_identifier):
                 raise RuntimeError(f"Info.plist {key} must be a Boolean true")
 
 
+def _verify_share_extension_in_archive(
+    archive,
+    names,
+    app_root,
+    share_extension_path,
+    app_group_id,
+    host_bundle_identifier,
+):
+    source = Path(share_extension_path)
+    extension_root = f"{app_root}/PlugIns/{source.name}"
+
+    def read_unique(relative_path):
+        name = f"{extension_root}/{relative_path}"
+        if names.count(name) != 1:
+            raise RuntimeError(
+                f"IPA must contain exactly one Share Extension {relative_path}; "
+                f"found {names.count(name)}"
+            )
+        return archive.read(name)
+
+    try:
+        plist = plistlib.loads(read_unique("Info.plist"))
+    except (plistlib.InvalidFileException, ValueError) as error:
+        raise RuntimeError("Embedded Share Extension Info.plist is invalid") from error
+    executable_name = (
+        plist.get("CFBundleExecutable") if isinstance(plist, dict) else None
+    )
+    if not isinstance(executable_name, str) or not executable_name:
+        raise RuntimeError("Embedded Share Extension CFBundleExecutable is missing")
+    executable_data = read_unique(executable_name)
+    executable_info = parse_macho_data(
+        executable_data,
+        f"{extension_root}/{executable_name}",
+    )
+    entitlements_name = f"{source.stem}.entitlements"
+    try:
+        entitlements = plistlib.loads(read_unique(entitlements_name))
+    except (plistlib.InvalidFileException, ValueError) as error:
+        raise RuntimeError("Embedded Share Extension entitlements are invalid") from error
+
+    try:
+        result = _validate_share_extension_metadata(
+            plist,
+            executable_info,
+            entitlements,
+            host_bundle_identifier + SHARE_EXTENSION_BUNDLE_SUFFIX,
+            app_group_id,
+        )
+    except ValueError as error:
+        raise RuntimeError(f"Embedded Share Extension is invalid: {error}") from error
+
+    stale_signatures = [
+        name
+        for name in names
+        if name.startswith(extension_root + "/_CodeSignature/")
+    ]
+    if stale_signatures:
+        raise RuntimeError("Embedded Share Extension still contains an old signature")
+    result["path"] = extension_root
+    return result
+
+
 def verify_injected_ipa(
     ipa_path,
     dylib_path,
     settings,
     expected_config=None,
     expected_bundle_identifier=None,
+    expected_share_extension=None,
+    expected_app_group_id=None,
 ):
     """Verify the final archive, embedded files, Mach-O layout, and config."""
     ipa_path = Path(ipa_path)
     dylib_path = Path(dylib_path)
     expected_dylib = dylib_path.read_bytes()
+    if (expected_share_extension is None) != (expected_app_group_id is None):
+        raise RuntimeError(
+            "Expected Share Extension and App Group must be provided together"
+        )
 
     try:
         with zipfile.ZipFile(ipa_path, "r") as archive:
@@ -678,7 +1028,10 @@ def verify_injected_ipa(
             except (plistlib.InvalidFileException, ValueError) as error:
                 raise RuntimeError("Injected Info.plist is invalid") from error
             _validate_patched_info_plist(
-                plist, settings, expected_bundle_identifier
+                plist,
+                settings,
+                expected_bundle_identifier,
+                expected_app_group_id,
             )
 
             executable_name = plist.get("CFBundleExecutable") or Path(app_root).stem
@@ -719,6 +1072,21 @@ def verify_injected_ipa(
                 if embedded_config != expected_config:
                     raise RuntimeError("Embedded debug config differs from generated config")
 
+            share_extension_info = None
+            if expected_share_extension is not None:
+                if expected_app_group_id is None:
+                    raise RuntimeError(
+                        "Expected App Group identifier is required for Share Extension"
+                    )
+                share_extension_info = _verify_share_extension_in_archive(
+                    archive,
+                    names,
+                    app_root,
+                    expected_share_extension,
+                    expected_app_group_id,
+                    plist.get("CFBundleIdentifier", ""),
+                )
+
     except zipfile.BadZipFile as error:
         raise RuntimeError(f"Invalid IPA ZIP archive: {ipa_path}") from error
 
@@ -730,6 +1098,7 @@ def verify_injected_ipa(
         "mode": expected_config.get("DefaultMode")
         if isinstance(expected_config, dict)
         else None,
+        "share_extension": share_extension_info,
     }
     print(
         "[+] Verified IPA: ZIP CRC, Info.plist, arm64 dylib, "
@@ -738,12 +1107,26 @@ def verify_injected_ipa(
     return result
 
 
-def inject_ipa(ipa_path, dylib_path, output_path, debug_settings=None):
+def inject_ipa(
+    ipa_path,
+    dylib_path,
+    output_path,
+    debug_settings=None,
+    share_extension_path=None,
+    app_group_id=None,
+):
     """Inject one dylib and return the generated/copied debug config, if any."""
     ipa_path = Path(ipa_path)
     dylib_path = Path(dylib_path)
     output_path = Path(output_path)
     settings = debug_settings or DebugSettings()
+
+    if (share_extension_path is None) != (app_group_id is None):
+        raise ValueError(
+            "share_extension_path and app_group_id must be provided together"
+        )
+    if app_group_id is not None:
+        _validate_app_group_id(app_group_id)
 
     if not ipa_path.is_file():
         raise FileNotFoundError(f"IPA not found: {ipa_path}")
@@ -776,10 +1159,17 @@ def inject_ipa(ipa_path, dylib_path, output_path, debug_settings=None):
         config = install_debug_config(app_dir, settings)
         patch_info_plist(app_dir, enable_debug_network=settings.enabled)
 
-        signature = app_dir / "_CodeSignature"
-        if signature.exists():
-            shutil.rmtree(signature)
-        print("[+] Removed old code signature")
+        if share_extension_path is not None:
+            patch_share_extension_host_info(app_dir, app_group_id)
+            install_share_extension(
+                app_dir,
+                share_extension_path,
+                app_group_id,
+                original_bundle_identifier,
+            )
+
+        removed_signatures = _remove_code_signature_directories(app_dir)
+        print(f"[+] Removed {removed_signatures} old code signature directorie(s)")
         _try_resign(app_dir)
 
         print(f"[*] Repacking to {output_path}...")
@@ -790,6 +1180,8 @@ def inject_ipa(ipa_path, dylib_path, output_path, debug_settings=None):
             settings,
             expected_config=config,
             expected_bundle_identifier=original_bundle_identifier,
+            expected_share_extension=share_extension_path,
+            expected_app_group_id=app_group_id,
         )
         print(f"[+] Done: {output_path}")
         return config
@@ -809,6 +1201,19 @@ def _token(value):
     if len(value) < 16:
         raise argparse.ArgumentTypeError("token must contain at least 16 characters")
     return value
+
+
+def _app_group_id(value):
+    try:
+        return _validate_app_group_id(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def _share_extension_options_from_args(args, parser):
+    if (args.share_extension is None) != (args.app_group_id is None):
+        parser.error("--share-extension and --app-group-id must be used together")
+    return args.share_extension, args.app_group_id
 
 
 def build_argument_parser():
@@ -831,6 +1236,15 @@ def build_argument_parser():
         "--debug-token", type=_token, help="debug backend bearer token"
     )
     parser.add_argument("--debug-mode", choices=DEBUG_MODES, help="initial mode")
+    parser.add_argument(
+        "--share-extension",
+        help="optional AMProjShareExtension.appex bundle to install",
+    )
+    parser.add_argument(
+        "--app-group-id",
+        type=_app_group_id,
+        help="App Group entitlement required by the Share Extension",
+    )
     return parser
 
 
@@ -838,12 +1252,22 @@ def main(argv=None):
     parser = build_argument_parser()
     args = parser.parse_args(argv)
     settings = _debug_settings_from_args(args, parser)
+    share_extension, app_group_id = _share_extension_options_from_args(
+        args, parser
+    )
     input_path = Path(args.ipa)
     output = args.output or str(
         input_path.with_name(f"{input_path.stem}_amproj.ipa")
     )
     try:
-        inject_ipa(args.ipa, args.dylib, output, settings)
+        inject_ipa(
+            args.ipa,
+            args.dylib,
+            output,
+            settings,
+            share_extension_path=share_extension,
+            app_group_id=app_group_id,
+        )
     except (
         OSError,
         ValueError,

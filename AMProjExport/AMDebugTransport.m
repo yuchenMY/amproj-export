@@ -18,7 +18,7 @@ static const NSUInteger kAMDebugMaxEventPayloadBytes = 128 * 1024;
 static const NSUInteger kAMDebugMaxArtifactBytes = 32 * 1024 * 1024;
 static const NSTimeInterval kAMDebugHelloInterval = 10.0;
 static const NSTimeInterval kAMDebugHelloRetryInterval = 5.0;
-static NSString *const kAMDebugPluginVersion = @"13";
+static NSString *const kAMDebugPluginVersion = @"14";
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
 
 typedef NS_ENUM(NSInteger, AMDebugBackendState) {

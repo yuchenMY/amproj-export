@@ -64,6 +64,46 @@ def make_macho(
     return bytes(data)
 
 
+def make_share_extension(
+    root,
+    host_bundle_identifier="com.example.fixture",
+    app_group_id="group.com.example.fixture.amprojshare",
+    extension_point=inject_dylib.SHARE_EXTENSION_POINT,
+    filetype=inject_dylib.MH_EXECUTE,
+    cputype=inject_dylib.CPU_TYPE_ARM64,
+):
+    build = Path(root) / "share-build"
+    appex = build / "FixtureShare.appex"
+    appex.mkdir(parents=True)
+    with (appex / "Info.plist").open("wb") as file:
+        plistlib.dump(
+            {
+                "CFBundleExecutable": "FixtureShare",
+                "CFBundleIdentifier": (
+                    host_bundle_identifier
+                    + inject_dylib.SHARE_EXTENSION_BUNDLE_SUFFIX
+                ),
+                "NSExtension": {
+                    "NSExtensionPointIdentifier": extension_point,
+                },
+            },
+            file,
+        )
+    make_macho(
+        appex / "FixtureShare",
+        filetype=filetype,
+        cputype=cputype,
+    )
+    with (build / "FixtureShare.entitlements").open("wb") as file:
+        plistlib.dump(
+            {
+                inject_dylib.APPLICATION_GROUPS_ENTITLEMENT: [app_group_id],
+            },
+            file,
+        )
+    return appex
+
+
 class MachOTests(unittest.TestCase):
     def test_insert_uses_padding_without_moving_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -153,6 +193,14 @@ class PlistTests(unittest.TestCase):
             self.assertIs(ats["NSAllowsLocalNetworking"], True)
             self.assertIs(ats["NSAllowsArbitraryLoads"], True)
             self.assertEqual(len(result["CFBundleDocumentTypes"]), 1)
+            self.assertEqual(
+                result["CFBundleDocumentTypes"][0]["CFBundleTypeRole"],
+                "Editor",
+            )
+            self.assertEqual(
+                result["CFBundleDocumentTypes"][0]["LSHandlerRank"],
+                "Owner",
+            )
             self.assertEqual(len(result["UTExportedTypeDeclarations"]), 1)
             self.assertIn(
                 "public.zip-archive",
@@ -163,6 +211,26 @@ class PlistTests(unittest.TestCase):
                 result["UTExportedTypeDeclarations"][0]["UTTypeTagSpecification"]
                 ["public.filename-extension"],
             )
+            self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], False)
+            self.assertIs(result["UISupportsDocumentBrowser"], False)
+
+    def test_copy_in_flags_are_forced_false_when_previously_true(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = Path(temp_dir)
+            with (app / "Info.plist").open("wb") as file:
+                plistlib.dump(
+                    {
+                        "LSSupportsOpeningDocumentsInPlace": True,
+                        "UISupportsDocumentBrowser": "YES",
+                    },
+                    file,
+                )
+
+            self.assertTrue(inject_dylib.patch_info_plist(app))
+            with (app / "Info.plist").open("rb") as file:
+                result = plistlib.load(file)
+            self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], False)
+            self.assertIs(result["UISupportsDocumentBrowser"], False)
 
 
 class AddressSelectionTests(unittest.TestCase):
@@ -290,6 +358,9 @@ class InjectionTests(unittest.TestCase):
             with (result_app / "Info.plist").open("rb") as file:
                 info = plistlib.load(file)
             self.assertEqual(info["CFBundleIdentifier"], "com.example.fixture")
+            self.assertIs(info["LSSupportsOpeningDocumentsInPlace"], False)
+            self.assertIs(info["UISupportsDocumentBrowser"], False)
+            self.assertNotIn(inject_dylib.SHARE_APP_GROUP_INFO_KEY, info)
             self.assertIs(
                 info["NSAppTransportSecurity"]["NSAllowsLocalNetworking"],
                 True,
@@ -311,6 +382,119 @@ class InjectionTests(unittest.TestCase):
             self.assertEqual(
                 verification["bundle_identifier"], "com.example.fixture"
             )
+            self.assertIsNone(verification["share_extension"])
+
+    def test_fake_ipa_installs_and_verifies_share_extension(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            app = source / "Payload" / "Fixture.app"
+            app.mkdir(parents=True)
+            with (app / "Info.plist").open("wb") as file:
+                plistlib.dump(
+                    {
+                        "CFBundleExecutable": "Fixture",
+                        "CFBundleIdentifier": "com.example.fixture",
+                    },
+                    file,
+                )
+            make_macho(app / "Fixture")
+            ipa = root / "input.ipa"
+            with zipfile.ZipFile(ipa, "w", zipfile.ZIP_DEFLATED) as archive:
+                for path in source.rglob("*"):
+                    archive.write(path, path.relative_to(source))
+
+            dylib = root / "AMProjExportDebug.dylib"
+            make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
+            app_group_id = "group.com.example.fixture.amprojshare"
+            appex = make_share_extension(root, app_group_id=app_group_id)
+            (appex / "_CodeSignature").mkdir()
+            (appex / "_CodeSignature" / "CodeResources").write_bytes(b"old")
+            output = root / "share-output.ipa"
+            settings = inject_dylib.DebugSettings(
+                enabled=True,
+                server_ip="192.168.1.5",
+                token="fixture-token-1234",
+            )
+
+            with mock.patch.object(inject_dylib, "_try_resign"):
+                inject_dylib.inject_ipa(
+                    ipa,
+                    dylib,
+                    output,
+                    settings,
+                    share_extension_path=appex,
+                    app_group_id=app_group_id,
+                )
+
+            extracted = root / "share-result"
+            shutil.unpack_archive(output, extracted, "zip")
+            result_app = extracted / "Payload" / "Fixture.app"
+            result_appex = result_app / "PlugIns" / appex.name
+            self.assertTrue((result_appex / "FixtureShare").is_file())
+            self.assertTrue(
+                (result_appex / "FixtureShare.entitlements").is_file()
+            )
+            self.assertFalse((result_appex / "_CodeSignature").exists())
+            with (result_app / "Info.plist").open("rb") as file:
+                info = plistlib.load(file)
+            self.assertEqual(
+                info[inject_dylib.SHARE_APP_GROUP_INFO_KEY], app_group_id
+            )
+            self.assertTrue(
+                inject_dylib._has_url_scheme(
+                    info, inject_dylib.AMPROJ_URL_SCHEME
+                )
+            )
+
+            verification = inject_dylib.verify_injected_ipa(
+                output,
+                dylib,
+                settings,
+                expected_config=plistlib.loads(
+                    (result_app / inject_dylib.DEBUG_CONFIG_NAME).read_bytes()
+                ),
+                expected_bundle_identifier="com.example.fixture",
+                expected_share_extension=appex,
+                expected_app_group_id=app_group_id,
+            )
+            self.assertEqual(
+                verification["share_extension"]["bundle_identifier"],
+                "com.example.fixture.amprojshare",
+            )
+
+    def test_share_extension_rejects_wrong_metadata_and_entitlements(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            group = "group.com.example.fixture.amprojshare"
+            appex = make_share_extension(root, app_group_id=group)
+            info_path = appex / "Info.plist"
+            with info_path.open("rb") as file:
+                info = plistlib.load(file)
+            info["NSExtension"]["NSExtensionPointIdentifier"] = (
+                "com.apple.invalid-extension"
+            )
+            with info_path.open("wb") as file:
+                plistlib.dump(info, file)
+
+            with self.assertRaisesRegex(ValueError, "NSExtensionPointIdentifier"):
+                inject_dylib.verify_share_extension_bundle(
+                    appex,
+                    "com.example.fixture.amprojshare",
+                    group,
+                )
+
+            info["NSExtension"]["NSExtensionPointIdentifier"] = (
+                inject_dylib.SHARE_EXTENSION_POINT
+            )
+            with info_path.open("wb") as file:
+                plistlib.dump(info, file)
+            with self.assertRaisesRegex(ValueError, "App Group"):
+                inject_dylib.verify_share_extension_bundle(
+                    appex,
+                    "com.example.fixture.amprojshare",
+                    "group.com.example.other",
+                )
 
     def test_final_verifier_rejects_missing_load_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -373,6 +557,8 @@ class ArgumentTests(unittest.TestCase):
         settings = inject_dylib._debug_settings_from_args(args, parser)
         self.assertEqual(args.output, "output.ipa")
         self.assertFalse(settings.enabled)
+        self.assertIsNone(args.share_extension)
+        self.assertIsNone(args.app_group_id)
 
     def test_debug_dylib_enables_generated_config(self):
         parser = inject_dylib.build_argument_parser()
@@ -393,6 +579,39 @@ class ArgumentTests(unittest.TestCase):
                     "short",
                 ]
             )
+
+    def test_share_extension_options_must_be_paired(self):
+        parser = inject_dylib.build_argument_parser()
+        args = parser.parse_args(
+            [
+                "input.ipa",
+                "AMProjExportDebug.dylib",
+                "--share-extension",
+                "AMProjShareExtension.appex",
+            ]
+        )
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            inject_dylib._share_extension_options_from_args(args, parser)
+
+    def test_share_extension_options_accept_valid_app_group(self):
+        parser = inject_dylib.build_argument_parser()
+        args = parser.parse_args(
+            [
+                "input.ipa",
+                "AMProjExportDebug.dylib",
+                "--share-extension",
+                "AMProjShareExtension.appex",
+                "--app-group-id",
+                "group.com.alightmotion.meow.amprojshare",
+            ]
+        )
+        self.assertEqual(
+            inject_dylib._share_extension_options_from_args(args, parser),
+            (
+                "AMProjShareExtension.appex",
+                "group.com.alightmotion.meow.amprojshare",
+            ),
+        )
 
 
 if __name__ == "__main__":
