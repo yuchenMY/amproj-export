@@ -2428,7 +2428,7 @@ static void amproj_showImportStatusAttempt(NSString *text, BOOL error,
 }
 
 static void amproj_showImportStatus(NSString *text, BOOL error) {
-    NSString *snapshot = [text copy] ?: @"AMProj v11 import";
+    NSString *snapshot = [text copy] ?: @"AMProj v12 import";
     dispatch_async(dispatch_get_main_queue(), ^{
         NSUInteger generation = ++amproj_importStatusGeneration;
         amproj_showImportStatusAttempt(snapshot, error, generation, 0);
@@ -2498,10 +2498,10 @@ static NSString* amproj_visibleImportFileError(NSError *error) {
     }
     NSString *diagnostics = amproj_copyDiagnosticSummary(error);
     if (diagnostics.length) {
-        return [NSString stringWithFormat:@"AMProj v11 \u00b7 %@ (E%ld \u00b7 %@)",
+        return [NSString stringWithFormat:@"AMProj v12 \u00b7 %@ (E%ld \u00b7 %@)",
                                           message, (long)error.code, diagnostics];
     }
-    return [NSString stringWithFormat:@"AMProj v11 \u00b7 %@ (E%ld)",
+    return [NSString stringWithFormat:@"AMProj v12 \u00b7 %@ (E%ld)",
                                       message, (long)error.code];
 }
 
@@ -3330,7 +3330,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             amproj_pendingImportURL = nil;
             amproj_pendingImportName = nil;
             amproj_captureTemplatesController(controller, @"dispatch");
-            amproj_showImportStatus(@"AMProj v11 \u00b7 4/4 \u5df2\u4ea4\u7ed9\u539f\u751f\u5bfc\u5165\u5668", NO);
+            amproj_showImportStatus(@"AMProj v12 \u00b7 4/4 \u5df2\u4ea4\u7ed9\u539f\u751f\u5bfc\u5165\u5668", NO);
             amproj_debugEvent(@"import.dispatch", @{
                 @"controller": NSStringFromClass(controller.class) ?: @"",
                 @"filename": name,
@@ -3341,7 +3341,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                     controller, selector, nil, @[URL]);
                 amproj_debugEvent(@"import.dispatched", @{@"success": @YES});
                 amproj_showImportStatus(
-                    @"AMProj v11 \u00b7 \u539f\u751f\u5bfc\u5165\u5df2\u542f\u52a8\uff0c\u8bf7\u4fdd\u6301 AM \u6253\u5f00", NO);
+                    @"AMProj v12 \u00b7 \u539f\u751f\u5bfc\u5165\u5df2\u542f\u52a8\uff0c\u8bf7\u4fdd\u6301 AM \u6253\u5f00", NO);
             } @catch (NSException *exception) {
                 amproj_debugEvent(@"import.dispatched", @{
                     @"success": @NO,
@@ -3349,7 +3349,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                     @"reason": exception.reason ?: @""
                 });
                 amproj_showImportStatus(
-                    @"AMProj v11 \u00b7 \u539f\u751f\u5bfc\u5165\u5668\u8c03\u7528\u5931\u8d25", YES);
+                    @"AMProj v12 \u00b7 \u539f\u751f\u5bfc\u5165\u5668\u8c03\u7528\u5931\u8d25", YES);
                 amproj_presentImportError(@"Alight Motion 的原生导入入口调用失败，请重新打开项目包。");
             }
             return;
@@ -3365,7 +3365,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                                            objc_getClass("_TtC12AlightMotion15TemplatesListVC") != Nil)
             });
             amproj_showImportStatus(
-                @"AMProj v11 \u00b7 \u672a\u627e\u5230 AM \u9879\u76ee/\u6a21\u677f\u5217\u8868", YES);
+                @"AMProj v12 \u00b7 \u672a\u627e\u5230 AM \u9879\u76ee/\u6a21\u677f\u5217\u8868", YES);
             amproj_presentImportError(@"Alight Motion 的项目列表尚未加载，请进入项目列表后再从 QQ 或文件 App 打开一次。");
             return;
         }
@@ -3388,7 +3388,7 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName) {
             @"wait_seconds": @90
         });
         amproj_showImportStatus(
-            @"AMProj v11 \u00b7 3/4 \u6b63\u5728\u5bfb\u627e AM \u539f\u751f\u9879\u76ee\u5217\u8868", NO);
+            @"AMProj v12 \u00b7 3/4 \u6b63\u5728\u5bfb\u627e AM \u539f\u751f\u9879\u76ee\u5217\u8868", NO);
         amproj_tryDispatchPendingImport(generation);
     });
 }
@@ -3407,9 +3407,6 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
         });
         return YES;
     }
-    amproj_lastIncomingURLKey = [URLKey copy];
-    amproj_lastIncomingURLTime = now;
-
     NSString *originalName = URL.lastPathComponent ?: @"project.amproj";
     amproj_debugEvent(@"import.url_received", @{
         @"source": source ?: @"",
@@ -3417,12 +3414,17 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
         @"file_url": @YES,
         @"extension": URL.pathExtension ?: @""
     });
-    amproj_showImportStatus(@"AMProj v11 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587\u4ef6", NO);
+    amproj_showImportStatus(@"AMProj v12 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587\u4ef6", NO);
 
-    // Acquire the sandbox extension before the delegate callback returns.
+    // Some providers grant access only for the lifetime of this app-delegate
+    // callback. Copy and validate before returning; dispatch only the cached URL.
+    NSFileManager *manager = NSFileManager.defaultManager;
+    CFAbsoluteTime stagingStarted = CFAbsoluteTimeGetCurrent();
+    BOOL requestedOpenInPlace = [options[UIApplicationOpenURLOptionsOpenInPlaceKey] boolValue];
+    BOOL readableBeforeScope = [manager isReadableFileAtPath:URL.path];
     BOOL scoped = [URL startAccessingSecurityScopedResource];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSFileManager *manager = NSFileManager.defaultManager;
+    BOOL readableAfterScope = [manager isReadableFileAtPath:URL.path];
+    @autoreleasepool {
         NSError *error = nil;
         NSURL *root = amproj_importCacheRoot();
         NSURL *directory = [root URLByAppendingPathComponent:NSUUID.UUID.UUIDString
@@ -3433,11 +3435,15 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
             amproj_debugEvent(@"import.copy", @{
                 @"success": @NO,
                 @"scoped": @(scoped),
+                @"open_in_place": @(requestedOpenInPlace),
+                @"staging_sync": @YES,
+                @"readable_before_scope": @(readableBeforeScope),
+                @"readable_after_scope": @(readableAfterScope),
                 @"error": error.localizedDescription ?: @"Unable to create import cache"
             });
-            amproj_showImportStatus(@"AMProj v11 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25", YES);
+            amproj_showImportStatus(@"AMProj v12 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25", YES);
             amproj_presentImportError(@"无法创建导入缓存，请检查设备剩余空间后重试。");
-            return;
+            return YES;
         }
 
         NSURL *destination = [directory URLByAppendingPathComponent:
@@ -3445,6 +3451,7 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
         __block NSError *copyError = nil;
         __block BOOL copied = NO;
         __block BOOL accessorCalled = NO;
+        __block BOOL coordinatedReadable = NO;
         __block uint64_t copiedBytes = 0;
         __block NSString *copyMethod = nil;
         NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
@@ -3455,11 +3462,14 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
                                               error:&coordinationError
                                           byAccessor:^(NSURL *coordinatedURL) {
                 accessorCalled = YES;
+                coordinatedReadable = [manager isReadableFileAtPath:coordinatedURL.path];
                 copied = amproj_streamCopyIncomingFile(
                     coordinatedURL, destination, &copiedBytes, &copyMethod, &copyError);
             }];
         } @catch (NSException *exception) {
             copyError = amproj_importCopyException(exception);
+        } @finally {
+            if (scoped) [URL stopAccessingSecurityScopedResource];
         }
         if (!copied && !copyError) {
             copyError = amproj_importFileError(
@@ -3468,14 +3478,20 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
                                  @"The File Provider did not supply the project package",
                 0, coordinationError);
         }
-        if (scoped) [URL stopAccessingSecurityScopedResource];
-
         if (!copied) {
             [manager removeItemAtURL:directory error:nil];
             amproj_debugEvent(@"import.copy", @{
                 @"success": @NO,
-                @"phase": @"copy",
+                @"phase": @"callback_copy",
+                @"source": source ?: @"",
                 @"scoped": @(scoped),
+                @"open_in_place": @(requestedOpenInPlace),
+                @"staging_sync": @YES,
+                @"readable_before_scope": @(readableBeforeScope),
+                @"readable_after_scope": @(readableAfterScope),
+                @"coordinated_readable": @(coordinatedReadable),
+                @"accessor_called": @(accessorCalled),
+                @"duration_ms": @((CFAbsoluteTimeGetCurrent() - stagingStarted) * 1000.0),
                 @"error_domain": copyError.domain ?: @"",
                 @"error_code": @(copyError.code),
                 @"error": copyError.localizedDescription ?: @"Unable to copy project package",
@@ -3486,17 +3502,31 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
             amproj_showImportStatus(amproj_visibleImportFileError(copyError), YES);
             NSString *diagnostics = amproj_copyDiagnosticSummary(copyError);
             NSString *message = @"无法读取 QQ 或文件 App 提供的项目包，请返回后重新打开一次。";
+            message = [message stringByAppendingFormat:
+                @"\n\n上下文：%@，scope=%@，openInPlace=%@，before=%@，after=%@，coordinated=%@",
+                source ?: @"unknown", scoped ? @"1" : @"0",
+                requestedOpenInPlace ? @"1" : @"0",
+                readableBeforeScope ? @"1" : @"0", readableAfterScope ? @"1" : @"0",
+                coordinatedReadable ? @"1" : @"0"];
             if (diagnostics.length) {
                 message = [message stringByAppendingFormat:@"\n\n诊断：%@", diagnostics];
             }
             amproj_presentImportError(message);
-            return;
+            return YES;
         }
 
         amproj_debugEvent(@"import.copy", @{
             @"success": @YES,
-            @"phase": @"copy",
+            @"phase": @"callback_copy",
+            @"source": source ?: @"",
             @"scoped": @(scoped),
+            @"open_in_place": @(requestedOpenInPlace),
+            @"staging_sync": @YES,
+            @"readable_before_scope": @(readableBeforeScope),
+            @"readable_after_scope": @(readableAfterScope),
+            @"coordinated_readable": @(coordinatedReadable),
+            @"accessor_called": @(accessorCalled),
+            @"duration_ms": @((CFAbsoluteTimeGetCurrent() - stagingStarted) * 1000.0),
             @"bytes": @(copiedBytes),
             @"method": copyMethod ?: @"unknown",
             @"bridge_filename": destination.lastPathComponent ?: @""
@@ -3521,7 +3551,7 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
             amproj_showImportStatus(amproj_visibleImportFileError(validationError), YES);
             amproj_presentImportError(
                 @"\u9879\u76ee\u5305\u5df2\u590d\u5236\uff0c\u4f46 ZIP \u7ed3\u6784\u6216\u573a\u666f XML \u4e0d\u5b8c\u6574\u3002");
-            return;
+            return YES;
         }
 
         amproj_debugEvent(@"import.validate", @{
@@ -3532,9 +3562,11 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
             @"xml_count": validationMetrics[@"xml_count"] ?: @0,
             @"manifest": validationMetrics[@"manifest"] ?: @NO
         });
-        amproj_showImportStatus(@"AMProj v11 \u00b7 2/4 \u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c", NO);
+        amproj_showImportStatus(@"AMProj v12 \u00b7 2/4 \u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c", NO);
+        amproj_lastIncomingURLKey = [URLKey copy];
+        amproj_lastIncomingURLTime = CFAbsoluteTimeGetCurrent();
         amproj_queuePreparedImport(destination, originalName);
-    });
+    }
     return YES;
 }
 
@@ -3590,12 +3622,6 @@ static void amproj_handleLaunchOptions(NSDictionary *launchOptions, NSString *so
 
 static BOOL hooked_applicationDidFinish(id self, SEL _cmd, UIApplication *application,
                                          NSDictionary *launchOptions) {
-    // The document URL exists only in this delegate argument on a cold launch.
-    // Acquire its security scope before returning to UIKit, then preserve AM's
-    // original startup result unconditionally.
-    amproj_handleLaunchOptions(launchOptions,
-                               @"application_did_finish_launch_options");
-
     IMP original = amproj_didFinishForwardDepth
         ? amproj_originalHookForReceiverSkippingExact(
               amproj_didFinishHooks,
@@ -3610,6 +3636,11 @@ static BOOL hooked_applicationDidFinish(id self, SEL _cmd, UIApplication *applic
             self, _cmd, application, launchOptions);
         amproj_didFinishForwardDepth -= 1;
     }
+
+    // Let AM initialize first, then stage the document while UIKit's original
+    // didFinish callback (and its temporary sandbox extension) is still active.
+    amproj_handleLaunchOptions(launchOptions,
+                               @"application_did_finish_launch_options");
 
     dispatch_async(dispatch_get_main_queue(), ^{
         // Firebase may install its openURL proxy during AM's startup.
@@ -3689,7 +3720,7 @@ static void hooked_templatesViewDidAppear(id self, SEL _cmd, BOOL animated) {
     amproj_captureTemplatesController((UIViewController *)self, @"view_did_appear");
     if (amproj_pendingImportURL) {
         amproj_showImportStatus(
-            @"AMProj v11 \u00b7 \u5df2\u8fdb\u5165\u9879\u76ee\u5217\u8868\uff0c\u6b63\u5728\u7ee7\u7eed\u5bfc\u5165", NO);
+            @"AMProj v12 \u00b7 \u5df2\u8fdb\u5165\u9879\u76ee\u5217\u8868\uff0c\u6b63\u5728\u7ee7\u7eed\u5bfc\u5165", NO);
         amproj_tryDispatchPendingImport(amproj_pendingImportGeneration);
     }
 }
@@ -4566,9 +4597,9 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v11-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v12-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v11 =====");
+        NSLog(@"[AMProjExport] ===== Loading v12 =====");
 #endif
 
         // ObjC classes are registered before image constructors. Installing only
@@ -4583,9 +4614,10 @@ static void AMProjExportInit(void) {
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(__unused NSNotification *notification) {
             // Install only the app/scene delivery hooks here. UIKit presentation
-            // hooks remain deferred until the app has finished launching.
+            // hooks remain deferred until the app has finished launching. Do not
+            // consume launchOptions here: notification URLs may lack the delegate
+            // callback's temporary sandbox extension.
             amproj_installImportHook();
-            amproj_handleLaunchOptions(notification.userInfo, @"will_launch_options");
         }];
         amproj_didLaunchObserver = [center
             addObserverForName:UIApplicationDidFinishLaunchingNotification
@@ -4594,7 +4626,6 @@ static void AMProjExportInit(void) {
                     usingBlock:^(__unused NSNotification *notification) {
             amproj_bootstrapAfterLaunch(@"did_finish_launching");
             amproj_installImportHook();
-            amproj_handleLaunchOptions(notification.userInfo, @"did_launch_options");
         }];
         amproj_didBecomeActiveObserver = [center
             addObserverForName:UIApplicationDidBecomeActiveNotification
