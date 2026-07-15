@@ -2296,6 +2296,7 @@ typedef BOOL (*AMProjApplicationOpenURLIMP)(id, SEL, UIApplication *, NSURL *, N
 typedef BOOL (*AMProjApplicationDidFinishIMP)(id, SEL, UIApplication *, NSDictionary *);
 typedef BOOL (*AMProjApplicationContinueActivityIMP)(id, SEL, UIApplication *,
                                                       NSUserActivity *, id);
+typedef BOOL (*AMProjApplicationHandleOpenURLIMP)(id, SEL, UIApplication *, NSURL *);
 typedef BOOL (*AMProjApplicationLegacyOpenURLIMP)(id, SEL, UIApplication *, NSURL *,
                                                   NSString *, id);
 typedef void (*AMProjSceneOpenURLContextsIMP)(id, SEL, UIScene *, NSSet *);
@@ -2308,6 +2309,7 @@ typedef struct {
 static AMProjTrackedHook amproj_openURLHooks[12] = {0};
 static AMProjTrackedHook amproj_didFinishHooks[12] = {0};
 static AMProjTrackedHook amproj_continueActivityHooks[12] = {0};
+static AMProjTrackedHook amproj_handleOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_legacyOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_sceneOpenURLHooks[12] = {0};
 static NSURL *amproj_pendingImportURL = nil;
@@ -2320,6 +2322,7 @@ static __weak UIViewController *amproj_lastTemplatesController = nil;
 static __weak UILabel *amproj_importStatusBanner = nil;
 static NSUInteger amproj_importStatusGeneration = 0;
 static __thread NSUInteger amproj_openURLForwardDepth = 0;
+static __thread NSUInteger amproj_handleOpenURLForwardDepth = 0;
 static __thread NSUInteger amproj_activityForwardDepth = 0;
 static __thread NSUInteger amproj_didFinishForwardDepth = 0;
 
@@ -2428,7 +2431,7 @@ static void amproj_showImportStatusAttempt(NSString *text, BOOL error,
 }
 
 static void amproj_showImportStatus(NSString *text, BOOL error) {
-    NSString *snapshot = [text copy] ?: @"AMProj v12 import";
+    NSString *snapshot = [text copy] ?: @"AMProj v13 import";
     dispatch_async(dispatch_get_main_queue(), ^{
         NSUInteger generation = ++amproj_importStatusGeneration;
         amproj_showImportStatusAttempt(snapshot, error, generation, 0);
@@ -2498,10 +2501,10 @@ static NSString* amproj_visibleImportFileError(NSError *error) {
     }
     NSString *diagnostics = amproj_copyDiagnosticSummary(error);
     if (diagnostics.length) {
-        return [NSString stringWithFormat:@"AMProj v12 \u00b7 %@ (E%ld \u00b7 %@)",
+        return [NSString stringWithFormat:@"AMProj v13 \u00b7 %@ (E%ld \u00b7 %@)",
                                           message, (long)error.code, diagnostics];
     }
-    return [NSString stringWithFormat:@"AMProj v12 \u00b7 %@ (E%ld)",
+    return [NSString stringWithFormat:@"AMProj v13 \u00b7 %@ (E%ld)",
                                       message, (long)error.code];
 }
 
@@ -3330,7 +3333,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             amproj_pendingImportURL = nil;
             amproj_pendingImportName = nil;
             amproj_captureTemplatesController(controller, @"dispatch");
-            amproj_showImportStatus(@"AMProj v12 \u00b7 4/4 \u5df2\u4ea4\u7ed9\u539f\u751f\u5bfc\u5165\u5668", NO);
+            amproj_showImportStatus(@"AMProj v13 \u00b7 4/4 \u5df2\u4ea4\u7ed9\u539f\u751f\u5bfc\u5165\u5668", NO);
             amproj_debugEvent(@"import.dispatch", @{
                 @"controller": NSStringFromClass(controller.class) ?: @"",
                 @"filename": name,
@@ -3341,7 +3344,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                     controller, selector, nil, @[URL]);
                 amproj_debugEvent(@"import.dispatched", @{@"success": @YES});
                 amproj_showImportStatus(
-                    @"AMProj v12 \u00b7 \u539f\u751f\u5bfc\u5165\u5df2\u542f\u52a8\uff0c\u8bf7\u4fdd\u6301 AM \u6253\u5f00", NO);
+                    @"AMProj v13 \u00b7 \u539f\u751f\u5bfc\u5165\u5df2\u542f\u52a8\uff0c\u8bf7\u4fdd\u6301 AM \u6253\u5f00", NO);
             } @catch (NSException *exception) {
                 amproj_debugEvent(@"import.dispatched", @{
                     @"success": @NO,
@@ -3349,7 +3352,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                     @"reason": exception.reason ?: @""
                 });
                 amproj_showImportStatus(
-                    @"AMProj v12 \u00b7 \u539f\u751f\u5bfc\u5165\u5668\u8c03\u7528\u5931\u8d25", YES);
+                    @"AMProj v13 \u00b7 \u539f\u751f\u5bfc\u5165\u5668\u8c03\u7528\u5931\u8d25", YES);
                 amproj_presentImportError(@"Alight Motion 的原生导入入口调用失败，请重新打开项目包。");
             }
             return;
@@ -3365,7 +3368,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                                            objc_getClass("_TtC12AlightMotion15TemplatesListVC") != Nil)
             });
             amproj_showImportStatus(
-                @"AMProj v12 \u00b7 \u672a\u627e\u5230 AM \u9879\u76ee/\u6a21\u677f\u5217\u8868", YES);
+                @"AMProj v13 \u00b7 \u672a\u627e\u5230 AM \u9879\u76ee/\u6a21\u677f\u5217\u8868", YES);
             amproj_presentImportError(@"Alight Motion 的项目列表尚未加载，请进入项目列表后再从 QQ 或文件 App 打开一次。");
             return;
         }
@@ -3388,7 +3391,7 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName) {
             @"wait_seconds": @90
         });
         amproj_showImportStatus(
-            @"AMProj v12 \u00b7 3/4 \u6b63\u5728\u5bfb\u627e AM \u539f\u751f\u9879\u76ee\u5217\u8868", NO);
+            @"AMProj v13 \u00b7 3/4 \u6b63\u5728\u5bfb\u627e AM \u539f\u751f\u9879\u76ee\u5217\u8868", NO);
         amproj_tryDispatchPendingImport(generation);
     });
 }
@@ -3414,7 +3417,7 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
         @"file_url": @YES,
         @"extension": URL.pathExtension ?: @""
     });
-    amproj_showImportStatus(@"AMProj v12 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587\u4ef6", NO);
+    amproj_showImportStatus(@"AMProj v13 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587\u4ef6", NO);
 
     // Some providers grant access only for the lifetime of this app-delegate
     // callback. Copy and validate before returning; dispatch only the cached URL.
@@ -3441,7 +3444,7 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
                 @"readable_after_scope": @(readableAfterScope),
                 @"error": error.localizedDescription ?: @"Unable to create import cache"
             });
-            amproj_showImportStatus(@"AMProj v12 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25", YES);
+            amproj_showImportStatus(@"AMProj v13 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25", YES);
             amproj_presentImportError(@"无法创建导入缓存，请检查设备剩余空间后重试。");
             return YES;
         }
@@ -3562,7 +3565,7 @@ static BOOL amproj_handleIncomingProjectURL(NSURL *URL, NSString *source,
             @"xml_count": validationMetrics[@"xml_count"] ?: @0,
             @"manifest": validationMetrics[@"manifest"] ?: @NO
         });
-        amproj_showImportStatus(@"AMProj v12 \u00b7 2/4 \u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c", NO);
+        amproj_showImportStatus(@"AMProj v13 \u00b7 2/4 \u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c", NO);
         amproj_lastIncomingURLKey = [URLKey copy];
         amproj_lastIncomingURLTime = CFAbsoluteTimeGetCurrent();
         amproj_queuePreparedImport(destination, originalName);
@@ -3622,6 +3625,11 @@ static void amproj_handleLaunchOptions(NSDictionary *launchOptions, NSString *so
 
 static BOOL hooked_applicationDidFinish(id self, SEL _cmd, UIApplication *application,
                                          NSDictionary *launchOptions) {
+    // Stage the document before AM's startup code can consume, move, or close
+    // the launch URL's temporary sandbox extension.
+    amproj_handleLaunchOptions(launchOptions,
+                               @"application_did_finish_launch_options_pre_original");
+
     IMP original = amproj_didFinishForwardDepth
         ? amproj_originalHookForReceiverSkippingExact(
               amproj_didFinishHooks,
@@ -3636,11 +3644,6 @@ static BOOL hooked_applicationDidFinish(id self, SEL _cmd, UIApplication *applic
             self, _cmd, application, launchOptions);
         amproj_didFinishForwardDepth -= 1;
     }
-
-    // Let AM initialize first, then stage the document while UIKit's original
-    // didFinish callback (and its temporary sandbox extension) is still active.
-    amproj_handleLaunchOptions(launchOptions,
-                               @"application_did_finish_launch_options");
 
     dispatch_async(dispatch_get_main_queue(), ^{
         // Firebase may install its openURL proxy during AM's startup.
@@ -3668,6 +3671,26 @@ static BOOL hooked_applicationContinueActivity(id self, SEL _cmd, UIApplication 
     BOOL handled = ((AMProjApplicationContinueActivityIMP)original)(
         self, _cmd, application, activity, restorationHandler);
     amproj_activityForwardDepth -= 1;
+    return handled;
+}
+
+static BOOL hooked_applicationHandleOpenURL(id self, SEL _cmd,
+                                             UIApplication *application, NSURL *URL) {
+    if (amproj_handleIncomingProjectURL(URL, @"application_handle_open_url", nil)) {
+        return YES;
+    }
+    IMP original = amproj_handleOpenURLForwardDepth
+        ? amproj_originalHookForReceiverSkippingExact(
+              amproj_handleOpenURLHooks,
+              sizeof(amproj_handleOpenURLHooks) / sizeof(amproj_handleOpenURLHooks[0]), self)
+        : amproj_originalHookForReceiver(
+              amproj_handleOpenURLHooks,
+              sizeof(amproj_handleOpenURLHooks) / sizeof(amproj_handleOpenURLHooks[0]), self);
+    if (!original || original == (IMP)hooked_applicationHandleOpenURL) return NO;
+    amproj_handleOpenURLForwardDepth += 1;
+    BOOL handled = ((AMProjApplicationHandleOpenURLIMP)original)(
+        self, _cmd, application, URL);
+    amproj_handleOpenURLForwardDepth -= 1;
     return handled;
 }
 
@@ -3720,7 +3743,7 @@ static void hooked_templatesViewDidAppear(id self, SEL _cmd, BOOL animated) {
     amproj_captureTemplatesController((UIViewController *)self, @"view_did_appear");
     if (amproj_pendingImportURL) {
         amproj_showImportStatus(
-            @"AMProj v12 \u00b7 \u5df2\u8fdb\u5165\u9879\u76ee\u5217\u8868\uff0c\u6b63\u5728\u7ee7\u7eed\u5bfc\u5165", NO);
+            @"AMProj v13 \u00b7 \u5df2\u8fdb\u5165\u9879\u76ee\u5217\u8868\uff0c\u6b63\u5728\u7ee7\u7eed\u5bfc\u5165", NO);
         amproj_tryDispatchPendingImport(amproj_pendingImportGeneration);
     }
 }
@@ -4300,6 +4323,58 @@ static BOOL amproj_installColdLaunchHook(void) {
     return installed;
 }
 
+static BOOL amproj_installDeclaredURLHooks(void) {
+    Class cls = amproj_declaredAppDelegateClass();
+    if (!cls) return NO;
+
+    SEL modernSelector = @selector(application:openURL:options:);
+    SEL legacySelector = NSSelectorFromString(
+        @"application:openURL:sourceApplication:annotation:");
+    SEL handleSelector = NSSelectorFromString(@"application:handleOpenURL:");
+    if (!class_getInstanceMethod(cls, modernSelector) &&
+        !class_getInstanceMethod(cls, legacySelector) &&
+        !class_getInstanceMethod(cls, handleSelector)) {
+        struct objc_method_description description = protocol_getMethodDescription(
+            @protocol(UIApplicationDelegate), modernSelector, NO, YES);
+        const char *encoding = description.types ?: "B40@0:8@16@24@32";
+        BOOL added = class_addMethod(
+            cls, modernSelector, (IMP)hooked_applicationOpenURL, encoding);
+        amproj_debugEvent(@"import.declared_url_method", @{
+            @"class": NSStringFromClass(cls) ?: @"",
+            @"selector": NSStringFromSelector(modernSelector),
+            @"added": @(added)
+        });
+    }
+
+    BOOL modernChanged = NO;
+    BOOL modernInstalled = amproj_installTrackedHook(
+        cls, modernSelector, (IMP)hooked_applicationOpenURL, 5,
+        amproj_openURLHooks,
+        sizeof(amproj_openURLHooks) / sizeof(amproj_openURLHooks[0]),
+        &modernChanged);
+    BOOL handleChanged = NO;
+    BOOL handleInstalled = amproj_installTrackedHook(
+        cls, handleSelector, (IMP)hooked_applicationHandleOpenURL, 4,
+        amproj_handleOpenURLHooks,
+        sizeof(amproj_handleOpenURLHooks) / sizeof(amproj_handleOpenURLHooks[0]),
+        &handleChanged);
+    BOOL legacyChanged = NO;
+    BOOL legacyInstalled = amproj_installTrackedHook(
+        cls, legacySelector, (IMP)hooked_applicationLegacyOpenURL, 6,
+        amproj_legacyOpenURLHooks,
+        sizeof(amproj_legacyOpenURLHooks) / sizeof(amproj_legacyOpenURLHooks[0]),
+        &legacyChanged);
+    if (modernChanged || handleChanged || legacyChanged) {
+        amproj_debugEvent(@"import.declared_hook", @{
+            @"class": NSStringFromClass(cls) ?: @"",
+            @"open_url": @(modernInstalled),
+            @"handle_open_url": @(handleInstalled),
+            @"legacy_open_url": @(legacyInstalled)
+        });
+    }
+    return modernInstalled || handleInstalled || legacyInstalled;
+}
+
 static BOOL amproj_installTemplatesLifecycleHook(void) {
     Class templatesClass = NSClassFromString(@"AlightMotion.TemplatesListVC");
     if (!templatesClass) {
@@ -4344,6 +4419,7 @@ static void amproj_installSceneImportHook(id sceneDelegate) {
 
 static void amproj_installImportHook(void) {
     (void)amproj_installColdLaunchHook();
+    (void)amproj_installDeclaredURLHooks();
     Class declaredClass = amproj_declaredAppDelegateClass();
     id delegate = UIApplication.sharedApplication.delegate;
     Class runtimeClass = delegate ? object_getClass(delegate) : Nil;
@@ -4365,6 +4441,12 @@ static void amproj_installImportHook(void) {
             sizeof(amproj_continueActivityHooks) /
                 sizeof(amproj_continueActivityHooks[0]),
             &activityChanged);
+        BOOL handleChanged = NO;
+        BOOL handleInstalled = amproj_installTrackedHook(
+            cls, NSSelectorFromString(@"application:handleOpenURL:"),
+            (IMP)hooked_applicationHandleOpenURL, 4, amproj_handleOpenURLHooks,
+            sizeof(amproj_handleOpenURLHooks) / sizeof(amproj_handleOpenURLHooks[0]),
+            &handleChanged);
         BOOL legacyChanged = NO;
         BOOL legacyInstalled = amproj_installTrackedHook(
             cls, NSSelectorFromString(
@@ -4372,12 +4454,13 @@ static void amproj_installImportHook(void) {
             (IMP)hooked_applicationLegacyOpenURL, 6, amproj_legacyOpenURLHooks,
             sizeof(amproj_legacyOpenURLHooks) / sizeof(amproj_legacyOpenURLHooks[0]),
             &legacyChanged);
-        if (openChanged || activityChanged || legacyChanged) {
+        if (openChanged || activityChanged || handleChanged || legacyChanged) {
             amproj_debugEvent(@"import.hook", @{
                 @"class": NSStringFromClass(cls) ?: @"",
                 @"runtime_delegate": @(cls == runtimeClass),
                 @"open_url": @(openInstalled),
                 @"continue_activity": @(activityInstalled),
+                @"handle_open_url": @(handleInstalled),
                 @"legacy_open_url": @(legacyInstalled)
             });
         }
@@ -4597,15 +4680,16 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v12-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v13-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v12 =====");
+        NSLog(@"[AMProjExport] ===== Loading v13 =====");
 #endif
 
         // ObjC classes are registered before image constructors. Installing only
         // this AppDelegate hook here avoids touching UIApplication or UIKit UI
         // while still capturing a cold-launch document URL synchronously.
         (void)amproj_installColdLaunchHook();
+        (void)amproj_installDeclaredURLHooks();
 
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
         amproj_willLaunchObserver = [center
