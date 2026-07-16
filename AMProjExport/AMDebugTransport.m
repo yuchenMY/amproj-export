@@ -2,8 +2,20 @@
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CommonCrypto/CommonDigest.h>
+#import <CommonCrypto/CommonHMAC.h>
+#import <arpa/inet.h>
 #import <dispatch/dispatch.h>
+#import <errno.h>
+#import <fcntl.h>
+#import <ifaddrs.h>
 #import <math.h>
+#import <net/if.h>
+#import <poll.h>
+#import <stdio.h>
+#import <stdlib.h>
+#import <sys/socket.h>
+#import <unistd.h>
 
 AMDebugExportMode const AMDebugExportModeObserve = @"observe";
 AMDebugExportMode const AMDebugExportModePlaceholder = @"placeholder";
@@ -18,8 +30,178 @@ static const NSUInteger kAMDebugMaxEventPayloadBytes = 128 * 1024;
 static const NSUInteger kAMDebugMaxArtifactBytes = 32 * 1024 * 1024;
 static const NSTimeInterval kAMDebugHelloInterval = 10.0;
 static const NSTimeInterval kAMDebugHelloRetryInterval = 5.0;
-static NSString *const kAMDebugPluginVersion = @"14";
+static const NSTimeInterval kAMDebugDiscoveryRetryInterval = 15.0;
+static const NSTimeInterval kAMDebugDiscoveryTimeout = 1.5;
+static const NSUInteger kAMDebugDiscoveryMaxPacketBytes = 512;
+static const NSUInteger kAMDebugDiscoveryMaxSubnetHosts = 1024;
+static NSString *const kAMDebugPluginVersion = @"15";
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
+
+static BOOL AMDebugPrivateIPv4(uint32_t address) {
+    return (address & 0xff000000U) == 0x0a000000U ||
+        (address & 0xfff00000U) == 0xac100000U ||
+        (address & 0xffff0000U) == 0xc0a80000U ||
+        (address & 0xffff0000U) == 0xa9fe0000U;
+}
+
+static NSString *AMDebugHexNonce(void) {
+    uint8_t bytes[16];
+    arc4random_buf(bytes, sizeof(bytes));
+    char output[sizeof(bytes) * 2 + 1];
+    for (NSUInteger index = 0; index < sizeof(bytes); index++) {
+        snprintf(output + index * 2, 3, "%02x", bytes[index]);
+    }
+    output[sizeof(bytes) * 2] = '\0';
+    return [NSString stringWithUTF8String:output];
+}
+
+static NSString *AMDebugDiscoveryProof(NSString *token, NSString *message) {
+    NSData *key = [token dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *body = [message dataUsingEncoding:NSASCIIStringEncoding];
+    if (!key.length || !body.length) return nil;
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CCHmac(kCCHmacAlgSHA256, key.bytes, key.length, body.bytes, body.length, digest);
+    NSData *data = [NSData dataWithBytes:digest length:sizeof(digest)];
+    NSString *encoded = [data base64EncodedStringWithOptions:0];
+    encoded = [encoded stringByReplacingOccurrencesOfString:@"+" withString:@"-"];
+    encoded = [encoded stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+    return [encoded stringByTrimmingCharactersInSet:
+        [NSCharacterSet characterSetWithCharactersInString:@"="]];
+}
+
+static BOOL AMDebugDiscoveryInterface(struct ifaddrs *interface) {
+    if (!interface || !interface->ifa_addr || interface->ifa_addr->sa_family != AF_INET) return NO;
+    unsigned int flags = interface->ifa_flags;
+    if (!(flags & IFF_UP) || (flags & IFF_LOOPBACK)) return NO;
+    NSString *name = [NSString stringWithUTF8String:interface->ifa_name ?: ""];
+    if (!name.length || [name hasPrefix:@"utun"] || [name hasPrefix:@"pdp_ip"] ||
+        [name hasPrefix:@"awdl"] || [name hasPrefix:@"llw"]) return NO;
+    uint32_t address = ntohl(((struct sockaddr_in *)interface->ifa_addr)->sin_addr.s_addr);
+    return AMDebugPrivateIPv4(address);
+}
+
+static NSURL *AMDebugDiscoverEndpointSync(NSString *token, NSUInteger discoveryPort) {
+    if (!token.length || discoveryPort < 1 || discoveryPort > UINT16_MAX) return nil;
+    NSString *nonce = AMDebugHexNonce();
+    NSString *message = [NSString stringWithFormat:@"discover:1:%@", nonce];
+    NSString *proof = AMDebugDiscoveryProof(token, message);
+    NSDictionary *probe = @{
+        @"type": @"amproj-discover",
+        @"version": @1,
+        @"nonce": nonce,
+        @"proof": proof ?: @""
+    };
+    NSData *probeData = [NSJSONSerialization dataWithJSONObject:probe options:0 error:nil];
+    if (!probeData.length || probeData.length > kAMDebugDiscoveryMaxPacketBytes) return nil;
+
+    int descriptor = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (descriptor < 0) return nil;
+    int descriptorFlags = fcntl(descriptor, F_GETFL, 0);
+    if (descriptorFlags >= 0) fcntl(descriptor, F_SETFL, descriptorFlags | O_NONBLOCK);
+
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0 || !interfaces) {
+        close(descriptor);
+        return nil;
+    }
+
+    BOOL sent = NO;
+    for (NSUInteger preferredPass = 0; preferredPass < 2 && !sent; preferredPass++) {
+        for (struct ifaddrs *item = interfaces; item; item = item->ifa_next) {
+            if (!AMDebugDiscoveryInterface(item) || !item->ifa_netmask) continue;
+            NSString *name = [NSString stringWithUTF8String:item->ifa_name ?: ""];
+            BOOL isWiFi = [name isEqualToString:@"en0"];
+            if ((preferredPass == 0) != isWiFi) continue;
+
+            uint32_t address = ntohl(((struct sockaddr_in *)item->ifa_addr)->sin_addr.s_addr);
+            uint32_t mask = ntohl(((struct sockaddr_in *)item->ifa_netmask)->sin_addr.s_addr);
+            struct sockaddr_in local = {0};
+            local.sin_len = sizeof(local);
+            local.sin_family = AF_INET;
+            local.sin_port = 0;
+            local.sin_addr = ((struct sockaddr_in *)item->ifa_addr)->sin_addr;
+            if (bind(descriptor, (const struct sockaddr *)&local, sizeof(local)) != 0) continue;
+            uint64_t hostCount = (uint64_t)(~mask) + 1;
+            if (hostCount > kAMDebugDiscoveryMaxSubnetHosts) mask = 0xffffff00U;
+            uint32_t network = address & mask;
+            uint32_t broadcast = network | ~mask;
+            if (broadcast <= network + 1) continue;
+
+            for (NSUInteger round = 0; round < 2; round++) {
+                for (uint32_t host = network + 1; host < broadcast; host++) {
+                    if (host == address) continue;
+                    struct sockaddr_in target = {0};
+                    target.sin_len = sizeof(target);
+                    target.sin_family = AF_INET;
+                    target.sin_port = htons((uint16_t)discoveryPort);
+                    target.sin_addr.s_addr = htonl(host);
+                    ssize_t written = sendto(descriptor, probeData.bytes, probeData.length, 0,
+                        (const struct sockaddr *)&target, sizeof(target));
+                    if (written < 0 && (errno == EAGAIN || errno == ENOBUFS)) {
+                        struct pollfd writable = { .fd = descriptor, .events = POLLOUT, .revents = 0 };
+                        if (poll(&writable, 1, 2) > 0) {
+                            written = sendto(descriptor, probeData.bytes, probeData.length, 0,
+                                (const struct sockaddr *)&target, sizeof(target));
+                        }
+                    }
+                    if (written == (ssize_t)probeData.length) sent = YES;
+                }
+            }
+            break;
+        }
+    }
+    freeifaddrs(interfaces);
+    if (!sent) {
+        close(descriptor);
+        return nil;
+    }
+
+    CFTimeInterval deadline = CACurrentMediaTime() + kAMDebugDiscoveryTimeout;
+    NSURL *result = nil;
+    while (!result) {
+        CFTimeInterval remaining = deadline - CACurrentMediaTime();
+        if (remaining <= 0) break;
+        struct pollfd pollDescriptor = { .fd = descriptor, .events = POLLIN, .revents = 0 };
+        int milliseconds = (int)ceil(remaining * 1000.0);
+        int pollResult = poll(&pollDescriptor, 1, milliseconds);
+        if (pollResult <= 0) break;
+
+        uint8_t responseBytes[kAMDebugDiscoveryMaxPacketBytes + 1];
+        struct sockaddr_in source = {0};
+        socklen_t sourceLength = sizeof(source);
+        ssize_t length = recvfrom(descriptor, responseBytes, sizeof(responseBytes), 0,
+                                  (struct sockaddr *)&source, &sourceLength);
+        if (length <= 0 || length > (ssize_t)kAMDebugDiscoveryMaxPacketBytes ||
+            source.sin_family != AF_INET) continue;
+        uint32_t sourceAddress = ntohl(source.sin_addr.s_addr);
+        if (!AMDebugPrivateIPv4(sourceAddress)) continue;
+
+        NSData *responseData = [NSData dataWithBytes:responseBytes length:(NSUInteger)length];
+        NSDictionary *response = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:nil];
+        if (![response isKindOfClass:NSDictionary.class] ||
+            ![response[@"type"] isEqual:@"amproj-offer"] ||
+            ![response[@"version"] isEqual:@1] ||
+            ![response[@"nonce"] isEqual:nonce] ||
+            ![response[@"port"] isKindOfClass:NSNumber.class] ||
+            ![response[@"proof"] isKindOfClass:NSString.class]) continue;
+        NSInteger HTTPPort = [response[@"port"] integerValue];
+        if (HTTPPort < 1 || HTTPPort > UINT16_MAX) continue;
+        NSString *offerMessage = [NSString stringWithFormat:@"offer:1:%@:%ld",
+                                  nonce, (long)HTTPPort];
+        NSString *expectedProof = AMDebugDiscoveryProof(token, offerMessage);
+        if (![expectedProof isEqualToString:response[@"proof"]]) continue;
+
+        char sourceText[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, &source.sin_addr, sourceText, sizeof(sourceText))) continue;
+        NSURLComponents *components = NSURLComponents.new;
+        components.scheme = @"http";
+        components.host = [NSString stringWithUTF8String:sourceText];
+        components.port = @(HTTPPort);
+        result = components.URL;
+    }
+    close(descriptor);
+    return result;
+}
 
 typedef NS_ENUM(NSInteger, AMDebugBackendState) {
     AMDebugBackendStateUnknown = 0,
@@ -238,6 +420,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
 @property(nonatomic, strong, nullable) dispatch_source_t flushTimer;
 @property(nonatomic, strong, nullable) dispatch_source_t pollTimer;
 @property(nonatomic, strong, nullable) NSURLSession *URLSession;
+@property(nonatomic, strong, nullable) NSURLSessionDataTask *helloTask;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *pendingEvents;
 @property(nonatomic, strong) NSMutableSet<NSString *> *capturedTransactions;
 @property(nonatomic, strong) NSArray *notificationTokens;
@@ -249,19 +432,25 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
 @property(nonatomic, strong) NSDictionary *helloMetadata;
 @property(nonatomic, readwrite, getter=isEnabled) BOOL enabled;
 @property(nonatomic, copy, readwrite) NSString *sessionIdentifier;
-@property(nonatomic, copy, readwrite, nullable) NSURL *baseURL;
+@property(atomic, copy, readwrite, nullable) NSURL *baseURL;
+@property(nonatomic, copy, nullable) NSURL *configuredBaseURL;
 @property(nonatomic) uint64_t sequence;
+@property(nonatomic) NSUInteger endpointGeneration;
+@property(nonatomic) NSUInteger discoveryPort;
 @property(nonatomic) BOOL started;
 @property(nonatomic) BOOL foreground;
 @property(nonatomic) BOOL eventsInFlight;
 @property(nonatomic) BOOL helloInFlight;
 @property(nonatomic) BOOL helloDelivered;
 @property(nonatomic) BOOL pollInFlight;
+@property(nonatomic) BOOL discoveryEnabled;
+@property(nonatomic) BOOL discoveryInFlight;
 @property(nonatomic) BOOL captureNextPending;
 @property(nonatomic) AMDebugBackendState backendState;
 @property(nonatomic) NSTimeInterval eventRetryDelay;
 @property(nonatomic) NSTimeInterval nextEventAttempt;
 @property(nonatomic) NSTimeInterval nextHelloAttempt;
+@property(nonatomic) NSTimeInterval nextDiscoveryAttempt;
 @property(nonatomic) NSUInteger eventBatchCountLimit;
 
 - (instancetype)initPrivate;
@@ -272,6 +461,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
 - (void)appendEvent:(NSString *)name fields:(NSDictionary *)fields;
 - (NSMutableURLRequest *)requestForPath:(NSString *)path method:(NSString *)method;
 - (void)sendHelloForce:(BOOL)force;
+- (void)startDiscoveryIfNeeded;
 - (void)flushEvents;
 - (nullable NSData *)eventBodyForBatch:(NSArray<NSDictionary *> *)batch;
 - (void)appendRejectedEventSummary:(NSDictionary *)event
@@ -324,6 +514,10 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
     NSString *baseString = [config[@"BaseURL"] isKindOfClass:NSString.class] ? config[@"BaseURL"] : nil;
     NSString *token = [config[@"Token"] isKindOfClass:NSString.class] ? config[@"Token"] : nil;
     id protocolVersion = config[@"ProtocolVersion"];
+    NSNumber *configuredDiscoveryPort = [config[@"DiscoveryPort"] isKindOfClass:NSNumber.class]
+        ? config[@"DiscoveryPort"] : nil;
+    NSNumber *configuredDiscoveryEnabled = [config[@"DiscoveryEnabled"] isKindOfClass:NSNumber.class]
+        ? config[@"DiscoveryEnabled"] : nil;
     NSString *defaultMode = [config[@"DefaultMode"] isKindOfClass:NSString.class]
         ? [config[@"DefaultMode"] lowercaseString] : nil;
     NSURL *baseURL = baseString.length ? [NSURL URLWithString:baseString] : nil;
@@ -337,8 +531,16 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
     if (([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) &&
         baseURL.host.length && safeToken && validProtocolVersion) {
         _baseURL = [baseURL copy];
+        _configuredBaseURL = [baseURL copy];
         _token = [token copy];
         _protocolVersion = AMDebugJSONValue(protocolVersion, 0);
+        NSInteger discoveryPort = configuredDiscoveryPort.integerValue;
+        if (discoveryPort < 1 || discoveryPort > UINT16_MAX) {
+            discoveryPort = baseURL.port.integerValue ?: 8765;
+        }
+        _discoveryPort = (NSUInteger)discoveryPort;
+        _discoveryEnabled = configuredDiscoveryEnabled ? configuredDiscoveryEnabled.boolValue : YES;
+        _endpointGeneration = 1;
         _enabled = YES;
     } else {
         _token = @"";
@@ -419,8 +621,6 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         if (self.foreground) {
             [self startTimers];
             [self sendHelloForce:YES];
-            [self pollCommands];
-            [self flushEvents];
         }
     });
 }
@@ -445,10 +645,9 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         dispatch_async(strongSelf.queue, ^{
             strongSelf.foreground = YES;
             strongSelf.nextEventAttempt = 0;
+            strongSelf.nextDiscoveryAttempt = 0;
             [strongSelf startTimers];
             [strongSelf sendHelloForce:YES];
-            [strongSelf pollCommands];
-            [strongSelf flushEvents];
         });
     }];
     id active = [center addObserverForName:UIApplicationDidBecomeActiveNotification
@@ -458,10 +657,9 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         dispatch_async(strongSelf.queue, ^{
             strongSelf.foreground = YES;
             strongSelf.nextHelloAttempt = 0;
+            strongSelf.nextDiscoveryAttempt = 0;
             [strongSelf startTimers];
             [strongSelf sendHelloForce:YES];
-            [strongSelf pollCommands];
-            [strongSelf flushEvents];
         });
     }];
     self.notificationTokens = @[background, foreground, active];
@@ -476,6 +674,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         dispatch_source_set_event_handler(timer, ^{
             [weakSelf flushEvents];
             [weakSelf sendHelloForce:NO];
+            [weakSelf startDiscoveryIfNeeded];
         });
         dispatch_resume(timer);
         self.flushTimer = timer;
@@ -655,14 +854,17 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     request.HTTPBody = body;
     self.helloInFlight = YES;
+    NSUInteger generation = self.endpointGeneration;
+    NSURL *requestBaseURL = [self.baseURL copy];
     __weak typeof(self) weakSelf = self;
-    [[self.URLSession dataTaskWithRequest:request completionHandler:^(__unused NSData *data,
-                                                                      NSURLResponse *response,
-                                                                      NSError *error) {
+    NSURLSessionDataTask *task = [self.URLSession dataTaskWithRequest:request
+        completionHandler:^(__unused NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(weakSelf.queue, ^{
             AMDebugTransport *strongSelf = weakSelf;
             if (!strongSelf) return;
+            if (generation != strongSelf.endpointGeneration) return;
             strongSelf.helloInFlight = NO;
+            strongSelf.helloTask = nil;
             NSInteger status = [(NSHTTPURLResponse *)response statusCode];
             strongSelf.helloDelivered = !error && status >= 200 && status < 300;
             AMDebugBackendState nextState = strongSelf.helloDelivered
@@ -673,7 +875,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
                 @"connected": @(strongSelf.helloDelivered),
                 @"status": @(status),
                 @"error": error ? AMDebugJSONValue(error, 0) : NSNull.null,
-                @"base_url": strongSelf.baseURL.absoluteString ?: @""
+                @"base_url": requestBaseURL.absoluteString ?: @""
             }];
             if (previousState != nextState) {
                 AMDebugShowStatus(strongSelf.mode, nextState);
@@ -681,13 +883,72 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             NSTimeInterval delay = strongSelf.helloDelivered ?
                 kAMDebugHelloInterval : kAMDebugHelloRetryInterval;
             strongSelf.nextHelloAttempt = NSProcessInfo.processInfo.systemUptime + delay;
-            if (strongSelf.helloDelivered) [strongSelf flushEvents];
+            if (strongSelf.helloDelivered) {
+                [strongSelf flushEvents];
+                [strongSelf pollCommands];
+            } else {
+                [strongSelf startDiscoveryIfNeeded];
+            }
         });
-    }] resume];
+    }];
+    self.helloTask = task;
+    [task resume];
+}
+
+- (void)startDiscoveryIfNeeded {
+    if (!self.started || !self.foreground || !self.discoveryEnabled ||
+        self.helloDelivered || self.discoveryInFlight) return;
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    if (now < self.nextDiscoveryAttempt) return;
+    self.discoveryInFlight = YES;
+    self.nextDiscoveryAttempt = now + kAMDebugDiscoveryRetryInterval;
+
+    NSString *token = [self.token copy];
+    NSUInteger discoveryPort = self.discoveryPort;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSURL *discoveredURL = AMDebugDiscoverEndpointSync(token, discoveryPort);
+        dispatch_async(weakSelf.queue, ^{
+            AMDebugTransport *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf.discoveryInFlight = NO;
+            if (!strongSelf.started || !strongSelf.foreground || strongSelf.helloDelivered) return;
+            if (!discoveredURL) {
+                [strongSelf appendEvent:@"transport.discovery" fields:@{
+                    @"found": @NO,
+                    @"port": @(discoveryPort)
+                }];
+                return;
+            }
+
+            BOOL changed = ![strongSelf.baseURL.absoluteString
+                isEqualToString:discoveredURL.absoluteString];
+            if (changed) {
+                strongSelf.endpointGeneration += 1;
+                [strongSelf.helloTask cancel];
+                strongSelf.helloTask = nil;
+                strongSelf.helloInFlight = NO;
+                strongSelf.helloDelivered = NO;
+                strongSelf.baseURL = discoveredURL;
+                strongSelf.commandCursor = nil;
+                strongSelf.nextHelloAttempt = 0;
+                strongSelf.nextEventAttempt = 0;
+                strongSelf.backendState = AMDebugBackendStateConnecting;
+                [strongSelf appendEvent:@"transport.discovery" fields:@{
+                    @"found": @YES,
+                    @"configured_base_url": strongSelf.configuredBaseURL.absoluteString ?: @"",
+                    @"discovered_base_url": discoveredURL.absoluteString ?: @""
+                }];
+                AMDebugShowStatus(strongSelf.mode, AMDebugBackendStateConnecting);
+            }
+            [strongSelf sendHelloForce:YES];
+        });
+    });
 }
 
 - (void)flushEvents {
-    if (!self.started || !self.URLSession || self.eventsInFlight || !self.pendingEvents.count) return;
+    if (!self.started || !self.helloDelivered || !self.URLSession ||
+        self.eventsInFlight || !self.pendingEvents.count) return;
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     if (now < self.nextEventAttempt) return;
 
@@ -720,6 +981,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     request.HTTPBody = body;
     self.eventsInFlight = YES;
+    NSUInteger generation = self.endpointGeneration;
     __weak typeof(self) weakSelf = self;
     [[self.URLSession dataTaskWithRequest:request completionHandler:^(__unused NSData *data,
                                                                       NSURLResponse *response,
@@ -730,6 +992,21 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             strongSelf.eventsInFlight = NO;
             NSInteger status = [(NSHTTPURLResponse *)response statusCode];
             BOOL success = !error && status >= 200 && status < 300;
+            if (generation != strongSelf.endpointGeneration) {
+                if (!success) {
+                    NSIndexSet *indexes = [NSIndexSet indexSetWithIndexesInRange:
+                        NSMakeRange(0, batch.count)];
+                    [strongSelf.pendingEvents insertObjects:batch atIndexes:indexes];
+                    while (strongSelf.pendingEvents.count > kAMDebugMaxBufferedEvents) {
+                        [strongSelf.pendingEvents removeLastObject];
+                    }
+                }
+                strongSelf.nextEventAttempt = 0;
+                if (strongSelf.helloDelivered && strongSelf.pendingEvents.count) {
+                    [strongSelf flushEvents];
+                }
+                return;
+            }
             if (success) {
                 strongSelf.eventRetryDelay = 1.0;
                 strongSelf.nextEventAttempt = 0;
@@ -792,7 +1069,8 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
 }
 
 - (void)pollCommands {
-    if (!self.started || !self.foreground || !self.URLSession || self.pollInFlight) return;
+    if (!self.started || !self.foreground || !self.helloDelivered ||
+        !self.URLSession || self.pollInFlight) return;
 
     NSMutableURLRequest *request = [self requestForPath:@"api/v1/commands" method:@"GET"];
     NSURLComponents *components = [NSURLComponents componentsWithURL:request.URL resolvingAgainstBaseURL:NO];
@@ -804,6 +1082,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
     components.queryItems = query;
     request.URL = components.URL;
     self.pollInFlight = YES;
+    NSUInteger generation = self.endpointGeneration;
 
     __weak typeof(self) weakSelf = self;
     [[self.URLSession dataTaskWithRequest:request completionHandler:^(NSData *data,
@@ -813,6 +1092,10 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             AMDebugTransport *strongSelf = weakSelf;
             if (!strongSelf) return;
             strongSelf.pollInFlight = NO;
+            if (generation != strongSelf.endpointGeneration) {
+                [strongSelf pollCommands];
+                return;
+            }
             NSInteger status = [(NSHTTPURLResponse *)response statusCode];
             if (error || status < 200 || status >= 300 || !data.length) return;
             id JSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -908,6 +1191,8 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         ? mimeType : @"application/octet-stream";
     [request setValue:safeType forHTTPHeaderField:@"Content-Type"];
 
+    NSUInteger generation = self.endpointGeneration;
+    NSURL *requestBaseURL = [self.baseURL copy];
     __weak typeof(self) weakSelf = self;
     NSURLSessionUploadTask *task = [self.URLSession uploadTaskWithRequest:request
                                                                  fromData:body
@@ -919,12 +1204,18 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             if (!strongSelf) return;
             NSInteger status = [(NSHTTPURLResponse *)response statusCode];
             BOOL success = !error && status >= 200 && status < 300;
-            [strongSelf appendEvent:success ? @"artifact.uploaded" : @"artifact.failed"
+            BOOL staleEndpoint = generation != strongSelf.endpointGeneration;
+            NSString *eventName = staleEndpoint ? @"artifact.stale_endpoint" :
+                (success ? @"artifact.uploaded" : @"artifact.failed");
+            [strongSelf appendEvent:eventName
                              fields:@{
                 @"name": name,
                 @"size": @(body.length),
                 @"transaction": transactionIdentifier,
                 @"status": @(status),
+                @"delivered": @(success),
+                @"request_base_url": requestBaseURL.absoluteString ?: @"",
+                @"current_base_url": strongSelf.baseURL.absoluteString ?: @"",
                 @"error": error ? AMDebugJSONValue(error, 0) : NSNull.null
             }];
             [strongSelf flushEvents];

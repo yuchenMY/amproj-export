@@ -18,7 +18,7 @@ FOUNDATION_EXPORT NSString *const AMDebugTransportMarkerHeader;
 @property(nonatomic, readonly, getter=isEnabled) BOOL enabled;
 @property(nonatomic, copy, readonly) NSString *sessionIdentifier;
 @property(nonatomic, copy, readonly) AMDebugExportMode currentMode;
-@property(nonatomic, copy, readonly, nullable) NSURL *baseURL;
+@property(atomic, copy, readonly, nullable) NSURL *baseURL;
 
 // All network work is asynchronous. Calling start more than once is harmless.
 - (void)start;

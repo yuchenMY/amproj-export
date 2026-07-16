@@ -560,6 +560,8 @@ def make_debug_config(server_ip, server_port, token, mode):
         "Token": token,
         "ProtocolVersion": 1,
         "DefaultMode": mode,
+        "DiscoveryEnabled": True,
+        "DiscoveryPort": server_port,
     }
 
 
@@ -590,6 +592,7 @@ def install_debug_config(app_dir, settings, adapter_records=None):
         plistlib.dump(config, file, fmt=plistlib.FMT_BINARY)
     print(f"[+] Generated debug config at {destination}")
     print(f"[+] Debug server: {config['BaseURL']}")
+    print(f"[+] Debug discovery: UDP {server_ip}:{config['DiscoveryPort']}")
     print(f"[+] Debug token: {config['Token']}")
     return config
 

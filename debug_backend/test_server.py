@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import tempfile
 import threading
 import unittest
@@ -10,12 +11,86 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 try:
-    from .server import BackendState, create_server
+    from .server import (
+        BackendState,
+        create_discovery_server,
+        create_server,
+        discovery_proof,
+        parse_discovery_probe,
+    )
 except ImportError:
-    from server import BackendState, create_server
+    from server import (
+        BackendState,
+        create_discovery_server,
+        create_server,
+        discovery_proof,
+        parse_discovery_probe,
+    )
 
 
 TOKEN = "test-token-with-adequate-length"
+
+
+def discovery_probe(nonce: str, token: str = TOKEN) -> bytes:
+    return json.dumps(
+        {
+            "type": "amproj-discover",
+            "version": 1,
+            "nonce": nonce,
+            "proof": discovery_proof(token, "discover", nonce),
+        },
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
+class DiscoveryTests(unittest.TestCase):
+    def test_probe_authentication_and_validation(self) -> None:
+        nonce = "0123456789abcdef0123456789abcdef"
+        self.assertEqual(
+            discovery_proof(TOKEN, "discover", nonce),
+            "5eTJQRFl7p_YOUZn5UbopEe-5tMOscncAk7x0BfYUjg",
+        )
+        self.assertEqual(
+            discovery_proof(TOKEN, "offer", nonce, 8765),
+            "aniWm4VqmM0ifZF_7AVi9KfeD6EpAArUufAJRR9w_bQ",
+        )
+        self.assertEqual(parse_discovery_probe(discovery_probe(nonce), TOKEN), nonce)
+        self.assertIsNone(parse_discovery_probe(discovery_probe(nonce, "wrong-token"), TOKEN))
+        self.assertIsNone(parse_discovery_probe(b"not-json", TOKEN))
+        self.assertIsNone(parse_discovery_probe(b"x" * 513, TOKEN))
+
+        wrong_version = json.loads(discovery_probe(nonce))
+        wrong_version["version"] = 2
+        self.assertIsNone(parse_discovery_probe(json.dumps(wrong_version).encode(), TOKEN))
+
+    def test_udp_offer_uses_configured_http_port(self) -> None:
+        server = create_discovery_server("127.0.0.1", 0, TOKEN, 43210)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(1)
+        nonce = "fedcba9876543210fedcba9876543210"
+        try:
+            sock.sendto(discovery_probe(nonce), server.server_address)
+            data, source = sock.recvfrom(512)
+            offer = json.loads(data)
+            self.assertEqual(source[0], "127.0.0.1")
+            self.assertEqual(offer["type"], "amproj-offer")
+            self.assertEqual(offer["nonce"], nonce)
+            self.assertEqual(offer["port"], 43210)
+            self.assertEqual(
+                offer["proof"], discovery_proof(TOKEN, "offer", nonce, 43210)
+            )
+
+            sock.settimeout(0.1)
+            sock.sendto(discovery_probe(nonce, "wrong-token"), server.server_address)
+            with self.assertRaises(TimeoutError):
+                sock.recvfrom(512)
+        finally:
+            sock.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 class BackendHTTPTests(unittest.TestCase):

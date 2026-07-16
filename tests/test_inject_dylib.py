@@ -308,6 +308,8 @@ class ConfigTests(unittest.TestCase):
                     "Token": "test-token-123456",
                     "ProtocolVersion": 1,
                     "DefaultMode": "placeholder",
+                    "DiscoveryEnabled": True,
+                    "DiscoveryPort": 8765,
                 },
             )
             with (Path(temp_dir) / inject_dylib.DEBUG_CONFIG_NAME).open(
@@ -441,6 +443,8 @@ class InjectionTests(unittest.TestCase):
             ) as file:
                 config = plistlib.load(file)
             self.assertEqual(config["DefaultMode"], "full")
+            self.assertIs(config["DiscoveryEnabled"], True)
+            self.assertEqual(config["DiscoveryPort"], 8765)
 
             verification = inject_dylib.verify_injected_ipa(
                 output,

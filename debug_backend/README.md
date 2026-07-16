@@ -1,5 +1,25 @@
 # AMProj Debug Backend
 
+## Dynamic LAN discovery
+
+Debug IPA keeps the injected `BaseURL` as the fast path. If the Windows WLAN
+address changes, the iOS transport discovers the backend over authenticated
+UDP and then verifies it through the normal `POST /api/v1/hello` request.
+Discovery uses the same numeric port as HTTP by default (`8765`), but UDP and
+TCP are separate listeners. The Bearer token is used only as an HMAC key and is
+never sent in a discovery packet.
+
+Windows Firewall must allow Python on the private network for both TCP and UDP
+port `8765`. Start the backend with the exact token embedded by the injector:
+
+```powershell
+python .\debug_backend\server.py --token "<injector-generated-token>"
+```
+
+Use `--discovery-port <port>` only when the IPA was injected with the matching
+port. `--no-discovery` disables the UDP listener. Discovery failure never
+blocks export or import; telemetry remains queued in memory for a later retry.
+
 Windows 本地调试后端，仅依赖 Python 标准库。HTTP API 对回环和私有局域网开放；Dashboard 和控制写入仅允许本机访问。
 
 ## 启动

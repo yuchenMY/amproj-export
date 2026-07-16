@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import signal
+import socketserver
 import sys
 import threading
 import time
@@ -38,6 +39,9 @@ DEFAULT_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_IN_MEMORY_EVENTS = 10_000
 MAX_STREAM_UPDATES = 2_000
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+DISCOVERY_PROTOCOL_VERSION = 1
+MAX_DISCOVERY_PACKET_BYTES = 512
+DISCOVERY_NONCE_RE = re.compile(r"[0-9a-f]{32}")
 
 
 def utc_now() -> str:
@@ -47,6 +51,49 @@ def utc_now() -> str:
 def safe_component(value: Any, fallback: str) -> str:
     cleaned = SAFE_NAME_RE.sub("_", str(value or "")).strip("._")
     return cleaned[:120] or fallback
+
+
+def discovery_proof(token: str, purpose: str, nonce: str, port: int | None = None) -> str:
+    fields = [purpose, str(DISCOVERY_PROTOCOL_VERSION), nonce]
+    if port is not None:
+        fields.append(str(port))
+    digest = hmac.new(token.encode("utf-8"), ":".join(fields).encode("ascii"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def parse_discovery_probe(data: bytes, token: str) -> str | None:
+    if not data or len(data) > MAX_DISCOVERY_PACKET_BYTES:
+        return None
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"type", "version", "nonce", "proof"}:
+        return None
+    nonce = payload.get("nonce")
+    proof = payload.get("proof")
+    if (
+        payload.get("type") != "amproj-discover"
+        or type(payload.get("version")) is not int
+        or payload["version"] != DISCOVERY_PROTOCOL_VERSION
+        or not isinstance(nonce, str)
+        or DISCOVERY_NONCE_RE.fullmatch(nonce) is None
+        or not isinstance(proof, str)
+    ):
+        return None
+    expected = discovery_proof(token, "discover", nonce)
+    return nonce if hmac.compare_digest(proof, expected) else None
+
+
+def build_discovery_offer(nonce: str, token: str, http_port: int) -> bytes:
+    payload = {
+        "type": "amproj-offer",
+        "version": DISCOVERY_PROTOCOL_VERSION,
+        "nonce": nonce,
+        "port": http_port,
+        "proof": discovery_proof(token, "offer", nonce, http_port),
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("ascii")
 
 
 def client_is_private(address: str) -> bool:
@@ -391,6 +438,27 @@ class DebugHTTPServer(ThreadingHTTPServer):
         self.static_dir = static_dir
 
 
+class DiscoveryUDPServer(socketserver.UDPServer):
+    allow_reuse_address = True
+
+    def __init__(self, server_address: tuple[str, int], token: str, http_port: int) -> None:
+        self.token = token
+        self.http_port = http_port
+        super().__init__(server_address, DiscoveryRequestHandler)
+
+
+class DiscoveryRequestHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        data, sock = self.request
+        server = self.server
+        if not isinstance(server, DiscoveryUDPServer) or not client_is_private(self.client_address[0]):
+            return
+        nonce = parse_discovery_probe(data, server.token)
+        if nonce is None:
+            return
+        sock.sendto(build_discovery_offer(nonce, server.token, server.http_port), self.client_address)
+
+
 class DebugRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "AMProjDebug/1"
@@ -677,10 +745,20 @@ def create_server(host: str, port: int, state: BackendState, static_dir: Path | 
     )
 
 
+def create_discovery_server(host: str, port: int, token: str, http_port: int) -> DiscoveryUDPServer:
+    return DiscoveryUDPServer((host, port), token, http_port)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AMProjExportDebug local backend")
     parser.add_argument("--host", default="0.0.0.0", help="listener address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8765, help="listener port (default: 8765)")
+    parser.add_argument(
+        "--discovery-port",
+        type=int,
+        help="UDP discovery port; defaults to the HTTP port",
+    )
+    parser.add_argument("--no-discovery", action="store_true", help="disable UDP LAN discovery")
     parser.add_argument("--data-dir", type=Path, default=Path(__file__).resolve().parent / "data")
     parser.add_argument("--token", help="Bearer token; defaults to AMPROJ_DEBUG_TOKEN or a generated token")
     parser.add_argument("--token-file", type=Path, help="read the Bearer token from this UTF-8 file")
@@ -708,30 +786,72 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("port must be between 1 and 65535")
     if not 1 <= args.max_artifact_mib <= 512:
         raise SystemExit("max artifact size must be between 1 and 512 MiB")
+    discovery_port = args.discovery_port if args.discovery_port is not None else args.port
+    if not 1 <= discovery_port <= 65535:
+        raise SystemExit("discovery port must be between 1 and 65535")
     token, generated = resolve_token(args)
     state = BackendState(args.data_dir, token, args.max_artifact_mib * 1024 * 1024)
     server = create_server(args.host, args.port, state)
-
-    def stop_server(_signum: int, _frame: Any) -> None:
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGINT, stop_server)
-        if hasattr(signal, "SIGTERM"):
-            signal.signal(signal.SIGTERM, stop_server)
-
-    print(f"AMProj Debug backend: http://127.0.0.1:{args.port}")
-    print(f"Device API: http://<windows-lan-ip>:{args.port}/api/v1")
-    print(f"Data directory: {state.data_dir.resolve()}")
-    if generated:
-        print(f"Generated Bearer token: {token}")
-        print("Pass this same token to the IPA injector.")
-    else:
-        print("Bearer token loaded.")
+    discovery_server: DiscoveryUDPServer | None = None
+    discovery_thread: threading.Thread | None = None
     try:
+        if not args.no_discovery:
+            try:
+                parsed_host = ipaddress.ip_address(args.host)
+            except ValueError:
+                parsed_host = None
+            if args.host.lower() == "localhost" or (parsed_host is not None and parsed_host.is_loopback):
+                raise SystemExit(
+                    "UDP discovery requires an HTTP host reachable from the LAN, such as 0.0.0.0"
+                )
+            try:
+                discovery_server = create_discovery_server(args.host, discovery_port, token, args.port)
+            except OSError as error:
+                raise SystemExit(
+                    f"cannot bind UDP discovery on {args.host}:{discovery_port}: {error}"
+                ) from error
+            discovery_thread = threading.Thread(
+                target=discovery_server.serve_forever,
+                kwargs={"poll_interval": 0.25},
+                name="amproj-discovery",
+                daemon=True,
+            )
+            discovery_thread.start()
+
+        def stop_server(_signum: int, _frame: Any) -> None:
+            def stop_all() -> None:
+                server.shutdown()
+                if discovery_server is not None:
+                    discovery_server.shutdown()
+
+            threading.Thread(target=stop_all, daemon=True).start()
+
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, stop_server)
+            if hasattr(signal, "SIGTERM"):
+                signal.signal(signal.SIGTERM, stop_server)
+
+        print(f"AMProj Debug backend: http://127.0.0.1:{args.port}")
+        print(f"Device API: http://<windows-lan-ip>:{args.port}/api/v1")
+        if discovery_server is not None:
+            print(f"Device discovery: UDP {args.host}:{discovery_port}")
+        else:
+            print("Device discovery: disabled")
+        print(f"Data directory: {state.data_dir.resolve()}")
+        if generated:
+            print(f"Generated Bearer token: {token}")
+            print("Pass this same token to the IPA injector.")
+        else:
+            print("Bearer token loaded.")
         server.serve_forever(poll_interval=0.25)
     finally:
         server.server_close()
+        if discovery_server is not None:
+            if discovery_thread is not None and discovery_thread.is_alive():
+                discovery_server.shutdown()
+            discovery_server.server_close()
+        if discovery_thread is not None:
+            discovery_thread.join(timeout=2)
     return 0
 
 
