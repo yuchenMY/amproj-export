@@ -54,7 +54,7 @@ python inject_dylib.py AM_v27b.ipa AMProjExportDebug.dylib AM_v27b_direct_v14.ip
 ```powershell
 python inject_dylib.py AM_v27b.ipa AMProjExportDebug.dylib AM_v27b_direct_v14_share_exp.ipa `
   --share-extension AMProjShareExtension.appex `
-  --app-group-id group.com.alightmotion.meow.amprojshare
+  --app-group-id group.com.amayaka.meow.amprojshare
 ```
 
 注入器会验证 arm64、Mach-O load command、ZIP CRC、UTI/copy-in 配置以及实验扩展的 Bundle ID、extension point 和 App Group 模板。输出 IPA 仍需使用 Sideloadly 签名安装。

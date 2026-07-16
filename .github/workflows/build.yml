@@ -50,8 +50,8 @@ jobs:
           path = "AMProjShareExtension/build/AMProjShareExtension.appex"
           info = verify_share_extension_bundle(
               path,
-              "com.alightmotion.meow.amprojshare",
-              "group.com.alightmotion.meow.amprojshare",
+              "com.amayaka.meow.amprojshare",
+              "group.com.amayaka.meow.amprojshare",
           )
           print(
               f"verified {path}: {info['bundle_identifier']}, "

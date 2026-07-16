@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>AMProjShareExtension</string>
     <key>CFBundleIdentifier</key>
-    <string>com.alightmotion.meow.amprojshare</string>
+    <string>com.amayaka.meow.amprojshare</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

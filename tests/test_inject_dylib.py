@@ -104,6 +104,31 @@ def make_share_extension(
     return appex
 
 
+def make_fake_ipa(
+    root,
+    bundle_identifier="com.example.fixture",
+    wrapper=None,
+):
+    source = Path(root) / "source"
+    archive_root = source / wrapper if wrapper else source
+    app = archive_root / "Payload" / "Fixture.app"
+    app.mkdir(parents=True)
+    with (app / "Info.plist").open("wb") as file:
+        plistlib.dump(
+            {
+                "CFBundleExecutable": "Fixture",
+                "CFBundleIdentifier": bundle_identifier,
+            },
+            file,
+        )
+    make_macho(app / "Fixture")
+    ipa = Path(root) / "input.ipa"
+    with zipfile.ZipFile(ipa, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in source.rglob("*"):
+            archive.write(path, path.relative_to(source))
+    return ipa, archive_root
+
+
 class MachOTests(unittest.TestCase):
     def test_insert_uses_padding_without_moving_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -313,6 +338,52 @@ class ConfigTests(unittest.TestCase):
 
 
 class InjectionTests(unittest.TestCase):
+    def test_wrapped_ipa_normalization_rejects_multiple_candidates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "First" / "Payload").mkdir(parents=True)
+            (root / "Second" / "Payload").mkdir(parents=True)
+
+            with self.assertRaisesRegex(RuntimeError, "more than one wrapper"):
+                inject_dylib._normalize_ipa_root(root)
+
+    def test_wrapped_ipa_normalization_rejects_root_conflicts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "DownloadedIPA" / "Payload").mkdir(parents=True)
+            (root / "DownloadedIPA" / "SwiftSupport").mkdir()
+            (root / "SwiftSupport").mkdir()
+
+            with self.assertRaisesRegex(RuntimeError, "entries conflict"):
+                inject_dylib._normalize_ipa_root(root)
+
+    def test_wrapped_fake_ipa_is_repacked_with_standard_root_layout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ipa, archive_root = make_fake_ipa(root, wrapper="DownloadedIPA")
+            swift_support = archive_root / "SwiftSupport"
+            swift_support.mkdir()
+            (swift_support / "marker.txt").write_text("preserved", encoding="ascii")
+            with zipfile.ZipFile(ipa, "w", zipfile.ZIP_DEFLATED) as archive:
+                source = root / "source"
+                for path in source.rglob("*"):
+                    archive.write(path, path.relative_to(source))
+
+            dylib = root / "AMProjExport.dylib"
+            make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
+            output = root / "wrapped-output.ipa"
+
+            with mock.patch.object(inject_dylib, "_try_resign"):
+                inject_dylib.inject_ipa(ipa, dylib, output)
+
+            with zipfile.ZipFile(output, "r") as archive:
+                names = archive.namelist()
+                self.assertIn("Payload/Fixture.app/Info.plist", names)
+                self.assertIn("SwiftSupport/marker.txt", names)
+                self.assertFalse(
+                    any(name.startswith("DownloadedIPA/") for name in names)
+                )
+
     def test_fake_ipa_debug_injection_end_to_end(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -624,6 +624,59 @@ def _debug_settings_from_args(args, parser):
     )
 
 
+def _normalize_ipa_root(extraction_dir):
+    """Move a single wrapper directory's contents to the IPA archive root."""
+    root = Path(extraction_dir)
+    payload = root / "Payload"
+    if payload.is_dir() and not payload.is_symlink():
+        return False
+    if payload.exists() or payload.is_symlink():
+        raise RuntimeError("IPA root Payload exists but is not a directory")
+
+    candidates = []
+    for path in root.iterdir():
+        wrapped_payload = path / "Payload"
+        if (
+            path.is_dir()
+            and not path.is_symlink()
+            and wrapped_payload.is_dir()
+            and not wrapped_payload.is_symlink()
+        ):
+            candidates.append(path)
+
+    if not candidates:
+        raise FileNotFoundError("IPA does not contain a Payload directory")
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "IPA contains more than one wrapper directory with Payload"
+        )
+
+    wrapper = candidates[0]
+    entries = list(wrapper.iterdir())
+    conflicts = [
+        entry.name
+        for entry in entries
+        if (root / entry.name).exists() or (root / entry.name).is_symlink()
+    ]
+    if conflicts:
+        raise RuntimeError(
+            "Cannot normalize IPA wrapper because archive-root entries conflict: "
+            + ", ".join(sorted(conflicts))
+        )
+    direct_symlinks = [entry.name for entry in entries if entry.is_symlink()]
+    if direct_symlinks:
+        raise RuntimeError(
+            "Cannot normalize IPA wrapper containing top-level symbolic links: "
+            + ", ".join(sorted(direct_symlinks))
+        )
+
+    for entry in entries:
+        shutil.move(str(entry), str(root / entry.name))
+    wrapper.rmdir()
+    print(f"[+] Normalized wrapped IPA root from {wrapper.name}")
+    return True
+
+
 def _find_app_bundle(extraction_dir):
     payload = Path(extraction_dir) / "Payload"
     if not payload.is_dir():
@@ -1138,6 +1191,7 @@ def inject_ipa(
         print(f"[*] Temp dir: {temp_dir}")
         print(f"[*] Extracting {ipa_path}...")
         shutil.unpack_archive(str(ipa_path), temp_dir, "zip")
+        _normalize_ipa_root(temp_dir)
         app_dir = _find_app_bundle(temp_dir)
         with (app_dir / "Info.plist").open("rb") as file:
             original_info = plistlib.load(file)

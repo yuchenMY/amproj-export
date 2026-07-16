@@ -5,7 +5,7 @@
 
 static NSString *const kAMProjShareErrorDomain = @"com.amproj.share-extension";
 static NSString *const kAMProjTypeIdentifier = @"com.alightcreative.motion.amproj";
-static NSString *const kAMProjAppGroupIdentifier = @"group.com.alightmotion.meow.amprojshare";
+static NSString *const kAMProjAppGroupIdentifier = @"group.com.amayaka.meow.amprojshare";
 static NSString *const kAMProjInboxDirectoryName = @"AMProjShareInbox";
 static unsigned long long const kAMProjMaximumFileSize = 512ULL * 1024ULL * 1024ULL;
 static NSTimeInterval const kAMProjStaleRequestAge = 24.0 * 60.0 * 60.0;

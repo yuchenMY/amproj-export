@@ -23,7 +23,7 @@ before signing the containing app.
 Both the containing app and extension must be signed with this App Group:
 
 ```text
-group.com.alightmotion.meow.amprojshare
+group.com.amayaka.meow.amprojshare
 ```
 
 The extension writes completed requests under:
