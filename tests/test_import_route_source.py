@@ -267,6 +267,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("amproj_nativeImportObservationActive", detector)
         self.assertIn("UIAlertController.class", detector)
+        self.assertIn('containsString:@"import failed"', detector)
         self.assertIn('containsString:@"upload failed"', detector)
         self.assertIn('containsString:@"corrupt"', detector)
 
@@ -275,11 +276,72 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "#if AMPROJ_DEBUG",
         )
         self.assertIn('amproj_debugEvent(@"import.native_failure_alert"', present)
-        self.assertIn("amproj_nativeImportObservationActive = NO", present)
-        self.assertIn("AM \\u539f\\u751f\\u89e3\\u6790\\u5931\\u8d25 (E40)", present)
+        self.assertIn("amproj_currentNativeParserSnapshot", present)
+        self.assertIn("amproj_visibleNativeParserSummary", present)
+        self.assertIn("amproj_endNativeImportObservation", present)
+        self.assertIn("amproj_flushDebugEvents", present)
+        self.assertIn("AMProj v19 \\u00b7 E40", present)
+        self.assertLess(
+            present.index('amproj_debugEvent(@"import.native_failure_alert"'),
+            present.index("amproj_endNativeImportObservation"),
+        )
         self.assertIn(
             "orig_presentVC(self, _cmd, controller, animated, completion)", present
         )
+
+    def test_scene_parser_probe_records_semantic_error_location_safely(self):
+        count_reader = function_body(
+            "static NSUInteger amproj_nativeSceneParserErrorCount",
+            "static NSMutableArray<NSString *>* amproj_nativeParserElementStack",
+        )
+        self.assertIn('class_getInstanceVariable([delegate class], "errors")', count_reader)
+        self.assertIn("class_getInstanceSize", count_reader)
+        self.assertGreaterEqual(count_reader.count("mach_vm_read_overwrite"), 1)
+        self.assertNotIn("object_getIvar", count_reader)
+
+        recorder = function_body(
+            "static void amproj_recordNativeSceneParserError",
+            "static void hooked_nativeXMLParserDidStartElement",
+        )
+        self.assertIn('snapshot[@"semantic_error_count"]', recorder)
+        self.assertIn('snapshot[@"element_path"]', recorder)
+        self.assertIn('amproj_debugEvent(@"import.native_scene_error"', recorder)
+
+        parser = function_body(
+            "static BOOL hooked_nativeXMLParserParse",
+            "static void amproj_installNativeXMLDelegateHook",
+        )
+        self.assertIn('containsString:@"SceneParserDelegate"', parser)
+        self.assertIn("parser.parserError", parser)
+        self.assertIn("amproj_storeNativeParserSnapshot", parser)
+
+        installer = function_body(
+            "static void amproj_installNativeXMLDelegateHook",
+            "static void amproj_installNativeXMLParserHook",
+        )
+        self.assertIn("parser:didStartElement:namespaceURI:qualifiedName:attributes:", installer)
+        self.assertIn("parser:foundCharacters:", installer)
+        self.assertIn("parser:didEndElement:namespaceURI:qualifiedName:", installer)
+
+    def test_native_import_observation_blocks_queue_until_terminal_state(self):
+        queue = function_body(
+            "static void amproj_queuePreparedImport",
+            "static void amproj_resumeQueuedImports",
+        )
+        resume = function_body(
+            "static void amproj_resumeQueuedImports",
+            "static BOOL amproj_handleImportCommandURL",
+        )
+        self.assertIn("!amproj_nativeImportObservationActive", queue)
+        self.assertIn("amproj_nativeImportObservationActive", resume)
+
+        disappeared = function_body(
+            "static void hooked_projectsImportAlertViewDidDisappear",
+            "static UIWindow* amproj_keyWindow",
+        )
+        self.assertIn("amproj_endNativeImportObservation", disappeared)
+        self.assertIn("amproj_importDispatchCoolingDown = NO", disappeared)
+        self.assertIn('amproj_resumeQueuedImports(@"native_import_observation_timeout")', disappeared)
 
     def test_alert_hook_install_retries_until_swift_class_exists(self):
         install = function_body(

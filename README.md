@@ -24,7 +24,7 @@ project.amproj
 
 完整格式见 `format_spec.md`。
 
-## v18 离线导入
+## v19 离线导入
 
 稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效时，先复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`。Inbox 或已取得 security scope 的文件在后台复制；只有无法延续授权的 Provider URL 才在回调内同步复制。AppDelegate 的通用文件入口只处理媒体、字体和 SVG，并且可能在没有创建项目时返回 `YES`，因此不能用于 `.amproj` 导入或作为成功判据。
 
@@ -47,20 +47,20 @@ AMProjShareExtension/build/AMProjShareExtension.appex
 AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-## 从干净 IPA 生成 v18
+## 从干净 IPA 生成 v19
 
 必须以未注入的 `AM_v1.ipa` 为输入，不要用旧测试包继续叠加。主 App Bundle ID 保持 `com.amayaka.meow`。
 
 稳定版：
 
 ```powershell
-python inject_dylib.py AM_v1.ipa AMProjExportDebug.dylib AM_v1_direct_v18.ipa
+python inject_dylib.py AM_v1.ipa AMProjExportDebug.dylib AM_v1_direct_v19.ipa
 ```
 
 实验版：
 
 ```powershell
-python inject_dylib.py AM_v1.ipa AMProjExportDebug.dylib AM_v1_direct_v18_share_exp.ipa `
+python inject_dylib.py AM_v1.ipa AMProjExportDebug.dylib AM_v1_direct_v19_share_exp.ipa `
   --share-extension AMProjShareExtension.appex `
   --app-group-id group.com.amayaka.meow.amprojshare
 ```
