@@ -43,7 +43,6 @@
 #import "AMDebugTransport.h"
 #import <dlfcn.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
 #import <mach/arm/thread_status.h>
 #endif
 
@@ -2340,7 +2339,6 @@ static AMProjTrackedHook amproj_handleOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_legacyOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_sceneOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateStartHooks[8] = {0};
-static AMProjTrackedHook amproj_nativeXMLDelegateCharactersHooks[8] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateEndHooks[8] = {0};
 static IMP amproj_nativeAppDelegateOpenURLIMP = NULL;
 static BOOL (*orig_nativeXMLParserParse)(NSXMLParser *, SEL) = NULL;
@@ -2359,6 +2357,7 @@ static BOOL amproj_nativeImportObservationActive = NO;
 static NSUInteger amproj_nativeImportObservationGeneration = 0;
 static NSString *amproj_nativeImportObservationName = nil;
 static NSString *amproj_nativeImportAttemptID = nil;
+static NSString *amproj_nativeImportObservationPhase = nil;
 static CFAbsoluteTime amproj_nativeImportObservationStartedAt = 0;
 static NSDictionary *amproj_nativeParserSnapshot = nil;
 static NSUInteger amproj_nativeImportRecognitionGeneration = 0;
@@ -2413,6 +2412,7 @@ static void amproj_beginNativeImportObservation(NSString *name) {
     amproj_nativeImportObservationStartedAt = CFAbsoluteTimeGetCurrent();
     @synchronized (amproj_nativeParserLock()) {
         amproj_nativeImportAttemptID = NSUUID.UUID.UUIDString.lowercaseString;
+        amproj_nativeImportObservationPhase = @"recognition";
         amproj_nativeParserSnapshot = nil;
     }
 }
@@ -2424,12 +2424,27 @@ static void amproj_endNativeImportObservation(void) {
     amproj_nativeImportObservationStartedAt = 0;
     @synchronized (amproj_nativeParserLock()) {
         amproj_nativeImportAttemptID = nil;
+        amproj_nativeImportObservationPhase = nil;
     }
 }
 
 static NSString* amproj_currentNativeImportAttemptID(void) {
     @synchronized (amproj_nativeParserLock()) {
         return [amproj_nativeImportAttemptID copy];
+    }
+}
+
+static NSString* amproj_currentNativeImportObservationPhase(void) {
+    @synchronized (amproj_nativeParserLock()) {
+        return [amproj_nativeImportObservationPhase copy];
+    }
+}
+
+static void amproj_setNativeImportObservationPhase(NSString *phase) {
+    @synchronized (amproj_nativeParserLock()) {
+        if (amproj_nativeImportAttemptID.length) {
+            amproj_nativeImportObservationPhase = [phase copy];
+        }
     }
 }
 
@@ -2444,7 +2459,20 @@ static void amproj_storeNativeParserSnapshot(NSString *attemptID,
     if (!attemptID.length || !snapshot.count) return;
     @synchronized (amproj_nativeParserLock()) {
         if ([attemptID isEqualToString:amproj_nativeImportAttemptID]) {
-            amproj_nativeParserSnapshot = [snapshot copy];
+            BOOL incomingFailure = [snapshot[@"semantic_error_count"] unsignedIntegerValue] > 0 ||
+                (snapshot[@"result"] && ![snapshot[@"result"] boolValue]);
+            BOOL existingFailure =
+                [amproj_nativeParserSnapshot[@"semantic_error_count"] unsignedIntegerValue] > 0 ||
+                (amproj_nativeParserSnapshot[@"result"] &&
+                 ![amproj_nativeParserSnapshot[@"result"] boolValue]);
+            BOOL incomingCommit = [snapshot[@"import_phase"] isEqual:@"commit"];
+            BOOL existingCommit =
+                [amproj_nativeParserSnapshot[@"import_phase"] isEqual:@"commit"];
+            if (!amproj_nativeParserSnapshot ||
+                (incomingFailure && !existingFailure) ||
+                (incomingCommit && !existingCommit)) {
+                amproj_nativeParserSnapshot = [snapshot copy];
+            }
         }
     }
 }
@@ -2456,6 +2484,7 @@ static NSDictionary* amproj_nativeImportObservationFields(void) {
         : 0;
     return @{
         @"attempt_id": amproj_currentNativeImportAttemptID() ?: @"",
+        @"phase": amproj_currentNativeImportObservationPhase() ?: @"",
         @"filename": amproj_nativeImportObservationName ?: @"project.amproj",
         @"elapsed_ms": @(elapsed)
     };
@@ -2504,9 +2533,9 @@ static IMP amproj_originalHookForReceiverSkippingExact(AMProjTrackedHook *hooks,
     return NULL;
 }
 
-static void amproj_storeOriginalHook(AMProjTrackedHook *hooks, NSUInteger count,
+static BOOL amproj_storeOriginalHook(AMProjTrackedHook *hooks, NSUInteger count,
                                      Class cls, IMP original) {
-    if (!cls || !original) return;
+    if (!cls || !original) return NO;
     for (NSUInteger index = 0; index < count; index++) {
         if (hooks[index].cls == cls) {
             if (!hooks[index].base) {
@@ -2514,7 +2543,7 @@ static void amproj_storeOriginalHook(AMProjTrackedHook *hooks, NSUInteger count,
                     ? hooks[index].original : original;
             }
             hooks[index].original = original;
-            return;
+            return YES;
         }
     }
     for (NSUInteger index = 0; index < count; index++) {
@@ -2522,9 +2551,10 @@ static void amproj_storeOriginalHook(AMProjTrackedHook *hooks, NSUInteger count,
             hooks[index].cls = cls;
             hooks[index].original = original;
             hooks[index].base = original;
-            return;
+            return YES;
         }
     }
+    return NO;
 }
 
 static UIWindow* amproj_importForegroundWindow(void) {
@@ -4845,6 +4875,7 @@ static void hooked_projectsImportAlertViewDidLoad(id self, SEL _cmd) {
 static void hooked_projectsImportAlertOnPressImport(id self, SEL _cmd, id sender) {
     BOOL tracked = amproj_isTrackedProjectsImportAlert(self);
     if (tracked) {
+        amproj_setNativeImportObservationPhase(@"commit");
         objc_setAssociatedObject(self, &amproj_projectsImportActionKey, @"import",
                                  OBJC_ASSOCIATION_COPY_NONATOMIC);
     }
@@ -5270,6 +5301,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         NSMutableDictionary *failureFields = [@{
             @"filename": name,
             @"attempt_id": observation[@"attempt_id"] ?: @"",
+            @"import_phase": observation[@"phase"] ?: @"",
             @"elapsed_ms": observation[@"elapsed_ms"] ?: @0,
             @"title": nativeFailureTitle ?: @"",
             @"message": nativeFailureMessage ?: @"",
@@ -5535,7 +5567,7 @@ static BOOL amproj_installTrackedHook(Class cls, SEL selector, IMP replacement,
     const char *encoding = method_getTypeEncoding(resolved);
     if (!encoding) return NO;
 
-    amproj_storeOriginalHook(hooks, hookCount, cls, current);
+    if (!amproj_storeOriginalHook(hooks, hookCount, cls, current)) return NO;
     if (own) {
         method_setImplementation(own, replacement);
     } else if (!class_addMethod(cls, selector, replacement, encoding)) {
@@ -5543,7 +5575,7 @@ static BOOL amproj_installTrackedHook(Class cls, SEL selector, IMP replacement,
         if (!own) return NO;
         current = method_getImplementation(own);
         if (current != replacement) {
-            amproj_storeOriginalHook(hooks, hookCount, cls, current);
+            if (!amproj_storeOriginalHook(hooks, hookCount, cls, current)) return NO;
             method_setImplementation(own, replacement);
         }
     }
@@ -5595,10 +5627,10 @@ static NSUInteger amproj_nativeSceneParserErrorCount(id delegate) {
         return NSNotFound;
     }
     uintptr_t count = 0;
-    mach_vm_size_t copied = 0;
-    kern_return_t result = mach_vm_read_overwrite(
-        mach_task_self(), (mach_vm_address_t)(storage + 0x10), sizeof(count),
-        (mach_vm_address_t)(uintptr_t)&count, &copied);
+    vm_size_t copied = 0;
+    kern_return_t result = vm_read_overwrite(
+        mach_task_self(), (vm_address_t)(storage + 0x10), sizeof(count),
+        (vm_address_t)(uintptr_t)&count, &copied);
     if (result != KERN_SUCCESS || copied != sizeof(count)) return NSNotFound;
     return count <= (1U << 20) ? (NSUInteger)count : NSNotFound;
 #else
@@ -5695,31 +5727,6 @@ static void hooked_nativeXMLParserDidStartElement(
         self, parser, @"did_start_element", beforeCount, afterCount);
 }
 
-static void hooked_nativeXMLParserFoundCharacters(
-    id self, SEL _cmd, NSXMLParser *parser, NSString *characters) {
-    NSString *attemptID = objc_getAssociatedObject(
-        parser, &amproj_nativeXMLParserAttemptKey);
-    NSNumber *previousCount = objc_getAssociatedObject(
-        parser, &amproj_nativeXMLParserErrorCountKey);
-    NSUInteger beforeCount = previousCount ? previousCount.unsignedIntegerValue : NSNotFound;
-    IMP original = amproj_originalHookForReceiver(
-        amproj_nativeXMLDelegateCharactersHooks,
-        sizeof(amproj_nativeXMLDelegateCharactersHooks) /
-            sizeof(amproj_nativeXMLDelegateCharactersHooks[0]), self);
-    if (original) {
-        ((void (*)(id, SEL, NSXMLParser *, NSString *))(void *)original)(
-            self, _cmd, parser, characters);
-    }
-    NSUInteger afterCount = attemptID.length
-        ? amproj_nativeSceneParserErrorCount(self) : NSNotFound;
-    if (afterCount != NSNotFound) {
-        objc_setAssociatedObject(parser, &amproj_nativeXMLParserErrorCountKey,
-                                 @(afterCount), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    amproj_recordNativeSceneParserError(
-        self, parser, @"found_characters", beforeCount, afterCount);
-}
-
 static void hooked_nativeXMLParserDidEndElement(
     id self, SEL _cmd, NSXMLParser *parser, NSString *elementName,
     NSString *namespaceURI, NSString *qualifiedName) {
@@ -5756,6 +5763,8 @@ static BOOL hooked_nativeXMLParserParse(NSXMLParser *parser, SEL _cmd) {
     NSString *attemptID = currentAttemptID.length &&
         [delegateClass containsString:@"SceneParserDelegate"]
         ? currentAttemptID : nil;
+    NSString *importPhase = attemptID.length
+        ? amproj_currentNativeImportObservationPhase() : nil;
     if (attemptID.length) {
         objc_setAssociatedObject(parser, &amproj_nativeXMLParserAttemptKey,
                                  attemptID, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -5769,6 +5778,7 @@ static BOOL hooked_nativeXMLParserParse(NSXMLParser *parser, SEL _cmd) {
         amproj_debugEvent(@"import.native_xml_parser", @{
             @"phase": @"begin",
             @"attempt_id": attemptID,
+            @"import_phase": importPhase ?: @"",
             @"delegate": delegateClass ?: @""
         });
     }
@@ -5790,6 +5800,7 @@ static BOOL hooked_nativeXMLParserParse(NSXMLParser *parser, SEL _cmd) {
             snapshot[@"final_column"] = lastElement[@"column"] ?: @0;
         }
         snapshot[@"attempt_id"] = attemptID;
+        snapshot[@"import_phase"] = importPhase ?: @"";
         snapshot[@"delegate"] = delegateClass ?: @"";
         snapshot[@"result"] = @(parsed);
         snapshot[@"duration_ms"] =
@@ -5820,13 +5831,6 @@ static void amproj_installNativeXMLDelegateHook(Class cls) {
         amproj_nativeXMLDelegateStartHooks,
         sizeof(amproj_nativeXMLDelegateStartHooks) /
             sizeof(amproj_nativeXMLDelegateStartHooks[0]), &startChanged);
-    BOOL charactersChanged = NO;
-    BOOL charactersInstalled = amproj_installTrackedHook(
-        cls, @selector(parser:foundCharacters:),
-        (IMP)hooked_nativeXMLParserFoundCharacters, 4,
-        amproj_nativeXMLDelegateCharactersHooks,
-        sizeof(amproj_nativeXMLDelegateCharactersHooks) /
-            sizeof(amproj_nativeXMLDelegateCharactersHooks[0]), &charactersChanged);
     BOOL endChanged = NO;
     BOOL endInstalled = amproj_installTrackedHook(
         cls, @selector(parser:didEndElement:namespaceURI:qualifiedName:),
@@ -5834,17 +5838,17 @@ static void amproj_installNativeXMLDelegateHook(Class cls) {
         amproj_nativeXMLDelegateEndHooks,
         sizeof(amproj_nativeXMLDelegateEndHooks) /
             sizeof(amproj_nativeXMLDelegateEndHooks[0]), &endChanged);
-    if (startChanged || charactersChanged || endChanged) {
+    if (startChanged || endChanged) {
         amproj_debugEvent(@"import.native_xml_delegate_hook", @{
             @"class": NSStringFromClass(cls) ?: @"",
             @"start": @(startInstalled),
-            @"characters": @(charactersInstalled),
             @"end": @(endInstalled)
         });
     }
 }
 
 static void amproj_installNativeXMLParserHook(void) {
+#if AMPROJ_DEBUG
     static BOOL installed = NO;
     if (installed) return;
     Method method = class_getInstanceMethod(NSXMLParser.class, @selector(parse));
@@ -5857,6 +5861,7 @@ static void amproj_installNativeXMLParserHook(void) {
     amproj_debugEvent(@"import.native_xml_parser_hook", @{
         @"installed": @(installed)
     });
+#endif
 }
 
 static NSString* amproj_compactNativeDiagnostic(NSString *text,

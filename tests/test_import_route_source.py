@@ -296,7 +296,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn('class_getInstanceVariable([delegate class], "errors")', count_reader)
         self.assertIn("class_getInstanceSize", count_reader)
-        self.assertGreaterEqual(count_reader.count("mach_vm_read_overwrite"), 1)
+        self.assertGreaterEqual(count_reader.count("vm_read_overwrite"), 1)
         self.assertNotIn("object_getIvar", count_reader)
 
         recorder = function_body(
@@ -320,8 +320,28 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_installNativeXMLParserHook",
         )
         self.assertIn("parser:didStartElement:namespaceURI:qualifiedName:attributes:", installer)
-        self.assertIn("parser:foundCharacters:", installer)
         self.assertIn("parser:didEndElement:namespaceURI:qualifiedName:", installer)
+        self.assertNotIn("parser:foundCharacters:", installer)
+
+        parse_installer = function_body(
+            "static void amproj_installNativeXMLParserHook",
+            "static NSString* amproj_compactNativeDiagnostic",
+        )
+        self.assertIn("#if AMPROJ_DEBUG", parse_installer)
+
+    def test_tracked_hook_refuses_to_swizzle_when_original_storage_is_full(self):
+        store = function_body(
+            "static BOOL amproj_storeOriginalHook",
+            "static UIWindow* amproj_importForegroundWindow",
+        )
+        self.assertIn("return NO;", store)
+        installer = function_body(
+            "static BOOL amproj_installTrackedHook",
+            "static NSDictionary* amproj_nativeParserElementSnapshot",
+        )
+        self.assertGreaterEqual(
+            installer.count("if (!amproj_storeOriginalHook"), 2
+        )
 
     def test_native_import_observation_blocks_queue_until_terminal_state(self):
         queue = function_body(
