@@ -13,13 +13,27 @@ int main(int argc, const char *argv[]) {
         NSURL *workURL = [NSURL fileURLWithPath:
             [NSString stringWithUTF8String:argv[2]] isDirectory:YES];
         BOOL expectSuccess = strcmp(argv[3], "ok") == 0;
+        BOOL normalize = strcmp(argv[3], "normalize") == 0;
         NSUInteger expectedMissing = (NSUInteger)strtoull(argv[4], NULL, 10);
 
         NSURL *nativeXMLURL = nil;
         NSDictionary<NSString *, id> *metrics = nil;
         NSError *error = nil;
-        BOOL success = AMProjPrepareNativeImport(archiveURL, workURL,
-                                                  &nativeXMLURL, &metrics, &error);
+        NSURL *normalizedURL = [workURL URLByAppendingPathComponent:@"normalized.amproj"];
+        BOOL success = normalize
+            ? AMProjNormalizeProjectArchive(archiveURL, workURL, normalizedURL, &metrics, &error)
+            : AMProjPrepareNativeImport(archiveURL, workURL, &nativeXMLURL, &metrics, &error);
+        if (normalize) {
+            if (!success || error || ![NSFileManager.defaultManager
+                    fileExistsAtPath:normalizedURL.path] ||
+                [metrics[@"missing_reference_count"] unsignedIntegerValue] != expectedMissing ||
+                [metrics[@"input_manifest_count"] unsignedIntegerValue] > 1 ||
+                [metrics[@"zip"][@"manifest_count"] unsignedIntegerValue] != 1) {
+                NSLog(@"archive normalization failed: %@ %@", metrics, error);
+                return 6;
+            }
+            return 0;
+        }
         if (!expectSuccess) {
             if (success || error == nil) {
                 NSLog(@"invalid archive unexpectedly succeeded: %@ %@", metrics, error);

@@ -31,7 +31,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_templates_picker_is_used_as_native_package_importer(self):
         finder = function_body(
             "static UIViewController* amproj_findTemplatesControllerRecursive",
-            "static UIViewController* amproj_findTemplatesController(void)",
+            "static UIViewController* amproj_findTemplatesController(BOOL visibleOnly)",
         )
         self.assertIn('containsString:@"TemplatesListVC"', finder)
         self.assertIn(
@@ -39,9 +39,11 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             finder,
         )
         self.assertIn("respondsToSelector:importSelector", finder)
+        self.assertIn("amproj_controllerIsVisible(controller)", finder)
+        self.assertIn("controller == amproj_activeTemplatesController", finder)
 
         search = function_body(
-            "static UIViewController* amproj_findTemplatesController(void)",
+            "static UIViewController* amproj_findTemplatesController(BOOL visibleOnly)",
             "static UIViewController* amproj_topViewController",
         )
         self.assertIn("UISceneActivationStateForegroundActive", search)
@@ -50,6 +52,28 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             search.index("keyWindow.rootViewController"),
             search.index("window.hidden"),
         )
+
+    def test_native_dispatch_waits_for_templates_view_did_appear(self):
+        appeared = function_body(
+            "static void hooked_templatesViewDidAppear",
+            "static void hooked_templatesViewDidDisappear",
+        )
+        self.assertIn("amproj_activeTemplatesController = self", appeared)
+        self.assertIn('amproj_resumeQueuedImports(@"templates_view_did_appear")', appeared)
+
+        disappeared = function_body(
+            "static void hooked_templatesViewDidDisappear",
+            "static BOOL amproj_isTrackedProjectsImportAlert",
+        )
+        self.assertIn("amproj_activeTemplatesController == self", disappeared)
+        self.assertIn("amproj_activeTemplatesController = nil", disappeared)
+
+        install = function_body(
+            "static void amproj_installTemplatesLifecycleHook",
+            "static void amproj_installProjectsImportAlertHook",
+        )
+        self.assertIn("TemplatesListVC.viewDidAppear", install)
+        self.assertIn("TemplatesListVC.viewDidDisappear", install)
 
     def test_delegate_url_entrypoints_capture_project_before_original(self):
         entrypoints = (
@@ -148,35 +172,39 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("if (passthroughContexts.count &&", body)
         self.assertNotIn("amproj_stageForwardedProjectURL", body)
 
-    def test_native_package_validation_requires_exactly_one_manifest(self):
+    def test_native_package_validation_accepts_missing_manifest_for_normalization(self):
         body = function_body(
             "static BOOL amproj_validateIncomingArchive",
             "static NSString* amproj_importCacheFilename",
         )
-        self.assertIn("if (manifestCount != 1)", body)
-        self.assertIn("manifestCount == 0 ?", body)
-        self.assertIn("contains no manifest.txt", body)
-        self.assertIn("exactly one manifest.txt", body)
+        self.assertIn("if (manifestCount > 1)", body)
+        self.assertNotIn("manifestCount != 1", body)
+        self.assertNotIn("manifestCount == 0 ?", body)
+        self.assertIn("at most one manifest.txt", body)
 
-    def test_archive_validation_runs_on_worker_and_queues_original_zip(self):
+    def test_archive_validation_normalizes_and_queues_canonical_zip(self):
         body = function_body(
             "static void amproj_prepareCopiedArchive",
             "static void amproj_activateNextPendingImport",
         )
         worker = body.index("dispatch_async(amproj_importInboxQueue()")
         validate = body.index("amproj_validateIncomingArchive")
-        queue = body.index("amproj_queuePreparedImport(archiveSnapshot")
+        normalize = body.index("AMProjNormalizeProjectArchive")
+        queue = body.index("amproj_queuePreparedImport(normalizedURL")
         self.assertLess(worker, validate)
-        self.assertLess(validate, queue)
-        self.assertNotIn("AMProjPrepareNativeImport", body)
-        self.assertNotIn("nativeXMLURL", body)
+        self.assertLess(validate, normalize)
+        self.assertLess(normalize, queue)
+        self.assertNotIn("amproj_queuePreparedImport(archiveSnapshot", body)
+        self.assertIn('normalizationMetrics[@"missing_reference_count"]', body)
 
     def test_prepared_zip_dispatches_to_templates_picker_not_app_delegate(self):
         dispatch = function_body(
             "static void amproj_tryDispatchPendingImport",
             "static void amproj_queuePreparedImport",
         )
-        self.assertIn("amproj_findTemplatesController()", dispatch)
+        self.assertIn("amproj_findTemplatesController(YES)", dispatch)
+        self.assertIn("amproj_findTemplatesController(NO)", dispatch)
+        self.assertIn("amproj_revealTemplatesController(hiddenController)", dispatch)
         self.assertIn(
             'NSSelectorFromString(@"documentPicker:didPickDocumentsAtURLs:")',
             dispatch,
@@ -210,6 +238,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("++amproj_nativeImportRecognitionGeneration", loaded)
         self.assertIn("if (recognizedQueuedPackage)", loaded)
         self.assertIn("4/4 AM", loaded)
+        self.assertNotIn("amproj_nativeImportObservationActive = NO", loaded)
         self.assertEqual(SOURCE.count("4/4 AM"), 1)
 
         pressed = function_body(
@@ -227,6 +256,30 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("amproj_nativeImportAlertActive = NO", disappeared)
         self.assertIn("amproj_resumeQueuedImports", disappeared)
+        self.assertIn('isEqualToString:@"import"', disappeared)
+        self.assertIn("180 * NSEC_PER_SEC", disappeared)
+        self.assertNotIn("2 * NSEC_PER_SEC", disappeared)
+
+    def test_native_failure_alert_is_observed_without_replacing_it(self):
+        detector = function_body(
+            "static BOOL amproj_isNativeImportFailureAlert",
+            "static void hooked_presentVC",
+        )
+        self.assertIn("amproj_nativeImportObservationActive", detector)
+        self.assertIn("UIAlertController.class", detector)
+        self.assertIn('containsString:@"upload failed"', detector)
+        self.assertIn('containsString:@"corrupt"', detector)
+
+        present = function_body(
+            "static void hooked_presentVC",
+            "#if AMPROJ_DEBUG",
+        )
+        self.assertIn('amproj_debugEvent(@"import.native_failure_alert"', present)
+        self.assertIn("amproj_nativeImportObservationActive = NO", present)
+        self.assertIn("AM \\u539f\\u751f\\u89e3\\u6790\\u5931\\u8d25 (E40)", present)
+        self.assertIn(
+            "orig_presentVC(self, _cmd, controller, animated, completion)", present
+        )
 
     def test_alert_hook_install_retries_until_swift_class_exists(self):
         install = function_body(

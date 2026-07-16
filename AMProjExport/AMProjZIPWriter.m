@@ -13,6 +13,7 @@ NSString *const AMProjZIPErrorDomain = @"com.amproj.export.zip";
 enum { kAMProjZIPBufferSize = 64 * 1024 };
 static const uint64_t kAMProjZIPSpaceReserve = 8 * 1024 * 1024;
 static const uint16_t kAMProjZIPUTF8Flag = 0x0800;
+static const uint16_t kAMProjZIPDOSDate19800101 = 0x0021;
 
 @interface AMProjZIPEntry : NSObject
 @property(nonatomic, copy) NSString *name;
@@ -292,6 +293,7 @@ static BOOL AMProjZIPDeflateEntry(AMProjZIPEntry *entry, int outputFD,
     AMProjZIPPut16(localHeader, 4, 20);
     AMProjZIPPut16(localHeader, 6, kAMProjZIPUTF8Flag);
     AMProjZIPPut16(localHeader, 8, 8);
+    AMProjZIPPut16(localHeader, 12, kAMProjZIPDOSDate19800101);
     AMProjZIPPut16(localHeader, 26, (uint16_t)entry.nameData.length);
     entry.localOffset = (uint32_t)*outputOffset;
     if (!AMProjZIPWriteAll(outputFD, localHeader, sizeof(localHeader), outputOffset, error) ||
@@ -439,6 +441,7 @@ static BOOL AMProjZIPWriteCentralDirectory(NSArray<AMProjZIPEntry *> *entries,
         AMProjZIPPut16(header, 6, 20);
         AMProjZIPPut16(header, 8, kAMProjZIPUTF8Flag);
         AMProjZIPPut16(header, 10, 8);
+        AMProjZIPPut16(header, 14, kAMProjZIPDOSDate19800101);
         AMProjZIPPut32(header, 16, entry.crc);
         AMProjZIPPut32(header, 20, entry.compressedSize);
         AMProjZIPPut32(header, 24, entry.uncompressedSize);

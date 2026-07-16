@@ -1,4 +1,5 @@
 #import "AMProjImportArchive.h"
+#import "AMProjZIPWriter.h"
 
 #import <errno.h>
 #import <fcntl.h>
@@ -695,6 +696,7 @@ static NSURL * _Nullable AMProjImportURLForReference(
 static NSData *AMProjImportRewriteXML(NSData *xmlData,
                                       NSArray<AMProjImportEntry *> *entries,
                                       NSUInteger *referenceCount,
+                                      NSUInteger *rewrittenCount,
                                       NSUInteger *missingCount, NSError **error) {
     NSString *xml = [[NSString alloc] initWithData:xmlData encoding:NSUTF8StringEncoding];
     if (!xml) {
@@ -728,7 +730,8 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
     NSMutableString *rewritten = [xml mutableCopy];
     NSArray<NSTextCheckingResult *> *matches = [regex matchesInString:xml options:0
                                                                range:NSMakeRange(0, xml.length)];
-    NSUInteger localMissingCount = 0;
+    NSMutableSet<NSString *> *missingReferences = [NSMutableSet set];
+    NSUInteger localRewrittenCount = 0;
     for (NSTextCheckingResult *match in matches.reverseObjectEnumerator) {
         if (match.numberOfRanges < 2) continue;
         NSRange referenceRange = [match rangeAtIndex:1];
@@ -737,8 +740,11 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
         if (url) {
             [rewritten replaceCharactersInRange:match.range
                                       withString:AMProjImportEscapeXMLValue(url.absoluteString)];
+            localRewrittenCount++;
         } else {
-            localMissingCount++;
+            NSString *decoded = AMProjImportDecodeXMLReference(reference);
+            NSString *identity = decoded.precomposedStringWithCanonicalMapping.lowercaseString;
+            if (identity.length) [missingReferences addObject:identity];
         }
     }
     NSData *result = [rewritten dataUsingEncoding:NSUTF8StringEncoding];
@@ -748,7 +754,8 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
         return nil;
     }
     if (referenceCount) *referenceCount = matches.count;
-    if (missingCount) *missingCount = localMissingCount;
+    if (rewrittenCount) *rewrittenCount = localRewrittenCount;
+    if (missingCount) *missingCount = missingReferences.count;
     return result;
 }
 
@@ -902,9 +909,11 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
                                 @{ @"reason": fileError.localizedDescription ?: @"" });
     }
     NSUInteger referenceCount = 0;
+    NSUInteger rewrittenCount = 0;
     NSUInteger missingCount = 0;
     NSData *nativeData = AMProjImportRewriteXML(xmlData, entries,
-                                                &referenceCount, &missingCount, error);
+                                                &referenceCount, &rewrittenCount,
+                                                &missingCount, error);
     if (!nativeData) {
         [fileManager removeItemAtURL:extractionURL error:nil];
         return NO;
@@ -930,11 +939,131 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
             @"compressed_bytes": @(compressedTotal),
             @"uncompressed_bytes": @(uncompressedTotal),
             @"reference_count": @(referenceCount),
-            @"rewritten_reference_count": @(referenceCount - missingCount),
+            @"rewritten_reference_count": @(rewrittenCount),
             @"missing_reference_count": @(missingCount),
             @"extraction_directory": extractionURL.path ?: @"",
             @"native_xml": nativeURL.path ?: @"",
         };
     }
     return YES;
+}
+
+BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
+                                   NSURL *destinationURL,
+                                   NSDictionary<NSString *, id> **metrics,
+                                   NSError **error) {
+    if (metrics) *metrics = nil;
+    if (error) *error = nil;
+    if (![destinationURL isKindOfClass:NSURL.class] || !destinationURL.isFileURL) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidArgument,
+                                @"Normalized archive destination must be a local file URL", nil);
+    }
+
+    NSURL *nativeXMLURL = nil;
+    NSDictionary<NSString *, id> *preparationMetrics = nil;
+    if (!AMProjPrepareNativeImport(archiveURL, workDirectoryURL, &nativeXMLURL,
+                                   &preparationMetrics, error)) {
+        return NO;
+    }
+    NSString *extractionPath = [preparationMetrics[@"extraction_directory"]
+        isKindOfClass:NSString.class] ? preparationMetrics[@"extraction_directory"] : nil;
+    NSURL *extractionURL = extractionPath.length
+        ? [NSURL fileURLWithPath:extractionPath isDirectory:YES]
+        : nativeXMLURL.URLByDeletingLastPathComponent;
+    NSFileManager *manager = NSFileManager.defaultManager;
+
+    @try {
+        NSError *fileError = nil;
+        NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:extractionURL
+            includingPropertiesForKeys:@[NSURLIsDirectoryKey, NSURLIsRegularFileKey]
+                               options:0
+                                 error:&fileError];
+        if (!children) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                    @"Unable to inspect the validated project package",
+                                    @{ @"reason": fileError.localizedDescription ?: @"" });
+        }
+
+        NSURL *sceneXMLURL = nil;
+        NSMutableDictionary<NSString *, NSURL *> *resourceURLs = [NSMutableDictionary dictionary];
+        for (NSURL *child in children) {
+            NSNumber *isDirectory = nil;
+            NSNumber *isRegular = nil;
+            NSError *resourceError = nil;
+            BOOL readDirectory = [child getResourceValue:&isDirectory
+                                                   forKey:NSURLIsDirectoryKey
+                                                    error:&resourceError];
+            BOOL readRegular = readDirectory && [child getResourceValue:&isRegular
+                                                                  forKey:NSURLIsRegularFileKey
+                                                                   error:&resourceError];
+            if (!readRegular) {
+                return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                        @"Unable to inspect an extracted project entry",
+                                        @{ @"entry": child.lastPathComponent ?: @"",
+                                           @"reason": resourceError.localizedDescription ?: @"" });
+            }
+            if (isDirectory.boolValue) {
+                return AMProjImportFail(error, AMProjImportArchiveErrorUnsafeEntry,
+                                        @"Canonical project packages require flat resource filenames",
+                                        @{ @"entry": child.lastPathComponent ?: @"" });
+            }
+            BOOL isGeneratedXML = [child.URLByStandardizingPath.path
+                isEqualToString:nativeXMLURL.URLByStandardizingPath.path];
+            if (!isRegular.boolValue || isGeneratedXML) continue;
+            NSString *name = child.lastPathComponent ?: @"";
+            if ([name.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame) {
+                if (sceneXMLURL) {
+                    return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
+                                            @"Validated project package contains multiple scene XML files", nil);
+                }
+                sceneXMLURL = child;
+                continue;
+            }
+            if ([name caseInsensitiveCompare:@"manifest.txt"] == NSOrderedSame) continue;
+            if (!name.length || resourceURLs[name]) {
+                return AMProjImportFail(error, AMProjImportArchiveErrorUnsafeEntry,
+                                        @"Project package contains duplicate resource filenames",
+                                        @{ @"entry": name });
+            }
+            resourceURLs[name] = child;
+        }
+        if (!sceneXMLURL) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
+                                    @"Validated project package has no scene XML", nil);
+        }
+
+        NSData *sceneXML = [NSData dataWithContentsOfURL:sceneXMLURL
+                                                 options:NSDataReadingMappedIfSafe
+                                                   error:&fileError];
+        if (!sceneXML.length) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
+                                    @"Unable to read the validated scene XML",
+                                    @{ @"reason": fileError.localizedDescription ?: @"" });
+        }
+
+        NSDictionary<NSString *, NSNumber *> *zipMetrics = nil;
+        NSError *zipError = nil;
+        BOOL written = AMProjZIPWriteProjectArchive(destinationURL, sceneXML, resourceURLs,
+                                                     &zipMetrics, &zipError);
+        if (!written) {
+            if (error) *error = zipError;
+            return NO;
+        }
+        if (metrics) {
+            *metrics = @{
+                @"entry_count": preparationMetrics[@"entry_count"] ?: @0,
+                @"input_manifest_count": preparationMetrics[@"manifest_count"] ?: @0,
+                @"reference_count": preparationMetrics[@"reference_count"] ?: @0,
+                @"missing_reference_count": preparationMetrics[@"missing_reference_count"] ?: @0,
+                @"resource_count": @(resourceURLs.count),
+                @"normalized_archive": destinationURL.path ?: @"",
+                @"zip": zipMetrics ?: @{}
+            };
+        }
+        return YES;
+    } @finally {
+        if (extractionURL.path.length) {
+            [manager removeItemAtURL:extractionURL error:nil];
+        }
+    }
 }

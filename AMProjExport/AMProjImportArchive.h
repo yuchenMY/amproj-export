@@ -40,4 +40,18 @@ FOUNDATION_EXPORT BOOL AMProjPrepareNativeImport(
     NSDictionary<NSString *, id> * _Nullable * _Nullable metrics,
     NSError * _Nullable * _Nullable error);
 
+/**
+ Fully validates and extracts an input package, then writes a canonical ZIP32
+ `.amproj` with resources first, one UUID scene XML, and a recalculated
+ `manifest.txt`. Missing input manifests are synthesized. Missing `amproj:`
+ resources remain referenced so Alight Motion can use its native missing-media
+ warning flow.
+ */
+FOUNDATION_EXPORT BOOL AMProjNormalizeProjectArchive(
+    NSURL *archiveURL,
+    NSURL *workDirectoryURL,
+    NSURL *destinationURL,
+    NSDictionary<NSString *, id> * _Nullable * _Nullable metrics,
+    NSError * _Nullable * _Nullable error);
+
 NS_ASSUME_NONNULL_END

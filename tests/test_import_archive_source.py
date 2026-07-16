@@ -10,7 +10,9 @@ MAKEFILE = ROOT / "AMProjExport" / "Makefile"
 
 class ImportArchiveSourceTests(unittest.TestCase):
     def test_public_api_and_build_include_module(self):
-        self.assertIn("AMProjPrepareNativeImport", HEADER.read_text(encoding="utf-8"))
+        header = HEADER.read_text(encoding="utf-8")
+        self.assertIn("AMProjPrepareNativeImport", header)
+        self.assertIn("AMProjNormalizeProjectArchive", header)
         makefile = MAKEFILE.read_text(encoding="utf-8")
         self.assertEqual(makefile.count("AMProjZIPWriter.m AMProjImportArchive.m"), 2)
 
@@ -41,9 +43,24 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn(".native-import.xml", source)
         self.assertIn("missing_reference_count", source)
         self.assertIn("if (url) {", source)
-        self.assertIn("localMissingCount++;", source)
+        self.assertIn("NSMutableSet<NSString *> *missingReferences", source)
+        self.assertIn("localRewrittenCount++", source)
+        self.assertIn('\"rewritten_reference_count\": @(rewrittenCount)', source)
+        self.assertIn("[missingReferences addObject:identity]", source)
+        self.assertIn("*missingCount = missingReferences.count", source)
         self.assertNotIn('URLByAppendingPathComponent:@".missing"', source)
         self.assertIn("rename(temporaryURL.fileSystemRepresentation", source)
+
+    def test_normalization_rebuilds_manifest_and_preserves_missing_references(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("AMProjNormalizeProjectArchive", source)
+        self.assertIn("AMProjZIPWriteProjectArchive", source)
+        self.assertIn('preparationMetrics[@"missing_reference_count"]', source)
+        self.assertIn('caseInsensitiveCompare:@"manifest.txt"', source)
+        self.assertIn("resourceURLs[name] = child", source)
+        self.assertIn("includingPropertiesForKeys:@[NSURLIsDirectoryKey", source)
+        self.assertIn("options:0", source)
+        self.assertIn("Unable to inspect an extracted project entry", source)
 
 
 if __name__ == "__main__":

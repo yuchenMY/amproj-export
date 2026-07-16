@@ -83,6 +83,7 @@ jobs:
               assert len(resource) == 200000
               expected = f"{hashlib.sha1(resource).hexdigest().upper()}:resource.bin".encode()
               assert archive.read("manifest.txt") == expected
+              assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist())
           PY
 
       - name: Upload artifact
