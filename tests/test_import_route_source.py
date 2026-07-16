@@ -5,9 +5,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "AMProjExport" / "AMProjExport.m").read_text(encoding="utf-8")
-ARCHIVE_SOURCE = (ROOT / "AMProjExport" / "AMProjImportArchive.m").read_text(
-    encoding="utf-8"
-)
 
 
 def function_body(signature: str, next_signature: str) -> str:
@@ -31,11 +28,27 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertLess(capture.end(), body.index("IMP original"), signature)
         self.assertLess(capture.end(), body.index(native_imp_type), signature)
 
-    def test_template_xml_picker_is_not_used_as_project_importer(self):
-        self.assertNotIn("TemplatesListVC", SOURCE)
-        self.assertNotIn(
+    def test_templates_picker_is_used_as_native_package_importer(self):
+        finder = function_body(
+            "static UIViewController* amproj_findTemplatesControllerRecursive",
+            "static UIViewController* amproj_findTemplatesController(void)",
+        )
+        self.assertIn('containsString:@"TemplatesListVC"', finder)
+        self.assertIn(
             'NSSelectorFromString(@"documentPicker:didPickDocumentsAtURLs:")',
-            SOURCE,
+            finder,
+        )
+        self.assertIn("respondsToSelector:importSelector", finder)
+
+        search = function_body(
+            "static UIViewController* amproj_findTemplatesController(void)",
+            "static UIViewController* amproj_topViewController",
+        )
+        self.assertIn("UISceneActivationStateForegroundActive", search)
+        self.assertIn("window.isKeyWindow", search)
+        self.assertLess(
+            search.index("keyWindow.rootViewController"),
+            search.index("window.hidden"),
         )
 
     def test_delegate_url_entrypoints_capture_project_before_original(self):
@@ -135,53 +148,105 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("if (passthroughContexts.count &&", body)
         self.assertNotIn("amproj_stageForwardedProjectURL", body)
 
-    def test_manifest_is_optional_but_may_not_be_duplicated(self):
-        self.assertIn("if (manifestCount > 1)", ARCHIVE_SOURCE)
-        self.assertNotIn("manifestCount != 1", ARCHIVE_SOURCE)
-        self.assertNotIn("manifestCount == 0 ?", ARCHIVE_SOURCE)
+    def test_native_package_validation_requires_exactly_one_manifest(self):
+        body = function_body(
+            "static BOOL amproj_validateIncomingArchive",
+            "static NSString* amproj_importCacheFilename",
+        )
+        self.assertIn("if (manifestCount != 1)", body)
+        self.assertIn("manifestCount == 0 ?", body)
+        self.assertIn("contains no manifest.txt", body)
+        self.assertIn("exactly one manifest.txt", body)
 
-    def test_archive_preparation_runs_on_worker_and_queues_xml(self):
+    def test_archive_validation_runs_on_worker_and_queues_original_zip(self):
         body = function_body(
             "static void amproj_prepareCopiedArchive",
-            "static BOOL amproj_forwardPreparedXMLToNative",
-        )
-        worker = body.index("dispatch_async(amproj_importInboxQueue()")
-        prepare = body.index("AMProjPrepareNativeImport")
-        queue = body.index("amproj_queuePreparedImport(nativeXMLURL")
-        self.assertLess(worker, prepare)
-        self.assertLess(prepare, queue)
-        self.assertNotIn("amproj_validateIncomingArchive", body)
-        self.assertNotIn("amproj_queuePreparedImport(archiveSnapshot", body)
-
-    def test_prepared_xml_uses_saved_app_delegate_implementation(self):
-        body = function_body(
-            "static BOOL amproj_forwardPreparedXMLToNative",
             "static void amproj_activateNextPendingImport",
         )
-        self.assertIn('isEqualToString:@"xml"', body)
-        self.assertIn('@"/AMProjImports/"', body)
-        self.assertIn("amproj_nativeAppDelegateOpenURLIMP", body)
-        self.assertIn("amproj_originalHookForClass", body)
-        self.assertIn("AMProjApplicationOpenURLIMP", body)
-        self.assertNotIn("objc_msgSend", body)
-        self.assertEqual(body.count("UIApplicationOpenURLOptionsOpenInPlaceKey"), 1)
+        worker = body.index("dispatch_async(amproj_importInboxQueue()")
+        validate = body.index("amproj_validateIncomingArchive")
+        queue = body.index("amproj_queuePreparedImport(archiveSnapshot")
+        self.assertLess(worker, validate)
+        self.assertLess(validate, queue)
+        self.assertNotIn("AMProjPrepareNativeImport", body)
+        self.assertNotIn("nativeXMLURL", body)
 
+    def test_prepared_zip_dispatches_to_templates_picker_not_app_delegate(self):
         dispatch = function_body(
             "static void amproj_tryDispatchPendingImport",
             "static void amproj_queuePreparedImport",
         )
-        self.assertIn("amproj_forwardPreparedXMLToNative", dispatch)
-        self.assertNotIn("amproj_forwardPreparedImportToNative", dispatch)
-        self.assertIn("amproj_markPreparedImportPersistent(URL);", dispatch)
+        self.assertIn("amproj_findTemplatesController()", dispatch)
+        self.assertIn(
+            'NSSelectorFromString(@"documentPicker:didPickDocumentsAtURLs:")',
+            dispatch,
+        )
+        self.assertIn("controller, selector, nil, @[URL]", dispatch)
+        self.assertIn("amproj_waitingForNativeImportAlert = YES", dispatch)
+        self.assertNotIn("AMProjApplicationOpenURLIMP", dispatch)
+        self.assertNotIn("amproj_nativeAppDelegateOpenURLIMP", dispatch)
+        self.assertNotIn("amproj_forwardPreparedXMLToNative", SOURCE)
+        self.assertNotIn("amproj_nativeImportForwardDepth", SOURCE)
 
-    def test_imported_assets_use_persistent_application_support_storage(self):
+    def test_copied_archives_use_application_support_and_expire(self):
         cache = function_body(
             "static NSURL* amproj_importCacheRoot",
             "typedef NS_ENUM(NSInteger, AMProjImportFileError)",
         )
         self.assertIn("NSApplicationSupportDirectory", cache)
-        self.assertIn('@".persistent-assets"', cache)
-        self.assertIn("if ([manager fileExistsAtPath:persistentMarker.path]) continue;", cache)
+        self.assertIn("AMProjImports", cache)
+        self.assertIn("-7.0 * 24.0 * 60.0 * 60.0", cache)
+        self.assertNotIn('@".persistent-assets"', cache)
+
+    def test_four_of_four_requires_native_projects_import_alert(self):
+        loaded = function_body(
+            "static void hooked_projectsImportAlertViewDidLoad",
+            "static void hooked_projectsImportAlertOnPressImport",
+        )
+        self.assertIn(
+            "recognizedQueuedPackage = amproj_waitingForNativeImportAlert", loaded
+        )
+        self.assertIn("amproj_waitingForNativeImportAlert = NO", loaded)
+        self.assertIn("++amproj_nativeImportRecognitionGeneration", loaded)
+        self.assertIn("if (recognizedQueuedPackage)", loaded)
+        self.assertIn("4/4 AM", loaded)
+        self.assertEqual(SOURCE.count("4/4 AM"), 1)
+
+        pressed = function_body(
+            "static void hooked_projectsImportAlertOnPressImport",
+            "static void hooked_projectsImportAlertOnPressCancel",
+        )
+        self.assertNotIn("4/4", pressed)
+        self.assertNotIn("amproj_resumeQueuedImports", pressed)
+        self.assertNotIn("amproj_nativeImportAlertActive = NO", pressed)
+        self.assertIn("if (tracked)", pressed)
+
+        disappeared = function_body(
+            "static void hooked_projectsImportAlertViewDidDisappear",
+            "static UIWindow* amproj_keyWindow",
+        )
+        self.assertIn("amproj_nativeImportAlertActive = NO", disappeared)
+        self.assertIn("amproj_resumeQueuedImports", disappeared)
+
+    def test_alert_hook_install_retries_until_swift_class_exists(self):
+        install = function_body(
+            "static void amproj_installProjectsImportAlertHook",
+            "static void amproj_installImportHook",
+        )
+        lookup = install.index('NSClassFromString(@"AlightMotion.ProjectsImportAlert")')
+        missing_return = install.index("if (!cls) return;")
+        once = install.index("dispatch_once(&onceToken")
+        self.assertLess(lookup, missing_return)
+        self.assertLess(missing_return, once)
+
+    def test_recognition_timeout_does_not_automatically_dispatch_next_package(self):
+        watchdog = function_body(
+            "static void amproj_checkNativeImportRecognition",
+            "static void amproj_tryDispatchPendingImport",
+        )
+        self.assertIn("90 * NSEC_PER_SEC", watchdog)
+        self.assertNotIn("amproj_resumeQueuedImports", watchdog)
+        self.assertNotIn("amproj_activateNextPendingImport", watchdog)
 
     def test_inactive_queue_waits_without_expiring(self):
         body = function_body(
