@@ -24,13 +24,13 @@ project.amproj
 
 完整格式见 `format_spec.md`。
 
-## v19 离线导入
+## v20 离线导入
 
-稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效时，先复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`。Inbox 或已取得 security scope 的文件在后台复制；只有无法延续授权的 Provider URL 才在回调内同步复制。AppDelegate 的通用文件入口只处理媒体、字体和 SVG，并且可能在没有创建项目时返回 `YES`，因此不能用于 `.amproj` 导入或作为成功判据。
+稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 只记录候选 URL，并把原始 launch options 完整交给 AM，避免在系统授权尚未激活时制造 `EPERM` 伪失败。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
 
-复制完成后的处理全部在本地执行：插件逐项解压验证 ZIP32、local header、CRC、XML 和路径安全，再用有效的资源、原始场景 XML 和重算的 manifest 生成规范包。缺少的 `amproj:` 素材引用会保留，交给 AM 原生的缺素材警告处理。规范包只会在可见的“模板”页交给 `TemplatesListVC` 文档选择器回调；如果该页尚未显示，插件会提示用户点击底部“模板”。AM 随后通过自己的 `Home.Feature.Action.Input.didPickFile`、`ProjectsImportAlert` 和 `PackageImporter` 完成解析及项目保存。插件只有观察到原生 `ProjectsImportAlert` 出现时才显示 `4/4`。
+复制完成后的处理全部在本地执行：插件逐项解压验证 ZIP32、local header、CRC、XML 和路径安全，再用有效的资源、原始场景 XML 和重算的 manifest 生成规范包。缺少的 `amproj:` 素材引用会保留，交给 AM 原生的缺素材处理。规范包只会交给已注册的本地 `PackageImporter` 适配器，完整 ZIP、XML、媒体和字体作为同一个项目事务写入；代码不再查找 `TemplatesListVC`，也不会调用模板页的 XML 文档选择器回调。
 
-正常状态顺序为：`1/4 收到文件 -> 2/4 完整校验并规范化 -> 打开模板页 -> 3/4 已交给 AM -> 4/4 AM 已识别项目包`。看到 `4/4` 后仍需在 AM 原生确认框中点击导入；插件不会在项目真正保存前宣称成功。
+正常状态顺序为：`1/4 收到文件 -> 2/4 完整校验并规范化 -> 3/4 正在解包并写入项目 -> 4/4 已导入到底部“项目”`。只有适配器确认项目和包内资源已经持久化后才显示 `4/4`，原生确认框出现本身不再算成功。
 
 实验入口是 QQ 分享面板中的“导入到 AM”。扩展先把一个 `.amproj` 原子写入 App Group，再尝试用 `alightmotion://amproj-import` 唤起主 App。免费自签不一定能保留 App Group 或允许扩展自动唤起，因此实验包与稳定包分开生成。
 
@@ -47,25 +47,49 @@ AMProjShareExtension/build/AMProjShareExtension.appex
 AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-## 从干净 IPA 生成 v19
+## 从干净 IPA 生成 v20
 
 必须以未注入的 `AM_v1.ipa` 为输入，不要用旧测试包继续叠加。主 App Bundle ID 保持 `com.amayaka.meow`。
 
-稳定版：
+v20 原生导入桥只支持这份已核验的主程序：
 
-```powershell
-python inject_dylib.py AM_v1.ipa AMProjExportDebug.dylib AM_v1_direct_v19.ipa
+```text
+AM_v1.ipa SHA-256: B135D99E81E0F3F976CBF4C30BCC491B4B770BD9D0A6841D48083B7A7EA29413
+Mach-O UUID:       4b22d43f-09fc-3bde-859b-78a5d573a503
 ```
 
-实验版：
+先将 Actions artifact 解压到仓库根目录。不要使用仓库根目录残留的旧 `AMProjExport.dylib`。
+
+稳定离线版：
 
 ```powershell
-python inject_dylib.py AM_v1.ipa AMProjExportDebug.dylib AM_v1_direct_v19_share_exp.ipa `
-  --share-extension AMProjShareExtension.appex `
+$uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v20.ipa `
+  --expected-main-uuid $uuid
+```
+
+带本地后端诊断的 Debug 版：
+
+```powershell
+$uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
+$token = python -c "import secrets; print(secrets.token_urlsafe(32))"
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v20_debug.ipa `
+  --debug-mode full --debug-token $token --expected-main-uuid $uuid
+python .\debug_backend\server.py --token $token
+```
+
+实验分享版：
+
+```powershell
+$uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
+$token = python -c "import secrets; print(secrets.token_urlsafe(32))"
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v20_share_exp.ipa `
+  --debug-mode full --debug-token $token --expected-main-uuid $uuid `
+  --share-extension .\AMProjShareExtension\build\AMProjShareExtension.appex `
   --app-group-id group.com.amayaka.meow.amprojshare
 ```
 
-注入器会验证 arm64、Mach-O load command、ZIP CRC、UTI/copy-in 配置以及实验扩展的 Bundle ID、extension point 和 App Group 模板。输出 IPA 仍需使用 Sideloadly 签名安装。
+注入器会验证主程序 UUID、arm64、Mach-O load command、ZIP CRC、UTI/copy-in 配置以及实验扩展的 Bundle ID、extension point 和 App Group 模板。输出 IPA 仍需使用 Sideloadly 签名安装。
 
 ## 本地测试
 

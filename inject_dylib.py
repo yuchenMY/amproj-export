@@ -30,6 +30,7 @@ MH_EXECUTE = 0x2
 MH_DYLIB = 0x6
 LC_LOAD_DYLIB = 0x0C
 LC_SEGMENT_64 = 0x19
+LC_UUID = 0x1B
 SHARE_EXTENSION_POINT = "com.apple.share-services"
 SHARE_EXTENSION_BUNDLE_SUFFIX = ".amprojshare"
 APPLICATION_GROUPS_ENTITLEMENT = "com.apple.security.application-groups"
@@ -76,6 +77,7 @@ def parse_macho_data(data, label="<memory>"):
     offset = 32
     first_section_offset = len(data)
     load_dylibs = []
+    macho_uuid = None
     for index in range(ncmds):
         if offset + 8 > commands_end:
             raise ValueError(f"Invalid load command {index} at 0x{offset:x}: {label}")
@@ -121,6 +123,13 @@ def parse_macho_data(data, label="<memory>"):
                     f"Invalid LC_LOAD_DYLIB UTF-8 at 0x{offset:x}: {label}"
                 ) from error
 
+        if cmd == LC_UUID:
+            if cmdsize != 24:
+                raise ValueError(f"Invalid LC_UUID at 0x{offset:x}: {label}")
+            if macho_uuid is not None:
+                raise ValueError(f"Duplicate LC_UUID at 0x{offset:x}: {label}")
+            macho_uuid = data[offset + 8 : offset + 24].hex()
+
         offset += cmdsize
 
     if offset != commands_end:
@@ -140,6 +149,7 @@ def parse_macho_data(data, label="<memory>"):
         "load_commands_end": commands_end,
         "first_section_offset": first_section_offset,
         "load_dylibs": load_dylibs,
+        "uuid": macho_uuid,
     }
 
 
@@ -1040,6 +1050,7 @@ def verify_injected_ipa(
     expected_bundle_identifier=None,
     expected_share_extension=None,
     expected_app_group_id=None,
+    expected_main_uuid=None,
 ):
     """Verify the final archive, embedded files, Mach-O layout, and config."""
     ipa_path = Path(ipa_path)
@@ -1097,6 +1108,9 @@ def verify_injected_ipa(
             )
             if executable_info["cputype"] != CPU_TYPE_ARM64:
                 raise RuntimeError("Application executable is not arm64")
+            _validate_expected_main_uuid(
+                executable_info, expected_main_uuid, "Application executable"
+            )
 
             dylib_relative = f"Frameworks/{dylib_path.name}"
             embedded_dylib = read_unique(dylib_relative)
@@ -1150,6 +1164,7 @@ def verify_injected_ipa(
         "app": app_root,
         "bundle_identifier": plist.get("CFBundleIdentifier", ""),
         "executable": executable_name,
+        "main_uuid": executable_info["uuid"],
         "dylib": dylib_path.name,
         "mode": expected_config.get("DefaultMode")
         if isinstance(expected_config, dict)
@@ -1170,6 +1185,7 @@ def inject_ipa(
     debug_settings=None,
     share_extension_path=None,
     app_group_id=None,
+    expected_main_uuid=None,
 ):
     """Inject one dylib and return the generated/copied debug config, if any."""
     ipa_path = Path(ipa_path)
@@ -1209,6 +1225,10 @@ def inject_ipa(
         print(f"[+] Copied dylib to {dylib_destination}")
 
         executable = _bundle_executable(app_dir)
+        executable_info = parse_macho(executable)
+        _validate_expected_main_uuid(
+            executable_info, expected_main_uuid, "Input application executable"
+        )
         patched = insert_load_dylib(str(executable), str(dylib_destination))
         if not patched:
             print("[*] Binary already patched, continuing...")
@@ -1239,6 +1259,7 @@ def inject_ipa(
             expected_bundle_identifier=original_bundle_identifier,
             expected_share_extension=share_extension_path,
             expected_app_group_id=app_group_id,
+            expected_main_uuid=expected_main_uuid,
         )
         print(f"[+] Done: {output_path}")
         return config
@@ -1258,6 +1279,35 @@ def _token(value):
     if len(value) < 16:
         raise argparse.ArgumentTypeError("token must contain at least 16 characters")
     return value
+
+
+def _normalize_macho_uuid(value):
+    normalized = value.replace("-", "").lower()
+    if len(normalized) != 32 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ValueError("Mach-O UUID must contain exactly 32 hexadecimal digits")
+    return normalized
+
+
+def _macho_uuid(value):
+    try:
+        return _normalize_macho_uuid(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def _validate_expected_main_uuid(info, expected_uuid, label):
+    if expected_uuid is None:
+        return
+    expected = _normalize_macho_uuid(expected_uuid)
+    actual = info.get("uuid")
+    if actual != expected:
+        found = actual or "missing"
+        raise RuntimeError(
+            f"{label} UUID does not match the verified AM build: "
+            f"expected {expected}, found {found}"
+        )
 
 
 def _app_group_id(value):
@@ -1294,6 +1344,11 @@ def build_argument_parser():
     )
     parser.add_argument("--debug-mode", choices=DEBUG_MODES, help="initial mode")
     parser.add_argument(
+        "--expected-main-uuid",
+        type=_macho_uuid,
+        help="reject an IPA whose main executable UUID does not match",
+    )
+    parser.add_argument(
         "--share-extension",
         help="optional AMProjShareExtension.appex bundle to install",
     )
@@ -1324,6 +1379,7 @@ def main(argv=None):
             settings,
             share_extension_path=share_extension,
             app_group_id=app_group_id,
+            expected_main_uuid=args.expected_main_uuid,
         )
     except (
         OSError,

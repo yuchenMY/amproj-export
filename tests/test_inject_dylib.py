@@ -15,16 +15,23 @@ def make_macho(
     section_offset=0x400,
     filetype=2,
     cputype=inject_dylib.CPU_TYPE_ARM64,
+    uuid=None,
 ):
     segment_size = 72 + 80
+    uuid_command = b""
+    if uuid is not None:
+        uuid_bytes = bytes.fromhex(uuid.replace("-", ""))
+        if len(uuid_bytes) != 16:
+            raise ValueError("test Mach-O UUID must contain 16 bytes")
+        uuid_command = struct.pack("<II", inject_dylib.LC_UUID, 24) + uuid_bytes
     header = struct.pack(
         "<IIIIIIII",
         0xFEEDFACF,
         cputype,
         0,
         filetype,
-        1,
-        segment_size,
+        1 + bool(uuid_command),
+        segment_size + len(uuid_command),
         0,
         0,
     )
@@ -57,7 +64,7 @@ def make_macho(
         0,
         0,
     )
-    data = bytearray(header + segment + section)
+    data = bytearray(header + segment + section + uuid_command)
     data.extend(b"\0" * (section_offset - len(data)))
     data.extend(b"PAYLOAD-MUST-NOT-MOVE")
     path.write_bytes(data)
@@ -130,6 +137,14 @@ def make_fake_ipa(
 
 
 class MachOTests(unittest.TestCase):
+    def test_parse_exposes_normalized_uuid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            binary = Path(temp_dir) / "App"
+            expected = "4b22d43f09fc3bde859b78a5d573a503"
+            make_macho(binary, uuid=expected)
+
+            self.assertEqual(inject_dylib.parse_macho(binary)["uuid"], expected)
+
     def test_insert_uses_padding_without_moving_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             binary = Path(temp_dir) / "App"
@@ -340,6 +355,21 @@ class ConfigTests(unittest.TestCase):
 
 
 class InjectionTests(unittest.TestCase):
+    def test_injection_rejects_unverified_main_uuid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ipa, _ = make_fake_ipa(root)
+            dylib = root / "AMProjExport.dylib"
+            make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
+
+            with self.assertRaisesRegex(RuntimeError, "UUID does not match"):
+                inject_dylib.inject_ipa(
+                    ipa,
+                    dylib,
+                    root / "rejected.ipa",
+                    expected_main_uuid="4b22d43f-09fc-3bde-859b-78a5d573a503",
+                )
+
     def test_wrapped_ipa_normalization_rejects_multiple_candidates(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -626,6 +656,21 @@ class InjectionTests(unittest.TestCase):
 
 
 class ArgumentTests(unittest.TestCase):
+    def test_expected_main_uuid_is_normalized(self):
+        parser = inject_dylib.build_argument_parser()
+        args = parser.parse_args(
+            [
+                "input.ipa",
+                "lib.dylib",
+                "--expected-main-uuid",
+                "4B22D43F-09FC-3BDE-859B-78A5D573A503",
+            ]
+        )
+        self.assertEqual(
+            args.expected_main_uuid,
+            "4b22d43f09fc3bde859b78a5d573a503",
+        )
+
     def test_legacy_positional_arguments_remain_compatible(self):
         parser = inject_dylib.build_argument_parser()
         args = parser.parse_args(["input.ipa", "lib.dylib", "output.ipa"])

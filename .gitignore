@@ -4,3 +4,6 @@
 __pycache__/
 *.pyc
 AMProjShareExtension/build/
+/2/
+/artifacts/
+/debug_backend/*.log

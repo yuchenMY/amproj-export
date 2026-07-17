@@ -32,13 +32,31 @@ jobs:
       - name: Verify built dylib architectures
         run: |
           python3 - <<'PY'
+          import subprocess
+
           from inject_dylib import verify_dylib_architecture
 
+          required_symbols = {
+              "_AMProjCallNativePackageImport",
+              "_AMProjInstallNativePackageImportBridge",
+          }
           for path in (
               "AMProjExport/AMProjExport.dylib",
               "AMProjExport/AMProjExportDebug.dylib",
           ):
               info = verify_dylib_architecture(path)
+              symbols = subprocess.check_output(
+                  ["nm", "-gU", path], text=True
+              )
+              missing = {
+                  symbol
+                  for symbol in required_symbols
+                  if not any(
+                      line.rstrip().endswith(" " + symbol)
+                      for line in symbols.splitlines()
+                  )
+              }
+              assert not missing, f"{path} missing symbols: {sorted(missing)}"
               print(f"verified {path}: arm64 MH_DYLIB, {info['ncmds']} load commands")
           PY
 

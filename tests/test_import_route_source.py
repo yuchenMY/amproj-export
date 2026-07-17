@@ -5,6 +5,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "AMProjExport" / "AMProjExport.m").read_text(encoding="utf-8")
+BRIDGE_SOURCE = (ROOT / "AMProjExport" / "AMProjNativeImportBridge.m").read_text(
+    encoding="utf-8"
+)
+BRIDGE_HEADER = (ROOT / "AMProjExport" / "AMProjNativeImportBridge.h").read_text(
+    encoding="utf-8"
+)
+BRIDGE_ASSEMBLY = (ROOT / "AMProjExport" / "AMProjNativeImportBridge.S").read_text(
+    encoding="utf-8"
+)
+MAKEFILE = (ROOT / "AMProjExport" / "Makefile").read_text(encoding="utf-8")
 
 
 def function_body(signature: str, next_signature: str) -> str:
@@ -28,52 +38,97 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertLess(capture.end(), body.index("IMP original"), signature)
         self.assertLess(capture.end(), body.index(native_imp_type), signature)
 
-    def test_templates_picker_is_used_as_native_package_importer(self):
-        finder = function_body(
-            "static UIViewController* amproj_findTemplatesControllerRecursive",
-            "static UIViewController* amproj_findTemplatesController(BOOL visibleOnly)",
-        )
-        self.assertIn('containsString:@"TemplatesListVC"', finder)
-        self.assertIn(
+    def test_template_xml_upload_route_is_completely_absent(self):
+        self.assertNotIn("TemplatesListVC", SOURCE)
+        self.assertNotIn("amproj_findTemplatesController", SOURCE)
+        self.assertNotIn("amproj_installTemplatesLifecycleHook", SOURCE)
+        self.assertNotIn(
             'NSSelectorFromString(@"documentPicker:didPickDocumentsAtURLs:")',
-            finder,
-        )
-        self.assertIn("respondsToSelector:importSelector", finder)
-        self.assertIn("amproj_controllerIsVisible(controller)", finder)
-        self.assertIn("controller == amproj_activeTemplatesController", finder)
-
-        search = function_body(
-            "static UIViewController* amproj_findTemplatesController(BOOL visibleOnly)",
-            "static UIViewController* amproj_topViewController",
-        )
-        self.assertIn("UISceneActivationStateForegroundActive", search)
-        self.assertIn("window.isKeyWindow", search)
-        self.assertLess(
-            search.index("keyWindow.rootViewController"),
-            search.index("window.hidden"),
+            SOURCE,
         )
 
-    def test_native_dispatch_waits_for_templates_view_did_appear(self):
-        appeared = function_body(
-            "static void hooked_templatesViewDidAppear",
-            "static void hooked_templatesViewDidDisappear",
+    def test_native_package_bridge_has_explicit_full_project_contract(self):
+        bridge = function_body(
+            "static AMProjNativePackageImportStarter amproj_nativePackageImportStarter",
+            "static void amproj_tryDispatchPendingImport",
         )
-        self.assertIn("amproj_activeTemplatesController = self", appeared)
-        self.assertIn('amproj_resumeQueuedImports(@"templates_view_did_appear")', appeared)
+        self.assertIn("AMProjNativePackageImportStarter", bridge)
+        self.assertIn("AMProjRegisterNativePackageImportStarter", bridge)
+        self.assertIn("package, XML and bundled resources", bridge)
+        self.assertIn('amproj_debugEvent(@"import.local_bridge_finished"', bridge)
+        self.assertIn("4/4", bridge)
+        self.assertIn("\\u9879\\u76ee", bridge)
 
-        disappeared = function_body(
-            "static void hooked_templatesViewDidDisappear",
-            "static BOOL amproj_isTrackedProjectsImportAlert",
-        )
-        self.assertIn("amproj_activeTemplatesController == self", disappeared)
-        self.assertIn("amproj_activeTemplatesController = nil", disappeared)
+    def test_native_bridge_uses_complete_package_and_firebase_task_contract(self):
+        self.assertIn("AMProjLocalStorageReference", BRIDGE_SOURCE)
+        self.assertIn("AMProjLocalStorageTask", BRIDGE_SOURCE)
+        self.assertIn("writeToFile:", BRIDGE_SOURCE)
+        self.assertIn("observeStatus:", BRIDGE_SOURCE)
+        self.assertIn("copyItemAtURL:sourceURL toURL:destinationURL", BRIDGE_SOURCE)
+        self.assertIn("status == 4", BRIDGE_SOURCE)
+        self.assertIn("status == 5", BRIDGE_SOURCE)
+        self.assertNotIn("AMProjExtractProjectArchive", BRIDGE_SOURCE)
+        self.assertNotIn("nativeXMLURL", BRIDGE_SOURCE)
 
-        install = function_body(
-            "static void amproj_installTemplatesLifecycleHook",
-            "static void amproj_installProjectsImportAlertHook",
+    def test_copy_failure_flows_through_the_native_status_handler(self):
+        start = BRIDGE_SOURCE.index("if (scheduleFailure)")
+        end = BRIDGE_SOURCE.index("} else if (scheduleSuccess)", start)
+        failure_branch = BRIDGE_SOURCE[start:end]
+        self.assertIn("snapshot.error = self.copyError", failure_branch)
+        self.assertIn("callback(snapshot)", failure_branch)
+        self.assertIn("dispatch_get_main_queue()", failure_branch)
+        self.assertNotIn(
+            "AMProjNativePackageImportBridgeFinishFailure", failure_branch
         )
-        self.assertIn("TemplatesListVC.viewDidAppear", install)
-        self.assertIn("TemplatesListVC.viewDidDisappear", install)
+
+    def test_timeout_poison_prevents_a_late_callback_from_finishing_a_new_import(self):
+        self.assertIn("amproj_nativeBridgePoisoned", BRIDGE_SOURCE)
+        self.assertIn("if (stillActive) amproj_nativeBridgePoisoned = YES", BRIDGE_SOURCE)
+        poison_check = BRIDGE_SOURCE.index("if (amproj_nativeBridgePoisoned)")
+        active_check = BRIDGE_SOURCE.index("if (amproj_nativeBridgeCompletion)")
+        self.assertLess(poison_check, active_check)
+        self.assertIn("Fully close and reopen Alight Motion", BRIDGE_SOURCE)
+
+    def test_native_bridge_is_locked_to_verified_am_v1_binary(self):
+        self.assertIn("4b, 0x22, 0xd4, 0x3f", BRIDGE_SOURCE)
+        self.assertIn("AMProjNativeImportEntry = 0x100266ee8ULL", BRIDGE_SOURCE)
+        self.assertIn("expectedPrologue", BRIDGE_SOURCE)
+        self.assertIn("LC_UUID", BRIDGE_SOURCE)
+        self.assertIn("memcmp(entry, expectedPrologue", BRIDGE_SOURCE)
+
+    def test_arm64_shim_sets_hidden_owner_without_corrupting_callee_saved_state(self):
+        self.assertIn("_AMProjCallNativePackageImport", BRIDGE_ASSEMBLY)
+        self.assertIn("str x20, [sp, #16]", BRIDGE_ASSEMBLY)
+        self.assertIn("mov x20, x7", BRIDGE_ASSEMBLY)
+        self.assertIn("blr x9", BRIDGE_ASSEMBLY)
+        self.assertIn("ldr x20, [sp, #16]", BRIDGE_ASSEMBLY)
+        self.assertIn(".cfi_startproc", BRIDGE_ASSEMBLY)
+        self.assertIn(".cfi_offset x20, -16", BRIDGE_ASSEMBLY)
+        self.assertIn(".cfi_endproc", BRIDGE_ASSEMBLY)
+        self.assertIn("AMProjNativeImportBridge.S", MAKEFILE)
+        self.assertEqual(MAKEFILE.count("AMProjNativeImportBridge.S"), 4)
+
+    def test_bridge_registers_after_launch_and_finishes_only_from_native_result(self):
+        bootstrap = function_body(
+            "static void amproj_bootstrapAfterLaunch",
+            "__attribute__((constructor))",
+        )
+        self.assertIn("AMProjInstallNativePackageImportBridge()", bootstrap)
+        self.assertIn("AMProjRegisterNativePackageImportStarter", BRIDGE_HEADER)
+        self.assertIn("AMProjNativeImportCompletionThunk", BRIDGE_SOURCE)
+        self.assertIn("AMProjFinishNativeBridge(YES, nil)", BRIDGE_SOURCE)
+        self.assertIn("300 * NSEC_PER_SEC", BRIDGE_SOURCE)
+
+    def test_native_failure_alert_completes_active_bridge_without_double_reset(self):
+        present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
+        self.assertIn("AMProjNativePackageImportBridgeFinishFailure", present)
+        self.assertIn("AMProjNativeAlertPresented", present)
+        self.assertIn("if (!bridgeHandled)", present)
+        finish = function_body(
+            "static void amproj_finishNativePackageImport",
+            "static void amproj_tryDispatchPendingImport",
+        )
+        self.assertIn("AMProjNativeAlertPresented", finish)
 
     def test_delegate_url_entrypoints_capture_project_before_original(self):
         entrypoints = (
@@ -122,39 +177,27 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("return hooks[index].base;", tracked)
         self.assertIn("if (!hooks[index].base)", tracked)
 
-    def test_cold_launch_captures_and_removes_consumed_project_urls(self):
-        sanitizer = function_body(
-            "static NSDictionary* amproj_launchOptionsAfterCapturingProjects",
+    def test_cold_launch_only_records_candidates_and_forwards_options_unchanged(self):
+        recorder = function_body(
+            "static void amproj_recordLaunchImportCandidates",
             "static BOOL hooked_applicationDidFinish",
         )
-        self.assertLess(
-            sanitizer.index("amproj_captureSystemProjectURL"),
-            sanitizer.index("[launchOptions mutableCopy]"),
-        )
-        self.assertIn(
-            "[forwardOptions removeObjectForKey:UIApplicationLaunchOptionsURLKey]",
-            sanitizer,
-        )
-        self.assertRegex(
-            sanitizer,
-            re.compile(
-                r"\[forwardOptions\s+removeObjectForKey:\s*"
-                r"UIApplicationLaunchOptionsUserActivityDictionaryKey\]",
-                re.DOTALL,
-            ),
-        )
-        self.assertIn("return launchOptions;", sanitizer)
+        self.assertIn("amproj_recordDeferredLaunchCandidate", recorder)
+        self.assertNotIn("amproj_captureSystemProjectURL", recorder)
+        self.assertNotIn("amproj_handleIncomingProjectURL", recorder)
+        self.assertNotIn("removeObjectForKey", recorder)
 
         hook = function_body(
             "static BOOL hooked_applicationDidFinish",
             "static BOOL hooked_applicationContinueActivity",
         )
         self.assertLess(
-            hook.index("amproj_launchOptionsAfterCapturingProjects"),
+            hook.index("amproj_recordLaunchImportCandidates"),
             hook.index("IMP original"),
         )
-        self.assertIn("application, forwardLaunchOptions);", hook)
-        self.assertNotIn("application, launchOptions);", hook)
+        self.assertIn("application, launchOptions);", hook)
+        self.assertNotIn("forwardLaunchOptions", hook)
+        self.assertIn('@"forwarded_unchanged": @YES', hook)
 
     def test_scene_partitions_project_contexts_before_forwarding(self):
         body = function_body(
@@ -171,6 +214,44 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("continue;", body[capture:passthrough])
         self.assertIn("if (passthroughContexts.count &&", body)
         self.assertNotIn("amproj_stageForwardedProjectURL", body)
+
+    def test_provider_callback_copies_synchronously_while_grant_is_valid(self):
+        capture = function_body(
+            "static BOOL amproj_captureSystemProjectURL",
+            "static BOOL hooked_applicationOpenURL",
+        )
+        self.assertIn("BOOL copyOffMainThread = stableInboxURL;", capture)
+        self.assertNotIn("stableInboxURL || heldSecurityScope", capture)
+        worker = capture.index("if (copyOffMainThread)")
+        synchronous = capture.index("capture();", worker)
+        self.assertLess(worker, synchronous)
+
+    def test_inbox_path_comparison_normalizes_private_var_alias(self):
+        normalizer = function_body(
+            "static NSString* amproj_normalizedFilePath(NSURL *URL) {",
+            "static BOOL amproj_URLIsInDocumentsInbox",
+        )
+        self.assertIn("URLByResolvingSymlinksInPath", normalizer)
+        self.assertIn('@"/private/var/"', normalizer)
+        self.assertIn('@"/private".length', normalizer)
+        inbox = function_body(
+            "static BOOL amproj_URLIsInDocumentsInbox",
+            "static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult",
+        )
+        self.assertEqual(inbox.count("amproj_normalizedFilePath"), 2)
+
+    def test_activation_scans_inbox_before_silent_launch_retry(self):
+        marker = SOURCE.index("UIApplicationDidBecomeActiveNotification")
+        body = SOURCE[marker : marker + 2400]
+        scan = body.index('amproj_scanLocalImportInboxes(@"did_become_active", nil)')
+        retry = body.index("amproj_retryDeferredLaunchImportCandidates()")
+        self.assertLess(scan, retry)
+        deferred = function_body(
+            "static void amproj_retryDeferredLaunchImportCandidates",
+            "static BOOL amproj_captureSystemProjectURL",
+        )
+        self.assertIn('options[@"AMProjSilentErrors"] = @YES', deferred)
+        self.assertIn("amproj_importInboxQueue()", deferred)
 
     def test_native_package_validation_accepts_missing_manifest_for_normalization(self):
         body = function_body(
@@ -197,23 +278,33 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn("amproj_queuePreparedImport(archiveSnapshot", body)
         self.assertIn('normalizationMetrics[@"missing_reference_count"]', body)
 
-    def test_prepared_zip_dispatches_to_templates_picker_not_app_delegate(self):
+    def test_prepared_zip_dispatches_only_to_local_package_bridge(self):
         dispatch = function_body(
             "static void amproj_tryDispatchPendingImport",
             "static void amproj_queuePreparedImport",
         )
-        self.assertIn("amproj_findTemplatesController(YES)", dispatch)
-        self.assertIn("amproj_findTemplatesController(NO)", dispatch)
-        self.assertIn("amproj_revealTemplatesController(hiddenController)", dispatch)
-        self.assertIn(
-            'NSSelectorFromString(@"documentPicker:didPickDocumentsAtURLs:")',
-            dispatch,
-        )
-        self.assertIn("controller, selector, nil, @[URL]", dispatch)
-        self.assertIn("amproj_waitingForNativeImportAlert = YES", dispatch)
+        self.assertIn("AMProjNativePackageImportStarter starter", dispatch)
+        self.assertIn("started = starter(URL, name", dispatch)
+        self.assertIn("amproj_finishNativePackageImport", dispatch)
+        self.assertIn('amproj_debugEvent(@"import.local_bridge_start"', dispatch)
+        self.assertNotIn("documentPicker", dispatch)
+        self.assertNotIn("Templates", dispatch)
         self.assertNotIn("AMProjApplicationOpenURLIMP", dispatch)
         self.assertNotIn("amproj_nativeAppDelegateOpenURLIMP", dispatch)
         self.assertNotIn("amproj_forwardPreparedXMLToNative", SOURCE)
+
+    def test_not_ready_project_screen_retries_without_dropping_the_package(self):
+        dispatch = function_body(
+            "static void amproj_tryDispatchPendingImport",
+            "static void amproj_queuePreparedImport",
+        )
+        retry = dispatch.index("BOOL retryable")
+        clear = dispatch.index("amproj_pendingImportURL = nil", retry)
+        self.assertLess(retry, clear)
+        self.assertIn('startError.userInfo[@"AMProjRetryable"]', dispatch)
+        self.assertIn('amproj_debugEvent(@"import.local_bridge_retry"', dispatch)
+        self.assertIn("amproj_tryDispatchPendingImport(generation)", dispatch[retry:clear])
+        self.assertIn('@{ @"AMProjRetryable": @YES }', BRIDGE_SOURCE)
         self.assertNotIn("amproj_nativeImportForwardDepth", SOURCE)
 
     def test_copied_archives_use_application_support_and_expire(self):
@@ -226,39 +317,21 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("-7.0 * 24.0 * 60.0 * 60.0", cache)
         self.assertNotIn('@".persistent-assets"', cache)
 
-    def test_four_of_four_requires_native_projects_import_alert(self):
-        loaded = function_body(
+    def test_four_of_four_requires_bridge_persistence_completion(self):
+        finish = function_body(
+            "static void amproj_finishNativePackageImport",
+            "static void amproj_tryDispatchPendingImport",
+        )
+        success_branch = finish.index("if (success)")
+        self.assertIn("4/4", finish[success_branch:])
+        self.assertIn("\\u5e95\\u90e8\\u201c\\u9879\\u76ee\\u201d", finish)
+        self.assertIn("amproj_endNativeImportObservation", finish)
+        self.assertIn("amproj_importDispatchCoolingDown = NO", finish)
+        self.assertNotIn("4/4", function_body(
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
-        )
-        self.assertIn(
-            "recognizedQueuedPackage = amproj_waitingForNativeImportAlert", loaded
-        )
-        self.assertIn("amproj_waitingForNativeImportAlert = NO", loaded)
-        self.assertIn("++amproj_nativeImportRecognitionGeneration", loaded)
-        self.assertIn("if (recognizedQueuedPackage)", loaded)
-        self.assertIn("4/4 AM", loaded)
-        self.assertNotIn("amproj_nativeImportObservationActive = NO", loaded)
-        self.assertEqual(SOURCE.count("4/4 AM"), 1)
-
-        pressed = function_body(
-            "static void hooked_projectsImportAlertOnPressImport",
-            "static void hooked_projectsImportAlertOnPressCancel",
-        )
-        self.assertNotIn("4/4", pressed)
-        self.assertNotIn("amproj_resumeQueuedImports", pressed)
-        self.assertNotIn("amproj_nativeImportAlertActive = NO", pressed)
-        self.assertIn("if (tracked)", pressed)
-
-        disappeared = function_body(
-            "static void hooked_projectsImportAlertViewDidDisappear",
-            "static UIWindow* amproj_keyWindow",
-        )
-        self.assertIn("amproj_nativeImportAlertActive = NO", disappeared)
-        self.assertIn("amproj_resumeQueuedImports", disappeared)
-        self.assertIn('isEqualToString:@"import"', disappeared)
-        self.assertIn("180 * NSEC_PER_SEC", disappeared)
-        self.assertNotIn("2 * NSEC_PER_SEC", disappeared)
+        ))
+        self.assertEqual(SOURCE.count("4/4"), 1)
 
     def test_native_failure_alert_is_observed_without_replacing_it(self):
         detector = function_body(
@@ -280,7 +353,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v19 \\u00b7 E40", present)
+        self.assertIn("AMProj v20 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),
@@ -343,7 +416,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             installer.count("if (!amproj_storeOriginalHook"), 2
         )
 
-    def test_native_import_observation_blocks_queue_until_terminal_state(self):
+    def test_native_bridge_blocks_queue_until_completion(self):
         queue = function_body(
             "static void amproj_queuePreparedImport",
             "static void amproj_resumeQueuedImports",
@@ -354,14 +427,13 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("!amproj_nativeImportObservationActive", queue)
         self.assertIn("amproj_nativeImportObservationActive", resume)
-
-        disappeared = function_body(
-            "static void hooked_projectsImportAlertViewDidDisappear",
-            "static UIWindow* amproj_keyWindow",
+        finish = function_body(
+            "static void amproj_finishNativePackageImport",
+            "static void amproj_tryDispatchPendingImport",
         )
-        self.assertIn("amproj_endNativeImportObservation", disappeared)
-        self.assertIn("amproj_importDispatchCoolingDown = NO", disappeared)
-        self.assertIn('amproj_resumeQueuedImports(@"native_import_observation_timeout")', disappeared)
+        self.assertIn("amproj_endNativeImportObservation", finish)
+        self.assertIn("amproj_importDispatchCoolingDown = NO", finish)
+        self.assertIn("amproj_resumeQueuedImports", finish)
 
     def test_alert_hook_install_retries_until_swift_class_exists(self):
         install = function_body(
@@ -374,14 +446,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertLess(lookup, missing_return)
         self.assertLess(missing_return, once)
 
-    def test_recognition_timeout_does_not_automatically_dispatch_next_package(self):
-        watchdog = function_body(
-            "static void amproj_checkNativeImportRecognition",
+    def test_unavailable_bridge_times_out_without_template_fallback(self):
+        dispatch = function_body(
             "static void amproj_tryDispatchPendingImport",
+            "static void amproj_queuePreparedImport",
         )
-        self.assertIn("90 * NSEC_PER_SEC", watchdog)
-        self.assertNotIn("amproj_resumeQueuedImports", watchdog)
-        self.assertNotIn("amproj_activateNextPendingImport", watchdog)
+        self.assertIn("CFAbsoluteTimeGetCurrent() >= amproj_pendingImportDeadline", dispatch)
+        self.assertIn('amproj_debugEvent(@"import.local_bridge_timeout"', dispatch)
+        self.assertIn('AMProjNativePackageImportStarter starter', dispatch)
+        self.assertNotIn("TemplatesListVC", dispatch)
+        self.assertNotIn("documentPicker", dispatch)
 
     def test_inactive_queue_waits_without_expiring(self):
         body = function_body(

@@ -1,4 +1,4 @@
-# Makefile — Build release and debug AMProjExport dylibs
+# Makefile - Build release and debug AMProjExport dylibs
 # Requirements: macOS + Xcode CLT
 # Usage: make
 
@@ -12,12 +12,12 @@ LDLIBS = -framework Foundation -framework UIKit -framework QuartzCore \
 
 all: AMProjExport.dylib AMProjExportDebug.dylib
 
-AMProjExport.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h
-	$(CC) $(CFLAGS) -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m $(LDLIBS)
+AMProjExport.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S
+	$(CC) $(CFLAGS) -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S $(LDLIBS)
 	@ls -la $@
 
-AMProjExportDebug.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMDebugTransport.m AMDebugTransport.h
-	$(CC) $(CFLAGS) -DAMPROJ_DEBUG=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMDebugTransport.m $(LDLIBS)
+AMProjExportDebug.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMDebugTransport.m AMDebugTransport.h
+	$(CC) $(CFLAGS) -DAMPROJ_DEBUG=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMDebugTransport.m $(LDLIBS)
 	@ls -la $@
 
 clean:
