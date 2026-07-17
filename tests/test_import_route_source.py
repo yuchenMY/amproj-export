@@ -74,7 +74,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         start = BRIDGE_SOURCE.index("if (scheduleFailure)")
         end = BRIDGE_SOURCE.index("} else if (scheduleSuccess)", start)
         failure_branch = BRIDGE_SOURCE[start:end]
-        self.assertIn("snapshot.error = self.copyError", failure_branch)
+        self.assertIn("snapshot.error = self.transferError", failure_branch)
         self.assertIn("callback(snapshot)", failure_branch)
         self.assertIn("dispatch_get_main_queue()", failure_branch)
         self.assertNotIn(

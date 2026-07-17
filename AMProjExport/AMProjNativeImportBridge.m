@@ -36,7 +36,7 @@ typedef void (*AMProjSwiftBridgeReleaseFn)(uintptr_t value);
 @interface AMProjLocalStorageTask : NSObject
 @property(nonatomic, strong) NSURL *sourceURL;
 @property(nonatomic, strong) NSURL *destinationURL;
-@property(nonatomic, strong) NSError *copyError;
+@property(nonatomic, strong) NSError *transferError;
 @property(nonatomic, strong) id reference;
 @property(nonatomic) BOOL terminalScheduled;
 - (instancetype)initWithSourceURL:(NSURL *)sourceURL
@@ -108,17 +108,17 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
     NSURL *directoryURL = [destinationURL URLByDeletingLastPathComponent];
     if (![manager createDirectoryAtURL:directoryURL
            withIntermediateDirectories:YES attributes:nil error:&error]) {
-        _copyError = error;
+        _transferError = error;
         return self;
     }
     if ([manager fileExistsAtPath:destinationURL.path]) {
         if (![manager removeItemAtURL:destinationURL error:&error]) {
-            _copyError = error;
+            _transferError = error;
             return self;
         }
     }
     if (![manager copyItemAtURL:sourceURL toURL:destinationURL error:&error]) {
-        _copyError = error;
+        _transferError = error;
     }
     return self;
 }
@@ -131,8 +131,8 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
     BOOL scheduleFailure = NO;
     @synchronized (self) {
         if (!self.terminalScheduled) {
-            scheduleSuccess = status == 4 && self.copyError == nil;
-            scheduleFailure = status == 5 && self.copyError != nil;
+            scheduleSuccess = status == 4 && self.transferError == nil;
+            scheduleFailure = status == 5 && self.transferError != nil;
             if (scheduleSuccess || scheduleFailure) self.terminalScheduled = YES;
         }
     }
@@ -140,7 +140,7 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
     if (scheduleFailure) {
         void (^callback)(id) = [handler copy];
         AMProjLocalStorageSnapshot *snapshot = [AMProjLocalStorageSnapshot new];
-        snapshot.error = self.copyError ?: AMProjNativeBridgeError(
+        snapshot.error = self.transferError ?: AMProjNativeBridgeError(
             105, @"Unable to copy the complete .amproj package", nil);
         snapshot.task = self;
         snapshot.reference = self.reference;
