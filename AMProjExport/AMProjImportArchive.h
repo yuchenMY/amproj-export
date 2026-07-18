@@ -23,7 +23,9 @@ typedef NS_ENUM(NSInteger, AMProjImportArchiveErrorCode) {
 
  Stored and raw-deflate entries are supported. Encrypted, split, ZIP64, unsafe,
  overlapping, oversized, or CRC-invalid archives are rejected. A package must
- contain at least one XML entry and no more than one root `manifest.txt`.
+  contain at least one XML entry and no more than one root `manifest.txt`.
+  Multiple XML entries are accepted only when that manifest is present;
+  ambiguous multi-XML archives without a manifest are rejected.
 
  On success, `nativeXMLURL` is the rewritten XML URL. `metrics` includes
  `entry_count`, `file_count`, `directory_count`, `xml_count`, `manifest_count`,

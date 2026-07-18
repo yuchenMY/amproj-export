@@ -864,6 +864,17 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
                                 @"A project package may contain at most one root manifest.txt",
                                 @{ @"manifest_count": @(manifestCount) });
     }
+    // A package with several independent scenes needs the official manifest
+    // to tell PackageImporter how those scenes belong together. Keep the
+    // single-XML legacy path permissive, but reject an ambiguous multi-XML
+    // archive before extracting it when no manifest is present.
+    if (xmlEntries.count > 1 && manifestCount == 0) {
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidZIP,
+                                @"A multi-project package must contain manifest.txt",
+                                @{ @"xml_count": @(xmlEntries.count),
+                                   @"manifest_count": @(manifestCount) });
+    }
     for (AMProjImportEntry *xmlEntry in xmlEntries) {
         if (xmlEntry.uncompressedSize == 0 ||
             xmlEntry.uncompressedSize > kAMProjImportMaximumXMLBytes) {
