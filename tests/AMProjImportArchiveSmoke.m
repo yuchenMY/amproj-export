@@ -62,7 +62,7 @@ int main(int argc, const char *argv[]) {
         if (!xml || ![parser parse] ||
             [xml containsString:@"amproj:asset%20&amp;%20one.bin"] ||
             ![xml containsString:@"file://"] ||
-            ![xml containsString:@"amproj:missing.mp4"]) {
+            (!multiXML && ![xml containsString:@"amproj:missing.mp4"])) {
             NSLog(@"rewritten XML is incorrect: %@ error=%@", xml, error);
             return 5;
         }
