@@ -24,9 +24,9 @@ project.amproj
 
 完整格式见 `format_spec.md`。
 
-## v21 离线导入
+## v22 离线导入
 
-### v21 稳定性修复
+### v22 稳定性修复
 
 - 原生导入开始前强制切换到底部“项目”页；项目页尚未完成挂载时会等待，不再把“主页”控制器当作导入上下文。
 - Debug 版默认不安装全局 `NSXMLParser` 诊断 swizzle，避免它干扰 Alight Motion 的 Swift 项目解析。
@@ -36,7 +36,7 @@ project.amproj
 `StorageReference`（入口会对它调用 `writeToFile:`），隐藏 Swift `x20` 是弱持有的
 项目页控制器。复制任务完成时同时发出 Firebase 的进度终态 `2` 和成功终态 `4`，失败仍发出 `5`。
 
-因此，`3/4` 后仍闪退的旧 v20 包不要继续重复安装；请使用 v21 构建。v21 同时兼容 Android 官方的多 XML + `manifest.txt` 项目包，并将缺失媒体交给 AM 原生警告流程；仍建议确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
+因此，`3/4` 后仍闪退的旧 v20/v21 包不要继续重复安装；请使用 v22 构建。v22 同时兼容 Android 官方的多 XML + `manifest.txt` 项目包，并将缺失媒体交给 AM 原生警告流程；仍建议确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
 
 稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 只记录候选 URL，并把原始 launch options 完整交给 AM，避免在系统授权尚未激活时制造 `EPERM` 伪失败。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
 
@@ -59,11 +59,11 @@ AMProjShareExtension/build/AMProjShareExtension.appex
 AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-## 从干净 IPA 生成 v21
+## 从干净 IPA 生成 v22
 
 必须以未注入的 `AM_v1.ipa` 为输入，不要用旧测试包继续叠加。主 App Bundle ID 保持 `com.amayaka.meow`。
 
-v21 原生导入桥只支持这份已核验的主程序：
+v22 原生导入桥只支持这份已核验的主程序：
 
 ```text
 AM_v1.ipa SHA-256: B135D99E81E0F3F976CBF4C30BCC491B4B770BD9D0A6841D48083B7A7EA29413
@@ -76,7 +76,7 @@ Mach-O UUID:       4b22d43f-09fc-3bde-859b-78a5d573a503
 
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v21.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v22.ipa `
   --expected-main-uuid $uuid
 ```
 
@@ -85,7 +85,7 @@ python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_d
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v21_debug.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v22_debug.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid
 python .\debug_backend\server.py --token $token
 ```
@@ -95,7 +95,7 @@ python .\debug_backend\server.py --token $token
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v21_share_exp.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v22_share_exp.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid `
   --share-extension .\AMProjShareExtension\build\AMProjShareExtension.appex `
   --app-group-id group.com.amayaka.meow.amprojshare

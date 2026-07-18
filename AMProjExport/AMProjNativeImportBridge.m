@@ -124,19 +124,19 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
         self.transferFinished = YES;
         self.progress.completedUnitCount = 1;
         NSMutableArray<NSDictionary *> *matching = [NSMutableArray array];
-        for (NSNumber *handle in self.observers.allKeys) {
-            NSDictionary *observer = self.observers[handle];
-            NSInteger status = [observer[@"status"] integerValue];
-            // PackageImporter observes Firebase's progress status (2) and
-            // failure status (5).  A completed Firebase task emits one final
-            // progress snapshot with fractionCompleted == 1; it does not
-            // rely on a success(4) observer for this import path.  Also honor
-            // success(4) for SDK variants that register it explicitly.
-            BOOL terminal = error
-                ? (status == 5)
-                : (status == 2 || status == 4);
-            if (terminal) {
-                [matching addObject:observer];
+        // PackageImporter observes Firebase's progress status (2), failure
+        // status (5), and success status (4). A completed Firebase task emits
+        // one final progress snapshot with fractionCompleted == 1. Keep the
+        // success order deterministic: progress first, then completion.
+        NSArray<NSNumber *> *terminalStatuses = error ? @[@5] : @[@2, @4];
+        NSArray<NSNumber *> *handles = [self.observers.allKeys
+            sortedArrayUsingSelector:@selector(compare:)];
+        for (NSNumber *wanted in terminalStatuses) {
+            for (NSNumber *handle in handles) {
+                NSDictionary *observer = self.observers[handle];
+                if ([observer[@"status"] integerValue] == wanted.integerValue) {
+                    [matching addObject:observer];
+                }
             }
         }
         [self.observers removeAllObjects];
@@ -147,7 +147,10 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
     void (^invokeCallbacks)(void) = ^{
         for (NSDictionary *observer in callbacks) {
             void (^handler)(id) = observer[@"handler"];
-            if (handler) handler([self snapshot]);
+            if (!handler) continue;
+            NSLog(@"[AMProjExport] Native import storage callback status=%ld",
+                  [observer[@"status"] integerValue]);
+            handler([self snapshot]);
         }
     };
     if ([NSThread isMainThread]) invokeCallbacks();
@@ -838,16 +841,16 @@ static BOOL AMProjStartNativePackageImport(
     @try {
         // The verified Swift entry uses the arm64 Swift closure convention:
         // its explicit x2 argument is the storage reference (the entry calls
-        // writeToFile: on it), while the hidden x20 context is the weak
-        // presentation owner. The assembly adapter keeps the public
-        // arguments in this order and places only the final owner argument in
-        // x20.
+        // writeToFile: on it), x3 is the progress UI owner, and the hidden x20
+        // context is the weak presentation owner. Use the same visible
+        // controller for both owner slots; the progress closure sends it
+        // view/superview while the importer keeps the weak owner alive.
         AMProjCallNativePackageImport(
             entry,
             swiftName.word0,
             swiftName.word1,
             reference,
-            nil,
+            owner,
             (void *)&AMProjNativeImportCompletionThunk,
             NULL,
             owner);

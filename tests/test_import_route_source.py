@@ -119,12 +119,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("view.window != window", fallback)
         self.assertIn("PortalActivityViewController", fallback)
 
-    def test_native_bridge_keeps_optional_progress_owner_nil(self):
+    def test_native_bridge_passes_project_owner_to_progress_and_hidden_slots(self):
         call_start = BRIDGE_SOURCE.index("AMProjCallNativePackageImport(")
         call_end = BRIDGE_SOURCE.index("releaseBridge(swiftName.word1)", call_start)
         call = BRIDGE_SOURCE[call_start:call_end]
         self.assertIn("reference,", call)
-        self.assertIn("nil,", call)
+        self.assertIn("owner,", call)
         self.assertIn("NULL,", call)
         self.assertIn("owner);", call)
         self.assertIn("explicit x2", BRIDGE_SOURCE)
@@ -155,8 +155,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "- (void)removeObserverWithHandle", observe_start
         )
         observe = BRIDGE_SOURCE[observe_start:observe_end]
-        self.assertIn("status == 2 || status == 4", finish)
-        self.assertIn("status == 5", finish)
+        self.assertIn("@[@5]", finish)
+        self.assertIn("@[@2, @4]", finish)
+        self.assertIn("terminalStatuses", finish)
+        self.assertIn("sortedArrayUsingSelector", finish)
         self.assertIn(
             "self.transferError == nil && (status == 2 || status == 4)",
             observe,
@@ -473,7 +475,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v21 \\u00b7 E40", present)
+        self.assertIn("AMProj v22 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),
