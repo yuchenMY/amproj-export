@@ -697,7 +697,9 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
                                       NSArray<AMProjImportEntry *> *entries,
                                       NSUInteger *referenceCount,
                                       NSUInteger *rewrittenCount,
-                                      NSUInteger *missingCount, NSError **error) {
+                                      NSUInteger *missingCount,
+                                      NSArray<NSString *> **missingNames,
+                                      NSError **error) {
     NSString *xml = [[NSString alloc] initWithData:xmlData encoding:NSUTF8StringEncoding];
     if (!xml) {
         AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
@@ -706,7 +708,7 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
     }
     NSError *regexError = nil;
     NSRegularExpression *regex = [NSRegularExpression
-        regularExpressionWithPattern:@"amproj:((?:&(?:amp|quot|apos|lt|gt);|[^\\s\\\"'<>&])+)"
+        regularExpressionWithPattern:@"amproj:((?:&(?:amp|quot|apos|lt|gt);|[^\\\"'<>&])+)"
                               options:0 error:&regexError];
     if (!regex) {
         AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
@@ -756,6 +758,10 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
     if (referenceCount) *referenceCount = matches.count;
     if (rewrittenCount) *rewrittenCount = localRewrittenCount;
     if (missingCount) *missingCount = missingReferences.count;
+    if (missingNames) {
+        *missingNames = [missingReferences.allObjects
+            sortedArrayUsingSelector:@selector(compare:)];
+    }
     return result;
 }
 
@@ -846,10 +852,10 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
             manifestCount++;
         }
     }
-    if (xmlEntries.count != 1) {
+    if (xmlEntries.count == 0) {
         close(sourceFD);
         return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
-                                @"A project package must contain exactly one XML file",
+                                @"A project package must contain at least one XML file",
                                 @{ @"xml_count": @(xmlEntries.count) });
     }
     if (manifestCount > 1) {
@@ -858,12 +864,15 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
                                 @"A project package may contain at most one root manifest.txt",
                                 @{ @"manifest_count": @(manifestCount) });
     }
-    AMProjImportEntry *xmlEntry = xmlEntries.firstObject;
-    if (xmlEntry.uncompressedSize == 0 || xmlEntry.uncompressedSize > kAMProjImportMaximumXMLBytes) {
-        close(sourceFD);
-        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
-                                @"The project XML is empty or too large",
-                                @{ @"xml_bytes": @(xmlEntry.uncompressedSize) });
+    for (AMProjImportEntry *xmlEntry in xmlEntries) {
+        if (xmlEntry.uncompressedSize == 0 ||
+            xmlEntry.uncompressedSize > kAMProjImportMaximumXMLBytes) {
+            close(sourceFD);
+            return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
+                                    @"A project XML is empty or too large",
+                                    @{ @"entry": xmlEntry.name ?: @"",
+                                       @"xml_bytes": @(xmlEntry.uncompressedSize) });
+        }
     }
 
     NSFileManager *fileManager = NSFileManager.defaultManager;
@@ -899,28 +908,47 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
         return NO;
     }
 
-    NSData *xmlData = [NSData dataWithContentsOfURL:xmlEntry.outputURL
-                                            options:NSDataReadingMappedIfSafe
-                                              error:&fileError];
-    if (!xmlData) {
-        [fileManager removeItemAtURL:extractionURL error:nil];
-        return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
-                                @"Unable to read the extracted project XML",
-                                @{ @"reason": fileError.localizedDescription ?: @"" });
-    }
     NSUInteger referenceCount = 0;
     NSUInteger rewrittenCount = 0;
     NSUInteger missingCount = 0;
-    NSData *nativeData = AMProjImportRewriteXML(xmlData, entries,
-                                                &referenceCount, &rewrittenCount,
-                                                &missingCount, error);
-    if (!nativeData) {
-        [fileManager removeItemAtURL:extractionURL error:nil];
-        return NO;
+    NSMutableSet<NSString *> *missingReferenceNames = [NSMutableSet set];
+    NSData *nativeData = nil;
+    AMProjImportEntry *primaryXMLEntry = xmlEntries.firstObject;
+    for (AMProjImportEntry *xmlEntry in xmlEntries) {
+        NSData *xmlData = [NSData dataWithContentsOfURL:xmlEntry.outputURL
+                                                options:NSDataReadingMappedIfSafe
+                                                  error:&fileError];
+        if (!xmlData) {
+            [fileManager removeItemAtURL:extractionURL error:nil];
+            return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                    @"Unable to read an extracted project XML",
+                                    @{ @"entry": xmlEntry.name ?: @"",
+                                       @"reason": fileError.localizedDescription ?: @"" });
+        }
+        NSUInteger xmlReferenceCount = 0;
+        NSUInteger xmlRewrittenCount = 0;
+        NSUInteger xmlMissingCount = 0;
+        NSArray<NSString *> *xmlMissingNames = nil;
+        NSData *rewritten = AMProjImportRewriteXML(
+            xmlData, entries, &xmlReferenceCount, &xmlRewrittenCount,
+            &xmlMissingCount, &xmlMissingNames, error);
+        if (!rewritten) {
+            [fileManager removeItemAtURL:extractionURL error:nil];
+            return NO;
+        }
+        referenceCount += xmlReferenceCount;
+        rewrittenCount += xmlRewrittenCount;
+        [missingReferenceNames addObjectsFromArray:xmlMissingNames ?: @[]];
+        if (xmlEntry == primaryXMLEntry) nativeData = rewritten;
+    }
+    missingCount = missingReferenceNames.count;
+    NSMutableArray<NSString *> *xmlNames = [NSMutableArray arrayWithCapacity:xmlEntries.count];
+    for (AMProjImportEntry *xmlEntry in xmlEntries) {
+        if (xmlEntry.name.length) [xmlNames addObject:xmlEntry.name];
     }
     NSString *nativeName = [NSUUID.UUID.UUIDString.lowercaseString
         stringByAppendingString:@".native-import.xml"];
-    NSURL *nativeURL = [xmlEntry.outputURL.URLByDeletingLastPathComponent
+    NSURL *nativeURL = [primaryXMLEntry.outputURL.URLByDeletingLastPathComponent
         URLByAppendingPathComponent:nativeName];
     if (!AMProjImportAtomicWrite(nativeData, nativeURL, error)) {
         [fileManager removeItemAtURL:extractionURL error:nil];
@@ -933,7 +961,7 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
             @"entry_count": @(entries.count),
             @"file_count": @(fileCount),
             @"directory_count": @(directoryCount),
-            @"xml_count": @1,
+            @"xml_count": @(xmlEntries.count),
             @"manifest_count": @(manifestCount),
             @"archive_bytes": @(archiveSize),
             @"compressed_bytes": @(compressedTotal),
@@ -941,6 +969,9 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
             @"reference_count": @(referenceCount),
             @"rewritten_reference_count": @(rewrittenCount),
             @"missing_reference_count": @(missingCount),
+            @"missing_reference_names": [missingReferenceNames.allObjects
+                sortedArrayUsingSelector:@selector(compare:)],
+            @"xml_names": [xmlNames copy],
             @"extraction_directory": extractionURL.path ?: @"",
             @"native_xml": nativeURL.path ?: @"",
         };
@@ -1055,6 +1086,7 @@ BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
                 @"input_manifest_count": preparationMetrics[@"manifest_count"] ?: @0,
                 @"reference_count": preparationMetrics[@"reference_count"] ?: @0,
                 @"missing_reference_count": preparationMetrics[@"missing_reference_count"] ?: @0,
+                @"missing_reference_names": preparationMetrics[@"missing_reference_names"] ?: @[],
                 @"resource_count": @(resourceURLs.count),
                 @"normalized_archive": destinationURL.path ?: @"",
                 @"zip": zipMetrics ?: @{}

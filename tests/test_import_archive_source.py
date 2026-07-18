@@ -39,6 +39,7 @@ class ImportArchiveSourceTests(unittest.TestCase):
     def test_xml_rewrite_and_atomic_publish_are_present(self):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn("amproj:", source)
+        self.assertIn('regularExpressionWithPattern:@"amproj:((?:&(?:amp|quot|apos|lt|gt);|[^\\\\\\\"\'<>&])+)"', source)
         self.assertIn("AMProjImportEscapeXMLValue(url.absoluteString)", source)
         self.assertIn(".native-import.xml", source)
         self.assertIn("missing_reference_count", source)
@@ -50,6 +51,15 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn("*missingCount = missingReferences.count", source)
         self.assertNotIn('URLByAppendingPathComponent:@".missing"', source)
         self.assertIn("rename(temporaryURL.fileSystemRepresentation", source)
+
+    def test_native_preparation_accepts_multiple_xml_files_and_reports_names(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("if (xmlEntries.count == 0)", source)
+        self.assertIn("for (AMProjImportEntry *xmlEntry in xmlEntries)", source)
+        self.assertIn("NSMutableArray<NSString *> *xmlNames", source)
+        self.assertIn('"xml_names": [xmlNames copy]', source)
+        self.assertIn('"missing_reference_names"', source)
+        self.assertNotIn("xmlEntries.count != 1", source)
 
     def test_normalization_rebuilds_manifest_and_preserves_missing_references(self):
         source = SOURCE.read_text(encoding="utf-8")

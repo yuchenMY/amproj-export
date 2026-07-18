@@ -23,15 +23,18 @@ typedef NS_ENUM(NSInteger, AMProjImportArchiveErrorCode) {
 
  Stored and raw-deflate entries are supported. Encrypted, split, ZIP64, unsafe,
  overlapping, oversized, or CRC-invalid archives are rejected. A package must
- contain exactly one XML entry and no more than one root `manifest.txt`.
+ contain at least one XML entry and no more than one root `manifest.txt`.
 
  On success, `nativeXMLURL` is the rewritten XML URL. `metrics` includes
  `entry_count`, `file_count`, `directory_count`, `xml_count`, `manifest_count`,
  `archive_bytes`, `compressed_bytes`, `uncompressed_bytes`, `reference_count`,
- `rewritten_reference_count`, `missing_reference_count`, `extraction_directory`,
- and `native_xml`. References whose files are absent remain unchanged and are
- counted in `missing_reference_count`. The caller owns the successful extraction
- directory and should remove it after the native importer has finished reading.
+ `rewritten_reference_count`, `missing_reference_count`,
+ `missing_reference_names`, `xml_names`, `extraction_directory`, and
+ `native_xml`. For compatibility with the legacy single-XML bridge,
+ `nativeXMLURL` points to the first rewritten XML; every XML and resource is
+ still extracted and integrity-checked. References whose files are absent remain
+ unchanged and are counted in `missing_reference_count`. The caller owns the
+ successful extraction directory and should remove it after use.
  */
 FOUNDATION_EXPORT BOOL AMProjPrepareNativeImport(
     NSURL *archiveURL,

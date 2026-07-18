@@ -15,28 +15,28 @@ Debug IPA 会优先连接注入时记录的 Windows 地址；地址变化或连�
 
 ```text
 project.amproj
-├── <UUID>.xml       # 恰好一个场景 XML
+├── <UUID>.xml       # 一个或多个场景 XML（Android 官方包可能包含多个）
 ├── manifest.txt     # 规范资源清单，可以为空
 └── media/font/...   # XML 引用的可选资源
 ```
 
-规范包必须有且只能有一个场景 XML 和一个 `manifest.txt`。为兼容旧包，导入器允许输入缺少 manifest，并在完整 CRC 校验后自动生成一个；多个 manifest 仍会被拒绝。插件导出始终生成规范的 `manifest.txt`。
+插件自己导出的规范包有一个场景 XML 和一个 `manifest.txt`。导入时同时接受 Android 官方的多个场景 XML，只要有一个根 `manifest.txt` 就保留原 ZIP 交给 AM；没有 manifest 的单 XML 旧包才会重建为规范包。多个 manifest、损坏 CRC 或不安全路径仍会被拒绝。
 
 完整格式见 `format_spec.md`。
 
-## v20 离线导入
+## v21 离线导入
 
-### v20r1 稳定性修复
+### v21 稳定性修复
 
 - 原生导入开始前强制切换到底部“项目”页；项目页尚未完成挂载时会等待，不再把“主页”控制器当作导入上下文。
 - Debug 版默认不安装全局 `NSXMLParser` 诊断 swizzle，避免它干扰 Alight Motion 的 Swift 项目解析。
 - XML 引用的媒体只要有一项不在 `.amproj` ZIP 中，就在 `2/4` 阶段停止并显示缺失数量，不再把不完整包交给原生 `PackageImporter`。
 
-因此，`3/4` 后仍闪退的旧 v20 包不要继续重复安装；请使用新构建，并确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
+因此，`3/4` 后仍闪退的旧 v20 包不要继续重复安装；请使用 v21 构建。v21 同时兼容 Android 官方的多 XML + `manifest.txt` 项目包，并将缺失媒体交给 AM 原生警告流程；仍建议确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
 
 稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 只记录候选 URL，并把原始 launch options 完整交给 AM，避免在系统授权尚未激活时制造 `EPERM` 伪失败。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
 
-复制完成后的处理全部在本地执行：插件逐项解压验证 ZIP32、local header、CRC、XML 和路径安全，再用有效的资源、原始场景 XML 和重算的 manifest 生成规范包。缺少的 `amproj:` 素材引用会保留，交给 AM 原生的缺素材处理。规范包只会交给已注册的本地 `PackageImporter` 适配器，完整 ZIP、XML、媒体和字体作为同一个项目事务写入；代码不再查找 `TemplatesListVC`，也不会调用模板页的 XML 文档选择器回调。
+复制完成后的处理全部在本地执行：插件逐项解压验证 ZIP32、local header、CRC、XML 和路径安全。带 manifest 的官方包保持完整 ZIP（包括所有 XML、媒体和字体）交给本地 `PackageImporter`；缺 manifest 的单 XML 旧包才重算 manifest。缺少的 `amproj:` 素材引用会保留，交给 AM 原生的缺素材处理；代码不再查找 `TemplatesListVC`，也不会调用模板页的 XML 文档选择器回调。
 
 正常状态顺序为：`1/4 收到文件 -> 2/4 完整校验并规范化 -> 3/4 正在解包并写入项目 -> 4/4 已导入到底部“项目”`。只有适配器确认项目和包内资源已经持久化后才显示 `4/4`，原生确认框出现本身不再算成功。
 
@@ -55,11 +55,11 @@ AMProjShareExtension/build/AMProjShareExtension.appex
 AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-## 从干净 IPA 生成 v20
+## 从干净 IPA 生成 v21
 
 必须以未注入的 `AM_v1.ipa` 为输入，不要用旧测试包继续叠加。主 App Bundle ID 保持 `com.amayaka.meow`。
 
-v20 原生导入桥只支持这份已核验的主程序：
+v21 原生导入桥只支持这份已核验的主程序：
 
 ```text
 AM_v1.ipa SHA-256: B135D99E81E0F3F976CBF4C30BCC491B4B770BD9D0A6841D48083B7A7EA29413
@@ -72,7 +72,7 @@ Mach-O UUID:       4b22d43f-09fc-3bde-859b-78a5d573a503
 
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v20.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v21.ipa `
   --expected-main-uuid $uuid
 ```
 
@@ -81,7 +81,7 @@ python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_d
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v20_debug.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v21_debug.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid
 python .\debug_backend\server.py --token $token
 ```
@@ -91,7 +91,7 @@ python .\debug_backend\server.py --token $token
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v20_share_exp.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v21_share_exp.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid `
   --share-extension .\AMProjShareExtension\build\AMProjShareExtension.appex `
   --app-group-id group.com.amayaka.meow.amprojshare

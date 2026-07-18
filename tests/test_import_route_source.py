@@ -62,11 +62,15 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_native_bridge_uses_complete_package_and_firebase_task_contract(self):
         self.assertIn("AMProjLocalStorageReference", BRIDGE_SOURCE)
         self.assertIn("AMProjLocalStorageTask", BRIDGE_SOURCE)
+        self.assertIn("typedef int64_t AMProjLocalStorageHandle", BRIDGE_SOURCE)
         self.assertIn("writeToFile:", BRIDGE_SOURCE)
         self.assertIn("observeStatus:", BRIDGE_SOURCE)
+        self.assertIn("removeObserverWithHandle:", BRIDGE_SOURCE)
+        self.assertIn("removeAllObserversForStatus:", BRIDGE_SOURCE)
         self.assertIn("copyItemAtURL:sourceURL toURL:destinationURL", BRIDGE_SOURCE)
         self.assertIn("status == 4", BRIDGE_SOURCE)
         self.assertIn("status == 5", BRIDGE_SOURCE)
+        self.assertIn("QOS_CLASS_USER_INITIATED", BRIDGE_SOURCE)
         self.assertNotIn("AMProjExtractProjectArchive", BRIDGE_SOURCE)
         self.assertNotIn("nativeXMLURL", BRIDGE_SOURCE)
 
@@ -78,23 +82,76 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn("window.rootViewController", owner)
         self.assertIn("static void AMProjSelectProjectsTab", BRIDGE_SOURCE)
 
+    def test_native_bridge_ranks_real_project_controller_candidates_without_root_fallback(self):
+        self.assertIn('hasSuffix:@"ProjectsVC"', BRIDGE_SOURCE)
+        self.assertIn('hasSuffix:@"ProjectsListVC"', BRIDGE_SOURCE)
+        self.assertIn("connectedScenes", BRIDGE_SOURCE)
+        self.assertIn("application.windows", BRIDGE_SOURCE)
+        self.assertIn("AMProjBestProjectControllerCandidate", BRIDGE_SOURCE)
+        self.assertIn("AMProjControllerIsMountedVisible", BRIDGE_SOURCE)
+        owner_start = BRIDGE_SOURCE.index(
+            "static UIViewController *AMProjPresentationOwner(void)"
+        )
+        owner_end = BRIDGE_SOURCE.index(
+            "static UIViewController *AMProjFindProjectsController", owner_start
+        )
+        owner = BRIDGE_SOURCE[owner_start:owner_end]
+        self.assertIn("AMProjProjectControllerCandidates()", owner)
+        self.assertIn("AMProjSelectProjectsTab(projects)", owner)
+        self.assertIn("no mounted visible candidate", BRIDGE_SOURCE)
+        self.assertNotIn("return window.rootViewController", owner)
+
+    def test_native_bridge_allows_only_an_unobstructed_foreground_fallback_owner(self):
+        self.assertIn("AMProjVisibleWindowPresentationOwner", BRIDGE_SOURCE)
+        self.assertIn("AMProjControllerBlocksNativePresentation", BRIDGE_SOURCE)
+        fallback_start = BRIDGE_SOURCE.index(
+            "static UIViewController *AMProjVisibleWindowPresentationOwner(void)"
+        )
+        fallback = BRIDGE_SOURCE[
+            fallback_start : BRIDGE_SOURCE.rindex(
+                "static UIViewController *AMProjFindProjectsController", fallback_start
+            )
+        ]
+        self.assertIn("UIApplicationStateActive", fallback)
+        self.assertIn("window.isKeyWindow", fallback)
+        self.assertIn("UIAlertController.class", fallback)
+        self.assertIn("view.window != window", fallback)
+        self.assertIn("PortalActivityViewController", fallback)
+
     def test_native_bridge_keeps_optional_progress_owner_nil(self):
         call_start = BRIDGE_SOURCE.index("AMProjCallNativePackageImport(")
         call_end = BRIDGE_SOURCE.index("releaseBridge(swiftName.word1)", call_start)
         call = BRIDGE_SOURCE[call_start:call_end]
-        self.assertIn("reference,\n        nil,", call)
-        self.assertIn("NULL,\n        owner);", call)
+        self.assertIn("owner,", call)
+        self.assertIn("nil,", call)
+        self.assertIn("NULL,", call)
+        self.assertIn("reference);", call)
+        self.assertIn("hidden x20", BRIDGE_SOURCE)
+        self.assertIn("writeToFile:", BRIDGE_SOURCE)
 
     def test_copy_failure_flows_through_the_native_status_handler(self):
-        start = BRIDGE_SOURCE.index("if (scheduleFailure)")
-        end = BRIDGE_SOURCE.index("} else if (scheduleSuccess)", start)
-        failure_branch = BRIDGE_SOURCE[start:end]
-        self.assertIn("snapshot.error = self.transferError", failure_branch)
-        self.assertIn("callback(snapshot)", failure_branch)
-        self.assertIn("dispatch_get_main_queue()", failure_branch)
-        self.assertNotIn(
-            "AMProjNativePackageImportBridgeFinishFailure", failure_branch
-        )
+        finish = BRIDGE_SOURCE[BRIDGE_SOURCE.index("- (void)finishTransferWithError") :
+                              BRIDGE_SOURCE.index("- (instancetype)initWithSourceURL", BRIDGE_SOURCE.index("- (void)finishTransferWithError"))]
+        self.assertIn("if (self.transferFinished) return", finish)
+        self.assertIn("self.transferError = error", finish)
+        self.assertIn('observer[@"status"]', finish)
+        self.assertIn("snapshot])", finish)
+        self.assertIn("dispatch_get_main_queue()", finish)
+        self.assertIn("error", BRIDGE_SOURCE[BRIDGE_SOURCE.index("if (![manager copyItemAtURL") :])
+        self.assertNotIn("AMProjNativePackageImportBridgeFinishFailure", finish)
+
+    def test_native_storage_handles_are_numeric_and_removable(self):
+        observe_start = BRIDGE_SOURCE.rindex("- (AMProjLocalStorageHandle)observeStatus")
+        observe = BRIDGE_SOURCE[observe_start :
+                               BRIDGE_SOURCE.index("- (void)removeObserverWithHandle", observe_start)]
+        self.assertIn("++self.nextHandle", observe)
+        self.assertIn("self.observers[@(handle)]", observe)
+        self.assertIn("return handle", observe)
+        remove_start = BRIDGE_SOURCE.rindex("- (void)removeObserverWithHandle")
+        remove = BRIDGE_SOURCE[remove_start :
+                              BRIDGE_SOURCE.index("@end", remove_start)]
+        self.assertIn("(AMProjLocalStorageHandle)handle", remove)
+        self.assertIn("removeObjectForKey:@(handle)", remove)
 
     def test_timeout_poison_prevents_a_late_callback_from_finishing_a_new_import(self):
         self.assertIn("amproj_nativeBridgePoisoned", BRIDGE_SOURCE)
@@ -114,6 +171,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_arm64_shim_sets_hidden_owner_without_corrupting_callee_saved_state(self):
         self.assertIn("_AMProjCallNativePackageImport", BRIDGE_ASSEMBLY)
         self.assertIn("str x20, [sp, #16]", BRIDGE_ASSEMBLY)
+        self.assertIn("storage reference in the hidden x20 context", BRIDGE_ASSEMBLY)
         self.assertIn("mov x20, x7", BRIDGE_ASSEMBLY)
         self.assertIn("blr x9", BRIDGE_ASSEMBLY)
         self.assertIn("ldr x20, [sp, #16]", BRIDGE_ASSEMBLY)
@@ -285,25 +343,37 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         worker = body.index("dispatch_async(amproj_importInboxQueue()")
         validate = body.index("amproj_validateIncomingArchive")
-        normalize = body.index("AMProjNormalizeProjectArchive")
-        queue = body.index("amproj_queuePreparedImport(normalizedURL")
+        original_route = body.index('if (inputManifestCount == 1)')
+        prepare = body.index("AMProjPrepareNativeImport", original_route)
+        original_assignment = body.index("preparedURL = archiveSnapshot", original_route)
+        legacy_route = body.index('} else if (inputXMLCount == 1)', original_route)
+        normalize = body.index("AMProjNormalizeProjectArchive", legacy_route)
+        queue = body.index("amproj_queuePreparedImport(preparedURL", legacy_route)
         self.assertLess(worker, validate)
-        self.assertLess(validate, normalize)
+        self.assertLess(validate, original_route)
+        self.assertLess(original_route, prepare)
+        self.assertLess(prepare, original_assignment)
+        self.assertLess(original_route, legacy_route)
+        self.assertLess(legacy_route, normalize)
         self.assertLess(normalize, queue)
-        self.assertNotIn("amproj_queuePreparedImport(archiveSnapshot", body)
-        self.assertIn('normalizationMetrics[@"missing_reference_count"]', body)
+        self.assertIn('route = @"validated_original_package"', body[original_route:legacy_route])
+        self.assertIn('route = @"normalized_legacy_package"', body[legacy_route:queue])
+        self.assertNotIn("AMProjNormalizeProjectArchive", body[original_route:legacy_route])
+        self.assertIn('preparationMetrics[@"missing_reference_count"]', body)
 
-    def test_incomplete_resource_archive_is_rejected_before_native_bridge(self):
+    def test_incomplete_resource_archive_is_forwarded_to_native_bridge(self):
         body = function_body(
             "static void amproj_prepareCopiedArchive",
             "static void amproj_activateNextPendingImport",
         )
         missing = body.index("NSUInteger missingReferences")
-        queue = body.index("amproj_queuePreparedImport(normalizedURL", missing)
-        reject = body.index("import.reject_incomplete_resources", missing)
-        self.assertLess(reject, queue)
-        self.assertIn("removeItemAtURL:directorySnapshot", body[missing:queue])
-        self.assertIn("amproj_presentImportError", body[missing:queue])
+        queue = body.index("amproj_queuePreparedImport(preparedURL", missing)
+        forward = body.index("import.missing_resources", missing)
+        self.assertLess(forward, queue)
+        self.assertIn('action": @"forward_to_native_importer"', body[forward:queue])
+        self.assertIn("missing_reference_names", body[forward:queue])
+        self.assertNotIn("import.reject_incomplete_resources", body[missing:queue])
+        self.assertNotIn("amproj_presentImportError", body[missing:queue])
 
     def test_prepared_zip_dispatches_only_to_local_package_bridge(self):
         dispatch = function_body(
@@ -380,7 +450,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v20 \\u00b7 E40", present)
+        self.assertIn("AMProj v21 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),

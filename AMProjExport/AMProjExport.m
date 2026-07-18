@@ -2621,7 +2621,7 @@ static void amproj_showImportStatusAttempt(NSString *text, BOOL error,
 }
 
 static void amproj_showImportStatus(NSString *text, BOOL error) {
-    NSString *snapshot = [text copy] ?: @"AMProj v20 import";
+    NSString *snapshot = [text copy] ?: @"AMProj v21 import";
     dispatch_async(dispatch_get_main_queue(), ^{
         NSUInteger generation = ++amproj_importStatusGeneration;
         amproj_showImportStatusAttempt(snapshot, error, generation, 0);
@@ -2702,10 +2702,10 @@ static NSString* amproj_visibleImportFileError(NSError *error) {
     }
     NSString *diagnostics = amproj_copyDiagnosticSummary(error);
     if (diagnostics.length) {
-        return [NSString stringWithFormat:@"AMProj v20 \u00b7 %@ (E%ld \u00b7 %@)",
+        return [NSString stringWithFormat:@"AMProj v21 \u00b7 %@ (E%ld \u00b7 %@)",
                                           message, (long)error.code, diagnostics];
     }
-    return [NSString stringWithFormat:@"AMProj v20 \u00b7 %@ (E%ld)",
+    return [NSString stringWithFormat:@"AMProj v21 \u00b7 %@ (E%ld)",
                                       message, (long)error.code];
 }
 
@@ -2981,11 +2981,10 @@ static BOOL amproj_validateIncomingArchive(NSURL *URL, NSDictionary **metrics,
             @"manifest_missing": @(manifestCount == 0),
         };
     }
-    if (XMLCount != 1) {
+    if (XMLCount == 0) {
         validationError = amproj_importFileError(
             AMProjImportFileErrorInvalidZIP,
-            XMLCount == 0 ? @"The project package ZIP contains no scene XML" :
-                            @"The project package ZIP must contain exactly one scene XML",
+            @"The project package ZIP contains no scene XML",
             0, nil);
         goto cleanup;
     }
@@ -3456,7 +3455,7 @@ static UIViewController* amproj_topViewController(UIViewController *controller) 
     }
     NSURL *selectedURL = [URLs.firstObject copy];
     BOOL heldSecurityScope = [selectedURL startAccessingSecurityScopedResource];
-    amproj_showImportStatus(@"AMProj v20 · 1/4 已选择 .amproj 文件", NO);
+    amproj_showImportStatus(@"AMProj v21 · 1/4 已选择 .amproj 文件", NO);
     dispatch_async(amproj_importInboxQueue(), ^{
         BOOL prepared = NO;
         AMProjIncomingURLResult result = amproj_handleIncomingProjectURLWithResult(
@@ -3599,7 +3598,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
     dispatch_async(amproj_importInboxQueue(), ^{
         @autoreleasepool {
             amproj_showImportStatus(
-                @"AMProj v20 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u5e76\u89c4\u8303\u5316\u9879\u76ee\u5305", NO);
+                @"AMProj v21 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u5e76\u89c4\u8303\u5316\u9879\u76ee\u5305", NO);
 
             NSDictionary *validationMetrics = nil;
             NSError *validationError = nil;
@@ -3637,35 +3636,82 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                 return;
             }
 
-            NSURL *normalizedURL = [directorySnapshot URLByAppendingPathComponent:
-                [[@"normalized-" stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString]
-                    stringByAppendingPathExtension:@"amproj"]];
-            NSDictionary *normalizationMetrics = nil;
-            NSError *normalizationError = nil;
-            BOOL normalized = AMProjNormalizeProjectArchive(
-                archiveSnapshot, directorySnapshot, normalizedURL,
-                &normalizationMetrics, &normalizationError);
-            amproj_debugEvent(@"import.normalize", @{
-                @"success": @(normalized),
+            NSUInteger inputManifestCount =
+                [validationMetrics[@"manifest_count"] unsignedIntegerValue];
+            NSUInteger inputXMLCount =
+                [validationMetrics[@"xml_count"] unsignedIntegerValue];
+            NSURL *preparedURL = nil;
+            NSDictionary *preparationMetrics = nil;
+            NSError *preparationError = nil;
+            NSString *route = nil;
+
+            if (inputManifestCount == 1) {
+                // Official Android packages can contain multiple independent
+                // scene XML files. Keep the validated package byte-for-byte so
+                // PackageImporter receives every scene and bundled resource.
+                NSURL *unusedNativeXML = nil;
+                BOOL prepared = AMProjPrepareNativeImport(
+                    archiveSnapshot, directorySnapshot, &unusedNativeXML,
+                    &preparationMetrics, &preparationError);
+                NSString *extractionPath = [preparationMetrics[@"extraction_directory"]
+                    isKindOfClass:NSString.class]
+                    ? preparationMetrics[@"extraction_directory"] : nil;
+                if (extractionPath.length) {
+                    [NSFileManager.defaultManager removeItemAtURL:
+                        [NSURL fileURLWithPath:extractionPath isDirectory:YES] error:nil];
+                }
+                if (prepared) {
+                    preparedURL = archiveSnapshot;
+                    route = @"validated_original_package";
+                }
+            } else if (inputXMLCount == 1) {
+                // Legacy exports without a manifest need one canonical rebuild.
+                NSURL *normalizedURL = [directorySnapshot URLByAppendingPathComponent:
+                    [[@"normalized-" stringByAppendingString:
+                        NSUUID.UUID.UUIDString.lowercaseString]
+                        stringByAppendingPathExtension:@"amproj"]];
+                BOOL normalized = AMProjNormalizeProjectArchive(
+                    archiveSnapshot, directorySnapshot, normalizedURL,
+                    &preparationMetrics, &preparationError);
+                if (normalized && normalizedURL.isFileURL) {
+                    preparedURL = normalizedURL;
+                    route = @"normalized_legacy_package";
+                }
+            } else {
+                preparationError = [NSError errorWithDomain:
+                    @"com.amproj.import.archive" code:32 userInfo:@{
+                        NSLocalizedDescriptionKey:
+                            @"A multi-project package must contain manifest.txt",
+                        @"xml_count": @(inputXMLCount)
+                    }];
+            }
+
+            BOOL prepared = preparedURL.isFileURL;
+            amproj_debugEvent(@"import.prepare_complete_package", @{
+                @"success": @(prepared),
                 @"source": sourceSnapshot,
                 @"filename": nameSnapshot,
-                @"input_manifest_count": normalizationMetrics[@"input_manifest_count"] ?: @0,
-                @"resource_count": normalizationMetrics[@"resource_count"] ?: @0,
-                @"reference_count": normalizationMetrics[@"reference_count"] ?: @0,
-                @"missing_reference_count": normalizationMetrics[@"missing_reference_count"] ?: @0,
-                @"zip": normalizationMetrics[@"zip"] ?: @{},
-                @"error_domain": normalizationError.domain ?: @"",
-                @"error_code": @(normalizationError.code),
-                @"error": normalizationError.localizedDescription ?: @""
+                @"route": route ?: @"none",
+                @"input_xml_count": @(inputXMLCount),
+                @"input_manifest_count": @(inputManifestCount),
+                @"entry_count": preparationMetrics[@"entry_count"] ?: @0,
+                @"resource_count": preparationMetrics[@"resource_count"] ?: @0,
+                @"reference_count": preparationMetrics[@"reference_count"] ?: @0,
+                @"missing_reference_count": preparationMetrics[@"missing_reference_count"] ?: @0,
+                @"missing_reference_names": preparationMetrics[@"missing_reference_names"] ?: @[],
+                @"zip": preparationMetrics[@"zip"] ?: @{},
+                @"error_domain": preparationError.domain ?: @"",
+                @"error_code": @(preparationError.code),
+                @"error": preparationError.localizedDescription ?: @""
             });
-            if (!normalized || !normalizedURL.isFileURL) {
+            if (!prepared) {
                 [NSFileManager.defaultManager removeItemAtURL:directorySnapshot error:nil];
                 if (!silentErrors) {
-                    NSString *detail = normalizationError.localizedDescription.length
-                        ? normalizationError.localizedDescription
+                    NSString *detail = preparationError.localizedDescription.length
+                        ? preparationError.localizedDescription
                         : @"\u9879\u76ee\u5305\u5b8c\u6574\u6027\u6821\u9a8c\u6216\u89c4\u8303\u5316\u5931\u8d25";
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v20 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u89c4\u8303\u5316\uff1a%@", detail];
+                        @"AMProj v21 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u89c4\u8303\u5316\uff1a%@", detail];
                     amproj_showImportStatus(visible, YES);
                     amproj_presentImportError(visible);
                 }
@@ -3673,44 +3719,39 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
             }
 
             NSUInteger missingReferences =
-                [normalizationMetrics[@"missing_reference_count"] unsignedIntegerValue];
+                [preparationMetrics[@"missing_reference_count"] unsignedIntegerValue];
             if (missingReferences) {
-                // Swift's package importer assumes every media URI resolves
-                // to an entry. Passing a partial archive reaches a fatal
-                // array-index path in PackageImporter, so reject it before
-                // the native call instead of producing a half-empty project.
-                NSError *missingError = [NSError errorWithDomain:
-                    @"com.amproj.import.archive" code:31 userInfo:@{
-                        NSLocalizedDescriptionKey: [NSString stringWithFormat:
-                            @"\u9879\u76ee\u5305\u7f3a\u5c11 %lu \u4e2a\u5a92\u4f53\u8d44\u6e90",
-                            (unsigned long)missingReferences],
-                        @"missing_reference_count": @(missingReferences)
-                    }];
-                [NSFileManager.defaultManager removeItemAtURL:directorySnapshot error:nil];
-                amproj_debugEvent(@"import.reject_incomplete_resources", @{
+                // AM's own importer explicitly supports partial packages and
+                // reports missing media after persisting the project. Do not
+                // turn that supported warning into a plugin-side hard failure.
+                amproj_debugEvent(@"import.missing_resources", @{
                     @"source": sourceSnapshot,
                     @"filename": nameSnapshot,
                     @"missing_reference_count": @(missingReferences),
-                    @"error": missingError.localizedDescription ?: @""
+                    @"missing_reference_names":
+                        preparationMetrics[@"missing_reference_names"] ?: @[],
+                    @"action": @"forward_to_native_importer"
                 });
-                NSString *visible = [NSString stringWithFormat:
-                    @"AMProj v20 \u00b7 \u9879\u76ee\u5305\u4e0d\u5b8c\u6574\uff1a%@",
-                    missingError.localizedDescription ?: @"\u5305\u5185\u7f3a\u5c11\u7d20\u6750"];
-                amproj_showImportStatus(visible, YES);
-                if (!silentErrors) amproj_presentImportError(visible);
-                return;
             }
             amproj_showImportStatus(
-                @"AMProj v20 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165", NO);
-            amproj_queuePreparedImport(normalizedURL, nameSnapshot);
+                @"AMProj v21 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165", NO);
+            amproj_queuePreparedImport(preparedURL, nameSnapshot);
         }
     });
 }
 
 static void amproj_activateNextPendingImport(void) {
+    if (!amproj_pendingImportQueue.count) return;
     if (amproj_pendingImportURL || amproj_importDispatchCoolingDown ||
-        amproj_nativeImportAlertActive ||
-        !amproj_pendingImportQueue.count) return;
+        amproj_nativeImportAlertActive) {
+        amproj_debugEvent(@"import.queue_blocked", @{
+            @"pending": @(amproj_pendingImportURL != nil),
+            @"cooldown": @(amproj_importDispatchCoolingDown),
+            @"native_alert": @(amproj_nativeImportAlertActive),
+            @"queue_depth": @(amproj_pendingImportQueue.count)
+        });
+        return;
+    }
     NSDictionary *entry = amproj_pendingImportQueue.firstObject;
     [amproj_pendingImportQueue removeObjectAtIndex:0];
     NSURL *URL = [entry[@"url"] isKindOfClass:NSURL.class] ? entry[@"url"] : nil;
@@ -3732,7 +3773,7 @@ static void amproj_activateNextPendingImport(void) {
         @"wait_seconds": @90
     });
     amproj_showImportStatus(
-        @"AMProj v20 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
+        @"AMProj v21 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
     amproj_tryDispatchPendingImport(generation);
 }
 
@@ -3770,12 +3811,12 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
         });
         if (success) {
             amproj_showImportStatus(
-                @"AMProj v20 \u00b7 4/4 \u5df2\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
+                @"AMProj v21 \u00b7 4/4 \u5df2\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
         } else {
             NSString *detail = error.localizedDescription.length
                 ? error.localizedDescription : @"AM \u672c\u5730\u9879\u76ee\u5305\u5bfc\u5165\u5931\u8d25";
             NSString *visible = [NSString stringWithFormat:
-                @"AMProj v20 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d\uff1a%@", detail];
+                @"AMProj v21 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d\uff1a%@", detail];
             amproj_showImportStatus(visible, YES);
             if (![error.userInfo[@"AMProjNativeAlertPresented"] boolValue]) {
                 amproj_presentImportErrorOfferingPicker(visible, NO);
@@ -3871,7 +3912,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             } else if (started &&
                        generation == amproj_activeNativeImportGeneration) {
                 amproj_showImportStatus(
-                    @"AMProj v20 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
+                    @"AMProj v21 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
                 amproj_debugEvent(@"import.local_bridge_started", @{
                     @"success": @YES,
                     @"filename": name
@@ -3885,15 +3926,20 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             amproj_pendingImportURL = nil;
             amproj_pendingImportName = nil;
             amproj_pendingImportDeadline = 0;
+            amproj_importDispatchCoolingDown = NO;
             amproj_debugEvent(@"import.local_bridge_timeout", @{
                 @"filename": name,
                 @"bridge_available": @NO
             });
             amproj_showImportStatus(
-                @"AMProj v20 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea", YES);
+                @"AMProj v21 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea", YES);
             amproj_presentImportErrorOfferingPicker(
                 @"\u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c\u901a\u8fc7\uff0c\u4f46 Alight Motion \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u672a\u80fd\u5c31\u7eea\u3002\u672c\u6b21\u6ca1\u6709\u56de\u9000\u5230\u4efb\u4f55\u4e0a\u4f20\u5165\u53e3\u3002",
                 YES);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                amproj_resumeQueuedImports(@"local_import_bridge_timeout");
+            });
             return;
         }
 
@@ -4047,7 +4093,7 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
         @"file_url": @YES,
         @"extension": URL.pathExtension ?: @""
     });
-    amproj_showImportStatus(@"AMProj v20 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587\u4ef6", NO);
+    amproj_showImportStatus(@"AMProj v21 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587\u4ef6", NO);
 
     // Provider-owned URLs are staged synchronously while their grant is valid.
     // Documents/Inbox and asCopy picker URLs reach this code on our serial worker.
@@ -4077,7 +4123,7 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
                 @"error": error.localizedDescription ?: @"Unable to create import cache"
             });
             if (!silentErrors) {
-                amproj_showImportStatus(@"AMProj v20 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25", YES);
+                amproj_showImportStatus(@"AMProj v21 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25", YES);
                 amproj_presentImportError(@"无法创建导入缓存，请检查设备剩余空间后重试。");
             }
             return AMProjIncomingURLFailed;
@@ -4177,7 +4223,7 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
             amproj_lastIncomingURLTime = CFAbsoluteTimeGetCurrent();
         }
         amproj_showImportStatus(
-            @"AMProj v20 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305", NO);
+            @"AMProj v21 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305", NO);
         amproj_prepareCopiedArchive(
             destination, directory, originalName, source, silentErrors);
         if (amproj_URLIsInDocumentsInbox(URL) && !preserveSource) {
@@ -4850,7 +4896,7 @@ static void hooked_projectsImportAlertViewDidLoad(id self, SEL _cmd) {
     });
     if (recognizedQueuedPackage) {
         amproj_showImportStatus(
-            @"AMProj v20 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d", NO);
+            @"AMProj v21 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d", NO);
     }
 }
 
@@ -4868,7 +4914,7 @@ static void hooked_projectsImportAlertOnPressImport(id self, SEL _cmd, id sender
     });
     if (tracked) {
         amproj_showImportStatus(
-            @"AMProj v20 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
+            @"AMProj v21 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
     }
     if (orig_projectsImportAlertOnPressImport) {
         orig_projectsImportAlertOnPressImport(self, _cmd, sender);
@@ -5322,7 +5368,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             amproj_importDispatchCoolingDown = NO;
         }
         amproj_showImportStatus([NSString stringWithFormat:
-            @"AMProj v20 \u00b7 E40 \u00b7 %@", failureDescription], YES);
+            @"AMProj v21 \u00b7 E40 \u00b7 %@", failureDescription], YES);
         amproj_flushDebugEvents();
         if (!bridgeHandled) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
@@ -6346,9 +6392,9 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v20-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v21-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v20 =====");
+        NSLog(@"[AMProjExport] ===== Loading v21 =====");
 #endif
 
         // ObjC classes are registered before image constructors. Installing only

@@ -12,7 +12,9 @@ int main(int argc, const char *argv[]) {
             [NSString stringWithUTF8String:argv[1]]];
         NSURL *workURL = [NSURL fileURLWithPath:
             [NSString stringWithUTF8String:argv[2]] isDirectory:YES];
-        BOOL expectSuccess = strcmp(argv[3], "ok") == 0;
+        BOOL expectSuccess = strcmp(argv[3], "ok") == 0 ||
+            strcmp(argv[3], "multi") == 0;
+        BOOL multiXML = strcmp(argv[3], "multi") == 0;
         BOOL normalize = strcmp(argv[3], "normalize") == 0;
         NSUInteger expectedMissing = (NSUInteger)strtoull(argv[4], NULL, 10);
 
@@ -41,11 +43,12 @@ int main(int argc, const char *argv[]) {
             }
             return 0;
         }
+        NSUInteger expectedXMLCount = multiXML ? 2 : 1;
         if (!success || !nativeXMLURL || error ||
-            [metrics[@"xml_count"] unsignedIntegerValue] != 1 ||
+            [metrics[@"xml_count"] unsignedIntegerValue] != expectedXMLCount ||
             [metrics[@"missing_reference_count"] unsignedIntegerValue] != expectedMissing ||
-            [metrics[@"reference_count"] unsignedIntegerValue] != 2 ||
-            [metrics[@"rewritten_reference_count"] unsignedIntegerValue] != 1 ||
+            (!multiXML && [metrics[@"reference_count"] unsignedIntegerValue] != 2) ||
+            (!multiXML && [metrics[@"rewritten_reference_count"] unsignedIntegerValue] != 1) ||
             ![nativeXMLURL.lastPathComponent hasSuffix:@".native-import.xml"]) {
             NSLog(@"native import preparation failed: %@ %@ %@", nativeXMLURL, metrics, error);
             return 4;

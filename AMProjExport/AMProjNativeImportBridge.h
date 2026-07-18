@@ -24,10 +24,10 @@ FOUNDATION_EXPORT void AMProjCallNativePackageImport(
     void *function,
     uintptr_t swiftStringWord0,
     uintptr_t swiftStringWord1,
-    id storageReference,
+    id presentationOwner,
     id _Nullable progressOwner,
     void *completionFunction,
     void * _Nullable completionContext,
-    id presentationOwner);
+    id storageReference);
 
 NS_ASSUME_NONNULL_END

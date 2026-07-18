@@ -66,10 +66,39 @@ class ImportArchiveHostTests(unittest.TestCase):
                 output.writestr("manifest.txt", "fixture")
         return archive
 
+    def make_multi_xml_archive(self, name, manifest=True):
+        archive = self.temp / name
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.writestr(
+                "first.xml",
+                '<?xml version="1.0"?><scene asset="amproj:asset%20&amp;%20one.bin"/>',
+            )
+            output.writestr(
+                "second.xml",
+                '<?xml version="1.0"?><scene asset="amproj:asset%20&amp;%20one.bin"/>',
+            )
+            output.writestr("asset & one.bin", bytes(range(256)) * 1024)
+            if manifest:
+                output.writestr("manifest.txt", "fixture")
+        return archive
+
     def test_deflate_without_manifest_and_stored_with_manifest(self):
         self.run_helper(self.make_archive("deflated.amproj", zipfile.ZIP_DEFLATED))
         self.run_helper(
             self.make_archive("stored.amproj", zipfile.ZIP_STORED, manifest=True)
+        )
+
+    def test_prepare_preserves_multi_xml_manifest_package(self):
+        archive = self.make_multi_xml_archive("multi-xml.amproj")
+        source_hash = hashlib.sha256(archive.read_bytes()).digest()
+        self.run_helper(archive, mode="multi", missing=0)
+        self.assertEqual(hashlib.sha256(archive.read_bytes()).digest(), source_hash)
+
+    def test_multi_xml_without_manifest_is_rejected(self):
+        self.run_helper(
+            self.make_multi_xml_archive("multi-xml-no-manifest.amproj", manifest=False),
+            mode="fail",
+            missing=0,
         )
 
     def test_normalizes_missing_manifest_and_recalculates_resource_hashes(self):
