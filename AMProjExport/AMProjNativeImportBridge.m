@@ -841,16 +841,18 @@ static BOOL AMProjStartNativePackageImport(
     @try {
         // The verified Swift entry uses the arm64 Swift closure convention:
         // its explicit x2 argument is the storage reference (the entry calls
-        // writeToFile: on it), x3 is the progress UI owner, and the hidden x20
-        // context is the weak presentation owner. Use the same visible
-        // controller for both owner slots; the progress closure sends it
-        // view/superview while the importer keeps the weak owner alive.
+        // writeToFile: on it), x3 is an AMProgressAlert owner, and the hidden x20
+        // context is the weak presentation owner. We do not have the
+        // native AMProgressAlert instance here; passing a ProjectsVC would
+        // make the progress closure treat its Swift storage as an alert and
+        // can hang or crash in the 3/4 phase. A nil x3 is supported by the
+        // verified importer and skips only its optional progress UI updates.
         AMProjCallNativePackageImport(
             entry,
             swiftName.word0,
             swiftName.word1,
             reference,
-            owner,
+            nil,
             (void *)&AMProjNativeImportCompletionThunk,
             NULL,
             owner);
