@@ -70,6 +70,21 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn("AMProjExtractProjectArchive", BRIDGE_SOURCE)
         self.assertNotIn("nativeXMLURL", BRIDGE_SOURCE)
 
+    def test_native_bridge_requires_visible_projects_tab_before_starting(self):
+        start = BRIDGE_SOURCE.index("static UIViewController *AMProjPresentationOwner(void)")
+        end = BRIDGE_SOURCE.index("static UIViewController *AMProjFindProjectsController", start)
+        owner = BRIDGE_SOURCE[start:end]
+        self.assertIn("AMProjSelectProjectsTab(projects)", owner)
+        self.assertNotIn("window.rootViewController", owner)
+        self.assertIn("static void AMProjSelectProjectsTab", BRIDGE_SOURCE)
+
+    def test_native_bridge_keeps_optional_progress_owner_nil(self):
+        call_start = BRIDGE_SOURCE.index("AMProjCallNativePackageImport(")
+        call_end = BRIDGE_SOURCE.index("releaseBridge(swiftName.word1)", call_start)
+        call = BRIDGE_SOURCE[call_start:call_end]
+        self.assertIn("reference,\n        nil,", call)
+        self.assertIn("NULL,\n        owner);", call)
+
     def test_copy_failure_flows_through_the_native_status_handler(self):
         start = BRIDGE_SOURCE.index("if (scheduleFailure)")
         end = BRIDGE_SOURCE.index("} else if (scheduleSuccess)", start)
@@ -278,6 +293,18 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn("amproj_queuePreparedImport(archiveSnapshot", body)
         self.assertIn('normalizationMetrics[@"missing_reference_count"]', body)
 
+    def test_incomplete_resource_archive_is_rejected_before_native_bridge(self):
+        body = function_body(
+            "static void amproj_prepareCopiedArchive",
+            "static void amproj_activateNextPendingImport",
+        )
+        missing = body.index("NSUInteger missingReferences")
+        queue = body.index("amproj_queuePreparedImport(normalizedURL", missing)
+        reject = body.index("import.reject_incomplete_resources", missing)
+        self.assertLess(reject, queue)
+        self.assertIn("removeItemAtURL:directorySnapshot", body[missing:queue])
+        self.assertIn("amproj_presentImportError", body[missing:queue])
+
     def test_prepared_zip_dispatches_only_to_local_package_bridge(self):
         dispatch = function_body(
             "static void amproj_tryDispatchPendingImport",
@@ -401,6 +428,14 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static NSString* amproj_compactNativeDiagnostic",
         )
         self.assertIn("#if AMPROJ_DEBUG", parse_installer)
+
+    def test_native_xml_diagnostics_are_opt_in_during_import_stability_testing(self):
+        install = function_body(
+            "static void amproj_installImportHook(void)",
+            "static void amproj_removeBootstrapObservers",
+        )
+        self.assertIn("AMPROJ_ENABLE_NATIVE_XML_DIAGNOSTICS", install)
+        self.assertIn("disabled_for_native_import_stability", install)
 
     def test_tracked_hook_refuses_to_swizzle_when_original_storage_is_full(self):
         store = function_body(

@@ -26,6 +26,14 @@ project.amproj
 
 ## v20 离线导入
 
+### v20r1 稳定性修复
+
+- 原生导入开始前强制切换到底部“项目”页；项目页尚未完成挂载时会等待，不再把“主页”控制器当作导入上下文。
+- Debug 版默认不安装全局 `NSXMLParser` 诊断 swizzle，避免它干扰 Alight Motion 的 Swift 项目解析。
+- XML 引用的媒体只要有一项不在 `.amproj` ZIP 中，就在 `2/4` 阶段停止并显示缺失数量，不再把不完整包交给原生 `PackageImporter`。
+
+因此，`3/4` 后仍闪退的旧 v20 包不要继续重复安装；请使用新构建，并确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
+
 稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 只记录候选 URL，并把原始 launch options 完整交给 AM，避免在系统授权尚未激活时制造 `EPERM` 伪失败。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
 
 复制完成后的处理全部在本地执行：插件逐项解压验证 ZIP32、local header、CRC、XML 和路径安全，再用有效的资源、原始场景 XML 和重算的 manifest 生成规范包。缺少的 `amproj:` 素材引用会保留，交给 AM 原生的缺素材处理。规范包只会交给已注册的本地 `PackageImporter` 适配器，完整 ZIP、XML、媒体和字体作为同一个项目事务写入；代码不再查找 `TemplatesListVC`，也不会调用模板页的 XML 文档选择器回调。

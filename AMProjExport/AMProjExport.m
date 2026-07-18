@@ -3675,9 +3675,30 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
             NSUInteger missingReferences =
                 [normalizationMetrics[@"missing_reference_count"] unsignedIntegerValue];
             if (missingReferences) {
-                amproj_showImportStatus([NSString stringWithFormat:
-                    @"AMProj v20 \u00b7 \u5305\u5185\u7f3a\u5c11 %lu \u4e2a\u7d20\u6750\uff0cAM \u5bfc\u5165\u540e\u5c06\u7559\u7a7a",
-                    (unsigned long)missingReferences], NO);
+                // Swift's package importer assumes every media URI resolves
+                // to an entry. Passing a partial archive reaches a fatal
+                // array-index path in PackageImporter, so reject it before
+                // the native call instead of producing a half-empty project.
+                NSError *missingError = [NSError errorWithDomain:
+                    @"com.amproj.import.archive" code:31 userInfo:@{
+                        NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                            @"\u9879\u76ee\u5305\u7f3a\u5c11 %lu \u4e2a\u5a92\u4f53\u8d44\u6e90",
+                            (unsigned long)missingReferences],
+                        @"missing_reference_count": @(missingReferences)
+                    }];
+                [NSFileManager.defaultManager removeItemAtURL:directorySnapshot error:nil];
+                amproj_debugEvent(@"import.reject_incomplete_resources", @{
+                    @"source": sourceSnapshot,
+                    @"filename": nameSnapshot,
+                    @"missing_reference_count": @(missingReferences),
+                    @"error": missingError.localizedDescription ?: @""
+                });
+                NSString *visible = [NSString stringWithFormat:
+                    @"AMProj v20 \u00b7 \u9879\u76ee\u5305\u4e0d\u5b8c\u6574\uff1a%@",
+                    missingError.localizedDescription ?: @"\u5305\u5185\u7f3a\u5c11\u7d20\u6750"];
+                amproj_showImportStatus(visible, YES);
+                if (!silentErrors) amproj_presentImportError(visible);
+                return;
             }
             amproj_showImportStatus(
                 @"AMProj v20 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165", NO);
@@ -6052,7 +6073,17 @@ static void amproj_installSceneImportHook(id sceneDelegate) {
 static void amproj_installImportHook(void) {
     (void)amproj_installColdLaunchHook();
     (void)amproj_installDeclaredURLHooks();
+    // NSXMLParser is used by AM's Swift importer on the same main-thread
+    // transaction. A process-wide parser swizzle can change delegate timing
+    // and is therefore kept opt-in while diagnosing native imports.
+#if defined(AMPROJ_ENABLE_NATIVE_XML_DIAGNOSTICS) && AMPROJ_ENABLE_NATIVE_XML_DIAGNOSTICS
     amproj_installNativeXMLParserHook();
+#else
+    amproj_debugEvent(@"import.native_xml_parser_hook", @{
+        @"installed": @NO,
+        @"reason": @"disabled_for_native_import_stability"
+    });
+#endif
     Class declaredClass = amproj_declaredAppDelegateClass();
     id delegate = UIApplication.sharedApplication.delegate;
     Class runtimeClass = delegate ? object_getClass(delegate) : Nil;

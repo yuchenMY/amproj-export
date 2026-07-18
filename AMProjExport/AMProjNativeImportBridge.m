@@ -138,6 +138,7 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
     }
 
     if (scheduleFailure) {
+        NSLog(@"[AMProjExport] Native import storage status=%ld failure", (long)status);
         void (^callback)(id) = [handler copy];
         AMProjLocalStorageSnapshot *snapshot = [AMProjLocalStorageSnapshot new];
         snapshot.error = self.transferError ?: AMProjNativeBridgeError(
@@ -146,9 +147,12 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
         snapshot.reference = self.reference;
         snapshot.progress = [NSProgress progressWithTotalUnitCount:1];
         dispatch_async(dispatch_get_main_queue(), ^{
+            NSLog(@"[AMProjExport] Native import status=5 callback enter");
             callback(snapshot);
+            NSLog(@"[AMProjExport] Native import status=5 callback exit");
         });
     } else if (scheduleSuccess) {
+        NSLog(@"[AMProjExport] Native import storage status=%ld success", (long)status);
         void (^callback)(id) = [handler copy];
         AMProjLocalStorageSnapshot *snapshot = [AMProjLocalStorageSnapshot new];
         snapshot.task = self;
@@ -156,7 +160,9 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
         snapshot.progress = [NSProgress progressWithTotalUnitCount:1];
         snapshot.progress.completedUnitCount = 1;
         dispatch_async(dispatch_get_main_queue(), ^{
+            NSLog(@"[AMProjExport] Native import status=4 callback enter");
             callback(snapshot);
+            NSLog(@"[AMProjExport] Native import status=4 callback exit");
         });
     }
     return handle;
@@ -276,6 +282,7 @@ static UIViewController *AMProjTopController(UIViewController *controller) {
 }
 
 static UIViewController *AMProjLoadedProjectsController(void);
+static void AMProjSelectProjectsTab(UIViewController *projects);
 
 static UIViewController *AMProjUsablePresentationOwner(
     UIViewController *controller) {
@@ -293,29 +300,10 @@ static UIViewController *AMProjUsablePresentationOwner(
 
 static UIViewController *AMProjPresentationOwner(void) {
     UIViewController *projects = AMProjLoadedProjectsController();
+    if (!projects) return nil;
+    AMProjSelectProjectsTab(projects);
     UIViewController *projectOwner = AMProjUsablePresentationOwner(projects);
     if (projectOwner) return projectOwner;
-
-    UIApplication *application = UIApplication.sharedApplication;
-    for (UIScene *scene in application.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class] ||
-            scene.activationState != UISceneActivationStateForegroundActive) continue;
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        for (UIWindow *window in windowScene.windows) {
-            if (window.isKeyWindow && window.rootViewController) {
-                UIViewController *owner = AMProjUsablePresentationOwner(
-                    window.rootViewController);
-                if (owner) return owner;
-            }
-        }
-        for (UIWindow *window in windowScene.windows) {
-            if (!window.hidden && window.alpha > 0 && window.rootViewController) {
-                UIViewController *owner = AMProjUsablePresentationOwner(
-                    window.rootViewController);
-                if (owner) return owner;
-            }
-        }
-    }
     return nil;
 }
 
@@ -352,22 +340,28 @@ static UIViewController *AMProjLoadedProjectsController(void) {
     return nil;
 }
 
+static void AMProjSelectProjectsTab(UIViewController *projects) {
+    if (!projects) return;
+    UITabBarController *tabs = projects.tabBarController;
+    if (!tabs) return;
+
+    UIViewController *branch = projects;
+    while (branch.parentViewController && branch.parentViewController != tabs) {
+        branch = branch.parentViewController;
+    }
+    if (branch.parentViewController == tabs &&
+        [tabs.viewControllers containsObject:branch] &&
+        tabs.selectedViewController != branch) {
+        tabs.selectedViewController = branch;
+        [tabs.viewIfLoaded setNeedsLayout];
+    }
+}
+
 static void AMProjRefreshProjectsController(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *projects = AMProjLoadedProjectsController();
         if (!projects) return;
-        UITabBarController *tabs = projects.tabBarController;
-        if (tabs) {
-            UIViewController *branch = projects;
-            while (branch.parentViewController &&
-                   branch.parentViewController != tabs) {
-                branch = branch.parentViewController;
-            }
-            if (branch.parentViewController == tabs &&
-                [tabs.viewControllers containsObject:branch]) {
-                tabs.selectedViewController = branch;
-            }
-        }
+        AMProjSelectProjectsTab(projects);
         SEL selector = NSSelectorFromString(@"pCollectionView");
         UICollectionView *collection = nil;
         if ([projects respondsToSelector:selector]) {
@@ -379,8 +373,9 @@ static void AMProjRefreshProjectsController(void) {
 }
 
 static void AMProjNativeImportCompletionThunk(void *result) {
-    (void)result;
+    NSLog(@"[AMProjExport] Native import completion enter result=%p", result);
     if (!AMProjFinishNativeBridge(YES, nil)) return;
+    NSLog(@"[AMProjExport] Native import completion accepted");
     AMProjRefreshProjectsController();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
@@ -468,6 +463,8 @@ static BOOL AMProjStartNativePackageImport(
     AMProjSwiftString swiftName = bridge(projectName);
     AMProjLocalStorageReference *reference =
         [[AMProjLocalStorageReference alloc] initWithSourceURL:packageURL];
+    NSLog(@"[AMProjExport] Native import entry begin owner=%@ package=%@",
+          NSStringFromClass(owner.class), packageURL.lastPathComponent);
     AMProjCallNativePackageImport(
         entry,
         swiftName.word0,
@@ -477,6 +474,7 @@ static BOOL AMProjStartNativePackageImport(
         (void *)&AMProjNativeImportCompletionThunk,
         NULL,
         owner);
+    NSLog(@"[AMProjExport] Native import entry returned");
     releaseBridge(swiftName.word1);
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_SEC),
