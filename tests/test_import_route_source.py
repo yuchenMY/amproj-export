@@ -68,8 +68,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("removeObserverWithHandle:", BRIDGE_SOURCE)
         self.assertIn("removeAllObserversForStatus:", BRIDGE_SOURCE)
         self.assertIn("copyItemAtURL:sourceURL toURL:destinationURL", BRIDGE_SOURCE)
-        self.assertIn("status == 4", BRIDGE_SOURCE)
+        self.assertIn("status == 2 || status == 4", BRIDGE_SOURCE)
         self.assertIn("status == 5", BRIDGE_SOURCE)
+        self.assertIn("progress.completedUnitCount = 1", BRIDGE_SOURCE)
         self.assertIn("QOS_CLASS_USER_INITIATED", BRIDGE_SOURCE)
         self.assertNotIn("AMProjExtractProjectArchive", BRIDGE_SOURCE)
         self.assertNotIn("nativeXMLURL", BRIDGE_SOURCE)
@@ -122,10 +123,11 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         call_start = BRIDGE_SOURCE.index("AMProjCallNativePackageImport(")
         call_end = BRIDGE_SOURCE.index("releaseBridge(swiftName.word1)", call_start)
         call = BRIDGE_SOURCE[call_start:call_end]
-        self.assertIn("owner,", call)
+        self.assertIn("reference,", call)
         self.assertIn("nil,", call)
         self.assertIn("NULL,", call)
-        self.assertIn("reference);", call)
+        self.assertIn("owner);", call)
+        self.assertIn("explicit x2", BRIDGE_SOURCE)
         self.assertIn("hidden x20", BRIDGE_SOURCE)
         self.assertIn("writeToFile:", BRIDGE_SOURCE)
 
@@ -139,6 +141,27 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("dispatch_get_main_queue()", finish)
         self.assertIn("error", BRIDGE_SOURCE[BRIDGE_SOURCE.index("if (![manager copyItemAtURL") :])
         self.assertNotIn("AMProjNativePackageImportBridgeFinishFailure", finish)
+
+    def test_native_storage_success_notifies_progress_and_success_observers(self):
+        finish_start = BRIDGE_SOURCE.index("- (void)finishTransferWithError")
+        finish_end = BRIDGE_SOURCE.index(
+            "- (instancetype)initWithSourceURL", finish_start
+        )
+        finish = BRIDGE_SOURCE[finish_start:finish_end]
+        observe_start = BRIDGE_SOURCE.rindex(
+            "- (AMProjLocalStorageHandle)observeStatus"
+        )
+        observe_end = BRIDGE_SOURCE.index(
+            "- (void)removeObserverWithHandle", observe_start
+        )
+        observe = BRIDGE_SOURCE[observe_start:observe_end]
+        self.assertIn("status == 2 || status == 4", finish)
+        self.assertIn("status == 5", finish)
+        self.assertIn(
+            "self.transferError == nil && (status == 2 || status == 4)",
+            observe,
+        )
+        self.assertIn("self.progress.completedUnitCount = 1", finish)
 
     def test_native_storage_handles_are_numeric_and_removable(self):
         observe_start = BRIDGE_SOURCE.rindex("- (AMProjLocalStorageHandle)observeStatus")
@@ -171,7 +194,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_arm64_shim_sets_hidden_owner_without_corrupting_callee_saved_state(self):
         self.assertIn("_AMProjCallNativePackageImport", BRIDGE_ASSEMBLY)
         self.assertIn("str x20, [sp, #16]", BRIDGE_ASSEMBLY)
-        self.assertIn("storage reference in the hidden x20 context", BRIDGE_ASSEMBLY)
+        self.assertIn("weak presentation owner in the hidden Swift x20 context", BRIDGE_ASSEMBLY)
         self.assertIn("mov x20, x7", BRIDGE_ASSEMBLY)
         self.assertIn("blr x9", BRIDGE_ASSEMBLY)
         self.assertIn("ldr x20, [sp, #16]", BRIDGE_ASSEMBLY)

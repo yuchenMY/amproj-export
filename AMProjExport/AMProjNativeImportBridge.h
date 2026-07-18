@@ -24,10 +24,12 @@ FOUNDATION_EXPORT void AMProjCallNativePackageImport(
     void *function,
     uintptr_t swiftStringWord0,
     uintptr_t swiftStringWord1,
-    id presentationOwner,
+    // The adapter maps this argument to the native entry's explicit x2.
+    id storageReference,
     id _Nullable progressOwner,
     void *completionFunction,
     void * _Nullable completionContext,
-    id storageReference);
+    // The adapter maps this final argument to Swift's hidden x20 context.
+    id presentationOwner);
 
 NS_ASSUME_NONNULL_END

@@ -12,10 +12,9 @@ _AMProjCallNativePackageImport:
     .cfi_offset x20, -16
 
     mov x9, x0
-    // The verified Swift closure takes its UIViewController in x2 and its
-    // storage reference in the hidden x20 context. The C adapter exposes the
-    // latter as its final argument (x7) so callers cannot accidentally shift
-    // the Swift hidden register into the ordinary argument list.
+    // The verified Swift entry takes its storage reference in explicit x2 and
+    // keeps the weak presentation owner in the hidden Swift x20 context. The
+    // C adapter exposes that owner as its final argument (x7).
     mov x0, x1
     mov x1, x2
     mov x2, x3

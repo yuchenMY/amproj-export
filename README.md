@@ -30,7 +30,11 @@ project.amproj
 
 - 原生导入开始前强制切换到底部“项目”页；项目页尚未完成挂载时会等待，不再把“主页”控制器当作导入上下文。
 - Debug 版默认不安装全局 `NSXMLParser` 诊断 swizzle，避免它干扰 Alight Motion 的 Swift 项目解析。
-- XML 引用的媒体只要有一项不在 `.amproj` ZIP 中，就在 `2/4` 阶段停止并显示缺失数量，不再把不完整包交给原生 `PackageImporter`。
+- XML 引用的媒体缺失时记录缺失数量，但不在 `2/4` 阶段提前拦截；由 AM 原生 `PackageImporter` 在项目持久化后给出缺素材结果。
+
+本轮 ABI 修复还原了干净 `AM_v1` 的真实调用约定：原生入口的显式 `x2` 是
+`StorageReference`（入口会对它调用 `writeToFile:`），隐藏 Swift `x20` 是弱持有的
+项目页控制器。复制任务完成时同时发出 Firebase 的进度终态 `2` 和成功终态 `4`，失败仍发出 `5`。
 
 因此，`3/4` 后仍闪退的旧 v20 包不要继续重复安装；请使用 v21 构建。v21 同时兼容 Android 官方的多 XML + `manifest.txt` 项目包，并将缺失媒体交给 AM 原生警告流程；仍建议确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
 
