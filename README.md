@@ -24,11 +24,11 @@ project.amproj
 
 完整格式见 `format_spec.md`。
 
-## v24 离线导入
+## v25 离线导入
 
-### v24 稳定性修复
+### v25 稳定性修复
 
-- 修复 v23 在 `3/4` 的确定性闪退：AM 会 retain `observeStatus:handler:` 的返回值，v24 恢复与原生 ABI 一致的 `NSString` 对象句柄，不再把整数 `1/2/3` 当对象地址。
+- 修复 v23 在 `3/4` 的确定性闪退：AM 会 retain `observeStatus:handler:` 的返回值，v25 恢复与原生 ABI 一致的 `NSString` 对象句柄，不再把整数 `1/2/3` 当对象地址。
 - 原生 completion 不再直接重载项目列表；列表刷新和“项目行已出现”验证统一由导入事务层执行。
 - native/storage 最后阶段会写入本地 breadcrumb，后端离线时重启 App 也能看到精确中断点。
 - 原生导入开始前强制切换到底部“项目”页；项目页尚未完成挂载时会等待，不再把“主页”控制器当作导入上下文。
@@ -36,12 +36,13 @@ project.amproj
 - XML 引用的媒体缺失时立即拒绝导入并保留缓存包，避免 AM 原生 importer 生成不完整的假项目。
 
 本轮 ABI 修复还原了干净 `AM_v1` 的真实调用约定：原生入口的显式 `x2` 是
-`StorageReference`（入口会对它调用 `writeToFile:`），显式 `x3` 是可空的
-`AMProgressAlert`，隐藏 Swift `x20` 是弱持有的项目页控制器。插件没有原生进度弹窗实例，
-因此向 `x3` 传 `nil`，只跳过可选的原生进度 UI；不能把项目页控制器传入这个位置。
+`StorageReference`（入口会对它调用 `writeToFile:`），显式 `x3` 是
+`AMProgressAlert`，隐藏 Swift `x20` 是弱持有的项目页控制器。v25 从主包
+`AMProgressAlert.storyboardc` 创建真实的进度控制器并在事务期间强持有；它不主动展示，
+但必须作为非空 `x3` 传入，因为 AM 在 status 4 后会无条件向它发送 dismiss。
 复制任务完成时同时发出 Firebase 的进度终态 `2` 和成功终态 `4`，失败仍发出 `5`。
 
-因此，`2/4` 或 `3/4` 停住的旧 v20/v21/v22/v23 包不要继续重复安装；请使用 v24 构建。v24 同时兼容 Android 官方的多 XML + `manifest.txt` 项目包，并在资源不完整时明确失败；请确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
+因此，`2/4` 或 `3/4` 停住的旧 v20/v21/v22/v23 包不要继续重复安装；请使用 v25 构建。v25 同时兼容 Android 官方的多 XML + `manifest.txt` 项目包，并在资源不完整时明确失败；请确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
 
 稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 先记录候选 URL，再复制一份 launch options，仅从转发给原 AppDelegate 的副本中移除 `.amproj` URL 或对应的 user activity，其他启动参数保持不变；原始字典不会被就地修改。这样可避免 AM 的原生 URL 路径同时处理同一个包。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
 
@@ -64,14 +65,14 @@ AMProjShareExtension/build/AMProjShareExtension.appex
 AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-下载名为 `AMProjExport-v24-dylibs` 的 artifact。其中的 `build-metadata.json`
+下载名为 `AMProjExport-v25-dylibs` 的 artifact。其中的 `build-metadata.json`
 记录插件版本、commit、Actions run ID 以及每个二进制文件的 SHA-256，注入前可用它确认没有混入旧版本产物。
 
-## 从干净 IPA 生成 v24
+## 从干净 IPA 生成 v25
 
 必须以未注入的 `AM_v1.ipa` 为输入，不要用旧测试包继续叠加。主 App Bundle ID 保持 `com.amayaka.meow`。
 
-v24 原生导入桥只支持这份已核验的主程序：
+v25 原生导入桥只支持这份已核验的主程序：
 
 ```text
 AM_v1.ipa SHA-256: B135D99E81E0F3F976CBF4C30BCC491B4B770BD9D0A6841D48083B7A7EA29413
@@ -84,7 +85,7 @@ Mach-O UUID:       4b22d43f-09fc-3bde-859b-78a5d573a503
 
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v24.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v25.ipa `
   --expected-main-uuid $uuid
 ```
 
@@ -93,7 +94,7 @@ python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_d
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v24_debug.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v25_debug.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid
 python .\debug_backend\server.py --token $token
 ```
@@ -103,7 +104,7 @@ python .\debug_backend\server.py --token $token
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v24_share_exp.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v25_share_exp.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid `
   --share-extension .\AMProjShareExtension\build\AMProjShareExtension.appex `
   --app-group-id group.com.amayaka.meow.amprojshare

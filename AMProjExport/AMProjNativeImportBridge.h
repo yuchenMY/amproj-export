@@ -42,7 +42,9 @@ FOUNDATION_EXPORT void AMProjCallNativePackageImport(
     uintptr_t swiftStringWord1,
     // The adapter maps this argument to the native entry's explicit x2.
     id storageReference,
-    id _Nullable progressOwner,
+    // The clean AM_v1 continuation unconditionally dismisses this
+    // AMProgressAlert after status 4; callers must pass a non-nil instance.
+    id progressOwner,
     void *completionFunction,
     void * _Nullable completionContext,
     // The adapter maps this final argument to Swift's hidden x20 context.

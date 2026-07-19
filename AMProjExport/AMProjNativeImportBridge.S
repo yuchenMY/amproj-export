@@ -12,9 +12,10 @@ _AMProjCallNativePackageImport:
     .cfi_offset x20, -16
 
     mov x9, x0
-    // The verified Swift entry takes its storage reference in explicit x2 and
-    // keeps the weak presentation owner in the hidden Swift x20 context. The
-    // C adapter exposes that owner as its final argument (x7).
+    // The verified Swift entry takes its storage reference in explicit x2,
+    // requires a non-null AMProgressAlert in x3, and keeps the weak
+    // presentation owner in the hidden Swift x20 context. The C adapter
+    // exposes that owner as its final argument (x7).
     mov x0, x1
     mov x1, x2
     mov x2, x3

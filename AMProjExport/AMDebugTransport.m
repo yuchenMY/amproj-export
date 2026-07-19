@@ -34,7 +34,7 @@ static const NSTimeInterval kAMDebugDiscoveryRetryInterval = 15.0;
 static const NSTimeInterval kAMDebugDiscoveryTimeout = 1.5;
 static const NSUInteger kAMDebugDiscoveryMaxPacketBytes = 512;
 static const NSUInteger kAMDebugDiscoveryMaxSubnetHosts = 1024;
-static NSString *const kAMDebugPluginVersion = @"24";
+static NSString *const kAMDebugPluginVersion = @"25";
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
 
 static BOOL AMDebugPrivateIPv4(uint32_t address) {

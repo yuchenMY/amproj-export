@@ -23,10 +23,15 @@ typedef AMProjSwiftString (*AMProjNSStringToSwiftStringFn)(NSString *value);
 typedef void (*AMProjSwiftBridgeReleaseFn)(uintptr_t value);
 
 @interface AMProjLocalStorageSnapshot : NSObject
-@property(nonatomic, strong) NSError *error;
-@property(nonatomic, strong) NSProgress *progress;
+// Keep the public surface and scalar ABI of FIRStorageTaskSnapshot.  AM uses
+// these accessors after the status callback returns, so implementing only the
+// four fields needed by the first callback is not sufficient.
 @property(nonatomic, strong) id task;
+@property(nonatomic, strong) id metadata;
 @property(nonatomic, strong) id reference;
+@property(nonatomic, strong) NSProgress *progress;
+@property(nonatomic, strong) NSError *error;
+@property(nonatomic) NSInteger status;
 @end
 
 @implementation AMProjLocalStorageSnapshot
@@ -42,10 +47,19 @@ typedef NSString *AMProjLocalStorageHandle;
 @property(nonatomic, strong) NSURL *destinationURL;
 @property(nonatomic, strong) NSError *transferError;
 @property(nonatomic, strong) id reference;
+@property(nonatomic, strong) id metadata;
 @property(nonatomic, strong) NSProgress *progress;
+@property(nonatomic, strong) id dispatchQueue;
+@property(nonatomic, strong) id baseRequest;
+@property(nonatomic, strong) id fetcher;
+@property(nonatomic, strong) id fetcherService;
+@property(nonatomic, copy) id fetcherCompletion;
 @property(nonatomic, strong) NSMutableDictionary<AMProjLocalStorageHandle, NSDictionary *> *observers;
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *terminalScheduledStatuses;
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *terminalDeliveredStatuses;
 @property(nonatomic) NSUInteger bridgeGeneration;
 @property(nonatomic) NSUInteger nextHandleIdentifier;
+@property(nonatomic) NSInteger state;
 @property(nonatomic) BOOL transferFinished;
 - (instancetype)initWithSourceURL:(NSURL *)sourceURL
                    destinationURL:(NSURL *)destinationURL
@@ -53,6 +67,12 @@ typedef NSString *AMProjLocalStorageHandle;
                   bridgeGeneration:(NSUInteger)bridgeGeneration;
 - (AMProjLocalStorageHandle)observeStatus:(NSInteger)status
                                   handler:(void (^)(id snapshot))handler;
+- (AMProjLocalStorageSnapshot *)snapshot;
+- (NSError *)error;
+- (void)dispatchAsync:(void (^)(void))block;
+- (BOOL)pause;
+- (BOOL)resume;
+- (BOOL)cancel;
 - (void)removeObserverWithHandle:(AMProjLocalStorageHandle)handle;
 - (void)removeAllObserversForStatus:(NSInteger)status;
 - (void)removeAllObservers;
@@ -61,9 +81,17 @@ typedef NSString *AMProjLocalStorageHandle;
 @interface AMProjLocalStorageReference : NSObject
 @property(nonatomic, strong) NSURL *sourceURL;
 @property(nonatomic) NSUInteger bridgeGeneration;
+@property(nonatomic, copy) NSString *path;
+@property(nonatomic, copy) NSString *fullPath;
+@property(nonatomic, copy) NSString *name;
+@property(nonatomic, copy) NSString *bucket;
+@property(nonatomic, strong) id storage;
 - (instancetype)initWithSourceURL:(NSURL *)sourceURL
                   bridgeGeneration:(NSUInteger)bridgeGeneration;
 - (id)writeToFile:(NSURL *)destinationURL;
+- (id)copyWithZone:(NSZone *)zone;
+- (BOOL)isEqualToFIRStorageReference:(id)other;
+- (NSString *)stringValue;
 @end
 
 static NSObject *AMProjNativeBridgeLock(void) {
@@ -77,6 +105,12 @@ static AMProjNativePackageImportCompletion amproj_nativeBridgeCompletion = nil;
 static AMProjNativePackageImportEventHandler amproj_nativeBridgeEventHandler = nil;
 static NSUInteger amproj_nativeBridgeGeneration = 0;
 static NSString *amproj_nativeBridgeFilename = nil;
+// The verified importer keeps an AMProgressAlert reference in its async
+// continuation and unconditionally dismisses it after status 4.  Passing nil
+// reaches a deliberate `brk` in the clean AM_v1 binary.  Keep the storyboard
+// instance alive for the whole transaction even though the plugin does not
+// present it (the plugin's own status bar remains the visible progress UI).
+static UIViewController *amproj_nativeBridgeProgressOwner = nil;
 static BOOL amproj_nativeBridgePoisoned = NO;
 static BOOL amproj_nativeBridgeFinishPending = NO;
 
@@ -136,11 +170,14 @@ static NSError *AMProjNativeBridgeError(NSInteger code, NSString *message,
 static BOOL AMProjFinishNativeBridge(BOOL success, NSError *error) {
     AMProjNativePackageImportCompletion completion = nil;
     NSString *filename = nil;
+    UIViewController *progressOwner = nil;
     NSUInteger generation = 0;
     @synchronized (AMProjNativeBridgeLock()) {
         completion = amproj_nativeBridgeCompletion;
         if (!completion) return NO;
         filename = [amproj_nativeBridgeFilename copy];
+        progressOwner = amproj_nativeBridgeProgressOwner;
+        amproj_nativeBridgeProgressOwner = nil;
         generation = amproj_nativeBridgeGeneration;
         amproj_nativeBridgeCompletion = nil;
         amproj_nativeBridgeFilename = nil;
@@ -162,6 +199,12 @@ static BOOL AMProjFinishNativeBridge(BOOL success, NSError *error) {
             NSLog(@"[AMProjExport] Native bridge completion raised: %@",
                   exception.reason ?: @"unknown exception");
         } @finally {
+            // A timeout/error can happen before AM reaches its own dismiss
+            // continuation.  Dismiss only when this controller is actually
+            // presented; the normal success path is already dismissed by AM.
+            if (!success && progressOwner.presentingViewController) {
+                [progressOwner dismissViewControllerAnimated:NO completion:nil];
+            }
             @synchronized (AMProjNativeBridgeLock()) {
                 amproj_nativeBridgeFinishPending = NO;
             }
@@ -208,6 +251,42 @@ static NSString *AMProjStorageStatusEventName(NSInteger status) {
 static NSString *AMProjStorageStatusReturnedEventName(NSInteger status) {
     NSString *event = AMProjStorageStatusEventName(status);
     return event.length ? [event stringByAppendingString:@"_returned"] : nil;
+}
+
+static UIViewController *AMProjCreateProgressOwner(NSError **error) {
+    if (!NSThread.isMainThread) {
+        if (error) *error = AMProjNativeBridgeError(
+            110, @"The native import progress controller must be created on the main thread", nil);
+        return nil;
+    }
+
+    @try {
+        UIStoryboard *storyboard = [UIStoryboard storyboardWithName:@"AMProgressAlert"
+                                                               bundle:NSBundle.mainBundle];
+        UIViewController *controller = [storyboard instantiateInitialViewController];
+        NSString *className = NSStringFromClass(controller.class);
+        BOOL isExpectedClass = [className hasSuffix:@"AMProgressAlert"] ||
+            [className isEqualToString:@"AlightMotion.AMProgressAlert"];
+        if (!controller || !isExpectedClass) {
+            if (error) *error = AMProjNativeBridgeError(
+                110, @"The Alight Motion progress controller is unavailable",
+                @{ @"class": className ?: @"" });
+            return nil;
+        }
+
+        AMProjEmitNativeBridgeEvent(@"progress_owner_created", @{
+            @"class": className ?: @"",
+            @"presented": @NO
+        });
+        return controller;
+    } @catch (NSException *exception) {
+        if (error) *error = AMProjNativeBridgeError(
+            110, exception.reason ?: @"The Alight Motion progress controller could not be created", nil);
+        AMProjEmitNativeBridgeEvent(@"progress_owner_failed", @{
+            @"exception": exception.reason ?: @"unknown exception"
+        });
+        return nil;
+    }
 }
 
 @implementation AMProjLocalStorageTask
@@ -866,6 +945,22 @@ static BOOL AMProjStartNativePackageImport(
     AMProjLocalStorageReference *reference =
         [[AMProjLocalStorageReference alloc] initWithSourceURL:packageURL
                                               bridgeGeneration:generation];
+    NSError *progressOwnerError = nil;
+    UIViewController *progressOwner = AMProjCreateProgressOwner(&progressOwnerError);
+    if (!progressOwner) {
+        NSError *resolvedError = progressOwnerError ?: AMProjNativeBridgeError(
+            110, @"The Alight Motion progress controller is unavailable", nil);
+        AMProjFinishNativeBridge(NO, resolvedError);
+        if (error) *error = resolvedError;
+        releaseBridge(swiftName.word1);
+        return NO;
+    }
+    @synchronized (AMProjNativeBridgeLock()) {
+        // The completion/timeout path takes ownership of this reference and
+        // clears it exactly once, so status callbacks cannot outlive the
+        // progress controller object.
+        amproj_nativeBridgeProgressOwner = progressOwner;
+    }
     NSLog(@"[AMProjExport] Native import entry begin owner=%@ package=%@",
           NSStringFromClass(owner.class), packageURL.lastPathComponent);
     AMProjEmitNativeBridgeEvent(@"native_entry_start", @{
@@ -880,18 +975,17 @@ static BOOL AMProjStartNativePackageImport(
     @try {
         // The verified Swift entry uses the arm64 Swift closure convention:
         // its explicit x2 argument is the storage reference (the entry calls
-        // writeToFile: on it), x3 is an AMProgressAlert owner, and the hidden x20
-        // context is the weak presentation owner. We do not have the
-        // native AMProgressAlert instance here; passing a ProjectsVC would
-        // make the progress closure treat its Swift storage as an alert and
-        // can hang or crash in the 3/4 phase. A nil x3 is supported by the
-        // verified importer and skips only its optional progress UI updates.
+        // writeToFile: on it), x3 is the AMProgressAlert owner, and the hidden
+        // x20 context is the weak presentation owner.  The clean binary's
+        // status-4 continuation unconditionally dismisses x3; nil reaches a
+        // deliberate trap, so keep the storyboard controller alive until the
+        // native completion callback.
         AMProjCallNativePackageImport(
             entry,
             swiftName.word0,
             swiftName.word1,
             reference,
-            nil,
+            progressOwner,
             (void *)&AMProjNativeImportCompletionThunk,
             NULL,
             owner);
