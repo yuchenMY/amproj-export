@@ -32,6 +32,10 @@ FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeFinishFailure(
 // has been poisoned by a timeout. Callers must keep later packages queued.
 FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeIsBusy(void);
 
+// A native error may leave an old Swift completion closure alive. The bridge
+// deliberately requires a process restart before accepting another package.
+FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeRequiresRestart(void);
+
 FOUNDATION_EXPORT void AMProjCallNativePackageImport(
     void *function,
     uintptr_t swiftStringWord0,

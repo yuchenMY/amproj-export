@@ -192,6 +192,12 @@ BOOL AMProjNativePackageImportBridgeIsBusy(void) {
     }
 }
 
+BOOL AMProjNativePackageImportBridgeRequiresRestart(void) {
+    @synchronized (AMProjNativeBridgeLock()) {
+        return amproj_nativeBridgePoisoned;
+    }
+}
+
 static NSString *AMProjStorageStatusEventName(NSInteger status) {
     switch (status) {
         case 2: return @"storage_status_2";

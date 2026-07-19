@@ -74,6 +74,8 @@ static void amproj_clearImportSuppression(NSURL *URL, NSString *name);
 static AMProjIncomingURLResult amproj_handleIncomingProjectURLSafely(
     NSURL *URL, NSString *source, NSDictionary *options, BOOL *prepared);
 static void amproj_presentImportError(NSString *message);
+static void amproj_presentImportErrorOfferingPicker(NSString *message,
+                                                     BOOL offerPicker);
 static void amproj_presentImportDocumentPicker(void);
 static dispatch_queue_t amproj_importInboxQueue(void);
 static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID);
@@ -2442,6 +2444,7 @@ static NSMutableArray<NSDictionary *> *amproj_deferredLaunchImportCandidates = n
 static BOOL amproj_importDispatchCoolingDown = NO;
 static BOOL amproj_nativeImportAlertActive = NO;
 static BOOL amproj_waitingForNativeImportAlert = NO;
+static BOOL amproj_nativeBridgeRestartNoticeShown = NO;
 static BOOL amproj_nativeImportObservationActive = NO;
 static NSUInteger amproj_nativeImportObservationGeneration = 0;
 static NSString *amproj_nativeImportObservationName = nil;
@@ -4110,6 +4113,27 @@ static void amproj_presentImportError(NSString *message) {
     amproj_presentImportErrorOfferingPicker(message, YES);
 }
 
+// A failed native transaction may still have an old Swift completion closure
+// in flight. Keep the staged package and stop scheduling retries in this
+// process; reopening AM resets the bridge while preserving the cache.
+static BOOL amproj_pauseForNativeBridgeRestart(NSString *transactionID,
+                                               NSString *name) {
+    if (!AMProjNativePackageImportBridgeRequiresRestart()) return NO;
+    if (amproj_nativeBridgeRestartNoticeShown) return YES;
+    amproj_nativeBridgeRestartNoticeShown = YES;
+    NSString *message =
+        @"AMProj v23 \u539f\u751f\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u5b8c\u5168\u5173\u95ed\u5e76\u91cd\u65b0\u6253\u5f00 Alight Motion \u540e\u518d\u91cd\u8bd5\u3002\u5df2\u4fdd\u7559\u5bfc\u5165\u7f13\u5b58\u5305\u3002";
+    amproj_debugEvent(@"import.local_bridge_requires_restart", @{
+        @"transaction_id": transactionID ?: @"",
+        @"filename": name ?: @"project.amproj",
+        @"reason": @"native_bridge_poisoned",
+        @"native_bridge_busy_or_poisoned": @YES
+    });
+    amproj_showImportStatusForTransaction(message, YES, transactionID);
+    amproj_presentImportErrorOfferingPicker(message, NO);
+    return YES;
+}
+
 static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                                         NSString *originalName, NSString *source,
                                         BOOL silentErrors, NSString *transactionID) {
@@ -4315,6 +4339,10 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
 
 static void amproj_activateNextPendingImport(void) {
     if (!amproj_pendingImportQueue.count) return;
+    if (AMProjNativePackageImportBridgeRequiresRestart()) {
+        amproj_pauseForNativeBridgeRestart(nil, nil);
+        return;
+    }
     if (AMProjNativePackageImportBridgeIsBusy()) {
         amproj_debugEvent(@"import.queue_blocked", @{
             @"reason": @"native_bridge_busy_or_poisoned",
@@ -4736,6 +4764,13 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (generation != amproj_pendingImportGeneration || !amproj_pendingImportURL) return;
 
+        if (AMProjNativePackageImportBridgeRequiresRestart()) {
+            amproj_pauseForNativeBridgeRestart(
+                amproj_pendingImportTransactionID,
+                amproj_pendingImportName);
+            return;
+        }
+
         UIApplication *application = UIApplication.sharedApplication;
         if (application.applicationState != UIApplicationStateActive) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
@@ -4966,6 +5001,12 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
 }
 
 static void amproj_resumeQueuedImports(NSString *source) {
+    if (AMProjNativePackageImportBridgeRequiresRestart()) {
+        amproj_pauseForNativeBridgeRestart(
+            amproj_pendingImportTransactionID ?: amproj_activeNativeImportTransactionID,
+            amproj_pendingImportName ?: amproj_nativeImportRecognitionName);
+        return;
+    }
     if (AMProjNativePackageImportBridgeIsBusy()) {
         amproj_debugEvent(@"import.resume_blocked", @{
             @"source": source ?: @"",

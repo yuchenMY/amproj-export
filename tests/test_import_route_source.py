@@ -832,6 +832,29 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_nativeBridgePoisoned ||", BRIDGE_SOURCE)
         self.assertIn("native_bridge_busy_or_poisoned", SOURCE)
 
+    def test_poisoned_bridge_pauses_without_retry_loop_and_keeps_cache(self):
+        self.assertIn(
+            "AMProjNativePackageImportBridgeRequiresRestart", BRIDGE_HEADER
+        )
+        self.assertIn(
+            "static BOOL amproj_pauseForNativeBridgeRestart", SOURCE
+        )
+        pause = function_body(
+            "static BOOL amproj_pauseForNativeBridgeRestart",
+            "static void amproj_prepareCopiedArchive",
+        )
+        self.assertIn("native_bridge_poisoned", pause)
+        self.assertIn("amproj_presentImportErrorOfferingPicker(message, NO)", pause)
+        self.assertIn("\\u5df2\\u4fdd\\u7559", pause)
+        dispatch = function_body(
+            "static void amproj_tryDispatchPendingImport",
+            "static void amproj_queuePreparedImport",
+        )
+        self.assertIn("AMProjNativePackageImportBridgeRequiresRestart()", dispatch)
+        self.assertIn("return;", dispatch[dispatch.index(
+            "AMProjNativePackageImportBridgeRequiresRestart()"
+        ):])
+
     def test_recognized_copy_failures_are_not_reported_as_accepted(self):
         body = function_body(
             "static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult",
