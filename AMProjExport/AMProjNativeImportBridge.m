@@ -23,15 +23,10 @@ typedef AMProjSwiftString (*AMProjNSStringToSwiftStringFn)(NSString *value);
 typedef void (*AMProjSwiftBridgeReleaseFn)(uintptr_t value);
 
 @interface AMProjLocalStorageSnapshot : NSObject
-// Keep the public surface and scalar ABI of FIRStorageTaskSnapshot.  AM uses
-// these accessors after the status callback returns, so implementing only the
-// four fields needed by the first callback is not sufficient.
 @property(nonatomic, strong) id task;
-@property(nonatomic, strong) id metadata;
 @property(nonatomic, strong) id reference;
 @property(nonatomic, strong) NSProgress *progress;
 @property(nonatomic, strong) NSError *error;
-@property(nonatomic) NSInteger status;
 @end
 
 @implementation AMProjLocalStorageSnapshot
@@ -47,19 +42,10 @@ typedef NSString *AMProjLocalStorageHandle;
 @property(nonatomic, strong) NSURL *destinationURL;
 @property(nonatomic, strong) NSError *transferError;
 @property(nonatomic, strong) id reference;
-@property(nonatomic, strong) id metadata;
 @property(nonatomic, strong) NSProgress *progress;
-@property(nonatomic, strong) id dispatchQueue;
-@property(nonatomic, strong) id baseRequest;
-@property(nonatomic, strong) id fetcher;
-@property(nonatomic, strong) id fetcherService;
-@property(nonatomic, copy) id fetcherCompletion;
 @property(nonatomic, strong) NSMutableDictionary<AMProjLocalStorageHandle, NSDictionary *> *observers;
-@property(nonatomic, strong) NSMutableSet<NSNumber *> *terminalScheduledStatuses;
-@property(nonatomic, strong) NSMutableSet<NSNumber *> *terminalDeliveredStatuses;
 @property(nonatomic) NSUInteger bridgeGeneration;
 @property(nonatomic) NSUInteger nextHandleIdentifier;
-@property(nonatomic) NSInteger state;
 @property(nonatomic) BOOL transferFinished;
 - (instancetype)initWithSourceURL:(NSURL *)sourceURL
                    destinationURL:(NSURL *)destinationURL
@@ -67,12 +53,6 @@ typedef NSString *AMProjLocalStorageHandle;
                   bridgeGeneration:(NSUInteger)bridgeGeneration;
 - (AMProjLocalStorageHandle)observeStatus:(NSInteger)status
                                   handler:(void (^)(id snapshot))handler;
-- (AMProjLocalStorageSnapshot *)snapshot;
-- (NSError *)error;
-- (void)dispatchAsync:(void (^)(void))block;
-- (BOOL)pause;
-- (BOOL)resume;
-- (BOOL)cancel;
 - (void)removeObserverWithHandle:(AMProjLocalStorageHandle)handle;
 - (void)removeAllObserversForStatus:(NSInteger)status;
 - (void)removeAllObservers;
@@ -81,17 +61,9 @@ typedef NSString *AMProjLocalStorageHandle;
 @interface AMProjLocalStorageReference : NSObject
 @property(nonatomic, strong) NSURL *sourceURL;
 @property(nonatomic) NSUInteger bridgeGeneration;
-@property(nonatomic, copy) NSString *path;
-@property(nonatomic, copy) NSString *fullPath;
-@property(nonatomic, copy) NSString *name;
-@property(nonatomic, copy) NSString *bucket;
-@property(nonatomic, strong) id storage;
 - (instancetype)initWithSourceURL:(NSURL *)sourceURL
                   bridgeGeneration:(NSUInteger)bridgeGeneration;
 - (id)writeToFile:(NSURL *)destinationURL;
-- (id)copyWithZone:(NSZone *)zone;
-- (BOOL)isEqualToFIRStorageReference:(id)other;
-- (NSString *)stringValue;
 @end
 
 static NSObject *AMProjNativeBridgeLock(void) {
