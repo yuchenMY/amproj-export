@@ -37,19 +37,19 @@ def function_body(signature: str, next_signature: str) -> str:
 
 class NativeImportRouteSourceTests(unittest.TestCase):
     def test_release_version_metadata_is_consistent(self):
-        self.assertIn('kAMProjPluginVersion = @"23";', SOURCE)
-        self.assertIn('kAMDebugPluginVersion = @"23";', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("AMProj v23", SOURCE)
-        self.assertNotIn("AMProj v22", SOURCE)
+        self.assertIn('kAMProjPluginVersion = @"24";', SOURCE)
+        self.assertIn('kAMDebugPluginVersion = @"24";', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("AMProj v24", SOURCE)
+        self.assertNotIn("AMProj v23", SOURCE)
         self.assertIn("AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs", WORKFLOW)
-        self.assertIn("AMPROJ_RELEASE_VERSION: '23'", WORKFLOW)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '24'", WORKFLOW)
         self.assertIn('"commit": os.environ["GITHUB_SHA"]', WORKFLOW)
         self.assertIn('"run_id": os.environ["GITHUB_RUN_ID"]', WORKFLOW)
         self.assertIn('"sha256": {', WORKFLOW)
         self.assertIn("build-metadata.json", WORKFLOW)
-        self.assertIn("AM_v1_direct_v23.ipa", README)
-        self.assertIn("AM_v1_direct_v23_debug.ipa", README)
-        self.assertIn("AM_v1_direct_v23.ipa", BUILD_SCRIPT)
+        self.assertIn("AM_v1_direct_v24.ipa", README)
+        self.assertIn("AM_v1_direct_v24_debug.ipa", README)
+        self.assertIn("AM_v1_direct_v24.ipa", BUILD_SCRIPT)
 
     def assert_capture_short_circuits_original(
         self, signature: str, next_signature: str, native_imp_type: str
@@ -89,7 +89,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_native_bridge_uses_complete_package_and_firebase_task_contract(self):
         self.assertIn("AMProjLocalStorageReference", BRIDGE_SOURCE)
         self.assertIn("AMProjLocalStorageTask", BRIDGE_SOURCE)
-        self.assertIn("typedef int64_t AMProjLocalStorageHandle", BRIDGE_SOURCE)
+        self.assertIn("typedef NSString *AMProjLocalStorageHandle", BRIDGE_SOURCE)
+        self.assertIn(
+            "NSMutableDictionary<AMProjLocalStorageHandle, NSDictionary *> *observers",
+            BRIDGE_SOURCE,
+        )
+        self.assertNotIn("typedef int64_t AMProjLocalStorageHandle", BRIDGE_SOURCE)
         self.assertIn("writeToFile:", BRIDGE_SOURCE)
         self.assertIn("observeStatus:", BRIDGE_SOURCE)
         self.assertIn("removeObserverWithHandle:", BRIDGE_SOURCE)
@@ -113,7 +118,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         selection = source_body(
             BRIDGE_SOURCE,
             "static BOOL AMProjSelectProjectsTab",
-            "static void AMProjRefreshProjectsController",
+            "static void AMProjNativeImportCompletionThunk",
         )
         self.assertIn("BOOL changed = NO", selection)
         self.assertIn("changed = YES", selection)
@@ -200,18 +205,23 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("self.progress.completedUnitCount = 1", finish)
 
-    def test_native_storage_handles_are_numeric_and_removable(self):
+    def test_native_storage_handles_are_string_objects_and_directly_removable(self):
         observe_start = BRIDGE_SOURCE.rindex("- (AMProjLocalStorageHandle)observeStatus")
         observe = BRIDGE_SOURCE[observe_start :
                                BRIDGE_SOURCE.index("- (void)removeObserverWithHandle", observe_start)]
-        self.assertIn("++self.nextHandle", observe)
-        self.assertIn("self.observers[@(handle)]", observe)
+        self.assertIn("if (!handler) return nil", observe)
+        self.assertIn("AMProjLocalStorageHandle handle = nil", observe)
+        self.assertIn('[NSString stringWithFormat:@"amproj-%020llu"', observe)
+        self.assertIn("self.observers[handle]", observe)
         self.assertIn("return handle", observe)
+        self.assertNotIn("@(handle)", observe)
         remove_start = BRIDGE_SOURCE.rindex("- (void)removeObserverWithHandle")
         remove = BRIDGE_SOURCE[remove_start :
                               BRIDGE_SOURCE.index("@end", remove_start)]
         self.assertIn("(AMProjLocalStorageHandle)handle", remove)
-        self.assertIn("removeObjectForKey:@(handle)", remove)
+        self.assertIn("removeObjectForKey:handle", remove)
+        self.assertNotIn("removeObjectForKey:@(handle)", remove)
+        self.assertNotIn("int64_t", BRIDGE_SOURCE)
 
     def test_native_bridge_events_are_thread_safe_and_main_thread_delivered(self):
         self.assertIn("AMProjNativePackageImportEventHandler", BRIDGE_HEADER)
@@ -228,13 +238,82 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "native_entry_start",
             "native_entry_return",
             "storage_write_start",
-            "storage_status_2",
-            "storage_status_4",
-            "storage_status_5",
+            "storage_observer_registered",
             "native_completion",
         ):
             self.assertIn(f'@"{event}"', BRIDGE_SOURCE)
+        self.assertIn("AMProjStorageStatusReturnedEventName", BRIDGE_SOURCE)
+        self.assertIn('stringByAppendingString:@"_returned"', BRIDGE_SOURCE)
+
+        finish_start = BRIDGE_SOURCE.index("- (void)finishTransferWithError")
+        finish_end = BRIDGE_SOURCE.index(
+            "- (instancetype)initWithSourceURL", finish_start
+        )
+        callback = BRIDGE_SOURCE[finish_start:finish_end]
+        self.assertLess(
+            callback.index("handler([self snapshot])"),
+            callback.index("[self emitStatusReturnedEvent:status]"),
+        )
+
+        observe_start = BRIDGE_SOURCE.rindex(
+            "- (AMProjLocalStorageHandle)observeStatus"
+        )
+        observe_end = BRIDGE_SOURCE.index(
+            "- (void)removeObserverWithHandle", observe_start
+        )
+        observe = BRIDGE_SOURCE[observe_start:observe_end]
+        self.assertLess(
+            observe.index("callback(terminalSnapshot ?: [self snapshot])"),
+            observe.index("[self emitStatusReturnedEvent:status]"),
+        )
         self.assertIn("amproj_nativeBridgeFinishPending", BRIDGE_SOURCE)
+
+    def test_native_events_are_persisted_for_offline_crash_diagnosis(self):
+        writer = source_body(
+            SOURCE,
+            "static void amproj_writeImportBreadcrumb",
+            "static NSDictionary *amproj_readImportBreadcrumb",
+        )
+        breadcrumb = source_body(
+            SOURCE,
+            "static void amproj_writeNativeEventBreadcrumb",
+            "static void amproj_setPersistentStage",
+        )
+        self.assertIn("amproj_importBreadcrumbLock", SOURCE)
+        self.assertIn("@synchronized (amproj_importBreadcrumbLock())", writer)
+        self.assertIn("[previous mutableCopy]", writer)
+        self.assertIn("sameTransaction", writer)
+        self.assertIn('record[@"last_native_event"]', breadcrumb)
+        self.assertIn('record[@"native_status"]', breadcrumb)
+        self.assertIn('record[@"native_fields"]', breadcrumb)
+        self.assertIn('@"returned"', breadcrumb)
+        self.assertIn('@"exception"', breadcrumb)
+        self.assertIn("NSDataWritingAtomic", breadcrumb)
+        self.assertNotIn("amproj_nativeBreadcrumbPhase", SOURCE)
+        self.assertIn(
+            "amproj_writeNativeEventBreadcrumb(transactionID, event, enriched);",
+            SOURCE,
+        )
+        display = source_body(
+            SOURCE,
+            "static NSString *amproj_nativeBreadcrumbDisplayStage",
+            "static void amproj_writeNativeEventBreadcrumb",
+        )
+        self.assertIn('breadcrumb[@"last_native_event"]', display)
+        self.assertIn('breadcrumb[@"native_status"]', display)
+        self.assertIn("storage_observer_%@_registered", display)
+        self.assertIn("amproj_nativeBreadcrumbDisplayStage(previousBreadcrumb)", SOURCE)
+
+    def test_native_completion_does_not_refresh_projects_ui_directly(self):
+        completion = source_body(
+            BRIDGE_SOURCE,
+            "static void AMProjNativeImportCompletionThunk",
+            "static BOOL AMProjStartNativePackageImport",
+        )
+        self.assertIn("AMProjFinishNativeBridge(YES, nil)", completion)
+        self.assertNotIn("AMProjRefreshProjectsController", completion)
+        self.assertNotIn("reloadData", completion)
+        self.assertNotIn("AMProjRefreshProjectsController", BRIDGE_SOURCE)
 
     def test_timeout_poison_prevents_a_late_callback_from_finishing_a_new_import(self):
         self.assertIn("amproj_nativeBridgePoisoned", BRIDGE_SOURCE)
@@ -540,7 +619,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_tryDispatchPendingImport",
         )
         success_branch = finish.index("if (success)")
-        self.assertNotIn('@"AMProj v23 · 4/4', finish[success_branch:])
+        self.assertNotIn('@"AMProj v24 · 4/4', finish[success_branch:])
         self.assertIn("amproj_importVerificationActive = YES", finish[success_branch:])
         self.assertIn('@"verifying_project_row"', finish[success_branch:])
         self.assertIn("amproj_verifyImportedProjectRow", finish[success_branch:])
@@ -554,7 +633,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         verified_branch = verification[verification.index("if (verified)") :]
         self.assertIn('@"import.project_row_verified"', verification)
         self.assertIn("amproj_releaseImportTransaction(transactionID, YES)", verified_branch)
-        self.assertIn('AMProj v23 · 4/4', verified_branch)
+        self.assertIn('AMProj v24 · 4/4', verified_branch)
         self.assertIn('amproj_resumeQueuedImports(@"project_row_verified")', verified_branch)
         self.assertIn('@"import.project_row_missing"', verification)
         self.assertIn("amproj_activateNextPendingImport()", verification)
@@ -562,7 +641,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertEqual(SOURCE.count("AMProj v23 · 4/4"), 1)
+        self.assertEqual(SOURCE.count("AMProj v24 · 4/4"), 1)
 
     def test_native_failure_alert_is_observed_without_replacing_it(self):
         detector = function_body(
@@ -584,7 +663,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v23 \\u00b7 E40", present)
+        self.assertIn("AMProj v24 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),

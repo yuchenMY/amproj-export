@@ -40,7 +40,7 @@
 #import "AMProjImportArchive.h"
 #import "AMProjNativeImportBridge.h"
 
-static NSString *const kAMProjPluginVersion = @"23";
+static NSString *const kAMProjPluginVersion = @"24";
 
 #if AMPROJ_DEBUG
 #import "AMDebugTransport.h"
@@ -117,6 +117,23 @@ static NSURL *amproj_importBreadcrumbURL(void) {
     return [directory URLByAppendingPathComponent:@"last-import.plist"];
 }
 
+static NSObject *amproj_importBreadcrumbLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static NSDictionary *amproj_readImportBreadcrumbAtURL(NSURL *URL) {
+    if (!URL) return nil;
+    NSData *data = [NSData dataWithContentsOfURL:URL options:NSDataReadingMappedIfSafe error:nil];
+    if (!data.length) return nil;
+    id value = [NSPropertyListSerialization propertyListWithData:data
+                                                           options:NSPropertyListImmutable
+                                                            format:nil error:nil];
+    return [value isKindOfClass:NSDictionary.class] ? value : nil;
+}
+
 static void amproj_writeImportBreadcrumb(NSString *transactionID,
                                          NSString *fingerprint,
                                          NSString *phase,
@@ -126,31 +143,98 @@ static void amproj_writeImportBreadcrumb(NSString *transactionID,
                                          NSString *errorText) {
     NSURL *URL = amproj_importBreadcrumbURL();
     if (!URL) return;
-    NSMutableDictionary *record = [@{
-        @"transaction_id": transactionID ?: @"",
-        @"fingerprint": fingerprint ?: @"",
-        @"phase": phase ?: @"",
-        @"source": source ?: @"",
-        @"owner_class": ownerClass ?: @"",
-        @"updated_at": @([NSDate.date timeIntervalSince1970])
-    } mutableCopy];
-    if (nativeStatus) record[@"native_status"] = nativeStatus;
-    if (errorText.length) record[@"error"] = errorText;
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:record
-                                                                format:NSPropertyListBinaryFormat_v1_0
-                                                               options:0 error:nil];
-    if (data.length) [data writeToURL:URL options:NSDataWritingAtomic error:nil];
+    @synchronized (amproj_importBreadcrumbLock()) {
+        NSDictionary *previous = amproj_readImportBreadcrumbAtURL(URL);
+        NSString *previousID = [previous[@"transaction_id"] isKindOfClass:NSString.class]
+            ? previous[@"transaction_id"] : @"";
+        BOOL sameTransaction = transactionID.length && [previousID isEqualToString:transactionID];
+        NSMutableDictionary *record = sameTransaction
+            ? [previous mutableCopy] : [NSMutableDictionary dictionary];
+        record[@"transaction_id"] = transactionID ?: @"";
+        record[@"phase"] = phase ?: @"";
+        record[@"updated_at"] = @([NSDate.date timeIntervalSince1970]);
+        if (fingerprint.length || !sameTransaction) record[@"fingerprint"] = fingerprint ?: @"";
+        if (source.length || !sameTransaction) record[@"source"] = source ?: @"";
+        if (ownerClass.length || !sameTransaction) record[@"owner_class"] = ownerClass ?: @"";
+        if (nativeStatus) record[@"native_status"] = nativeStatus;
+        if (errorText.length) record[@"error"] = errorText;
+        if ([phase isEqualToString:@"completed"]) [record removeObjectForKey:@"error"];
+
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:record
+                                                                    format:NSPropertyListBinaryFormat_v1_0
+                                                                   options:0 error:nil];
+        if (data.length) [data writeToURL:URL options:NSDataWritingAtomic error:nil];
+    }
 }
 
 static NSDictionary *amproj_readImportBreadcrumb(void) {
     NSURL *URL = amproj_importBreadcrumbURL();
     if (!URL) return nil;
-    NSData *data = [NSData dataWithContentsOfURL:URL options:NSDataReadingMappedIfSafe error:nil];
-    if (!data.length) return nil;
-    id value = [NSPropertyListSerialization propertyListWithData:data
-                                                           options:NSPropertyListImmutable
-                                                            format:nil error:nil];
-    return [value isKindOfClass:NSDictionary.class] ? value : nil;
+    @synchronized (amproj_importBreadcrumbLock()) {
+        return amproj_readImportBreadcrumbAtURL(URL);
+    }
+}
+
+static NSString *amproj_nativeBreadcrumbDisplayStage(NSDictionary *breadcrumb) {
+    NSString *phase = [breadcrumb[@"phase"] isKindOfClass:NSString.class]
+        ? breadcrumb[@"phase"] : @"";
+    NSString *event = [breadcrumb[@"last_native_event"] isKindOfClass:NSString.class]
+        ? breadcrumb[@"last_native_event"] : @"";
+    NSNumber *status = [breadcrumb[@"native_status"] isKindOfClass:NSNumber.class]
+        ? breadcrumb[@"native_status"] : nil;
+    if ([event isEqualToString:@"storage_observer_registered"] && status) {
+        return [NSString stringWithFormat:@"storage_observer_%@_registered", status];
+    }
+    return event.length ? event : phase;
+}
+
+static void amproj_writeNativeEventBreadcrumb(NSString *transactionID,
+                                               NSString *event,
+                                               NSDictionary *fields) {
+    if (!transactionID.length ||
+        (!([event hasPrefix:@"native_"] || [event hasPrefix:@"storage_"]))) return;
+    NSURL *URL = amproj_importBreadcrumbURL();
+    if (!URL) return;
+    @synchronized (amproj_importBreadcrumbLock()) {
+        NSDictionary *previous = amproj_readImportBreadcrumbAtURL(URL);
+        NSString *previousID = [previous[@"transaction_id"] isKindOfClass:NSString.class]
+            ? previous[@"transaction_id"] : @"";
+        if (previousID.length && ![previousID isEqualToString:transactionID]) return;
+
+        NSMutableDictionary *record = [previous mutableCopy] ?: [NSMutableDictionary dictionary];
+        record[@"transaction_id"] = transactionID;
+        if (![record[@"phase"] isKindOfClass:NSString.class]) record[@"phase"] = @"native_active";
+        record[@"last_native_event"] = event ?: @"";
+        record[@"updated_at"] = @([NSDate.date timeIntervalSince1970]);
+
+        NSNumber *status = [fields[@"status"] isKindOfClass:NSNumber.class]
+            ? fields[@"status"] : nil;
+        if (status) record[@"native_status"] = status;
+        NSString *ownerClass = [fields[@"owner_class"] isKindOfClass:NSString.class]
+            ? fields[@"owner_class"] : nil;
+        if (ownerClass.length) record[@"owner_class"] = ownerClass;
+        NSString *errorText = [fields[@"error"] isKindOfClass:NSString.class]
+            ? fields[@"error"] : nil;
+        if (errorText.length) record[@"error"] = errorText;
+
+        NSMutableDictionary *nativeFields = [NSMutableDictionary dictionary];
+        for (NSString *key in @[
+            @"generation", @"status", @"handle", @"handle_class", @"terminal",
+            @"success", @"returned", @"exception", @"error_domain", @"error_code",
+            @"error", @"filename", @"owner_class", @"source_path", @"destination_path"
+        ]) {
+            id value = fields[key];
+            if ([value isKindOfClass:NSString.class] || [value isKindOfClass:NSNumber.class]) {
+                nativeFields[key] = value;
+            }
+        }
+        record[@"native_fields"] = nativeFields;
+
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:record
+                                                                    format:NSPropertyListBinaryFormat_v1_0
+                                                                   options:0 error:nil];
+        if (data.length) [data writeToURL:URL options:NSDataWritingAtomic error:nil];
+    }
 }
 
 static void amproj_setPersistentStage(NSString *stage) {
@@ -3206,10 +3290,10 @@ static NSString* amproj_visibleImportFileError(NSError *error) {
     }
     NSString *diagnostics = amproj_copyDiagnosticSummary(error);
     if (diagnostics.length) {
-        return [NSString stringWithFormat:@"AMProj v23 \u00b7 %@ (E%ld \u00b7 %@)",
+        return [NSString stringWithFormat:@"AMProj v24 \u00b7 %@ (E%ld \u00b7 %@)",
                                           message, (long)error.code, diagnostics];
     }
-    return [NSString stringWithFormat:@"AMProj v23 \u00b7 %@ (E%ld)",
+    return [NSString stringWithFormat:@"AMProj v24 \u00b7 %@ (E%ld)",
                                       message, (long)error.code];
 }
 
@@ -3959,7 +4043,7 @@ static UIViewController* amproj_topViewController(UIViewController *controller) 
     }
     NSURL *selectedURL = [URLs.firstObject copy];
     BOOL heldSecurityScope = [selectedURL startAccessingSecurityScopedResource];
-    amproj_showImportStatus(@"AMProj v23 · 1/4 已选择 .amproj 文件", NO);
+    amproj_showImportStatus(@"AMProj v24 · 1/4 已选择 .amproj 文件", NO);
     dispatch_async(amproj_importInboxQueue(), ^{
         BOOL prepared = NO;
         AMProjIncomingURLResult result = amproj_handleIncomingProjectURLSafely(
@@ -4122,7 +4206,7 @@ static BOOL amproj_pauseForNativeBridgeRestart(NSString *transactionID,
     if (amproj_nativeBridgeRestartNoticeShown) return YES;
     amproj_nativeBridgeRestartNoticeShown = YES;
     NSString *message =
-        @"AMProj v23 \u539f\u751f\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u5b8c\u5168\u5173\u95ed\u5e76\u91cd\u65b0\u6253\u5f00 Alight Motion \u540e\u518d\u91cd\u8bd5\u3002\u5df2\u4fdd\u7559\u5bfc\u5165\u7f13\u5b58\u5305\u3002";
+        @"AMProj v24 \u539f\u751f\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u5b8c\u5168\u5173\u95ed\u5e76\u91cd\u65b0\u6253\u5f00 Alight Motion \u540e\u518d\u91cd\u8bd5\u3002\u5df2\u4fdd\u7559\u5bfc\u5165\u7f13\u5b58\u5305\u3002";
     amproj_debugEvent(@"import.local_bridge_requires_restart", @{
         @"transaction_id": transactionID ?: @"",
         @"filename": name ?: @"project.amproj",
@@ -4145,7 +4229,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
         @autoreleasepool {
             @try {
             amproj_showImportStatusForTransaction(
-                @"AMProj v23 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u5e76\u89c4\u8303\u5316\u9879\u76ee\u5305",
+                @"AMProj v24 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u5e76\u89c4\u8303\u5316\u9879\u76ee\u5305",
                 NO, transactionID);
 
             NSDictionary *validationMetrics = nil;
@@ -4266,7 +4350,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                         ? preparationError.localizedDescription
                         : @"\u9879\u76ee\u5305\u5b8c\u6574\u6027\u6821\u9a8c\u6216\u89c4\u8303\u5316\u5931\u8d25";
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v23 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u89c4\u8303\u5316\uff1a%@", detail];
+                        @"AMProj v24 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u89c4\u8303\u5316\uff1a%@", detail];
                     amproj_showImportStatusForTransaction(visible, YES, transactionID);
                     amproj_presentImportError(visible);
                 }
@@ -4306,7 +4390,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                 return;
             }
             amproj_showImportStatusForTransaction(
-                @"AMProj v23 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165",
+                @"AMProj v24 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165",
                 NO, transactionID);
             amproj_queuePreparedImport(preparedURL, nameSnapshot, transactionID);
             } @catch (NSException *exception) {
@@ -4328,7 +4412,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                 });
                 if (!silentErrors) {
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v23 · 项目包处理异常：%@", reason];
+                        @"AMProj v24 · 项目包处理异常：%@", reason];
                     amproj_showImportStatusForTransaction(visible, YES, transactionID);
                     amproj_presentImportError(visible);
                 }
@@ -4402,7 +4486,7 @@ static void amproj_activateNextPendingImport(void) {
     amproj_markImportTransactionState(
         transactionID, AMProjImportTransactionWaitingForProjects);
     amproj_showImportStatusForTransaction(
-        @"AMProj v23 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d",
+        @"AMProj v24 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d",
         NO, transactionID);
     amproj_tryDispatchPendingImport(generation);
 }
@@ -4613,7 +4697,7 @@ static void amproj_verifyImportedProjectRow(NSUInteger generation,
             amproj_importVisibleStageRank = 0;
             amproj_visibleStatusTransactionID = nil;
             amproj_showImportStatusForTransaction(
-                @"AMProj v23 · 4/4 已验证项目已出现在底部“项目”", NO,
+                @"AMProj v24 · 4/4 已验证项目已出现在底部“项目”", NO,
                 transactionID);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC),
                            dispatch_get_main_queue(), ^{
@@ -4659,7 +4743,7 @@ static void amproj_verifyImportedProjectRow(NSUInteger generation,
             @"error": verifyError.localizedDescription
         });
         NSString *visible = [NSString stringWithFormat:
-            @"AMProj v23 · 导入未完成：%@。缓存包已保留，可重试。",
+            @"AMProj v24 · 导入未完成：%@。缓存包已保留，可重试。",
             verifyError.localizedDescription];
         amproj_showImportStatusForTransaction(visible, YES, transactionID);
         amproj_presentImportErrorOfferingPicker(visible, NO);
@@ -4727,7 +4811,7 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
                                          amproj_importTransactionForID(transactionID).fingerprint,
                                          @"verifying_project_row", nil, nil, @4, nil);
             amproj_showImportStatusForTransaction(
-                @"AMProj v23 · 原生回调完成，正在确认项目已出现在底部“项目”",
+                @"AMProj v24 · 原生回调完成，正在确认项目已出现在底部“项目”",
                 NO, transactionID);
             amproj_verifyImportedProjectRow(amproj_importVerificationGeneration,
                                             name ?: @"project.amproj",
@@ -4745,7 +4829,7 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
             NSString *detail = error.localizedDescription.length
                 ? error.localizedDescription : @"AM \u672c\u5730\u9879\u76ee\u5305\u5bfc\u5165\u5931\u8d25";
             NSString *visible = [NSString stringWithFormat:
-                @"AMProj v23 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d\uff1a%@", detail];
+                @"AMProj v24 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d\uff1a%@", detail];
             amproj_showImportStatusForTransaction(visible, YES, transactionID);
             if (![error.userInfo[@"AMProjNativeAlertPresented"] boolValue]) {
                 amproj_presentImportErrorOfferingPicker(visible, NO);
@@ -4877,7 +4961,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             } else if (started &&
                        generation == amproj_activeNativeImportGeneration) {
                 amproj_showImportStatusForTransaction(
-                    @"AMProj v23 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u5e95\u90e8\u201c\u9879\u76ee\u201d",
+                    @"AMProj v24 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u5e95\u90e8\u201c\u9879\u76ee\u201d",
                     NO, transactionID);
                 amproj_debugEvent(@"import.local_bridge_started", @{
                     @"success": @YES,
@@ -4912,7 +4996,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                 @"bridge_available": @NO
             });
             amproj_showImportStatusForTransaction(
-                @"AMProj v23 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea",
+                @"AMProj v24 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea",
                 YES, transactionID);
             amproj_presentImportErrorOfferingPicker(
                 @"\u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c\u901a\u8fc7\uff0c\u4f46 Alight Motion \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u672a\u80fd\u5c31\u7eea\u3002\u672c\u6b21\u6ca1\u6709\u56de\u9000\u5230\u4efb\u4f55\u4e0a\u4f20\u5165\u53e3\u3002",
@@ -5196,7 +5280,7 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
             });
             if (!silentErrors) {
                 amproj_showImportStatusForTransaction(
-                    @"AMProj v23 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25",
+                    @"AMProj v24 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25",
                     YES, transactionID);
                 amproj_presentImportError(@"无法创建导入缓存，请检查设备剩余空间后重试。");
             }
@@ -5357,10 +5441,10 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
         });
         amproj_markImportTransactionState(transactionID, AMProjImportTransactionValidating);
         amproj_showImportStatusForTransaction(
-            @"AMProj v23 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587件",
+            @"AMProj v24 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587件",
             NO, transactionID);
         amproj_showImportStatusForTransaction(
-            @"AMProj v23 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305",
+            @"AMProj v24 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305",
             NO, transactionID);
         amproj_prepareCopiedArchive(
             destination, directory, originalName, source, silentErrors, transactionID);
@@ -6191,7 +6275,7 @@ static void hooked_projectsImportAlertViewDidLoad(id self, SEL _cmd) {
     });
     if (recognizedQueuedPackage) {
         amproj_showImportStatus(
-            @"AMProj v23 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d", NO);
+            @"AMProj v24 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d", NO);
     }
 }
 
@@ -6209,7 +6293,7 @@ static void hooked_projectsImportAlertOnPressImport(id self, SEL _cmd, id sender
     });
     if (tracked) {
         amproj_showImportStatus(
-            @"AMProj v23 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
+            @"AMProj v24 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
     }
     if (orig_projectsImportAlertOnPressImport) {
         orig_projectsImportAlertOnPressImport(self, _cmd, sender);
@@ -6663,7 +6747,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             amproj_importDispatchCoolingDown = NO;
         }
         amproj_showImportStatus([NSString stringWithFormat:
-            @"AMProj v23 \u00b7 E40 \u00b7 %@", failureDescription], YES);
+            @"AMProj v24 \u00b7 E40 \u00b7 %@", failureDescription], YES);
         amproj_flushDebugEvents();
         if (!bridgeHandled) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
@@ -7681,6 +7765,9 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                             : amproj_importVerificationTransactionID);
                     if (transactionID.length) enriched[@"transaction_id"] = transactionID;
                 }
+                NSString *transactionID = [enriched[@"transaction_id"]
+                    isKindOfClass:NSString.class] ? enriched[@"transaction_id"] : nil;
+                amproj_writeNativeEventBreadcrumb(transactionID, event, enriched);
                 amproj_debugEvent(event, enriched);
             });
         AMProjInstallNativePackageImportBridge();
@@ -7696,11 +7783,13 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                       previousBreadcrumb[@"error"] ?: @"");
                 NSString *phase = [previousBreadcrumb[@"phase"]
                     isKindOfClass:NSString.class] ? previousBreadcrumb[@"phase"] : @"";
+                NSString *interruptedStage =
+                    amproj_nativeBreadcrumbDisplayStage(previousBreadcrumb);
                 if (phase.length && ![phase isEqualToString:@"completed"] &&
                     ![phase isEqualToString:@"failed"]) {
                     amproj_showImportStatus([NSString stringWithFormat:
-                        @"AMProj v23 · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
-                        phase], YES);
+                        @"AMProj v24 · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
+                        interruptedStage], YES);
                 }
             }
             amproj_purgeOldDirectExports();
@@ -7725,9 +7814,9 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v23-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v24-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v23 =====");
+        NSLog(@"[AMProjExport] ===== Loading v24 =====");
 #endif
 
         // ObjC classes are registered before image constructors. Installing only

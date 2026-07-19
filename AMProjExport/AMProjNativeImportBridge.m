@@ -4,7 +4,6 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
-#import <objc/message.h>
 #import <string.h>
 
 static NSString *const AMProjNativeBridgeErrorDomain =
@@ -33,11 +32,10 @@ typedef void (*AMProjSwiftBridgeReleaseFn)(uintptr_t value);
 @implementation AMProjLocalStorageSnapshot
 @end
 
-// FIRStorageHandle is a signed 64-bit value in the Firebase Objective-C API.
-// The Swift importer stores this result as an Int64 and may pass it back to
-// removeObserverWithHandle:, so an Objective-C object/NSString handle is not
-// ABI-compatible here.
-typedef int64_t AMProjLocalStorageHandle;
+// This AM build retains each observeStatus:handler: result as an Objective-C
+// object. Match Firebase's object handle contract instead of returning an
+// integer that would be interpreted as an invalid object pointer.
+typedef NSString *AMProjLocalStorageHandle;
 
 @interface AMProjLocalStorageTask : NSObject
 @property(nonatomic, strong) NSURL *sourceURL;
@@ -45,9 +43,9 @@ typedef int64_t AMProjLocalStorageHandle;
 @property(nonatomic, strong) NSError *transferError;
 @property(nonatomic, strong) id reference;
 @property(nonatomic, strong) NSProgress *progress;
-@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *observers;
+@property(nonatomic, strong) NSMutableDictionary<AMProjLocalStorageHandle, NSDictionary *> *observers;
 @property(nonatomic) NSUInteger bridgeGeneration;
-@property(nonatomic) AMProjLocalStorageHandle nextHandle;
+@property(nonatomic) NSUInteger nextHandleIdentifier;
 @property(nonatomic) BOOL transferFinished;
 - (instancetype)initWithSourceURL:(NSURL *)sourceURL
                    destinationURL:(NSURL *)destinationURL
@@ -207,10 +205,30 @@ static NSString *AMProjStorageStatusEventName(NSInteger status) {
     }
 }
 
+static NSString *AMProjStorageStatusReturnedEventName(NSInteger status) {
+    NSString *event = AMProjStorageStatusEventName(status);
+    return event.length ? [event stringByAppendingString:@"_returned"] : nil;
+}
+
 @implementation AMProjLocalStorageTask
 
 - (void)emitStatusEvent:(NSInteger)status {
     NSString *event = AMProjStorageStatusEventName(status);
+    if (!event) return;
+    AMProjEmitNativeBridgeEvent(event, @{
+        @"generation": @(self.bridgeGeneration),
+        @"status": @(status),
+        @"source_path": self.sourceURL.path ?: @"",
+        @"destination_path": self.destinationURL.path ?: @"",
+        @"success": @(self.transferError == nil),
+        @"error_domain": self.transferError.domain ?: @"",
+        @"error_code": @(self.transferError.code),
+        @"error": self.transferError.localizedDescription ?: @""
+    });
+}
+
+- (void)emitStatusReturnedEvent:(NSInteger)status {
+    NSString *event = AMProjStorageStatusReturnedEventName(status);
     if (!event) return;
     AMProjEmitNativeBridgeEvent(event, @{
         @"generation": @(self.bridgeGeneration),
@@ -246,10 +264,10 @@ static NSString *AMProjStorageStatusEventName(NSInteger status) {
         // one final progress snapshot with fractionCompleted == 1. Keep the
         // success order deterministic: progress first, then completion.
         NSArray<NSNumber *> *terminalStatuses = error ? @[@5] : @[@2, @4];
-        NSArray<NSNumber *> *handles = [self.observers.allKeys
+        NSArray<AMProjLocalStorageHandle> *handles = [self.observers.allKeys
             sortedArrayUsingSelector:@selector(compare:)];
         for (NSNumber *wanted in terminalStatuses) {
-            for (NSNumber *handle in handles) {
+            for (AMProjLocalStorageHandle handle in handles) {
                 NSDictionary *observer = self.observers[handle];
                 if ([observer[@"status"] integerValue] == wanted.integerValue) {
                     [matching addObject:observer];
@@ -266,9 +284,11 @@ static NSString *AMProjStorageStatusEventName(NSInteger status) {
             void (^handler)(id) = observer[@"handler"];
             if (!handler) continue;
             NSLog(@"[AMProjExport] Native import storage callback status=%ld",
-                  [observer[@"status"] integerValue]);
-            [self emitStatusEvent:[observer[@"status"] integerValue]];
+                   [observer[@"status"] integerValue]);
+            NSInteger status = [observer[@"status"] integerValue];
+            [self emitStatusEvent:status];
             handler([self snapshot]);
+            [self emitStatusReturnedEvent:status];
         }
     };
     if ([NSThread isMainThread]) invokeCallbacks();
@@ -321,20 +341,21 @@ static NSString *AMProjStorageStatusEventName(NSInteger status) {
 
 - (AMProjLocalStorageHandle)observeStatus:(NSInteger)status
                                   handler:(void (^)(id snapshot))handler {
-    if (!handler) return 0;
+    if (!handler) return nil;
 
-    AMProjLocalStorageHandle handle = 0;
+    AMProjLocalStorageHandle handle = nil;
     BOOL notifyTerminal = NO;
     AMProjLocalStorageSnapshot *terminalSnapshot = nil;
     @synchronized (self) {
-        handle = ++self.nextHandle;
+        handle = [NSString stringWithFormat:@"amproj-%020llu",
+                  (unsigned long long)++self.nextHandleIdentifier];
         notifyTerminal = self.transferFinished &&
             ((self.transferError == nil && (status == 2 || status == 4)) ||
              (status == 5 && self.transferError != nil));
         if (notifyTerminal) {
             terminalSnapshot = [self snapshot];
         } else {
-            self.observers[@(handle)] = @{
+            self.observers[handle] = @{
                 @"status": @(status),
                 @"handler": [handler copy]
             };
@@ -342,11 +363,19 @@ static NSString *AMProjStorageStatusEventName(NSInteger status) {
     }
     NSLog(@"[AMProjExport] Native import storage observer status=%ld terminal=%d",
           (long)status, notifyTerminal);
+    AMProjEmitNativeBridgeEvent(@"storage_observer_registered", @{
+        @"generation": @(self.bridgeGeneration),
+        @"status": @(status),
+        @"handle": handle ?: @"",
+        @"handle_class": handle ? NSStringFromClass(handle.class) : @"",
+        @"terminal": @(notifyTerminal)
+    });
     if (notifyTerminal) {
         void (^callback)(id) = [handler copy];
         dispatch_async(dispatch_get_main_queue(), ^{
             [self emitStatusEvent:status];
             callback(terminalSnapshot ?: [self snapshot]);
+            [self emitStatusReturnedEvent:status];
         });
     }
     return handle;
@@ -355,14 +384,14 @@ static NSString *AMProjStorageStatusEventName(NSInteger status) {
 - (void)removeObserverWithHandle:(AMProjLocalStorageHandle)handle {
     if (!handle) return;
     @synchronized (self) {
-        [self.observers removeObjectForKey:@(handle)];
+        [self.observers removeObjectForKey:handle];
     }
 }
 
 - (void)removeAllObserversForStatus:(NSInteger)status {
     @synchronized (self) {
-        NSMutableArray<NSNumber *> *handles = [NSMutableArray array];
-        for (NSNumber *handle in self.observers) {
+        NSMutableArray<AMProjLocalStorageHandle> *handles = [NSMutableArray array];
+        for (AMProjLocalStorageHandle handle in self.observers) {
             if ([self.observers[handle][@"status"] integerValue] == status) {
                 [handles addObject:handle];
             }
@@ -468,7 +497,6 @@ static void *AMProjMainAddress(uintptr_t preferredAddress) {
                     (preferredAddress - AMProjMainPreferredBase));
 }
 
-static UIViewController *AMProjLoadedProjectsController(void);
 static BOOL AMProjSelectProjectsTab(UIViewController *projects);
 
 @interface AMProjProjectControllerCandidate : NSObject
@@ -723,12 +751,6 @@ static AMProjProjectControllerCandidate *AMProjBestProjectControllerCandidate(
     return best;
 }
 
-static UIViewController *AMProjLoadedProjectsController(void) {
-    AMProjProjectControllerCandidate *candidate =
-        AMProjBestProjectControllerCandidate(AMProjProjectControllerCandidates(), NO);
-    return candidate.controller;
-}
-
 static BOOL AMProjSelectProjectsTab(UIViewController *projects) {
     if (!projects) return NO;
     UITabBarController *tabs = projects.tabBarController;
@@ -749,30 +771,10 @@ static BOOL AMProjSelectProjectsTab(UIViewController *projects) {
     return changed;
 }
 
-static void AMProjRefreshProjectsController(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *projects = AMProjLoadedProjectsController();
-        if (!projects) return;
-        (void)AMProjSelectProjectsTab(projects);
-        SEL selector = NSSelectorFromString(@"pCollectionView");
-        UICollectionView *collection = nil;
-        if ([projects respondsToSelector:selector]) {
-            collection = ((id (*)(id, SEL))(void *)objc_msgSend)(projects, selector);
-        }
-        [collection reloadData];
-        [collection setNeedsLayout];
-    });
-}
-
 static void AMProjNativeImportCompletionThunk(void *result) {
     NSLog(@"[AMProjExport] Native import completion enter result=%p", result);
     if (!AMProjFinishNativeBridge(YES, nil)) return;
     NSLog(@"[AMProjExport] Native import completion accepted");
-    AMProjRefreshProjectsController();
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC),
-                   dispatch_get_main_queue(), ^{
-        AMProjRefreshProjectsController();
-    });
 }
 
 static BOOL AMProjStartNativePackageImport(
