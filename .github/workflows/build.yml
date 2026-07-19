@@ -1,5 +1,8 @@
 name: Build AMProjExport dylibs
 
+env:
+  AMPROJ_RELEASE_VERSION: '23'
+
 on:
   push:
     paths:
@@ -104,11 +107,45 @@ jobs:
               assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist())
           PY
 
+      - name: Write build metadata
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          artifact_paths = (
+              Path("AMProjExport/AMProjExport.dylib"),
+              Path("AMProjExport/AMProjExportDebug.dylib"),
+              Path("AMProjShareExtension/build/AMProjShareExtension.appex/AMProjShareExtension"),
+              Path("AMProjShareExtension/build/AMProjShareExtension.appex/Info.plist"),
+              Path("AMProjShareExtension/build/AMProjShareExtension.entitlements"),
+          )
+          metadata = {
+              "plugin_version": os.environ["AMPROJ_RELEASE_VERSION"],
+              "commit": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_number": os.environ["GITHUB_RUN_NUMBER"],
+              "sha256": {
+                  str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                  for path in artifact_paths
+              },
+          }
+          Path("build-metadata.json").write_text(
+              json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AMProjExport-dylibs
+          name: AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs
+          if-no-files-found: error
+          retention-days: 14
           path: |
+            build-metadata.json
             AMProjExport/AMProjExport.dylib
             AMProjExport/AMProjExportDebug.dylib
             AMProjShareExtension/build/AMProjShareExtension.appex

@@ -1,6 +1,7 @@
 #import "AMProjImportArchive.h"
 #import "AMProjZIPWriter.h"
 
+#import <CommonCrypto/CommonDigest.h>
 #import <errno.h>
 #import <fcntl.h>
 #import <sys/stat.h>
@@ -18,6 +19,7 @@ static const uint64_t kAMProjImportMaximumArchiveBytes = 2ULL * 1024 * 1024 * 10
 static const uint64_t kAMProjImportMaximumEntryBytes = 1024ULL * 1024 * 1024;
 static const uint64_t kAMProjImportMaximumTotalBytes = 2ULL * 1024 * 1024 * 1024;
 static const uint64_t kAMProjImportMaximumXMLBytes = 64ULL * 1024 * 1024;
+static const uint64_t kAMProjImportMaximumManifestBytes = 16ULL * 1024 * 1024;
 static const uint64_t kAMProjImportMaximumCentralDirectoryBytes = 64ULL * 1024 * 1024;
 static const uint16_t kAMProjImportUTF8Flag = 0x0800;
 
@@ -102,6 +104,68 @@ static BOOL AMProjImportWriteAll(int fd, const void *buffer, size_t length,
         remaining -= (size_t)count;
     }
     return YES;
+}
+
+static NSString *AMProjImportUpperSHA1(const unsigned char *bytes, size_t length) {
+    static const char digits[] = "0123456789ABCDEF";
+    if (length != CC_SHA1_DIGEST_LENGTH) return nil;
+    char output[CC_SHA1_DIGEST_LENGTH * 2];
+    for (size_t index = 0; index < length; index++) {
+        output[index * 2] = digits[bytes[index] >> 4];
+        output[index * 2 + 1] = digits[bytes[index] & 0x0f];
+    }
+    return [[NSString alloc] initWithBytes:output length:sizeof(output)
+                                  encoding:NSASCIIStringEncoding];
+}
+
+static NSString *AMProjImportSHA1ForFileURL(NSURL *fileURL, NSString *entryName,
+                                            NSError **error) {
+    int fd = open(fileURL.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) {
+        AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                         @"Unable to open an extracted project resource for verification",
+                         @{ @"entry": entryName ?: @"", @"errno": @(errno) });
+        return nil;
+    }
+    struct stat fileStat = {0};
+    if (fstat(fd, &fileStat) != 0 || !S_ISREG(fileStat.st_mode)) {
+        int savedErrno = errno;
+        close(fd);
+        AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                         @"An extracted project resource is not a regular file",
+                         @{ @"entry": entryName ?: @"", @"errno": @(savedErrno) });
+        return nil;
+    }
+
+    CC_SHA1_CTX context;
+    CC_SHA1_Init(&context);
+    uint8_t buffer[kAMProjImportBufferSize];
+    BOOL success = YES;
+    while (success) {
+        ssize_t count = read(fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                             @"Unable to read an extracted project resource for verification",
+                             @{ @"entry": entryName ?: @"", @"errno": @(errno) });
+            success = NO;
+        } else if (count == 0) {
+            break;
+        } else {
+            CC_SHA1_Update(&context, buffer, (CC_LONG)count);
+        }
+    }
+    int closeResult = close(fd);
+    if (!success) return nil;
+    if (closeResult != 0) {
+        AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                         @"Unable to close a verified project resource",
+                         @{ @"entry": entryName ?: @"", @"errno": @(errno) });
+        return nil;
+    }
+    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+    CC_SHA1_Final(digest, &context);
+    return AMProjImportUpperSHA1(digest, sizeof(digest));
 }
 
 static BOOL AMProjImportExtraIsZIP32(NSData *extra, NSString *entryName,
@@ -658,6 +722,173 @@ static BOOL AMProjImportExtractEntry(int sourceFD, AMProjImportEntry *entry,
     return YES;
 }
 
+static BOOL AMProjImportEntryIsXML(AMProjImportEntry *entry) {
+    return [entry.name.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame;
+}
+
+static BOOL AMProjImportEntryIsManifest(AMProjImportEntry *entry) {
+    return [entry.name caseInsensitiveCompare:@"manifest.txt"] == NSOrderedSame;
+}
+
+static NSString *AMProjImportFoldedName(NSString *name) {
+    return name.precomposedStringWithCanonicalMapping.lowercaseString;
+}
+
+static BOOL AMProjImportIsUpperSHA1(NSString *value) {
+    if (value.length != CC_SHA1_DIGEST_LENGTH * 2) return NO;
+    for (NSUInteger index = 0; index < value.length; index++) {
+        unichar character = [value characterAtIndex:index];
+        BOOL digit = character >= '0' && character <= '9';
+        BOOL upperHex = character >= 'A' && character <= 'F';
+        if (!digit && !upperHex) return NO;
+    }
+    return YES;
+}
+
+static BOOL AMProjImportValidateManifest(
+    NSArray<AMProjImportEntry *> *entries, AMProjImportEntry *manifestEntry,
+    NSUInteger *resourceCountOut, NSUInteger *manifestEntryCountOut,
+    NSUInteger *verifiedResourceCountOut, BOOL *manifestVerifiedOut,
+    NSError **error) {
+    NSMutableDictionary<NSString *, AMProjImportEntry *> *resourcesByName =
+        [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSString *> *resourceNamesByName =
+        [NSMutableDictionary dictionary];
+    for (AMProjImportEntry *entry in entries) {
+        if (entry.directory || AMProjImportEntryIsXML(entry) ||
+            AMProjImportEntryIsManifest(entry)) {
+            continue;
+        }
+        NSString *folded = AMProjImportFoldedName(entry.name);
+        resourcesByName[folded] = entry;
+        resourceNamesByName[folded] = entry.name;
+    }
+    if (resourceCountOut) *resourceCountOut = resourcesByName.count;
+    if (manifestEntryCountOut) *manifestEntryCountOut = 0;
+    if (verifiedResourceCountOut) *verifiedResourceCountOut = 0;
+    if (manifestVerifiedOut) *manifestVerifiedOut = NO;
+    if (!manifestEntry) return YES;
+
+    if (manifestEntry.uncompressedSize > kAMProjImportMaximumManifestBytes) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorLimitExceeded,
+                                @"The project resource manifest is too large",
+                                @{ @"manifest_bytes": @(manifestEntry.uncompressedSize) });
+    }
+    NSError *fileError = nil;
+    NSData *manifestData = [NSData dataWithContentsOfURL:manifestEntry.outputURL
+                                                 options:NSDataReadingMappedIfSafe
+                                                   error:&fileError];
+    if (!manifestData || manifestData.length != manifestEntry.uncompressedSize) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                @"Unable to read the extracted project resource manifest",
+                                @{ @"reason": fileError.localizedDescription ?: @"",
+                                   @"expected_bytes": @(manifestEntry.uncompressedSize),
+                                   @"actual_bytes": @(manifestData.length) });
+    }
+    NSString *manifest = [[NSString alloc] initWithData:manifestData
+                                                encoding:NSUTF8StringEncoding];
+    if (!manifest) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                @"manifest.txt is not valid UTF-8", nil);
+    }
+    manifest = [manifest stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
+    if ([manifest rangeOfString:@"\r"].location != NSNotFound) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                @"manifest.txt contains an invalid line ending", nil);
+    }
+    if ([manifest hasSuffix:@"\n"]) {
+        manifest = [manifest substringToIndex:manifest.length - 1];
+    }
+    NSArray<NSString *> *lines = manifest.length
+        ? [manifest componentsSeparatedByString:@"\n"] : @[];
+
+    NSMutableSet<NSString *> *seenNames = [NSMutableSet set];
+    NSMutableSet<NSString *> *seenHashes = [NSMutableSet set];
+    NSUInteger verifiedCount = 0;
+    for (NSUInteger lineIndex = 0; lineIndex < lines.count; lineIndex++) {
+        NSString *line = lines[lineIndex];
+        if (line.length <= CC_SHA1_DIGEST_LENGTH * 2 ||
+            [line characterAtIndex:CC_SHA1_DIGEST_LENGTH * 2] != ':') {
+            return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                    @"manifest.txt contains a malformed entry",
+                                    @{ @"line": @(lineIndex + 1) });
+        }
+        NSString *expectedHash = [line substringToIndex:CC_SHA1_DIGEST_LENGTH * 2];
+        if (!AMProjImportIsUpperSHA1(expectedHash)) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                    @"manifest.txt SHA-1 values must use 40 uppercase hexadecimal characters",
+                                    @{ @"line": @(lineIndex + 1),
+                                       @"sha1": expectedHash ?: @"" });
+        }
+        NSString *rawName = [line substringFromIndex:CC_SHA1_DIGEST_LENGTH * 2 + 1];
+        BOOL directory = NO;
+        NSError *nameError = nil;
+        NSString *safeName = AMProjImportSafeName(rawName, &directory, &nameError);
+        if (!safeName || directory || ![safeName isEqualToString:rawName]) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorUnsafeEntry,
+                                    @"manifest.txt contains an unsafe resource filename",
+                                    @{ @"line": @(lineIndex + 1),
+                                       @"entry": rawName ?: @"",
+                                       @"reason": nameError.localizedDescription ?: @"" });
+        }
+        if ([safeName.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame ||
+            [safeName caseInsensitiveCompare:@"manifest.txt"] == NSOrderedSame) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                    @"manifest.txt may list resources only, not XML or the manifest itself",
+                                    @{ @"line": @(lineIndex + 1), @"entry": safeName });
+        }
+        NSString *foldedName = AMProjImportFoldedName(safeName);
+        if ([seenNames containsObject:foldedName]) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                    @"manifest.txt contains a duplicate resource filename",
+                                    @{ @"line": @(lineIndex + 1), @"entry": safeName });
+        }
+        if ([seenHashes containsObject:expectedHash]) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                    @"manifest.txt contains a duplicate SHA-1 value",
+                                    @{ @"line": @(lineIndex + 1), @"sha1": expectedHash });
+        }
+        AMProjImportEntry *resource = resourcesByName[foldedName];
+        if (!resource || !resource.outputURL) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                    @"manifest.txt lists a resource that is missing from the project package",
+                                    @{ @"line": @(lineIndex + 1), @"entry": safeName });
+        }
+        NSString *actualHash = AMProjImportSHA1ForFileURL(resource.outputURL,
+                                                          resource.name, error);
+        if (!actualHash) return NO;
+        if (![actualHash isEqualToString:expectedHash]) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                    @"A project resource does not match its manifest.txt SHA-1",
+                                    @{ @"entry": resource.name,
+                                       @"expected_sha1": expectedHash,
+                                       @"actual_sha1": actualHash });
+        }
+        [seenNames addObject:foldedName];
+        [seenHashes addObject:expectedHash];
+        verifiedCount++;
+    }
+
+    NSMutableSet<NSString *> *unlistedNames =
+        [NSMutableSet setWithArray:resourcesByName.allKeys];
+    [unlistedNames minusSet:seenNames];
+    if (unlistedNames.count > 0) {
+        NSMutableArray<NSString *> *displayNames = [NSMutableArray array];
+        for (NSString *foldedName in unlistedNames) {
+            NSString *name = resourceNamesByName[foldedName];
+            if (name.length) [displayNames addObject:name];
+        }
+        [displayNames sortUsingSelector:@selector(compare:)];
+        return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                @"Project resources are missing from manifest.txt",
+                                @{ @"unlisted_entries": displayNames });
+    }
+    if (manifestEntryCountOut) *manifestEntryCountOut = lines.count;
+    if (verifiedResourceCountOut) *verifiedResourceCountOut = verifiedCount;
+    if (manifestVerifiedOut) *manifestVerifiedOut = YES;
+    return YES;
+}
+
 static NSString *AMProjImportDecodeXMLReference(NSString *value) {
     // Decode exactly one XML entity layer. Ampersand must be last so a literal
     // "&amp;quot;" filename does not become a quote through a second decode.
@@ -836,6 +1067,7 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
     }
 
     NSMutableArray<AMProjImportEntry *> *xmlEntries = [NSMutableArray array];
+    AMProjImportEntry *manifestEntry = nil;
     NSUInteger manifestCount = 0;
     NSUInteger fileCount = 0;
     NSUInteger directoryCount = 0;
@@ -845,11 +1077,12 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
             continue;
         }
         fileCount++;
-        if ([entry.name.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame) {
+        if (AMProjImportEntryIsXML(entry)) {
             [xmlEntries addObject:entry];
         }
-        if ([entry.name caseInsensitiveCompare:@"manifest.txt"] == NSOrderedSame) {
+        if (AMProjImportEntryIsManifest(entry)) {
             manifestCount++;
+            manifestEntry = entry;
         }
     }
     if (xmlEntries.count == 0) {
@@ -863,6 +1096,12 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
         return AMProjImportFail(error, AMProjImportArchiveErrorInvalidZIP,
                                 @"A project package may contain at most one root manifest.txt",
                                 @{ @"manifest_count": @(manifestCount) });
+    }
+    if (manifestEntry.uncompressedSize > kAMProjImportMaximumManifestBytes) {
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorLimitExceeded,
+                                @"The project resource manifest is too large",
+                                @{ @"manifest_bytes": @(manifestEntry.uncompressedSize) });
     }
     // A package with several independent scenes needs the official manifest
     // to tell PackageImporter how those scenes belong together. Keep the
@@ -915,6 +1154,18 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
     }
     close(sourceFD);
     if (!extracted) {
+        [fileManager removeItemAtURL:extractionURL error:nil];
+        return NO;
+    }
+
+    NSUInteger resourceCount = 0;
+    NSUInteger manifestEntryCount = 0;
+    NSUInteger manifestVerifiedResourceCount = 0;
+    BOOL manifestVerified = NO;
+    if (!AMProjImportValidateManifest(entries, manifestEntry, &resourceCount,
+                                      &manifestEntryCount,
+                                      &manifestVerifiedResourceCount,
+                                      &manifestVerified, error)) {
         [fileManager removeItemAtURL:extractionURL error:nil];
         return NO;
     }
@@ -974,6 +1225,10 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
             @"directory_count": @(directoryCount),
             @"xml_count": @(xmlEntries.count),
             @"manifest_count": @(manifestCount),
+            @"resource_count": @(resourceCount),
+            @"manifest_entry_count": @(manifestEntryCount),
+            @"manifest_verified_resource_count": @(manifestVerifiedResourceCount),
+            @"manifest_verified": @(manifestVerified),
             @"archive_bytes": @(archiveSize),
             @"compressed_bytes": @(compressedTotal),
             @"uncompressed_bytes": @(uncompressedTotal),

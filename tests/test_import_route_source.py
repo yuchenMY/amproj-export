@@ -15,15 +15,42 @@ BRIDGE_ASSEMBLY = (ROOT / "AMProjExport" / "AMProjNativeImportBridge.S").read_te
     encoding="utf-8"
 )
 MAKEFILE = (ROOT / "AMProjExport" / "Makefile").read_text(encoding="utf-8")
+DEBUG_TRANSPORT_SOURCE = (
+    ROOT / "AMProjExport" / "AMDebugTransport.m"
+).read_text(encoding="utf-8")
+README = (ROOT / "README.md").read_text(encoding="utf-8")
+WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(
+    encoding="utf-8"
+)
+BUILD_SCRIPT = (ROOT / "build_and_inject.bat").read_text(encoding="utf-8")
+
+
+def source_body(source: str, signature: str, next_signature: str) -> str:
+    start = source.rindex(signature)
+    end = source.index(next_signature, start)
+    return source[start:end]
 
 
 def function_body(signature: str, next_signature: str) -> str:
-    start = SOURCE.rindex(signature)
-    end = SOURCE.index(next_signature, start)
-    return SOURCE[start:end]
+    return source_body(SOURCE, signature, next_signature)
 
 
 class NativeImportRouteSourceTests(unittest.TestCase):
+    def test_release_version_metadata_is_consistent(self):
+        self.assertIn('kAMProjPluginVersion = @"23";', SOURCE)
+        self.assertIn('kAMDebugPluginVersion = @"23";', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("AMProj v23", SOURCE)
+        self.assertNotIn("AMProj v22", SOURCE)
+        self.assertIn("AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs", WORKFLOW)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '23'", WORKFLOW)
+        self.assertIn('"commit": os.environ["GITHUB_SHA"]', WORKFLOW)
+        self.assertIn('"run_id": os.environ["GITHUB_RUN_ID"]', WORKFLOW)
+        self.assertIn('"sha256": {', WORKFLOW)
+        self.assertIn("build-metadata.json", WORKFLOW)
+        self.assertIn("AM_v1_direct_v23.ipa", README)
+        self.assertIn("AM_v1_direct_v23_debug.ipa", README)
+        self.assertIn("AM_v1_direct_v23.ipa", BUILD_SCRIPT)
+
     def assert_capture_short_circuits_original(
         self, signature: str, next_signature: str, native_imp_type: str
     ) -> None:
@@ -77,11 +104,20 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
     def test_native_bridge_requires_visible_projects_tab_before_starting(self):
         start = BRIDGE_SOURCE.index("static UIViewController *AMProjPresentationOwner(void)")
-        end = BRIDGE_SOURCE.index("static UIViewController *AMProjFindProjectsController", start)
+        end = BRIDGE_SOURCE.index("static BOOL AMProjIsProjectsController", start)
         owner = BRIDGE_SOURCE[start:end]
-        self.assertIn("AMProjSelectProjectsTab(projects)", owner)
+        self.assertIn("UIApplicationStateActive", owner)
+        self.assertIn("if (AMProjSelectProjectsTab(projects))", owner)
+        self.assertIn("waiting for next run loop", owner)
         self.assertNotIn("window.rootViewController", owner)
-        self.assertIn("static void AMProjSelectProjectsTab", BRIDGE_SOURCE)
+        selection = source_body(
+            BRIDGE_SOURCE,
+            "static BOOL AMProjSelectProjectsTab",
+            "static void AMProjRefreshProjectsController",
+        )
+        self.assertIn("BOOL changed = NO", selection)
+        self.assertIn("changed = YES", selection)
+        self.assertIn("return changed", selection)
 
     def test_native_bridge_ranks_real_project_controller_candidates_without_root_fallback(self):
         self.assertIn('hasSuffix:@"ProjectsVC"', BRIDGE_SOURCE)
@@ -94,30 +130,29 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static UIViewController *AMProjPresentationOwner(void)"
         )
         owner_end = BRIDGE_SOURCE.index(
-            "static UIViewController *AMProjFindProjectsController", owner_start
+            "static BOOL AMProjIsProjectsController", owner_start
         )
         owner = BRIDGE_SOURCE[owner_start:owner_end]
         self.assertIn("AMProjProjectControllerCandidates()", owner)
         self.assertIn("AMProjSelectProjectsTab(projects)", owner)
-        self.assertIn("no mounted visible candidate", BRIDGE_SOURCE)
+        self.assertIn("no foreground mounted candidate", BRIDGE_SOURCE)
+        self.assertIn("AMProjProjectOwnerIsUnobstructed", owner)
         self.assertNotIn("return window.rootViewController", owner)
 
-    def test_native_bridge_allows_only_an_unobstructed_foreground_fallback_owner(self):
-        self.assertIn("AMProjVisibleWindowPresentationOwner", BRIDGE_SOURCE)
-        self.assertIn("AMProjControllerBlocksNativePresentation", BRIDGE_SOURCE)
-        fallback_start = BRIDGE_SOURCE.index(
-            "static UIViewController *AMProjVisibleWindowPresentationOwner(void)"
+    def test_native_bridge_has_no_arbitrary_root_or_visible_window_fallback(self):
+        self.assertNotIn("AMProjVisibleWindowPresentationOwner", BRIDGE_SOURCE)
+        self.assertNotIn("AMProjUsablePresentationOwner", BRIDGE_SOURCE)
+        self.assertNotIn("AMProjTopController", BRIDGE_SOURCE)
+        self.assertIn("if (!candidate.foregroundActive || !candidate.visibleWindow)",
+                      BRIDGE_SOURCE)
+        owner_guard = source_body(
+            BRIDGE_SOURCE,
+            "static BOOL AMProjProjectOwnerIsUnobstructed",
+            "static UIViewController *AMProjPresentationOwner",
         )
-        fallback = BRIDGE_SOURCE[
-            fallback_start : BRIDGE_SOURCE.rindex(
-                "static UIViewController *AMProjFindProjectsController", fallback_start
-            )
-        ]
-        self.assertIn("UIApplicationStateActive", fallback)
-        self.assertIn("window.isKeyWindow", fallback)
-        self.assertIn("UIAlertController.class", fallback)
-        self.assertIn("view.window != window", fallback)
-        self.assertIn("PortalActivityViewController", fallback)
+        self.assertIn("AMProjIsProjectsController", owner_guard)
+        self.assertIn("AMProjControllerIsMountedVisible", owner_guard)
+        self.assertIn("presentedViewController", owner_guard)
 
     def test_native_bridge_keeps_progress_owner_nil_and_passes_hidden_owner(self):
         call_start = BRIDGE_SOURCE.index("AMProjCallNativePackageImport(")
@@ -178,13 +213,53 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("(AMProjLocalStorageHandle)handle", remove)
         self.assertIn("removeObjectForKey:@(handle)", remove)
 
+    def test_native_bridge_events_are_thread_safe_and_main_thread_delivered(self):
+        self.assertIn("AMProjNativePackageImportEventHandler", BRIDGE_HEADER)
+        self.assertIn("AMProjRegisterNativePackageImportEventHandler", BRIDGE_HEADER)
+        self.assertIn("@synchronized (AMProjNativeBridgeLock())", BRIDGE_SOURCE)
+        emitter = source_body(
+            BRIDGE_SOURCE,
+            "static void AMProjEmitNativeBridgeEvent",
+            "static NSError *AMProjNativeBridgeError",
+        )
+        self.assertIn("NSThread.isMainThread", emitter)
+        self.assertIn("dispatch_get_main_queue()", emitter)
+        for event in (
+            "native_entry_start",
+            "native_entry_return",
+            "storage_write_start",
+            "storage_status_2",
+            "storage_status_4",
+            "storage_status_5",
+            "native_completion",
+        ):
+            self.assertIn(f'@"{event}"', BRIDGE_SOURCE)
+        self.assertIn("amproj_nativeBridgeFinishPending", BRIDGE_SOURCE)
+
     def test_timeout_poison_prevents_a_late_callback_from_finishing_a_new_import(self):
         self.assertIn("amproj_nativeBridgePoisoned", BRIDGE_SOURCE)
         self.assertIn("if (stillActive) amproj_nativeBridgePoisoned = YES", BRIDGE_SOURCE)
         poison_check = BRIDGE_SOURCE.index("if (amproj_nativeBridgePoisoned)")
-        active_check = BRIDGE_SOURCE.index("if (amproj_nativeBridgeCompletion)")
+        active_guard = (
+            "if (amproj_nativeBridgeCompletion || "
+            "amproj_nativeBridgeFinishPending)"
+        )
+        self.assertIn(active_guard, BRIDGE_SOURCE)
+        active_check = BRIDGE_SOURCE.index(active_guard)
         self.assertLess(poison_check, active_check)
         self.assertIn("Fully close and reopen Alight Motion", BRIDGE_SOURCE)
+
+    def test_native_failure_poison_prevents_late_swift_callback_reuse(self):
+        failure_start = BRIDGE_SOURCE.index(
+            "BOOL AMProjNativePackageImportBridgeFinishFailure"
+        )
+        failure_end = BRIDGE_SOURCE.index(
+            "BOOL AMProjNativePackageImportBridgeIsBusy", failure_start
+        )
+        failure = BRIDGE_SOURCE[failure_start:failure_end]
+        self.assertIn("AMProjPoisonNativeBridgeIfActive", failure)
+        self.assertIn("late Swift callback", BRIDGE_SOURCE)
+        self.assertIn("amproj_nativeBridgePoisoned ||", BRIDGE_SOURCE)
 
     def test_native_bridge_is_locked_to_verified_am_v1_binary(self):
         self.assertIn("4b, 0x22, 0xd4, 0x3f", BRIDGE_SOURCE)
@@ -275,27 +350,42 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("return hooks[index].base;", tracked)
         self.assertIn("if (!hooks[index].base)", tracked)
 
-    def test_cold_launch_only_records_candidates_and_forwards_options_unchanged(self):
+    def test_cold_launch_records_candidates_and_filters_only_project_options(self):
         recorder = function_body(
             "static void amproj_recordLaunchImportCandidates",
-            "static BOOL hooked_applicationDidFinish",
+            "static NSDictionary *amproj_launchOptionsForNativeAppDelegate",
         )
         self.assertIn("amproj_recordDeferredLaunchCandidate", recorder)
         self.assertNotIn("amproj_captureSystemProjectURL", recorder)
         self.assertNotIn("amproj_handleIncomingProjectURL", recorder)
         self.assertNotIn("removeObjectForKey", recorder)
 
+        filterer = function_body(
+            "static NSDictionary *amproj_launchOptionsForNativeAppDelegate",
+            "static BOOL hooked_applicationDidFinish",
+        )
+        self.assertIn("NSMutableDictionary *filtered = [launchOptions mutableCopy]", filterer)
+        self.assertIn("amproj_isIncomingProjectURL(launchURL, launchOptions)", filterer)
+        self.assertIn(
+            "[filtered removeObjectForKey:UIApplicationLaunchOptionsURLKey]",
+            filterer,
+        )
+        self.assertIn("NSMutableDictionary *activities", filterer)
+        self.assertIn("amproj_isIncomingProjectURL(activityURL, nil)", filterer)
+        self.assertIn("[activities removeObjectForKey:key]", filterer)
+        self.assertIn("return filtered", filterer)
+
         hook = function_body(
             "static BOOL hooked_applicationDidFinish",
             "static BOOL hooked_applicationContinueActivity",
         )
-        self.assertLess(
-            hook.index("amproj_recordLaunchImportCandidates"),
-            hook.index("IMP original"),
-        )
-        self.assertIn("application, launchOptions);", hook)
-        self.assertNotIn("forwardLaunchOptions", hook)
-        self.assertIn('@"forwarded_unchanged": @YES', hook)
+        record = hook.index("amproj_recordLaunchImportCandidates")
+        filter_call = hook.index("amproj_launchOptionsForNativeAppDelegate")
+        original = hook.index("IMP original")
+        self.assertLess(record, filter_call)
+        self.assertLess(filter_call, original)
+        self.assertIn("self, _cmd, application, forwardedOptions);", hook)
+        self.assertIn('@"forwarded_project_url_removed"', hook)
 
     def test_scene_partitions_project_contexts_before_forwarding(self):
         body = function_body(
@@ -338,12 +428,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertEqual(inbox.count("amproj_normalizedFilePath"), 2)
 
-    def test_activation_scans_inbox_before_silent_launch_retry(self):
+    def test_activation_prioritizes_silent_launch_retry_before_inbox_scan(self):
         marker = SOURCE.index("UIApplicationDidBecomeActiveNotification")
         body = SOURCE[marker : marker + 2400]
         scan = body.index('amproj_scanLocalImportInboxes(@"did_become_active", nil)')
         retry = body.index("amproj_retryDeferredLaunchImportCandidates()")
-        self.assertLess(scan, retry)
+        self.assertLess(retry, scan)
         deferred = function_body(
             "static void amproj_retryDeferredLaunchImportCandidates",
             "static BOOL amproj_captureSystemProjectURL",
@@ -386,19 +476,24 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn("AMProjNormalizeProjectArchive", body[original_route:legacy_route])
         self.assertIn('preparationMetrics[@"missing_reference_count"]', body)
 
-    def test_incomplete_resource_archive_is_forwarded_to_native_bridge(self):
+    def test_incomplete_resource_archive_is_rejected_before_native_bridge(self):
         body = function_body(
             "static void amproj_prepareCopiedArchive",
             "static void amproj_activateNextPendingImport",
         )
         missing = body.index("NSUInteger missingReferences")
         queue = body.index("amproj_queuePreparedImport(preparedURL", missing)
-        forward = body.index("import.missing_resources", missing)
-        self.assertLess(forward, queue)
-        self.assertIn('action": @"forward_to_native_importer"', body[forward:queue])
-        self.assertIn("missing_reference_names", body[forward:queue])
-        self.assertNotIn("import.reject_incomplete_resources", body[missing:queue])
-        self.assertNotIn("amproj_presentImportError", body[missing:queue])
+        reject = body.index("if (missingReferences)", missing)
+        reject_branch = body[reject:queue]
+        self.assertIn('amproj_debugEvent(@"import.missing_resources"', reject_branch)
+        self.assertIn('action": @"reject_incomplete_package"', reject_branch)
+        self.assertIn("missing_reference_names", reject_branch)
+        self.assertIn("amproj_releaseImportTransaction(transactionID, NO)", reject_branch)
+        self.assertIn("amproj_writeImportBreadcrumb", reject_branch)
+        self.assertIn("amproj_presentImportError(missingMessage)", reject_branch)
+        self.assertIn("return;", reject_branch)
+        self.assertNotIn("forward_to_native_importer", reject_branch)
+        self.assertNotIn("amproj_queuePreparedImport", reject_branch)
 
     def test_prepared_zip_dispatches_only_to_local_package_bridge(self):
         dispatch = function_body(
@@ -445,15 +540,29 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_tryDispatchPendingImport",
         )
         success_branch = finish.index("if (success)")
-        self.assertIn("4/4", finish[success_branch:])
-        self.assertIn("\\u5e95\\u90e8\\u201c\\u9879\\u76ee\\u201d", finish)
+        self.assertNotIn('@"AMProj v23 · 4/4', finish[success_branch:])
+        self.assertIn("amproj_importVerificationActive = YES", finish[success_branch:])
+        self.assertIn('@"verifying_project_row"', finish[success_branch:])
+        self.assertIn("amproj_verifyImportedProjectRow", finish[success_branch:])
         self.assertIn("amproj_endNativeImportObservation", finish)
         self.assertIn("amproj_importDispatchCoolingDown = NO", finish)
+
+        verification = function_body(
+            "static void amproj_verifyImportedProjectRow",
+            "static void amproj_finishNativePackageImport",
+        )
+        verified_branch = verification[verification.index("if (verified)") :]
+        self.assertIn('@"import.project_row_verified"', verification)
+        self.assertIn("amproj_releaseImportTransaction(transactionID, YES)", verified_branch)
+        self.assertIn('AMProj v23 · 4/4', verified_branch)
+        self.assertIn('amproj_resumeQueuedImports(@"project_row_verified")', verified_branch)
+        self.assertIn('@"import.project_row_missing"', verification)
+        self.assertIn("amproj_activateNextPendingImport()", verification)
         self.assertNotIn("4/4", function_body(
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertEqual(SOURCE.count("4/4"), 1)
+        self.assertEqual(SOURCE.count("AMProj v23 · 4/4"), 1)
 
     def test_native_failure_alert_is_observed_without_replacing_it(self):
         detector = function_body(
@@ -475,7 +584,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v22 \\u00b7 E40", present)
+        self.assertIn("AMProj v23 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),
@@ -563,7 +672,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("amproj_endNativeImportObservation", finish)
         self.assertIn("amproj_importDispatchCoolingDown = NO", finish)
-        self.assertIn("amproj_resumeQueuedImports", finish)
+        self.assertIn("amproj_activateNextPendingImport", finish)
 
     def test_alert_hook_install_retries_until_swift_class_exists(self):
         install = function_body(
@@ -598,12 +707,130 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
     def test_inbox_skip_continues_to_later_files(self):
         body = function_body(
-            "static void amproj_scanDocumentsInboxNow",
+            "static BOOL amproj_scanDocumentsInboxNow",
             "static NSDictionary* amproj_shareRequestDescriptor",
         )
         self.assertIn("AMProjIncomingURLResult result", body)
-        self.assertIn("if (result == AMProjIncomingURLFailed) break;", body)
+        failure = body.index("if (result == AMProjIncomingURLFailed)")
+        failure_continue = body.index("continue;", failure)
+        self.assertIn('@"import.inbox_failed"', body[failure:failure_continue])
         self.assertNotIn("if (!prepared) break;", body)
+
+    def test_share_scan_continues_after_automatic_duplicate_or_failure(self):
+        share = function_body(
+            "static BOOL amproj_scanShareInboxNow",
+            "static void amproj_scanLocalImportInboxes",
+        )
+        self.assertIn("if (prepared || requestedID.length) return YES;", share)
+        self.assertNotIn(
+            "prepared || result == AMProjIncomingURLAccepted || requestedID.length",
+            share,
+        )
+        worker = function_body(
+            "static void amproj_scanLocalImportInboxes",
+            "static void amproj_retryDeferredLaunchImportCandidates",
+        )
+        requested = worker.index("if (currentRequest.length)")
+        documents = worker.index("amproj_scanDocumentsInboxNow", requested)
+        share_first = worker.index(
+            "amproj_scanShareInboxNow(currentSource, currentRequest)", requested
+        )
+        self.assertLess(share_first, documents)
+
+    def test_duplicate_owner_failure_preserves_waiter_cache(self):
+        release = function_body(
+            "static void amproj_releaseImportTransaction(",
+            "static void amproj_releaseImportTransactionForURL",
+        )
+        self.assertIn('if (![cleanup[@"success"] boolValue]) continue;', release)
+        self.assertIn("removeObjectForKey:dependent.transactionID", release)
+
+    def test_late_transaction_cannot_roll_visible_status_back_to_one_of_four(self):
+        status = function_body(
+            "static void amproj_showImportStatusForTransaction",
+            "static void amproj_showImportStatus(",
+        )
+        self.assertIn(
+            "amproj_importTransactionForID(amproj_visibleStatusTransactionID)",
+            status,
+        )
+        self.assertIn("if (visibleTransaction)", status)
+        self.assertIn('reason": @"stale_transaction"', status)
+        handler = function_body(
+            "static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult",
+            "static AMProjIncomingURLResult amproj_handleIncomingProjectURL(",
+        )
+        capture = handler[handler.index("dispatch_async(dispatch_get_main_queue()") :]
+        self.assertIn("AMProjImportTransaction *visibleTransaction", capture)
+        self.assertIn("if (!visibleTransaction ||", capture)
+
+    def test_scan_exception_requeues_current_request(self):
+        scan = function_body(
+            "static void amproj_scanLocalImportInboxes",
+            "static void amproj_retryDeferredLaunchImportCandidates",
+        )
+        catch = scan[scan.index("@catch (NSException *exception)") :]
+        self.assertIn("retrySource = amproj_pendingScanSource.length", catch)
+        self.assertIn(" : currentSource", catch)
+        self.assertIn("retryRequest = amproj_pendingScanRequestID.length", catch)
+        self.assertIn(" : currentRequest", catch)
+
+    def test_deferred_launch_tail_is_restored_when_a_transaction_is_live(self):
+        retry = function_body(
+            "static void amproj_retryDeferredLaunchImportCandidates",
+            "static BOOL amproj_captureSystemProjectURL",
+        )
+        self.assertIn("subarrayWithRange:NSMakeRange(index", retry)
+        self.assertIn("amproj_deferredLaunchImportCandidates", retry)
+        self.assertIn("import.launch_candidates_deferred", retry)
+        resume = function_body(
+            "static void amproj_resumeQueuedImports",
+            "static BOOL amproj_handleImportCommandURL",
+        )
+        self.assertIn("amproj_hasDeferredLaunchImportCandidates()", resume)
+        self.assertIn("amproj_retryDeferredLaunchImportCandidates()", resume)
+
+    def test_queue_rejects_active_verifying_and_released_transactions(self):
+        queue = function_body(
+            "static void amproj_queuePreparedImport",
+            "static void amproj_resumeQueuedImports",
+        )
+        self.assertIn("amproj_activeNativeImportTransactionID", queue)
+        self.assertIn("amproj_importVerificationTransactionID", queue)
+        self.assertIn('@"native_active" : @"row_verification"', queue)
+        activate = function_body(
+            "static void amproj_activateNextPendingImport",
+            "static AMProjNativePackageImportStarter amproj_nativePackageImportStarter",
+        )
+        self.assertIn("transaction.state != AMProjImportTransactionQueued", activate)
+        self.assertIn('@"transaction_released"', activate)
+        stale = activate.index('amproj_debugEvent(@"import.stale_queue_suppressed"')
+        pending = activate.index("amproj_pendingImportURL = URL")
+        self.assertLess(stale, pending)
+
+    def test_duplicate_fingerprint_waits_for_owner_before_cleanup(self):
+        self.assertIn("duplicateOfFingerprint", SOURCE)
+        self.assertIn("amproj_importDuplicateOwners", SOURCE)
+        self.assertIn('@"duplicate_waiting"', SOURCE)
+        duplicate = function_body(
+            "if (!amproj_claimImportFingerprint(transactionID, destination, fingerprint,",
+            'amproj_debugEvent(@"import.fingerprint_claimed"',
+        )
+        self.assertIn("waitingForOwner", duplicate)
+        self.assertIn("if (!waitingForOwner)", duplicate)
+        self.assertIn("kept_for_owner_result", duplicate)
+
+    def test_async_import_entrypoints_use_exception_safe_wrapper(self):
+        self.assertGreaterEqual(
+            SOURCE.count("amproj_handleIncomingProjectURLSafely("), 5
+        )
+        self.assertIn("@catch (NSException *exception)", SOURCE)
+        self.assertIn('@"import.exception"', SOURCE)
+
+    def test_native_bridge_busy_blocks_queue_progression(self):
+        self.assertIn("AMProjNativePackageImportBridgeIsBusy", BRIDGE_HEADER)
+        self.assertIn("amproj_nativeBridgePoisoned ||", BRIDGE_SOURCE)
+        self.assertIn("native_bridge_busy_or_poisoned", SOURCE)
 
     def test_recognized_copy_failures_are_not_reported_as_accepted(self):
         body = function_body(

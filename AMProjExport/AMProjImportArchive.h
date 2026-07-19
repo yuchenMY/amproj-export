@@ -24,12 +24,17 @@ typedef NS_ENUM(NSInteger, AMProjImportArchiveErrorCode) {
  Stored and raw-deflate entries are supported. Encrypted, split, ZIP64, unsafe,
  overlapping, oversized, or CRC-invalid archives are rejected. A package must
   contain at least one XML entry and no more than one root `manifest.txt`.
-  Multiple XML entries are accepted only when that manifest is present;
-  ambiguous multi-XML archives without a manifest are rejected.
+ Multiple XML entries are accepted only when that manifest is present;
+ ambiguous multi-XML archives without a manifest are rejected. When present,
+ `manifest.txt` must contain one `UPPERCASE_SHA1:filename` line for every
+ non-XML resource and no other entries. Resource SHA-1 values are calculated
+ from the extracted files using streaming reads.
 
  On success, `nativeXMLURL` is the rewritten XML URL. `metrics` includes
  `entry_count`, `file_count`, `directory_count`, `xml_count`, `manifest_count`,
- `archive_bytes`, `compressed_bytes`, `uncompressed_bytes`, `reference_count`,
+ `resource_count`, `manifest_entry_count`,
+ `manifest_verified_resource_count`, `manifest_verified`, `archive_bytes`,
+ `compressed_bytes`, `uncompressed_bytes`, `reference_count`,
  `rewritten_reference_count`, `missing_reference_count`,
  `missing_reference_names`, `xml_names`, `extraction_directory`, and
  `native_xml`. For compatibility with the legacy single-XML bridge,

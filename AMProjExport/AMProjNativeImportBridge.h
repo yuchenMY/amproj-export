@@ -10,15 +10,27 @@ typedef BOOL (^AMProjNativePackageImportStarter)(
     NSString *originalName,
     AMProjNativePackageImportCompletion completion,
     NSError * _Nullable * _Nullable error);
+typedef void (^AMProjNativePackageImportEventHandler)(
+    NSString *event,
+    NSDictionary<NSString *, id> *fields);
 
 FOUNDATION_EXPORT void AMProjRegisterNativePackageImportStarter(
     AMProjNativePackageImportStarter _Nullable starter);
+
+// Event handlers are copied under the bridge lock and always invoked on the
+// main thread. Registering diagnostics does not change the starter contract.
+FOUNDATION_EXPORT void AMProjRegisterNativePackageImportEventHandler(
+    AMProjNativePackageImportEventHandler _Nullable handler);
 
 FOUNDATION_EXPORT void AMProjInstallNativePackageImportBridge(void);
 
 // Returns YES when an active local import consumed the native failure.
 FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeFinishFailure(
     NSError *error);
+
+// Returns YES while the native importer has an in-flight/finishing callback or
+// has been poisoned by a timeout. Callers must keep later packages queued.
+FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeIsBusy(void);
 
 FOUNDATION_EXPORT void AMProjCallNativePackageImport(
     void *function,

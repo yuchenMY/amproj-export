@@ -52,6 +52,40 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertNotIn('URLByAppendingPathComponent:@".missing"', source)
         self.assertIn("rename(temporaryURL.fileSystemRepresentation", source)
 
+    def test_manifest_is_strictly_verified_against_streamed_resource_hashes(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("#import <CommonCrypto/CommonDigest.h>", source)
+        self.assertIn("AMProjImportValidateManifest", source)
+        self.assertIn("AMProjImportSHA1ForFileURL", source)
+        self.assertIn("CC_SHA1_Init", source)
+        self.assertIn("CC_SHA1_Update", source)
+        self.assertIn("CC_SHA1_Final", source)
+        self.assertIn("manifest.txt SHA-1 values must use 40 uppercase", source)
+        self.assertIn("manifest.txt contains a duplicate resource filename", source)
+        self.assertIn("manifest.txt contains a duplicate SHA-1 value", source)
+        self.assertIn("manifest.txt lists a resource that is missing", source)
+        self.assertIn("Project resources are missing from manifest.txt", source)
+        self.assertIn("not XML or the manifest itself", source)
+        self.assertIn('stringByReplacingOccurrencesOfString:@"\\r\\n"', source)
+
+        validation = source.index("AMProjImportValidateManifest(entries")
+        rewrite = source.index("AMProjImportRewriteXML(", validation)
+        self.assertLess(validation, rewrite)
+
+    def test_manifest_metrics_distinguish_legacy_and_verified_packages(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        for metric in (
+            '"resource_count": @(resourceCount)',
+            '"manifest_entry_count": @(manifestEntryCount)',
+            '"manifest_verified_resource_count": @(manifestVerifiedResourceCount)',
+            '"manifest_verified": @(manifestVerified)',
+        ):
+            self.assertIn(metric, source)
+
+        header = HEADER.read_text(encoding="utf-8")
+        self.assertIn("UPPERCASE_SHA1:filename", header)
+        self.assertIn("manifest_verified_resource_count", header)
+
     def test_native_preparation_accepts_multiple_xml_files_and_reports_names(self):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn("if (xmlEntries.count == 0)", source)

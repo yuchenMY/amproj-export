@@ -46,11 +46,13 @@ typedef int64_t AMProjLocalStorageHandle;
 @property(nonatomic, strong) id reference;
 @property(nonatomic, strong) NSProgress *progress;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *observers;
+@property(nonatomic) NSUInteger bridgeGeneration;
 @property(nonatomic) AMProjLocalStorageHandle nextHandle;
 @property(nonatomic) BOOL transferFinished;
 - (instancetype)initWithSourceURL:(NSURL *)sourceURL
                    destinationURL:(NSURL *)destinationURL
-                         reference:(id)reference;
+                         reference:(id)reference
+                  bridgeGeneration:(NSUInteger)bridgeGeneration;
 - (AMProjLocalStorageHandle)observeStatus:(NSInteger)status
                                   handler:(void (^)(id snapshot))handler;
 - (void)removeObserverWithHandle:(AMProjLocalStorageHandle)handle;
@@ -60,7 +62,9 @@ typedef int64_t AMProjLocalStorageHandle;
 
 @interface AMProjLocalStorageReference : NSObject
 @property(nonatomic, strong) NSURL *sourceURL;
-- (instancetype)initWithSourceURL:(NSURL *)sourceURL;
+@property(nonatomic) NSUInteger bridgeGeneration;
+- (instancetype)initWithSourceURL:(NSURL *)sourceURL
+                  bridgeGeneration:(NSUInteger)bridgeGeneration;
 - (id)writeToFile:(NSURL *)destinationURL;
 @end
 
@@ -72,9 +76,54 @@ static NSObject *AMProjNativeBridgeLock(void) {
 }
 
 static AMProjNativePackageImportCompletion amproj_nativeBridgeCompletion = nil;
+static AMProjNativePackageImportEventHandler amproj_nativeBridgeEventHandler = nil;
 static NSUInteger amproj_nativeBridgeGeneration = 0;
 static NSString *amproj_nativeBridgeFilename = nil;
 static BOOL amproj_nativeBridgePoisoned = NO;
+static BOOL amproj_nativeBridgeFinishPending = NO;
+
+static void AMProjPoisonNativeBridge(void) {
+    @synchronized (AMProjNativeBridgeLock()) {
+        amproj_nativeBridgePoisoned = YES;
+    }
+}
+
+static void AMProjPoisonNativeBridgeIfActive(void) {
+    @synchronized (AMProjNativeBridgeLock()) {
+        if (amproj_nativeBridgeCompletion) {
+            amproj_nativeBridgePoisoned = YES;
+        }
+    }
+}
+
+void AMProjRegisterNativePackageImportEventHandler(
+    AMProjNativePackageImportEventHandler handler) {
+    @synchronized (AMProjNativeBridgeLock()) {
+        amproj_nativeBridgeEventHandler = [handler copy];
+    }
+}
+
+static void AMProjEmitNativeBridgeEvent(NSString *event,
+                                        NSDictionary<NSString *, id> *fields) {
+    if (!event.length) return;
+    AMProjNativePackageImportEventHandler handler = nil;
+    @synchronized (AMProjNativeBridgeLock()) {
+        handler = [amproj_nativeBridgeEventHandler copy];
+    }
+    if (!handler) return;
+
+    NSDictionary<NSString *, id> *snapshot = [fields copy] ?: @{};
+    void (^invoke)(void) = ^{
+        @try {
+            handler(event, snapshot);
+        } @catch (NSException *exception) {
+            NSLog(@"[AMProjExport] Native bridge event handler %@ raised: %@",
+                  event, exception.reason ?: @"unknown exception");
+        }
+    };
+    if (NSThread.isMainThread) invoke();
+    else dispatch_async(dispatch_get_main_queue(), invoke);
+}
 
 static NSError *AMProjNativeBridgeError(NSInteger code, NSString *message,
                                         NSDictionary *extra) {
@@ -88,24 +137,86 @@ static NSError *AMProjNativeBridgeError(NSInteger code, NSString *message,
 
 static BOOL AMProjFinishNativeBridge(BOOL success, NSError *error) {
     AMProjNativePackageImportCompletion completion = nil;
+    NSString *filename = nil;
+    NSUInteger generation = 0;
     @synchronized (AMProjNativeBridgeLock()) {
         completion = amproj_nativeBridgeCompletion;
         if (!completion) return NO;
+        filename = [amproj_nativeBridgeFilename copy];
+        generation = amproj_nativeBridgeGeneration;
         amproj_nativeBridgeCompletion = nil;
         amproj_nativeBridgeFilename = nil;
+        amproj_nativeBridgeFinishPending = YES;
         ++amproj_nativeBridgeGeneration;
     }
-    completion(success, error);
+    void (^finish)(void) = ^{
+        AMProjEmitNativeBridgeEvent(@"native_completion", @{
+            @"generation": @(generation),
+            @"filename": filename ?: @"project.amproj",
+            @"success": @(success),
+            @"error_domain": error.domain ?: @"",
+            @"error_code": @(error.code),
+            @"error": error.localizedDescription ?: @""
+        });
+        @try {
+            completion(success, error);
+        } @catch (NSException *exception) {
+            NSLog(@"[AMProjExport] Native bridge completion raised: %@",
+                  exception.reason ?: @"unknown exception");
+        } @finally {
+            @synchronized (AMProjNativeBridgeLock()) {
+                amproj_nativeBridgeFinishPending = NO;
+            }
+        }
+    };
+    if (NSThread.isMainThread) finish();
+    else dispatch_async(dispatch_get_main_queue(), finish);
     return YES;
 }
 
 BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
     NSError *resolved = error ?: AMProjNativeBridgeError(
         106, @"Alight Motion rejected the local project package", nil);
+    // The native completion closure has no generation parameter. Once an
+    // alert/error path consumes it, a late Swift callback could otherwise
+    // finish a newer transaction. Require a process restart before retrying.
+    AMProjPoisonNativeBridgeIfActive();
     return AMProjFinishNativeBridge(NO, resolved);
 }
 
+BOOL AMProjNativePackageImportBridgeIsBusy(void) {
+    @synchronized (AMProjNativeBridgeLock()) {
+        return amproj_nativeBridgePoisoned ||
+            amproj_nativeBridgeCompletion != nil ||
+            amproj_nativeBridgeFinishPending;
+    }
+}
+
+static NSString *AMProjStorageStatusEventName(NSInteger status) {
+    switch (status) {
+        case 2: return @"storage_status_2";
+        case 4: return @"storage_status_4";
+        case 5: return @"storage_status_5";
+        default: return nil;
+    }
+}
+
 @implementation AMProjLocalStorageTask
+
+- (void)emitStatusEvent:(NSInteger)status {
+    NSString *event = AMProjStorageStatusEventName(status);
+    if (!event) return;
+    AMProjEmitNativeBridgeEvent(event, @{
+        @"generation": @(self.bridgeGeneration),
+        @"status": @(status),
+        @"source_path": self.sourceURL.path ?: @"",
+        @"destination_path": self.destinationURL.path ?: @"",
+        @"success": @(self.transferError == nil),
+        @"error_domain": self.transferError.domain ?: @"",
+        @"error_code": @(self.transferError.code),
+        @"error": self.transferError.localizedDescription ?: @""
+    });
+}
 
 - (AMProjLocalStorageSnapshot *)snapshot {
     AMProjLocalStorageSnapshot *snapshot = [AMProjLocalStorageSnapshot new];
@@ -150,6 +261,7 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
             if (!handler) continue;
             NSLog(@"[AMProjExport] Native import storage callback status=%ld",
                   [observer[@"status"] integerValue]);
+            [self emitStatusEvent:[observer[@"status"] integerValue]];
             handler([self snapshot]);
         }
     };
@@ -159,12 +271,14 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
 
 - (instancetype)initWithSourceURL:(NSURL *)sourceURL
                    destinationURL:(NSURL *)destinationURL
-                         reference:(id)reference {
+                         reference:(id)reference
+                  bridgeGeneration:(NSUInteger)bridgeGeneration {
     self = [super init];
     if (!self) return nil;
     _sourceURL = sourceURL;
     _destinationURL = destinationURL;
     _reference = reference;
+    _bridgeGeneration = bridgeGeneration;
     _progress = [NSProgress progressWithTotalUnitCount:1];
     _observers = [NSMutableDictionary dictionary];
 
@@ -225,6 +339,7 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
     if (notifyTerminal) {
         void (^callback)(id) = [handler copy];
         dispatch_async(dispatch_get_main_queue(), ^{
+            [self emitStatusEvent:status];
             callback(terminalSnapshot ?: [self snapshot]);
         });
     }
@@ -260,16 +375,26 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
 
 @implementation AMProjLocalStorageReference
 
-- (instancetype)initWithSourceURL:(NSURL *)sourceURL {
+- (instancetype)initWithSourceURL:(NSURL *)sourceURL
+                  bridgeGeneration:(NSUInteger)bridgeGeneration {
     self = [super init];
-    if (self) _sourceURL = sourceURL;
+    if (self) {
+        _sourceURL = sourceURL;
+        _bridgeGeneration = bridgeGeneration;
+    }
     return self;
 }
 
 - (id)writeToFile:(NSURL *)destinationURL {
+    AMProjEmitNativeBridgeEvent(@"storage_write_start", @{
+        @"generation": @(self.bridgeGeneration),
+        @"source_path": self.sourceURL.path ?: @"",
+        @"destination_path": destinationURL.path ?: @""
+    });
     return [[AMProjLocalStorageTask alloc] initWithSourceURL:self.sourceURL
                                              destinationURL:destinationURL
-                                                   reference:self];
+                                                   reference:self
+                                            bridgeGeneration:self.bridgeGeneration];
 }
 
 @end
@@ -337,40 +462,8 @@ static void *AMProjMainAddress(uintptr_t preferredAddress) {
                     (preferredAddress - AMProjMainPreferredBase));
 }
 
-static UIViewController *AMProjTopController(UIViewController *controller) {
-    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
-    while (controller) {
-        NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
-        if ([visited containsObject:identity]) break;
-        [visited addObject:identity];
-        if (controller.presentedViewController &&
-            !controller.presentedViewController.isBeingDismissed) {
-            controller = controller.presentedViewController;
-            continue;
-        }
-        if ([controller isKindOfClass:UINavigationController.class]) {
-            UIViewController *visible =
-                ((UINavigationController *)controller).visibleViewController;
-            if (visible && visible != controller) {
-                controller = visible;
-                continue;
-            }
-        }
-        if ([controller isKindOfClass:UITabBarController.class]) {
-            UIViewController *selected =
-                ((UITabBarController *)controller).selectedViewController;
-            if (selected && selected != controller) {
-                controller = selected;
-                continue;
-            }
-        }
-        break;
-    }
-    return controller;
-}
-
 static UIViewController *AMProjLoadedProjectsController(void);
-static void AMProjSelectProjectsTab(UIViewController *projects);
+static BOOL AMProjSelectProjectsTab(UIViewController *projects);
 
 @interface AMProjProjectControllerCandidate : NSObject
 @property(nonatomic, strong) UIViewController *controller;
@@ -389,25 +482,28 @@ static void AMProjSelectProjectsTab(UIViewController *projects);
 static NSArray<AMProjProjectControllerCandidate *> *AMProjProjectControllerCandidates(void);
 static AMProjProjectControllerCandidate *AMProjBestProjectControllerCandidate(
     NSArray<AMProjProjectControllerCandidate *> *candidates, BOOL requireMounted);
+static BOOL AMProjIsProjectsController(UIViewController *controller,
+                                       NSInteger *classRank);
 static BOOL AMProjControllerIsMountedVisible(UIViewController *controller);
-static BOOL AMProjControllerBlocksNativePresentation(UIViewController *controller);
-static UIViewController *AMProjVisibleWindowPresentationOwner(void);
 
-static UIViewController *AMProjUsablePresentationOwner(
-    UIViewController *controller) {
-    controller = AMProjTopController(controller);
-    while (controller &&
-           ([controller isKindOfClass:UIAlertController.class] ||
-            controller.isBeingDismissed)) {
-        UIViewController *presenter = controller.presentingViewController;
-        if (!presenter || presenter == controller) return nil;
-        controller = presenter;
+static BOOL AMProjProjectOwnerIsUnobstructed(UIViewController *controller) {
+    if (!AMProjIsProjectsController(controller, NULL) ||
+        !AMProjControllerIsMountedVisible(controller)) return NO;
+    for (UIViewController *cursor = controller; cursor;
+         cursor = cursor.parentViewController) {
+        if (cursor.isBeingDismissed || cursor.isBeingPresented) return NO;
+        UIViewController *presented = cursor.presentedViewController;
+        if (presented && !presented.isBeingDismissed) return NO;
     }
-    if (!controller || !controller.viewIfLoaded.window) return nil;
-    return controller;
+    return YES;
 }
 
 static UIViewController *AMProjPresentationOwner(void) {
+    if (UIApplication.sharedApplication.applicationState !=
+        UIApplicationStateActive) {
+        NSLog(@"[AMProjExport] Native import project owner: application is not active");
+        return nil;
+    }
     // The project tab can still be loading when QQ/File Provider wakes AM.
     // Select the best known project controller first, then re-scan after UIKit
     // has applied the tab selection. Never fall back to an arbitrary root
@@ -417,39 +513,41 @@ static UIViewController *AMProjPresentationOwner(void) {
     AMProjProjectControllerCandidate *candidate =
         AMProjBestProjectControllerCandidate(initial, NO);
     if (!candidate) {
-        NSLog(@"[AMProjExport] Native import project owner: no ProjectsVC/ProjectsListVC candidate");
-        return AMProjVisibleWindowPresentationOwner();
+        NSLog(@"[AMProjExport] Native import project owner: no foreground ProjectsVC/ProjectsListVC candidate");
+        return nil;
     }
     NSLog(@"[AMProjExport] Native import project candidate class=%@ window=%@ active=%d key=%d visible=%d mounted=%d",
           NSStringFromClass(candidate.controller.class), candidate.window,
           candidate.foregroundActive, candidate.keyWindow,
           candidate.visibleWindow, candidate.mounted);
     UIViewController *projects = candidate.controller;
-    AMProjSelectProjectsTab(projects);
+    // Selecting the tab mutates UIKit's hierarchy asynchronously. Treat that
+    // transition as retryable instead of passing a still-unmounted controller
+    // into the Swift importer on this same run loop.
+    if (AMProjSelectProjectsTab(projects)) {
+        NSLog(@"[AMProjExport] Native import project tab selection changed; waiting for next run loop");
+        return nil;
+    }
 
     NSArray<AMProjProjectControllerCandidate *> *mountedCandidates =
         AMProjProjectControllerCandidates();
     AMProjProjectControllerCandidate *mounted =
         AMProjBestProjectControllerCandidate(mountedCandidates, YES);
     if (!mounted) {
-        NSLog(@"[AMProjExport] Native import project owner: tab selected but no mounted visible candidate");
-        return AMProjVisibleWindowPresentationOwner();
+        NSLog(@"[AMProjExport] Native import project owner: tab selected but no foreground mounted candidate");
+        return nil;
     }
-    UIViewController *projectOwner =
-        AMProjUsablePresentationOwner(mounted.controller);
-    if (!projectOwner || !AMProjControllerIsMountedVisible(projectOwner)) {
-        NSLog(@"[AMProjExport] Native import project owner: candidate %@ is not mounted after tab selection",
+    UIViewController *projectOwner = mounted.controller;
+    if (!mounted.foregroundActive || !mounted.visibleWindow || !mounted.mounted ||
+        !AMProjProjectOwnerIsUnobstructed(projectOwner)) {
+        NSLog(@"[AMProjExport] Native import project owner: candidate %@ is not an unobstructed foreground mounted project controller",
               NSStringFromClass(mounted.controller.class));
-        return AMProjVisibleWindowPresentationOwner();
+        return nil;
     }
     NSLog(@"[AMProjExport] Native import project owner selected class=%@ window=%@",
           NSStringFromClass(projectOwner.class), projectOwner.viewIfLoaded.window);
     return projectOwner;
 }
-
-static UIViewController *AMProjFindProjectsController(UIViewController *controller,
-                                                       NSUInteger depth,
-                                                       NSMutableSet<NSValue *> *visited);
 
 static BOOL AMProjIsProjectsController(UIViewController *controller,
                                        NSInteger *classRank) {
@@ -576,7 +674,7 @@ static NSArray<AMProjProjectControllerCandidate *> *AMProjProjectControllerCandi
             AMProjProjectControllerCandidate *candidate = [AMProjProjectControllerCandidate new];
             candidate.controller = controller;
             candidate.window = attached ?: window;
-            candidate.foregroundActive = foregroundActive;
+            candidate.foregroundActive = AMProjSceneIsForegroundActive(attached ?: window);
             candidate.keyWindow = window.isKeyWindow || attached.isKeyWindow;
             candidate.visibleWindow = attachedVisible;
             candidate.mounted = attachedVisible && AMProjControllerIsMountedVisible(controller);
@@ -612,99 +710,11 @@ static AMProjProjectControllerCandidate *AMProjBestProjectControllerCandidate(
     NSArray<AMProjProjectControllerCandidate *> *candidates, BOOL requireMounted) {
     AMProjProjectControllerCandidate *best = nil;
     for (AMProjProjectControllerCandidate *candidate in candidates) {
-        if (!candidate.visibleWindow) continue;
+        if (!candidate.foregroundActive || !candidate.visibleWindow) continue;
         if (requireMounted && !candidate.mounted) continue;
         if (AMProjProjectCandidateIsBetter(candidate, best)) best = candidate;
     }
     return best;
-}
-
-static BOOL AMProjControllerBlocksNativePresentation(UIViewController *controller) {
-    if (!controller) return YES;
-    if ([controller isKindOfClass:UIAlertController.class] ||
-        [controller isKindOfClass:UIActivityViewController.class]) return YES;
-    NSString *name = NSStringFromClass(controller.class);
-    return [name containsString:@"PortalActivityViewController"] ||
-           [name containsString:@"ShareProjectPackage"] ||
-           [name containsString:@"ProjectsImportAlert"];
-}
-
-static UIViewController *AMProjVisibleWindowPresentationOwner(void) {
-    UIApplication *application = UIApplication.sharedApplication;
-    if (application.applicationState != UIApplicationStateActive) return nil;
-
-    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
-    NSMutableSet<NSValue *> *seen = [NSMutableSet set];
-    void (^appendWindow)(UIWindow *) = ^(UIWindow *window) {
-        if (!window || window.hidden || window.alpha <= 0.01 ||
-            !window.rootViewController) return;
-        NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)window];
-        if ([seen containsObject:identity]) return;
-        [seen addObject:identity];
-        [windows addObject:window];
-    };
-    for (UIScene *scene in application.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow *window in ((UIWindowScene *)scene).windows) appendWindow(window);
-    }
-    for (UIWindow *window in application.windows) appendWindow(window);
-    [windows sortUsingComparator:^NSComparisonResult(UIWindow *left, UIWindow *right) {
-        BOOL leftActive = left.windowScene.activationState == UISceneActivationStateForegroundActive;
-        BOOL rightActive = right.windowScene.activationState == UISceneActivationStateForegroundActive;
-        if (leftActive != rightActive) return leftActive ? NSOrderedAscending : NSOrderedDescending;
-        if (left.isKeyWindow != right.isKeyWindow) {
-            return left.isKeyWindow ? NSOrderedAscending : NSOrderedDescending;
-        }
-        return NSOrderedSame;
-    }];
-
-    for (UIWindow *window in windows) {
-        UIViewController *root = window.rootViewController;
-        UIViewController *cursor = root;
-        BOOL blocked = NO;
-        NSMutableSet<NSValue *> *visited = [NSMutableSet set];
-        while (cursor) {
-            NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)cursor];
-            if ([visited containsObject:identity]) { blocked = YES; break; }
-            [visited addObject:identity];
-            if (AMProjControllerBlocksNativePresentation(cursor) ||
-                cursor.isBeingDismissed || cursor.isBeingPresented) {
-                blocked = YES;
-                break;
-            }
-            UIViewController *presented = cursor.presentedViewController;
-            if (!presented || presented.isBeingDismissed) break;
-            cursor = presented;
-        }
-        if (blocked) continue;
-        UIViewController *owner = AMProjUsablePresentationOwner(root);
-        if (!owner || AMProjControllerBlocksNativePresentation(owner) ||
-            owner.isBeingDismissed || owner.isBeingPresented) continue;
-        UIView *view = owner.viewIfLoaded;
-        if (!view || view.window != window || view.hidden || view.alpha <= 0.01) continue;
-        NSLog(@"[AMProjExport] Native import visible fallback owner=%@ window=%@",
-              NSStringFromClass(owner.class), window);
-        return owner;
-    }
-    return nil;
-}
-
-static UIViewController *AMProjFindProjectsController(UIViewController *controller,
-                                                       NSUInteger depth,
-                                                       NSMutableSet<NSValue *> *visited) {
-    if (!controller || depth > 24) return nil;
-    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
-    if ([visited containsObject:identity]) return nil;
-    [visited addObject:identity];
-    if (AMProjIsProjectsController(controller, NULL)) return controller;
-    UIViewController *found = AMProjFindProjectsController(
-        controller.presentedViewController, depth + 1, visited);
-    if (found) return found;
-    for (UIViewController *child in controller.childViewControllers) {
-        found = AMProjFindProjectsController(child, depth + 1, visited);
-        if (found) return found;
-    }
-    return nil;
 }
 
 static UIViewController *AMProjLoadedProjectsController(void) {
@@ -713,28 +723,31 @@ static UIViewController *AMProjLoadedProjectsController(void) {
     return candidate.controller;
 }
 
-static void AMProjSelectProjectsTab(UIViewController *projects) {
-    if (!projects) return;
+static BOOL AMProjSelectProjectsTab(UIViewController *projects) {
+    if (!projects) return NO;
     UITabBarController *tabs = projects.tabBarController;
-    if (!tabs) return;
+    if (!tabs) return NO;
 
     UIViewController *branch = projects;
     while (branch.parentViewController && branch.parentViewController != tabs) {
         branch = branch.parentViewController;
     }
+    BOOL changed = NO;
     if (branch.parentViewController == tabs &&
         [tabs.viewControllers containsObject:branch] &&
         tabs.selectedViewController != branch) {
         tabs.selectedViewController = branch;
         [tabs.viewIfLoaded setNeedsLayout];
+        changed = YES;
     }
+    return changed;
 }
 
 static void AMProjRefreshProjectsController(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *projects = AMProjLoadedProjectsController();
         if (!projects) return;
-        AMProjSelectProjectsTab(projects);
+        (void)AMProjSelectProjectsTab(projects);
         SEL selector = NSSelectorFromString(@"pCollectionView");
         UICollectionView *collection = nil;
         if ([projects respondsToSelector:selector]) {
@@ -779,7 +792,15 @@ static BOOL AMProjStartNativePackageImport(
         return NO;
     }
 
-    UIViewController *owner = AMProjPresentationOwner();
+    UIViewController *owner = nil;
+    @try {
+        owner = AMProjPresentationOwner();
+    } @catch (NSException *exception) {
+        if (error) *error = AMProjNativeBridgeError(
+            103, exception.reason ?: @"The Alight Motion project screen could not be inspected",
+            @{ @"AMProjRetryable": @YES });
+        return NO;
+    }
     if (!owner) {
         if (error) *error = AMProjNativeBridgeError(
             103, @"The Alight Motion project screen is not ready",
@@ -796,7 +817,7 @@ static BOOL AMProjStartNativePackageImport(
                 nil);
             return NO;
         }
-        if (amproj_nativeBridgeCompletion) {
+        if (amproj_nativeBridgeCompletion || amproj_nativeBridgeFinishPending) {
             if (error) *error = AMProjNativeBridgeError(
                 102, @"Another project package is still importing", nil);
             return NO;
@@ -835,9 +856,19 @@ static BOOL AMProjStartNativePackageImport(
 
     AMProjSwiftString swiftName = bridge(projectName);
     AMProjLocalStorageReference *reference =
-        [[AMProjLocalStorageReference alloc] initWithSourceURL:packageURL];
+        [[AMProjLocalStorageReference alloc] initWithSourceURL:packageURL
+                                              bridgeGeneration:generation];
     NSLog(@"[AMProjExport] Native import entry begin owner=%@ package=%@",
           NSStringFromClass(owner.class), packageURL.lastPathComponent);
+    AMProjEmitNativeBridgeEvent(@"native_entry_start", @{
+        @"generation": @(generation),
+        @"filename": originalName ?: packageURL.lastPathComponent ?: @"project.amproj",
+        @"package_path": packageURL.path ?: @"",
+        @"owner_class": NSStringFromClass(owner.class) ?: @"",
+        @"owner_window_active":
+            @(owner.viewIfLoaded.window.windowScene.activationState ==
+              UISceneActivationStateForegroundActive)
+    });
     @try {
         // The verified Swift entry uses the arm64 Swift closure convention:
         // its explicit x2 argument is the storage reference (the entry calls
@@ -859,12 +890,22 @@ static BOOL AMProjStartNativePackageImport(
     } @catch (NSException *exception) {
         NSError *runtimeError = AMProjNativeBridgeError(
             109, exception.reason ?: @"The native project importer raised an exception", nil);
+        AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
+            @"generation": @(generation),
+            @"returned": @NO,
+            @"exception": exception.reason ?: @"unknown exception"
+        });
+        AMProjPoisonNativeBridge();
         AMProjFinishNativeBridge(NO, runtimeError);
         releaseBridge(swiftName.word1);
         if (error) *error = runtimeError;
         return NO;
     }
     NSLog(@"[AMProjExport] Native import entry returned");
+    AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
+        @"generation": @(generation),
+        @"returned": @YES
+    });
     releaseBridge(swiftName.word1);
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_SEC),

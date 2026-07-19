@@ -13,8 +13,13 @@ int main(int argc, const char *argv[]) {
         NSURL *workURL = [NSURL fileURLWithPath:
             [NSString stringWithUTF8String:argv[2]] isDirectory:YES];
         BOOL expectSuccess = strcmp(argv[3], "ok") == 0 ||
-            strcmp(argv[3], "multi") == 0;
+            strcmp(argv[3], "multi") == 0 ||
+            strcmp(argv[3], "manifest") == 0 ||
+            strcmp(argv[3], "manifest-empty") == 0;
         BOOL multiXML = strcmp(argv[3], "multi") == 0;
+        BOOL verifiedManifest = strcmp(argv[3], "manifest") == 0 || multiXML;
+        BOOL emptyManifest = strcmp(argv[3], "manifest-empty") == 0;
+        BOOL standardFixture = !multiXML && !emptyManifest;
         BOOL normalize = strcmp(argv[3], "normalize") == 0;
         NSUInteger expectedMissing = (NSUInteger)strtoull(argv[4], NULL, 10);
 
@@ -47,8 +52,16 @@ int main(int argc, const char *argv[]) {
         if (!success || !nativeXMLURL || error ||
             [metrics[@"xml_count"] unsignedIntegerValue] != expectedXMLCount ||
             [metrics[@"missing_reference_count"] unsignedIntegerValue] != expectedMissing ||
-            (!multiXML && [metrics[@"reference_count"] unsignedIntegerValue] != 2) ||
-            (!multiXML && [metrics[@"rewritten_reference_count"] unsignedIntegerValue] != 1) ||
+            (standardFixture && [metrics[@"reference_count"] unsignedIntegerValue] != 2) ||
+            (standardFixture && [metrics[@"rewritten_reference_count"] unsignedIntegerValue] != 1) ||
+            (verifiedManifest && ![metrics[@"manifest_verified"] boolValue]) ||
+            (verifiedManifest && [metrics[@"resource_count"] unsignedIntegerValue] != 1) ||
+            (verifiedManifest && [metrics[@"manifest_entry_count"] unsignedIntegerValue] != 1) ||
+            (verifiedManifest && [metrics[@"manifest_verified_resource_count"] unsignedIntegerValue] != 1) ||
+            (emptyManifest && ![metrics[@"manifest_verified"] boolValue]) ||
+            (emptyManifest && [metrics[@"resource_count"] unsignedIntegerValue] != 0) ||
+            (emptyManifest && [metrics[@"manifest_entry_count"] unsignedIntegerValue] != 0) ||
+            (emptyManifest && [metrics[@"manifest_verified_resource_count"] unsignedIntegerValue] != 0) ||
             ![nativeXMLURL.lastPathComponent hasSuffix:@".native-import.xml"]) {
             NSLog(@"native import preparation failed: %@ %@ %@", nativeXMLURL, metrics, error);
             return 4;
@@ -60,9 +73,9 @@ int main(int argc, const char *argv[]) {
         NSData *rewrittenData = [xml dataUsingEncoding:NSUTF8StringEncoding];
         NSXMLParser *parser = [[NSXMLParser alloc] initWithData:rewrittenData ?: NSData.data];
         if (!xml || ![parser parse] ||
-            [xml containsString:@"amproj:asset%20&amp;%20one.bin"] ||
-            ![xml containsString:@"file://"] ||
-            (!multiXML && ![xml containsString:@"amproj:missing.mp4"])) {
+            (standardFixture && [xml containsString:@"amproj:asset%20&amp;%20one.bin"]) ||
+            (standardFixture && ![xml containsString:@"file://"]) ||
+            (standardFixture && ![xml containsString:@"amproj:missing.mp4"])) {
             NSLog(@"rewritten XML is incorrect: %@ error=%@", xml, error);
             return 5;
         }

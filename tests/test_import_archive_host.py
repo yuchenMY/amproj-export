@@ -53,21 +53,36 @@ class ImportArchiveHostTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(archive.read_bytes()).digest(), source_hash)
         return work / "normalized.amproj"
 
+    @staticmethod
+    def manifest_bytes(resources, line_ending="\n", trailing=False):
+        lines = [
+            f"{hashlib.sha1(data).hexdigest().upper()}:{name}"
+            for name, data in resources.items()
+        ]
+        text = line_ending.join(lines)
+        if trailing:
+            text += line_ending
+        return text.encode("utf-8")
+
     def make_archive(self, name, compression, manifest=False):
         archive = self.temp / name
+        asset = bytes(range(256)) * 1024
         xml = (
             '<?xml version="1.0"?><scene asset="amproj:asset%20&amp;%20one.bin" '
             'missing="amproj:missing.mp4"/>'
         )
         with zipfile.ZipFile(archive, "w", compression=compression) as output:
             output.writestr("scene.xml", xml)
-            output.writestr("asset & one.bin", bytes(range(256)) * 1024)
+            output.writestr("asset & one.bin", asset)
             if manifest:
-                output.writestr("manifest.txt", "fixture")
+                output.writestr(
+                    "manifest.txt", self.manifest_bytes({"asset & one.bin": asset})
+                )
         return archive
 
     def make_multi_xml_archive(self, name, manifest=True):
         archive = self.temp / name
+        asset = bytes(range(256)) * 1024
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
             output.writestr(
                 "first.xml",
@@ -77,9 +92,11 @@ class ImportArchiveHostTests(unittest.TestCase):
                 "second.xml",
                 '<?xml version="1.0"?><scene asset="amproj:asset%20&amp;%20one.bin"/>',
             )
-            output.writestr("asset & one.bin", bytes(range(256)) * 1024)
+            output.writestr("asset & one.bin", asset)
             if manifest:
-                output.writestr("manifest.txt", "fixture")
+                output.writestr(
+                    "manifest.txt", self.manifest_bytes({"asset & one.bin": asset})
+                )
         return archive
 
     def test_deflate_without_manifest_and_stored_with_manifest(self):
@@ -93,6 +110,80 @@ class ImportArchiveHostTests(unittest.TestCase):
         source_hash = hashlib.sha256(archive.read_bytes()).digest()
         self.run_helper(archive, mode="multi", missing=0)
         self.assertEqual(hashlib.sha256(archive.read_bytes()).digest(), source_hash)
+
+    def test_accepts_strict_manifest_line_endings_and_empty_manifest(self):
+        asset = b"resource-one"
+        for suffix, line_ending, trailing in (
+            ("lf", "\n", False),
+            ("lf-trailing", "\n", True),
+            ("crlf", "\r\n", False),
+            ("crlf-trailing", "\r\n", True),
+        ):
+            with self.subTest(suffix=suffix):
+                archive = self.temp / f"manifest-{suffix}.amproj"
+                with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+                    output.writestr(
+                        "scene.xml",
+                        '<scene asset="amproj:asset.bin" missing="amproj:missing.mp4"/>',
+                    )
+                    output.writestr("asset.bin", asset)
+                    output.writestr(
+                        "manifest.txt",
+                        self.manifest_bytes(
+                            {"asset.bin": asset}, line_ending=line_ending, trailing=trailing
+                        ),
+                    )
+                self.run_helper(archive, mode="manifest", missing=1)
+
+        empty = self.temp / "manifest-empty.amproj"
+        with zipfile.ZipFile(empty, "w", zipfile.ZIP_DEFLATED) as output:
+            output.writestr("scene.xml", "<scene/>")
+            output.writestr("manifest.txt", b"")
+        self.run_helper(empty, mode="manifest-empty", missing=0)
+
+    def test_manifest_uses_unique_case_and_nfc_filename_matching(self):
+        archive = self.temp / "manifest-nfc-name.amproj"
+        resource_name = "caf\u00e9.bin"
+        manifest_name = "CAFE\u0301.BIN"
+        asset = b"unicode-resource"
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+            output.writestr(
+                "scene.xml",
+                f'<scene asset="amproj:{resource_name}" missing="amproj:missing.mp4"/>',
+            )
+            output.writestr(resource_name, asset)
+            output.writestr(
+                "manifest.txt", self.manifest_bytes({manifest_name: asset})
+            )
+        self.run_helper(archive, mode="manifest", missing=1)
+
+    def test_rejects_invalid_or_incomplete_manifest(self):
+        asset = b"resource-one"
+        asset_hash = hashlib.sha1(asset).hexdigest().upper()
+        other = b"resource-two"
+        cases = {
+            "lowercase-sha1": f"{asset_hash.lower()}:asset.bin",
+            "wrong-sha1": f"{'0' * 40}:asset.bin",
+            "malformed": f"{asset_hash} asset.bin",
+            "duplicate-name": f"{asset_hash}:asset.bin\n{'1' * 40}:ASSET.BIN",
+            "duplicate-sha1": f"{asset_hash}:asset.bin\n{asset_hash}:other.bin",
+            "missing-file": f"{asset_hash}:absent.bin",
+            "lists-xml": f"{asset_hash}:scene.xml",
+            "lists-itself": f"{asset_hash}:manifest.txt",
+            "unlisted-resource": "",
+            "lone-cr": f"{asset_hash}:asset.bin\r{asset_hash}:other.bin",
+            "extra-empty-line": f"{asset_hash}:asset.bin\n\n",
+        }
+        for suffix, manifest in cases.items():
+            with self.subTest(suffix=suffix):
+                archive = self.temp / f"bad-manifest-{suffix}.amproj"
+                with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+                    output.writestr("scene.xml", '<scene asset="amproj:asset.bin"/>')
+                    output.writestr("asset.bin", asset)
+                    if suffix == "duplicate-sha1" or suffix == "lone-cr":
+                        output.writestr("other.bin", other)
+                    output.writestr("manifest.txt", manifest)
+                self.run_helper(archive, mode="fail", missing=0)
 
     def test_multi_xml_without_manifest_is_rejected(self):
         self.run_helper(

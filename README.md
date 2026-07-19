@@ -17,32 +17,34 @@ Debug IPA 会优先连接注入时记录的 Windows 地址；地址变化或连�
 project.amproj
 ├── <UUID>.xml       # 一个或多个场景 XML（Android 官方包可能包含多个）
 ├── manifest.txt     # 规范资源清单，可以为空
-└── media/font/...   # XML 引用的可选资源
+└── media/font/...   # XML 引用时必须随包提供的资源
 ```
 
 插件自己导出的规范包有一个场景 XML 和一个 `manifest.txt`。导入时同时接受 Android 官方的多个场景 XML，只要有一个根 `manifest.txt` 就保留原 ZIP 交给 AM；没有 manifest 的单 XML 旧包才会重建为规范包。多个 manifest、损坏 CRC 或不安全路径仍会被拒绝。
 
 完整格式见 `format_spec.md`。
 
-## v22 离线导入
+## v23 离线导入
 
-### v22 稳定性修复
+### v23 稳定性修复
 
 - 原生导入开始前强制切换到底部“项目”页；项目页尚未完成挂载时会等待，不再把“主页”控制器当作导入上下文。
 - Debug 版默认不安装全局 `NSXMLParser` 诊断 swizzle，避免它干扰 Alight Motion 的 Swift 项目解析。
-- XML 引用的媒体缺失时记录缺失数量，但不在 `2/4` 阶段提前拦截；由 AM 原生 `PackageImporter` 在项目持久化后给出缺素材结果。
+- XML 引用的媒体缺失时立即拒绝导入并保留缓存包，避免 AM 原生 importer 生成不完整的假项目。
 
 本轮 ABI 修复还原了干净 `AM_v1` 的真实调用约定：原生入口的显式 `x2` 是
-`StorageReference`（入口会对它调用 `writeToFile:`），隐藏 Swift `x20` 是弱持有的
-项目页控制器。复制任务完成时同时发出 Firebase 的进度终态 `2` 和成功终态 `4`，失败仍发出 `5`。
+`StorageReference`（入口会对它调用 `writeToFile:`），显式 `x3` 是可空的
+`AMProgressAlert`，隐藏 Swift `x20` 是弱持有的项目页控制器。插件没有原生进度弹窗实例，
+因此向 `x3` 传 `nil`，只跳过可选的原生进度 UI；不能把项目页控制器传入这个位置。
+复制任务完成时同时发出 Firebase 的进度终态 `2` 和成功终态 `4`，失败仍发出 `5`。
 
-因此，`3/4` 后仍闪退的旧 v20/v21 包不要继续重复安装；请使用 v22 构建。v22 同时兼容 Android 官方的多 XML + `manifest.txt` 项目包，并将缺失媒体交给 AM 原生警告流程；仍建议确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
+因此，`2/4` 或 `3/4` 停住的旧 v20/v21/v22 包不要继续重复安装；请使用 v23 构建。v23 同时兼容 Android 官方的多 XML + `manifest.txt` 项目包，并在资源不完整时明确失败；请确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
 
-稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 只记录候选 URL，并把原始 launch options 完整交给 AM，避免在系统授权尚未激活时制造 `EPERM` 伪失败。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
+稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 先记录候选 URL，再复制一份 launch options，仅从转发给原 AppDelegate 的副本中移除 `.amproj` URL 或对应的 user activity，其他启动参数保持不变；原始字典不会被就地修改。这样可避免 AM 的原生 URL 路径同时处理同一个包。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
 
-复制完成后的处理全部在本地执行：插件逐项解压验证 ZIP32、local header、CRC、XML 和路径安全。带 manifest 的官方包保持完整 ZIP（包括所有 XML、媒体和字体）交给本地 `PackageImporter`；缺 manifest 的单 XML 旧包才重算 manifest。缺少的 `amproj:` 素材引用会保留，交给 AM 原生的缺素材处理；代码不再查找 `TemplatesListVC`，也不会调用模板页的 XML 文档选择器回调。
+复制完成后的处理全部在本地执行：插件逐项解压验证 ZIP32、local header、CRC、XML 和路径安全。带 manifest 的官方包保持完整 ZIP（包括所有 XML、媒体和字体）；缺 manifest 的单 XML 旧包才重算 manifest。随后会核对所有 `amproj:` 素材引用：缺少任一被引用的图片、音频、视频或字体时，会在进入原生 `PackageImporter` 前停止导入、显示缺失名称并保留缓存包供重试；完整包才会进入原生桥。代码不再查找 `TemplatesListVC`，也不会调用模板页的 XML 文档选择器回调。
 
-正常状态顺序为：`1/4 收到文件 -> 2/4 完整校验并规范化 -> 3/4 正在解包并写入项目 -> 4/4 已导入到底部“项目”`。只有适配器确认项目和包内资源已经持久化后才显示 `4/4`，原生确认框出现本身不再算成功。
+正常状态顺序为：`1/4 收到文件 -> 2/4 完整校验并规范化 -> 3/4 正在解包并写入项目 -> 原生回调完成后验证项目列表 -> 4/4`。只有在底部“项目”页实际找到新项目行后才显示 `4/4`；原生回调、确认框或文件复制完成本身都不算成功。
 
 实验入口是 QQ 分享面板中的“导入到 AM”。扩展先把一个 `.amproj` 原子写入 App Group，再尝试用 `alightmotion://amproj-import` 唤起主 App。免费自签不一定能保留 App Group 或允许扩展自动唤起，因此实验包与稳定包分开生成。
 
@@ -59,11 +61,14 @@ AMProjShareExtension/build/AMProjShareExtension.appex
 AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-## 从干净 IPA 生成 v22
+下载名为 `AMProjExport-v23-dylibs` 的 artifact。其中的 `build-metadata.json`
+记录插件版本、commit、Actions run ID 以及每个二进制文件的 SHA-256，注入前可用它确认没有混入旧版本产物。
+
+## 从干净 IPA 生成 v23
 
 必须以未注入的 `AM_v1.ipa` 为输入，不要用旧测试包继续叠加。主 App Bundle ID 保持 `com.amayaka.meow`。
 
-v22 原生导入桥只支持这份已核验的主程序：
+v23 原生导入桥只支持这份已核验的主程序：
 
 ```text
 AM_v1.ipa SHA-256: B135D99E81E0F3F976CBF4C30BCC491B4B770BD9D0A6841D48083B7A7EA29413
@@ -76,7 +81,7 @@ Mach-O UUID:       4b22d43f-09fc-3bde-859b-78a5d573a503
 
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v22.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v23.ipa `
   --expected-main-uuid $uuid
 ```
 
@@ -85,7 +90,7 @@ python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_d
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v22_debug.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v23_debug.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid
 python .\debug_backend\server.py --token $token
 ```
@@ -95,7 +100,7 @@ python .\debug_backend\server.py --token $token
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v22_share_exp.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v23_share_exp.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid `
   --share-extension .\AMProjShareExtension\build\AMProjShareExtension.appex `
   --app-group-id group.com.amayaka.meow.amprojshare
