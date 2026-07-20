@@ -7096,22 +7096,6 @@ static void amproj_recordPaywallScanRoot(UIViewController *root, NSString *sourc
 #endif
 }
 
-static UIWindow *amproj_alternateVisibleWindow(UIWindow *excluded) {
-    if (!excluded) return nil;
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-            if (window != excluded && !window.hidden && window.alpha > 0.01 &&
-                window.rootViewController) return window;
-        }
-    }
-    for (UIWindow *window in UIApplication.sharedApplication.windows) {
-        if (window != excluded && !window.hidden && window.alpha > 0.01 &&
-            window.rootViewController) return window;
-    }
-    return nil;
-}
-
 static void amproj_dismissDetectedPaywallFrom(UIViewController *candidate,
                                               NSString *source) {
     if (![NSThread isMainThread]) {
@@ -7195,28 +7179,10 @@ static void amproj_dismissDetectedPaywallFrom(UIViewController *candidate,
         return;
     }
 
-    UIWindow *paywallWindow = paywall.viewIfLoaded.window;
-    UIWindow *alternateWindow = amproj_alternateVisibleWindow(paywallWindow);
-    if (paywallWindow && alternateWindow &&
-        paywallWindow.rootViewController == dismissOwner) {
-        activePaywallAction = paywall;
-        activePaywallActionAt = now;
-        paywallWindow.hidden = YES;
-        [alternateWindow makeKeyAndVisible];
-        lastPaywall = paywall;
-        lastDismissAt = now;
-        activePaywallAction = nil;
-        amproj_debugEvent(@"paywall.dismissed", @{
-            @"source": source ?: @"unknown",
-            @"controller": fields[@"controller"] ?: @"",
-            @"method": @"hide_dedicated_window"
-        });
-        return;
-    }
-
-    // A few SwiftUI paywalls are hosted in a dedicated window rather than a
-    // modal presentation. In that case, use only an explicitly labelled close
-    // button after the strict marker match above.
+    // Do not hide a root window to escape this state. UIKit can report transient
+    // keyboard/tracking windows as an "alternate" window; hiding the real AM
+    // window in that case leaves the process foregrounded on a black screen.
+    // A root-hosted page may only be dismissed through its own close control.
     id closeView = amproj_findPaywallCloseView(
         paywall.viewIfLoaded, [NSMutableSet set], 0);
     if (!closeView) {
@@ -7348,31 +7314,57 @@ static BOOL amproj_startupLoadingButtonLooksLikeClose(UIButton *button) {
     return explicitClose || topLeftCloseCandidate;
 }
 
-static BOOL amproj_hideStartupLoadingInView(UIView *view) {
+static BOOL amproj_revealStartupLoadingCloseInView(UIView *view,
+                                                    BOOL *changedOut) {
     if (!view) return NO;
-    BOOL changed = NO;
-    if ([view isKindOfClass:UIActivityIndicatorView.class]) {
-        if (!view.hidden || view.alpha > 0.01) {
-            view.alpha = 0.0;
-            view.hidden = YES;
-            changed = YES;
-        }
-    }
+    BOOL closeCandidate = NO;
     if ([view isKindOfClass:UIButton.class]) {
         UIButton *button = (UIButton *)view;
-        if (amproj_startupLoadingButtonLooksLikeClose(button) &&
-            (button.hidden || button.alpha < 0.99)) {
+        if (amproj_startupLoadingButtonLooksLikeClose(button)) {
+            closeCandidate = YES;
+            if (button.hidden || button.alpha < 0.99) {
+                if (changedOut) *changedOut = YES;
+            }
             button.alpha = 1.0;
             button.hidden = NO;
             [button.superview bringSubviewToFront:button];
-            changed = YES;
         }
     }
     NSArray<UIView *> *children = [view.subviews copy];
     for (UIView *child in children) {
-        if (amproj_hideStartupLoadingInView(child)) changed = YES;
+        if (amproj_revealStartupLoadingCloseInView(child, changedOut)) {
+            closeCandidate = YES;
+        }
     }
-    return changed;
+    return closeCandidate;
+}
+
+static NSUInteger amproj_hideStartupLoadingSpinnersInView(UIView *view) {
+    if (!view) return 0;
+    NSUInteger hiddenSpinnerCount = 0;
+    if ([view isKindOfClass:UIActivityIndicatorView.class] &&
+        (!view.hidden || view.alpha > 0.01)) {
+        view.alpha = 0.0;
+        view.hidden = YES;
+        hiddenSpinnerCount++;
+    }
+    NSArray<UIView *> *children = [view.subviews copy];
+    for (UIView *child in children) {
+        hiddenSpinnerCount += amproj_hideStartupLoadingSpinnersInView(child);
+    }
+    return hiddenSpinnerCount;
+}
+
+static BOOL amproj_hideStartupLoadingInView(UIView *view,
+                                            BOOL *closeCandidateOut,
+                                            NSUInteger *hiddenSpinnerCountOut) {
+    BOOL closeChanged = NO;
+    BOOL closeCandidate = amproj_revealStartupLoadingCloseInView(view, &closeChanged);
+    NSUInteger hiddenSpinnerCount = closeCandidate
+        ? amproj_hideStartupLoadingSpinnersInView(view) : 0;
+    if (closeCandidateOut) *closeCandidateOut = closeCandidate;
+    if (hiddenSpinnerCountOut) *hiddenSpinnerCountOut = hiddenSpinnerCount;
+    return closeChanged || hiddenSpinnerCount > 0;
 }
 
 static BOOL amproj_hideStartupLoadingInWindows(void) {
@@ -7387,11 +7379,16 @@ static BOOL amproj_hideStartupLoadingInWindows(void) {
         UIViewController *paywall = amproj_findPaywallController(
             window.rootViewController, [NSMutableSet set], 0, &evidence);
         if (!paywall) return;
-        BOOL candidateChanged = amproj_hideStartupLoadingInView(paywall.viewIfLoaded);
+        BOOL closeCandidate = NO;
+        NSUInteger hiddenSpinnerCount = 0;
+        BOOL candidateChanged = amproj_hideStartupLoadingInView(
+            paywall.viewIfLoaded, &closeCandidate, &hiddenSpinnerCount);
         if (candidateChanged) changed = YES;
         amproj_debugEvent(@"startup_loading.paywall_candidate", @{
             @"controller": NSStringFromClass(paywall.class) ?: @"",
             @"changed": @(candidateChanged),
+            @"close_candidate": @(closeCandidate),
+            @"spinners_hidden": @(hiddenSpinnerCount),
             @"startup_fallback": evidence[@"startup_fallback"] ?: @NO
         });
     };

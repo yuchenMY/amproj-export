@@ -72,24 +72,49 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_hideStartupLoadingInView", SOURCE)
         self.assertIn("startup_loading.skip_pass", SOURCE)
         self.assertIn("amproj_scheduleStartupLoadingSkip();", SOURCE)
+        self.assertNotIn("hide_dedicated_window", SOURCE)
+        self.assertNotIn("amproj_alternateVisibleWindow", SOURCE)
         self.assertIn("[presentingController dismissViewControllerAnimated", SOURCE)
         self.assertIn('gone ? @"paywall.dismissed" : @"paywall.dismiss_failed"', SOURCE)
         self.assertIn("ShareProjectPackageVC", SOURCE)
+
+        dismiss = function_body(
+            "static void amproj_dismissDetectedPaywallFrom",
+            "static void amproj_scanVisiblePaywall",
+        )
+        self.assertIn("[presentingController dismissViewControllerAnimated", dismiss)
+        self.assertNotIn("paywallWindow.hidden = YES", dismiss)
+        self.assertNotIn("makeKeyAndVisible", dismiss)
 
     def test_startup_loading_bypass_matches_documented_view_scope(self):
         helper = function_body(
             "static BOOL amproj_hideStartupLoadingInView",
             "static BOOL amproj_hideStartupLoadingInWindows",
         )
-        self.assertIn("UIActivityIndicatorView.class", helper)
-        self.assertIn("UIButton.class", helper)
-        self.assertIn("amproj_startupLoadingButtonLooksLikeClose", helper)
-        self.assertIn("button.alpha = 1.0", helper)
-        self.assertIn("button.hidden = NO", helper)
-        self.assertIn("bringSubviewToFront:button", helper)
-        self.assertIn("NSArray<UIView *> *children = [view.subviews copy]", helper)
-        self.assertNotIn("UIControl *", helper)
-        self.assertNotIn("enabled = YES", helper)
+        self.assertIn("amproj_revealStartupLoadingCloseInView", helper)
+        self.assertIn("amproj_hideStartupLoadingSpinnersInView", helper)
+        self.assertIn("? amproj_hideStartupLoadingSpinnersInView(view) : 0", helper)
+        self.assertIn("closeCandidateOut", helper)
+
+        close_helper = function_body(
+            "static BOOL amproj_revealStartupLoadingCloseInView",
+            "static NSUInteger amproj_hideStartupLoadingSpinnersInView",
+        )
+        self.assertIn("UIButton.class", close_helper)
+        self.assertIn("amproj_startupLoadingButtonLooksLikeClose", close_helper)
+        self.assertIn("button.alpha = 1.0", close_helper)
+        self.assertIn("button.hidden = NO", close_helper)
+        self.assertIn("bringSubviewToFront:button", close_helper)
+        self.assertIn("NSArray<UIView *> *children = [view.subviews copy]", close_helper)
+        self.assertNotIn("UIControl *", close_helper)
+        self.assertNotIn("enabled = YES", close_helper)
+
+        spinner_helper = function_body(
+            "static NSUInteger amproj_hideStartupLoadingSpinnersInView",
+            "static BOOL amproj_hideStartupLoadingInView",
+        )
+        self.assertIn("UIActivityIndicatorView.class", spinner_helper)
+        self.assertIn("NSArray<UIView *> *children = [view.subviews copy]", spinner_helper)
 
         windows = function_body(
             "static BOOL amproj_hideStartupLoadingInWindows",
