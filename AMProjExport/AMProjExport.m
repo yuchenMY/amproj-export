@@ -7326,6 +7326,83 @@ static void amproj_schedulePaywallScan(UIViewController *candidate, NSString *so
     }
 }
 
+// MARK: - Startup loading overlay bypass
+// This intentionally mirrors the documented runtime-only workaround: it runs
+// after launch on the main queue and only changes UIKit's stock spinner and
+// labelled UIButton views.
+
+static BOOL amproj_hideStartupLoadingInView(UIView *view) {
+    if (!view) return NO;
+    BOOL found = NO;
+    if ([view isKindOfClass:UIActivityIndicatorView.class]) {
+        view.alpha = 0.0;
+        view.hidden = YES;
+        found = YES;
+    }
+    if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)view;
+        if (button.currentTitle.length || button.accessibilityLabel.length) {
+            button.alpha = 1.0;
+            button.hidden = NO;
+            [button.superview bringSubviewToFront:button];
+            found = YES;
+        }
+    }
+    NSArray<UIView *> *children = [view.subviews copy];
+    for (UIView *child in children) {
+        if (amproj_hideStartupLoadingInView(child)) found = YES;
+    }
+    return found;
+}
+
+static BOOL amproj_hideStartupLoadingInWindows(void) {
+    NSMutableSet<NSValue *> *seen = [NSMutableSet set];
+    __block BOOL changed = NO;
+    void (^scanWindow)(UIWindow *) = ^(UIWindow *window) {
+        if (!window || window.hidden || window.alpha <= 0.01) return;
+        NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)window];
+        if ([seen containsObject:identity]) return;
+        [seen addObject:identity];
+        if (amproj_hideStartupLoadingInView(window)) changed = YES;
+    };
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) scanWindow(window);
+    }
+    for (UIWindow *window in UIApplication.sharedApplication.windows) scanWindow(window);
+    return changed;
+}
+
+static NSUInteger amproj_startupLoadingSkipAttempt = 0;
+
+static void amproj_skipStartupLoadingPass(void) {
+    if (![NSThread isMainThread]) return;
+    if (amproj_startupLoadingSkipAttempt++ >= 20) {
+        return;
+    }
+    BOOL changed = amproj_hideStartupLoadingInWindows();
+    amproj_debugEvent(@"startup_loading.skip_pass", @{
+        @"attempt": @(amproj_startupLoadingSkipAttempt),
+        @"changed": @(changed)
+    });
+    if (!changed) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            amproj_skipStartupLoadingPass();
+        });
+    }
+}
+
+static void amproj_scheduleStartupLoadingSkip(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            amproj_skipStartupLoadingPass();
+        });
+    });
+}
+
 static NSString* amproj_projectTitleRecursive(UIViewController *controller, NSUInteger depth,
                                                NSMutableSet<NSValue *> *visited) {
     if (!controller || depth > 8) return nil;
@@ -8630,6 +8707,9 @@ static void AMProjExportInit(void) {
             amproj_schedulePaywallScan(nil, @"main_queue_fallback");
         });
 
+        // The delayed task is safe during early process initialization and
+        // implements the startup-loading bypass documented for this build.
+        amproj_scheduleStartupLoadingSkip();
         NSLog(@"[AMProjExport] Hooks scheduled for launch, activation, and delayed fallback");
     }
 }

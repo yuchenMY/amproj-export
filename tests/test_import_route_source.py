@@ -69,9 +69,34 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("paywall.scan_root", SOURCE)
         self.assertIn("amproj_armPaywallStartupFallback", SOURCE)
         self.assertIn("startupLoadingFallback", SOURCE)
+        self.assertIn("amproj_hideStartupLoadingInView", SOURCE)
+        self.assertIn("startup_loading.skip_pass", SOURCE)
+        self.assertIn("amproj_scheduleStartupLoadingSkip();", SOURCE)
         self.assertIn("[presentingController dismissViewControllerAnimated", SOURCE)
         self.assertIn('gone ? @"paywall.dismissed" : @"paywall.dismiss_failed"', SOURCE)
         self.assertIn("ShareProjectPackageVC", SOURCE)
+
+    def test_startup_loading_bypass_matches_documented_view_scope(self):
+        helper = function_body(
+            "static BOOL amproj_hideStartupLoadingInView",
+            "static BOOL amproj_hideStartupLoadingInWindows",
+        )
+        self.assertIn("UIActivityIndicatorView.class", helper)
+        self.assertIn("UIButton.class", helper)
+        self.assertIn("button.alpha = 1.0", helper)
+        self.assertIn("button.hidden = NO", helper)
+        self.assertIn("bringSubviewToFront:button", helper)
+        self.assertIn("NSArray<UIView *> *children = [view.subviews copy]", helper)
+        self.assertNotIn("UIControl *", helper)
+        self.assertNotIn("enabled = YES", helper)
+
+        scheduler = function_body(
+            "static void amproj_scheduleStartupLoadingSkip",
+            "static NSString* amproj_projectTitleRecursive",
+        )
+        self.assertIn("dispatch_once", scheduler)
+        self.assertIn("300 * NSEC_PER_MSEC", scheduler)
+        self.assertIn("amproj_skipStartupLoadingPass", scheduler)
 
     def test_package_flow_predicate_is_narrow(self):
         body = function_body(
