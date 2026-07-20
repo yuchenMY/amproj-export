@@ -6661,6 +6661,19 @@ static BOOL amproj_isIPAFireWelcome(UIViewController *controller) {
          [content containsString:@"شكراً لاستخدامك تطبيقاتنا"]);
 }
 
+// A self-signed build can leave StoreKit's SwiftUI paywall in an indefinite
+// loading state before any accessibility strings are exposed. Keep a short
+// startup-only fallback window so normal, intentionally opened subscription
+// screens are never treated as stuck pages.
+static CFAbsoluteTime amproj_paywallStartupFallbackUntil = 0;
+
+static void amproj_armPaywallStartupFallback(void) {
+    if (![NSThread isMainThread]) return;
+    if (amproj_paywallStartupFallbackUntil <= 0) {
+        amproj_paywallStartupFallbackUntil = CFAbsoluteTimeGetCurrent() + 120.0;
+    }
+}
+
 static BOOL amproj_paywallContentContainsAny(NSString *content,
                                              NSArray<NSString *> *markers) {
     if (!content.length) return NO;
@@ -6668,6 +6681,26 @@ static BOOL amproj_paywallContentContainsAny(NSString *content,
         if (marker.length && [content containsString:marker]) return YES;
     }
     return NO;
+}
+
+static NSArray *amproj_paywallAccessibilityChildren(UIView *view) {
+    if (!view) return @[];
+    NSMutableArray *children = [NSMutableArray array];
+    @try {
+        NSArray *declared = view.accessibilityElements;
+        if ([declared isKindOfClass:NSArray.class]) [children addObjectsFromArray:declared];
+        NSInteger count = [view accessibilityElementCount];
+        if (count > 0 && count != NSNotFound && count <= 256) {
+            for (NSInteger index = 0; index < count; index++) {
+                id element = [view accessibilityElementAtIndex:index];
+                if (element && ![children containsObject:element]) [children addObject:element];
+            }
+        }
+    } @catch (__unused NSException *exception) {
+        // Some SwiftUI containers do not expose an accessibility tree until
+        // their first layout pass. The ordinary subview walk remains valid.
+    }
+    return children;
 }
 
 static void amproj_appendPaywallViewText(UIView *view, NSMutableString *output,
@@ -6700,6 +6733,35 @@ static void amproj_appendPaywallViewText(UIView *view, NSMutableString *output,
             [output appendString:@"\n"];
         }
     }
+    // SwiftUI often exposes its visible strings as UIAccessibilityElement
+    // objects instead of UILabel subviews. Include that tree without forcing
+    // view loading or reading arbitrary model/KVC values.
+    NSArray *accessibilityElements = amproj_paywallAccessibilityChildren(view);
+    if ([accessibilityElements isKindOfClass:NSArray.class]) {
+        for (id element in accessibilityElements) {
+            if (!element) continue;
+            if ([element isKindOfClass:UIView.class]) {
+                amproj_appendPaywallViewText((UIView *)element, output, visited, depth + 1);
+                continue;
+            }
+            NSValue *elementIdentity = [NSValue valueWithPointer:(__bridge const void *)element];
+            if ([visited containsObject:elementIdentity]) continue;
+            [visited addObject:elementIdentity];
+            for (NSString *selectorName in @[
+                NSStringFromSelector(@selector(accessibilityLabel)),
+                NSStringFromSelector(@selector(accessibilityValue)),
+                NSStringFromSelector(@selector(accessibilityHint))
+            ]) {
+                SEL actualSelector = NSSelectorFromString(selectorName);
+                if (![element respondsToSelector:actualSelector]) continue;
+                NSString *value = ((id (*)(id, SEL))objc_msgSend)(element, actualSelector);
+                if ([value isKindOfClass:NSString.class] && value.length) {
+                    [output appendString:value];
+                    [output appendString:@"\n"];
+                }
+            }
+        }
+    }
     for (UIView *child in view.subviews) {
         amproj_appendPaywallViewText(child, output, visited, depth + 1);
     }
@@ -6719,6 +6781,29 @@ static NSString *amproj_paywallTextForController(UIViewController *controller) {
         amproj_appendPaywallViewText(view, text, [NSMutableSet set], 0);
     }
     return text;
+}
+
+static BOOL amproj_paywallLayerHasAnimation(CALayer *layer, NSUInteger depth) {
+    if (!layer || depth > 8) return NO;
+    CGFloat width = CGRectGetWidth(layer.bounds);
+    CGFloat height = CGRectGetHeight(layer.bounds);
+    BOOL compactSquare = width >= 16.0 && width <= 240.0 &&
+        height >= 16.0 && height <= 240.0 && fabs(width - height) <= 24.0;
+    if (compactSquare) {
+        for (NSString *key in layer.animationKeys) {
+            CAAnimation *animation = [layer animationForKey:key];
+            if (animation && (isinf(animation.repeatCount) ||
+                              isinf(animation.repeatDuration) ||
+                              animation.repeatCount >= 8.0f ||
+                              animation.repeatDuration >= 8.0)) {
+                return YES;
+            }
+        }
+    }
+    for (CALayer *child in layer.sublayers) {
+        if (amproj_paywallLayerHasAnimation(child, depth + 1)) return YES;
+    }
+    return NO;
 }
 
 static BOOL amproj_paywallViewHasLoadingIndicator(UIView *view,
@@ -6745,6 +6830,7 @@ static BOOL amproj_paywallViewHasLoadingIndicator(UIView *view,
     if (namedLoadingView && view.layer.animationKeys.count) return YES;
     if (namedLoadingView && ([view isKindOfClass:UIActivityIndicatorView.class] ||
                              [view isKindOfClass:UIProgressView.class])) return YES;
+    if (amproj_paywallLayerHasAnimation(view.layer, 0)) return YES;
     for (UIView *child in view.subviews) {
         if (amproj_paywallViewHasLoadingIndicator(child, visited, depth + 1)) return YES;
     }
@@ -6785,7 +6871,18 @@ static BOOL amproj_isPaywallController(UIViewController *controller,
         view, [NSMutableSet set], 0);
     BOOL markerMatch = plan && continueMarker &&
         ((purchased && cadence) || (purchased && classHint) || (cadence && classHint));
-    if (!markerMatch || !loading) return NO;
+    UINavigationController *navigation = controller.navigationController;
+    BOOL hostingClass = [className containsString:@"hosting"] ||
+        [className containsString:@"storeproduct"];
+    BOOL hasPresentationChain = controller.presentingViewController != nil ||
+        navigation.presentingViewController != nil ||
+        navigation.viewControllers.count > 1;
+    BOOL hostedAtWindowRoot = view.window.rootViewController == controller ||
+        (navigation && view.window.rootViewController == navigation);
+    BOOL startupLoadingFallback = loading && hostingClass &&
+        (hasPresentationChain || hostedAtWindowRoot) &&
+        CFAbsoluteTimeGetCurrent() < amproj_paywallStartupFallbackUntil;
+    if ((!markerMatch && !startupLoadingFallback) || !loading) return NO;
 
     if (evidenceOut) {
         *evidenceOut = @{
@@ -6795,10 +6892,62 @@ static BOOL amproj_isPaywallController(UIViewController *controller,
             @"cadence": @(cadence),
             @"continue": @(continueMarker),
             @"class_hint": @(classHint),
-            @"loading": @(loading)
+            @"loading": @(loading),
+            @"startup_fallback": @(startupLoadingFallback)
         };
     }
     return YES;
+}
+
+static void amproj_recordPaywallControllerAppearance(UIViewController *controller) {
+#if AMPROJ_DEBUG
+    if (!controller) return;
+    NSString *className = NSStringFromClass(controller.class) ?: @"";
+    NSString *classLower = className.lowercaseString;
+    NSString *content = amproj_paywallTextForController(controller).lowercaseString;
+    BOOL classHint = [classLower containsString:@"hosting"] ||
+        [classLower containsString:@"paywall"] ||
+        [classLower containsString:@"monetization"] ||
+        [classLower containsString:@"purchase"] ||
+        [classLower containsString:@"subscription"] ||
+        [classLower containsString:@"storeproduct"];
+    BOOL plan = amproj_paywallContentContainsAny(content, @[
+        @"选择一个套餐", @"选择套餐", @"choose a plan", @"select a plan"
+    ]);
+    BOOL purchased = amproj_paywallContentContainsAny(content, @[
+        @"已经购买", @"已购买", @"already purchased", @"restore purchase"
+    ]);
+    BOOL cadence = amproj_paywallContentContainsAny(content, @[
+        @"每周", @"每年", @"weekly", @"yearly", @"per week", @"per year"
+    ]);
+    BOOL continueMarker = amproj_paywallContentContainsAny(content, @[
+        @"继续", @"continue", @"start free trial", @"subscribe"
+    ]);
+    if (!classHint && !plan && !purchased && !cadence && !continueMarker) return;
+    static NSMutableSet<NSString *> *reported;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ reported = [NSMutableSet set]; });
+    NSString *key = [NSString stringWithFormat:@"%@/%d%d%d%d", className,
+                     plan, purchased, cadence, continueMarker];
+    if ([reported containsObject:key]) return;
+    [reported addObject:key];
+    UIView *view = controller.viewIfLoaded;
+    BOOL loading = amproj_paywallViewHasLoadingIndicator(view, [NSMutableSet set], 0);
+    amproj_debugEvent(@"paywall.controller_appeared", @{
+        @"controller": className,
+        @"view": NSStringFromClass(view.class) ?: @"",
+        @"text_length": @(content.length),
+        @"plan": @(plan),
+        @"purchased": @(purchased),
+        @"cadence": @(cadence),
+        @"continue": @(continueMarker),
+        @"loading": @(loading),
+        @"has_window": @(view.window != nil),
+        @"presenting": NSStringFromClass(controller.presentingViewController.class) ?: @""
+    });
+#else
+    (void)controller;
+#endif
 }
 
 static UIViewController *amproj_findPaywallController(UIViewController *controller,
@@ -6832,9 +6981,9 @@ static UIViewController *amproj_findPaywallController(UIViewController *controll
     return nil;
 }
 
-static UIView *amproj_findPaywallCloseView(UIView *view,
-                                           NSMutableSet<NSValue *> *visited,
-                                           NSUInteger depth) {
+static id amproj_findPaywallCloseView(UIView *view,
+                                      NSMutableSet<NSValue *> *visited,
+                                      NSUInteger depth) {
     if (!view || depth > 32) return nil;
     NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)view];
     if ([visited containsObject:identity]) return nil;
@@ -6850,9 +6999,115 @@ static UIView *amproj_findPaywallCloseView(UIView *view,
     if (closeLabel && (view.isAccessibilityElement || [view isKindOfClass:UIButton.class])) {
         return view;
     }
+    NSArray *accessibilityElements = amproj_paywallAccessibilityChildren(view);
+    if ([accessibilityElements isKindOfClass:NSArray.class]) {
+        for (id element in accessibilityElements) {
+            if (!element || [element isKindOfClass:UIView.class]) continue;
+            NSString *label = nil;
+            if ([element respondsToSelector:@selector(accessibilityLabel)]) {
+                label = ((id (*)(id, SEL))objc_msgSend)(
+                    element, @selector(accessibilityLabel));
+            }
+            NSString *normalized = label.lowercaseString ?: @"";
+            BOOL accessibilityClose = [normalized isEqualToString:@"x"] ||
+                [normalized isEqualToString:@"×"] ||
+                [normalized isEqualToString:@"close"] ||
+                [normalized isEqualToString:@"关闭"] ||
+                [normalized isEqualToString:@"取消"];
+            if (accessibilityClose &&
+                [element respondsToSelector:@selector(accessibilityActivate)]) {
+                return element;
+            }
+        }
+    }
     for (UIView *child in view.subviews) {
-        UIView *closeView = amproj_findPaywallCloseView(child, visited, depth + 1);
+        id closeView = amproj_findPaywallCloseView(child, visited, depth + 1);
         if (closeView) return closeView;
+    }
+    return nil;
+}
+
+static UIControl *amproj_findTopLeftPaywallControl(UIView *view,
+                                                    NSMutableSet<NSValue *> *visited,
+                                                    NSUInteger depth) {
+    if (!view || depth > 32) return nil;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)view];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+    if ([view isKindOfClass:UIControl.class] && view.window) {
+        CGRect frame = [view convertRect:view.bounds toView:view.window];
+        if (CGRectGetMinX(frame) >= 0.0 && CGRectGetMinX(frame) <= 128.0 &&
+            CGRectGetMinY(frame) >= 72.0 && CGRectGetMinY(frame) <= 260.0 &&
+            CGRectGetWidth(frame) <= 128.0 && CGRectGetHeight(frame) <= 128.0) {
+            return (UIControl *)view;
+        }
+    }
+    for (UIView *child in view.subviews) {
+        UIControl *control = amproj_findTopLeftPaywallControl(child, visited, depth + 1);
+        if (control) return control;
+    }
+    return nil;
+}
+
+static void amproj_recordPaywallScanRoot(UIViewController *root, NSString *source) {
+#if AMPROJ_DEBUG
+    if (!root) return;
+    static NSMutableSet<NSValue *> *reported;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ reported = [NSMutableSet set]; });
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)root];
+    if ([reported containsObject:identity]) return;
+    [reported addObject:identity];
+
+    NSMutableArray<NSString *> *classes = [NSMutableArray array];
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    __block void (^walk)(UIViewController *, NSUInteger);
+    walk = ^(UIViewController *controller, NSUInteger depth) {
+        if (!controller || depth > 8 || classes.count >= 32) return;
+        NSValue *controllerID = [NSValue valueWithPointer:(__bridge const void *)controller];
+        if ([visited containsObject:controllerID]) return;
+        [visited addObject:controllerID];
+        NSString *name = NSStringFromClass(controller.class) ?: @"";
+        if (name.length) [classes addObject:name];
+        walk(controller.presentedViewController, depth + 1);
+        if ([controller isKindOfClass:UINavigationController.class]) {
+            walk(((UINavigationController *)controller).visibleViewController, depth + 1);
+        }
+        for (UIViewController *child in controller.childViewControllers) {
+            walk(child, depth + 1);
+        }
+    };
+    walk(root, 0);
+    walk = nil;
+    UIView *view = root.viewIfLoaded;
+    NSString *content = amproj_paywallTextForController(root).lowercaseString;
+    amproj_debugEvent(@"paywall.scan_root", @{
+        @"source": source ?: @"unknown",
+        @"root": NSStringFromClass(root.class) ?: @"",
+        @"classes": classes,
+        @"text_length": @(content.length),
+        @"loading": @(amproj_paywallViewHasLoadingIndicator(view, [NSMutableSet set], 0)),
+        @"has_window": @(view.window != nil),
+        @"presented": NSStringFromClass(root.presentedViewController.class) ?: @""
+    });
+#else
+    (void)root;
+    (void)source;
+#endif
+}
+
+static UIWindow *amproj_alternateVisibleWindow(UIWindow *excluded) {
+    if (!excluded) return nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window != excluded && !window.hidden && window.alpha > 0.01 &&
+                window.rootViewController) return window;
+        }
+    }
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (window != excluded && !window.hidden && window.alpha > 0.01 &&
+            window.rootViewController) return window;
     }
     return nil;
 }
@@ -6868,6 +7123,7 @@ static void amproj_dismissDetectedPaywallFrom(UIViewController *candidate,
         return;
     }
     if (!candidate) return;
+    amproj_recordPaywallScanRoot(candidate, source);
     NSDictionary *evidence = nil;
     UIViewController *paywall = amproj_findPaywallController(
         candidate, [NSMutableSet set], 0, &evidence);
@@ -6923,17 +7179,59 @@ static void amproj_dismissDetectedPaywallFrom(UIViewController *candidate,
         return;
     }
 
+    UINavigationController *navigation = paywall.navigationController;
+    if (navigation.topViewController == paywall && navigation.viewControllers.count > 1) {
+        activePaywallAction = paywall;
+        activePaywallActionAt = now;
+        [navigation popViewControllerAnimated:YES];
+        lastPaywall = paywall;
+        lastDismissAt = now;
+        activePaywallAction = nil;
+        amproj_debugEvent(@"paywall.dismissed", @{
+            @"source": source ?: @"unknown",
+            @"controller": fields[@"controller"] ?: @"",
+            @"method": @"navigation_pop"
+        });
+        return;
+    }
+
+    UIWindow *paywallWindow = paywall.viewIfLoaded.window;
+    UIWindow *alternateWindow = amproj_alternateVisibleWindow(paywallWindow);
+    if (paywallWindow && alternateWindow &&
+        paywallWindow.rootViewController == dismissOwner) {
+        activePaywallAction = paywall;
+        activePaywallActionAt = now;
+        paywallWindow.hidden = YES;
+        [alternateWindow makeKeyAndVisible];
+        lastPaywall = paywall;
+        lastDismissAt = now;
+        activePaywallAction = nil;
+        amproj_debugEvent(@"paywall.dismissed", @{
+            @"source": source ?: @"unknown",
+            @"controller": fields[@"controller"] ?: @"",
+            @"method": @"hide_dedicated_window"
+        });
+        return;
+    }
+
     // A few SwiftUI paywalls are hosted in a dedicated window rather than a
     // modal presentation. In that case, use only an explicitly labelled close
     // button after the strict marker match above.
-    UIView *closeView = amproj_findPaywallCloseView(
+    id closeView = amproj_findPaywallCloseView(
         paywall.viewIfLoaded, [NSMutableSet set], 0);
+    if (!closeView) {
+        closeView = amproj_findTopLeftPaywallControl(
+            paywall.viewIfLoaded, [NSMutableSet set], 0);
+    }
     if (closeView) {
         activePaywallAction = paywall;
         activePaywallActionAt = now;
         BOOL activated = NO;
-        if ([closeView isKindOfClass:UIButton.class]) {
-            [((UIButton *)closeView) sendActionsForControlEvents:UIControlEventTouchUpInside];
+        if ([closeView isKindOfClass:UIControl.class]) {
+            UIControl *control = (UIControl *)closeView;
+            control.enabled = YES;
+            control.userInteractionEnabled = YES;
+            [control sendActionsForControlEvents:UIControlEventTouchUpInside];
             activated = YES;
         } else if ([closeView respondsToSelector:@selector(accessibilityActivate)]) {
             activated = ((BOOL (*)(id, SEL))objc_msgSend)(
@@ -7011,7 +7309,9 @@ static void amproj_scanVisiblePaywall(NSString *source) {
 static void amproj_schedulePaywallScan(UIViewController *candidate, NSString *source) {
     NSString *sourceCopy = [source copy] ?: @"unknown";
     __weak UIViewController *weakCandidate = candidate;
-    NSArray<NSNumber *> *delays = @[@0.05, @0.25, @0.75, @1.5, @3.0, @6.0];
+    NSArray<NSNumber *> *delays = @[
+        @0.05, @0.25, @0.75, @1.5, @3.0, @6.0, @10.0, @20.0, @40.0, @80.0
+    ];
     for (NSNumber *delay in delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                       (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
@@ -7243,6 +7543,10 @@ static BOOL amproj_isPackageController(id controller) {
 static void hooked_viewDidAppear(id self, SEL _cmd, BOOL animated) {
     if (amproj_isPackageController(self)) amproj_beginPackageFlow(@"view_did_appear");
     orig_viewDidAppear(self, _cmd, animated);
+    if ([self isKindOfClass:UIViewController.class]) {
+        amproj_recordPaywallControllerAppearance((UIViewController *)self);
+        amproj_schedulePaywallScan((UIViewController *)self, @"view_did_appear");
+    }
     if (amproj_isPackageController(self)) {
         amproj_debugEvent(@"package_vc.appeared", @{@"class": NSStringFromClass([self class]) ?: @""});
     }
@@ -8242,6 +8546,7 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
             amproj_debugEvent(@"bootstrap.ready", @{@"trigger": startupTrigger});
 #endif
             amproj_installExportHooks();
+            amproj_armPaywallStartupFallback();
             amproj_schedulePaywallScan(nil, @"bootstrap");
         });
     });
@@ -8290,6 +8595,7 @@ static void AMProjExportInit(void) {
                     usingBlock:^(__unused NSNotification *notification) {
             amproj_bootstrapAfterLaunch(@"did_become_active");
             amproj_installImportHook();
+            amproj_armPaywallStartupFallback();
             amproj_schedulePaywallScan(nil, @"did_become_active");
             // The launch URL is the current user action. Consume its deferred
             // candidate first; only then inspect stale app-owned Inbox files.
@@ -8320,6 +8626,7 @@ static void AMProjExportInit(void) {
                        dispatch_get_main_queue(), ^{
             amproj_bootstrapAfterLaunch(@"main_queue_fallback");
             amproj_installImportHook();
+            amproj_armPaywallStartupFallback();
             amproj_schedulePaywallScan(nil, @"main_queue_fallback");
         });
 
