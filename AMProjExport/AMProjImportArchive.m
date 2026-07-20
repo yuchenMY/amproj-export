@@ -1097,11 +1097,12 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
         NSString *currentSignature = AMProjImportXMLAttributeValue(tag, @"sig", &sigRange);
         if (currentSignature.length &&
             ![currentSignature.uppercaseString isEqualToString:expectedHash]) {
-            return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
-                                    @"A project media sig does not match manifest.txt",
-                                    @{ @"entry": resourceName,
-                                       @"expected_sha1": expectedHash,
-                                       @"actual_sig": currentSignature });
+            AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                             @"A project media sig does not match manifest.txt",
+                             @{ @"entry": resourceName,
+                                @"expected_sha1": expectedHash,
+                                @"actual_sig": currentSignature });
+            return nil;
         }
         if (sigRange.location != NSNotFound) {
             if (![currentSignature isEqualToString:expectedHash]) {
