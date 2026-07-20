@@ -6721,6 +6721,36 @@ static NSString *amproj_paywallTextForController(UIViewController *controller) {
     return text;
 }
 
+static BOOL amproj_paywallViewHasLoadingIndicator(UIView *view,
+                                                  NSMutableSet<NSValue *> *visited,
+                                                  NSUInteger depth) {
+    if (!view || depth > 32) return NO;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)view];
+    if ([visited containsObject:identity]) return NO;
+    [visited addObject:identity];
+    NSString *className = NSStringFromClass(view.class).lowercaseString ?: @"";
+    NSString *label = view.accessibilityLabel.lowercaseString ?: @"";
+    BOOL namedLoadingView = [className containsString:@"paywallloading"] ||
+        [className containsString:@"loadingview"] ||
+        [className containsString:@"progressview"] ||
+        [className containsString:@"spinner"] ||
+        [className containsString:@"activityindicator"] ||
+        [label containsString:@"loading"] || [label containsString:@"加载"] ||
+        [label containsString:@"正在加载"];
+    if ([className containsString:@"paywallloading"] ||
+        [label containsString:@"loading"] || [label containsString:@"加载"] ||
+        [label containsString:@"正在加载"]) return YES;
+    if ([view isKindOfClass:UIActivityIndicatorView.class] &&
+        !view.hidden && view.alpha > 0.01) return YES;
+    if (namedLoadingView && view.layer.animationKeys.count) return YES;
+    if (namedLoadingView && ([view isKindOfClass:UIActivityIndicatorView.class] ||
+                             [view isKindOfClass:UIProgressView.class])) return YES;
+    for (UIView *child in view.subviews) {
+        if (amproj_paywallViewHasLoadingIndicator(child, visited, depth + 1)) return YES;
+    }
+    return NO;
+}
+
 static BOOL amproj_isPaywallController(UIViewController *controller,
                                        NSDictionary **evidenceOut) {
     if (!controller) return NO;
@@ -6751,9 +6781,11 @@ static BOOL amproj_isPaywallController(UIViewController *controller,
         [className containsString:@"purchase"] ||
         [className containsString:@"subscription"] ||
         [className containsString:@"otheroptions"];
+    BOOL loading = amproj_paywallViewHasLoadingIndicator(
+        view, [NSMutableSet set], 0);
     BOOL markerMatch = plan && continueMarker &&
         ((purchased && cadence) || (purchased && classHint) || (cadence && classHint));
-    if (!markerMatch) return NO;
+    if (!markerMatch || !loading) return NO;
 
     if (evidenceOut) {
         *evidenceOut = @{
@@ -6762,7 +6794,8 @@ static BOOL amproj_isPaywallController(UIViewController *controller,
             @"purchased": @(purchased),
             @"cadence": @(cadence),
             @"continue": @(continueMarker),
-            @"class_hint": @(classHint)
+            @"class_hint": @(classHint),
+            @"loading": @(loading)
         };
     }
     return YES;
@@ -6799,26 +6832,27 @@ static UIViewController *amproj_findPaywallController(UIViewController *controll
     return nil;
 }
 
-static UIButton *amproj_findPaywallCloseButton(UIView *view,
-                                               NSMutableSet<NSValue *> *visited,
-                                               NSUInteger depth) {
+static UIView *amproj_findPaywallCloseView(UIView *view,
+                                           NSMutableSet<NSValue *> *visited,
+                                           NSUInteger depth) {
     if (!view || depth > 32) return nil;
     NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)view];
     if ([visited containsObject:identity]) return nil;
     [visited addObject:identity];
+    NSString *label = view.accessibilityLabel.lowercaseString ?: @"";
+    NSString *title = @"";
     if ([view isKindOfClass:UIButton.class]) {
-        UIButton *button = (UIButton *)view;
-        NSString *title = [[button titleForState:UIControlStateNormal] lowercaseString] ?: @"";
-        NSString *label = [button.accessibilityLabel.lowercaseString copy] ?: @"";
-        if ([title isEqualToString:@"x"] || [title containsString:@"关闭"] ||
-            [title containsString:@"close"] || [label isEqualToString:@"x"] ||
-            [label containsString:@"关闭"] || [label containsString:@"close"]) {
-            return button;
-        }
+        title = [((UIButton *)view) titleForState:UIControlStateNormal].lowercaseString ?: @"";
+    }
+    BOOL closeLabel = [title isEqualToString:@"x"] || [title containsString:@"关闭"] ||
+        [title containsString:@"close"] || [label isEqualToString:@"x"] ||
+        [label containsString:@"关闭"] || [label containsString:@"close"];
+    if (closeLabel && (view.isAccessibilityElement || [view isKindOfClass:UIButton.class])) {
+        return view;
     }
     for (UIView *child in view.subviews) {
-        UIButton *button = amproj_findPaywallCloseButton(child, visited, depth + 1);
-        if (button) return button;
+        UIView *closeView = amproj_findPaywallCloseView(child, visited, depth + 1);
+        if (closeView) return closeView;
     }
     return nil;
 }
@@ -6841,8 +6875,11 @@ static void amproj_dismissDetectedPaywallFrom(UIViewController *candidate,
 
     static __weak UIViewController *lastPaywall;
     static CFAbsoluteTime lastDismissAt = 0;
+    static __weak UIViewController *activePaywallAction;
+    static CFAbsoluteTime activePaywallActionAt = 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (lastPaywall == paywall && now - lastDismissAt < 10.0) return;
+    if (activePaywallAction == paywall && now - activePaywallActionAt < 2.0) return;
 
     NSMutableDictionary *fields = [evidence mutableCopy] ?: [NSMutableDictionary dictionary];
     fields[@"source"] = source ?: @"unknown";
@@ -6854,17 +6891,34 @@ static void amproj_dismissDetectedPaywallFrom(UIViewController *candidate,
     while (dismissOwner.parentViewController && !dismissOwner.presentingViewController) {
         dismissOwner = dismissOwner.parentViewController;
     }
-    BOOL hasModalPresentation = dismissOwner.presentingViewController != nil ||
-        paywall.presentingViewController != nil;
+    UIViewController *presentingController = dismissOwner.presentingViewController ?
+        dismissOwner.presentingViewController : paywall.presentingViewController;
+    BOOL hasModalPresentation = presentingController != nil;
     if (hasModalPresentation) {
-        lastPaywall = paywall;
-        lastDismissAt = now;
-        [dismissOwner dismissViewControllerAnimated:YES completion:^{
-            amproj_debugEvent(@"paywall.dismissed", @{
+        activePaywallAction = paywall;
+        activePaywallActionAt = now;
+        __weak UIViewController *weakPaywall = paywall;
+        [presentingController dismissViewControllerAnimated:YES completion:^{
+            UIViewController *remaining = weakPaywall;
+            BOOL gone = !remaining ||
+                (!remaining.presentingViewController && !remaining.viewIfLoaded.window);
+            amproj_debugEvent(gone ? @"paywall.dismissed" : @"paywall.dismiss_failed", @{
                 @"source": source ?: @"unknown",
                 @"controller": fields[@"controller"] ?: @"",
-                @"method": @"dismiss"
+                @"method": @"dismiss",
+                @"gone": @(gone)
             });
+            if (gone) {
+                lastPaywall = remaining;
+                lastDismissAt = CFAbsoluteTimeGetCurrent();
+                activePaywallAction = nil;
+            } else {
+                activePaywallAction = nil;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                               dispatch_get_main_queue(), ^{
+                    amproj_dismissDetectedPaywallFrom(remaining, @"dismiss_verify");
+                });
+            }
         }];
         return;
     }
@@ -6872,16 +6926,49 @@ static void amproj_dismissDetectedPaywallFrom(UIViewController *candidate,
     // A few SwiftUI paywalls are hosted in a dedicated window rather than a
     // modal presentation. In that case, use only an explicitly labelled close
     // button after the strict marker match above.
-    UIButton *closeButton = amproj_findPaywallCloseButton(
+    UIView *closeView = amproj_findPaywallCloseView(
         paywall.viewIfLoaded, [NSMutableSet set], 0);
-    if (closeButton) {
+    if (closeView) {
+        activePaywallAction = paywall;
+        activePaywallActionAt = now;
+        BOOL activated = NO;
+        if ([closeView isKindOfClass:UIButton.class]) {
+            [((UIButton *)closeView) sendActionsForControlEvents:UIControlEventTouchUpInside];
+            activated = YES;
+        } else if ([closeView respondsToSelector:@selector(accessibilityActivate)]) {
+            activated = ((BOOL (*)(id, SEL))objc_msgSend)(
+                closeView, @selector(accessibilityActivate));
+        }
+        if (!activated) {
+            activePaywallAction = nil;
+            amproj_debugEvent(@"paywall.dismiss_failed", @{
+                @"source": source ?: @"unknown",
+                @"controller": fields[@"controller"] ?: @"",
+                @"reason": @"close_activation_rejected"
+            });
+            return;
+        }
         lastPaywall = paywall;
         lastDismissAt = now;
-        [closeButton sendActionsForControlEvents:UIControlEventTouchUpInside];
         amproj_debugEvent(@"paywall.dismissed", @{
             @"source": source ?: @"unknown",
             @"controller": fields[@"controller"] ?: @"",
-            @"method": @"close_button"
+            @"method": @"close_button",
+            @"accessibility": @YES
+        });
+        __weak UIViewController *weakPaywall = paywall;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            UIViewController *remaining = weakPaywall;
+            if (!remaining || !remaining.viewIfLoaded.window) return;
+            lastPaywall = nil;
+            activePaywallAction = nil;
+            amproj_debugEvent(@"paywall.dismiss_failed", @{
+                @"source": source ?: @"unknown",
+                @"controller": fields[@"controller"] ?: @"",
+                @"reason": @"close_button_still_visible"
+            });
+            amproj_dismissDetectedPaywallFrom(remaining, @"close_verify");
         });
     } else {
         amproj_debugEvent(@"paywall.dismiss_failed", @{

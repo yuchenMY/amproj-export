@@ -62,6 +62,11 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("did_become_active", SOURCE)
         # A generic hosting controller must not be dismissed by class name alone.
         self.assertIn("BOOL markerMatch = plan && continueMarker", SOURCE)
+        self.assertIn("if (!markerMatch || !loading) return NO;", SOURCE)
+        self.assertIn("UIActivityIndicatorView", SOURCE)
+        self.assertIn("accessibilityActivate", SOURCE)
+        self.assertIn("[presentingController dismissViewControllerAnimated", SOURCE)
+        self.assertIn('gone ? @"paywall.dismissed" : @"paywall.dismiss_failed"', SOURCE)
         self.assertIn("ShareProjectPackageVC", SOURCE)
 
     def test_package_flow_predicate_is_narrow(self):
