@@ -24,11 +24,18 @@ project.amproj
 
 完整格式见 `format_spec.md`。
 
-## v25 离线导入
+## v26 离线导入
 
-### v25 稳定性修复
+### v26 媒体签名修复
 
-- 修复 v23 在 `3/4` 的确定性闪退：AM 会 retain `observeStatus:handler:` 的返回值，v25 恢复与原生 ABI 一致的 `NSString` 对象句柄，不再把整数 `1/2/3` 当对象地址。
+- Android 官方项目包可能在 `manifest.txt` 中提供媒体 SHA-1，却省略 XML `<media>` 的 `sig` 属性。v26 会按资源字节计算并补写大写 SHA-1，避免 iOS 原生 importer 报 `Missing Media`。
+- 已有非空 `sig` 必须与 `manifest.txt` 一致；哈希不匹配、缺少被 XML 引用的媒体或 ZIP 校验失败时会在原生导入前拒绝，不生成假项目。
+- 单 XML 的 manifest 包会在需要时重新生成 ZIP，仅改写 XML 签名并保留 `amproj:` URI、所有 XML 和媒体字节；已有完整签名的多 XML 包保持原 ZIP 不变。
+
+### v25 稳定性修复（v26 保留）
+
+- 修复 v24 在 `storage_status_4_returned` 后的确定性闪退：AM 会无条件关闭原生 `AMProgressAlert`，v24 传入 `nil` 后命中主程序的主动崩溃指令；v25 从 App 自带 storyboard 创建真实控制器并强持有到原生 completion。
+- 保留 v24 的观察器句柄修复：`observeStatus:handler:` 返回 `NSString` 对象句柄，不再把整数 `1/2/3` 当对象地址 retain。
 - 原生 completion 不再直接重载项目列表；列表刷新和“项目行已出现”验证统一由导入事务层执行。
 - native/storage 最后阶段会写入本地 breadcrumb，后端离线时重启 App 也能看到精确中断点。
 - 原生导入开始前强制切换到底部“项目”页；项目页尚未完成挂载时会等待，不再把“主页”控制器当作导入上下文。
@@ -42,7 +49,7 @@ project.amproj
 但必须作为非空 `x3` 传入，因为 AM 在 status 4 后会无条件向它发送 dismiss。
 复制任务完成时同时发出 Firebase 的进度终态 `2` 和成功终态 `4`，失败仍发出 `5`。
 
-因此，`2/4` 或 `3/4` 停住的旧 v20/v21/v22/v23 包不要继续重复安装；请使用 v25 构建。v25 同时兼容 Android 官方的多 XML + `manifest.txt` 项目包，并在资源不完整时明确失败；请确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
+因此，`2/4` 或 `3/4` 停住、闪退的旧 v20-v25 包不要继续重复安装；请使用 v26 构建。v26 保留 Android 官方多 XML + `manifest.txt` 包的完整资源校验，并为缺失 XML `sig` 的单 XML 包自动补齐签名；请确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
 
 稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 先记录候选 URL，再复制一份 launch options，仅从转发给原 AppDelegate 的副本中移除 `.amproj` URL 或对应的 user activity，其他启动参数保持不变；原始字典不会被就地修改。这样可避免 AM 的原生 URL 路径同时处理同一个包。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
 
@@ -65,14 +72,14 @@ AMProjShareExtension/build/AMProjShareExtension.appex
 AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-下载名为 `AMProjExport-v25-dylibs` 的 artifact。其中的 `build-metadata.json`
+下载名为 `AMProjExport-v26-dylibs` 的 artifact。其中的 `build-metadata.json`
 记录插件版本、commit、Actions run ID 以及每个二进制文件的 SHA-256，注入前可用它确认没有混入旧版本产物。
 
-## 从干净 IPA 生成 v25
+## 从干净 IPA 生成 v26
 
 必须以未注入的 `AM_v1.ipa` 为输入，不要用旧测试包继续叠加。主 App Bundle ID 保持 `com.amayaka.meow`。
 
-v25 原生导入桥只支持这份已核验的主程序：
+v26 原生导入桥只支持这份已核验的主程序：
 
 ```text
 AM_v1.ipa SHA-256: B135D99E81E0F3F976CBF4C30BCC491B4B770BD9D0A6841D48083B7A7EA29413
@@ -85,7 +92,7 @@ Mach-O UUID:       4b22d43f-09fc-3bde-859b-78a5d573a503
 
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v25.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v26.ipa `
   --expected-main-uuid $uuid
 ```
 
@@ -94,7 +101,7 @@ python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_d
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v25_debug.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v26_debug.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid
 python .\debug_backend\server.py --token $token
 ```
@@ -104,7 +111,7 @@ python .\debug_backend\server.py --token $token
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v25_share_exp.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v26_share_exp.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid `
   --share-extension .\AMProjShareExtension\build\AMProjShareExtension.appex `
   --app-group-id group.com.amayaka.meow.amprojshare

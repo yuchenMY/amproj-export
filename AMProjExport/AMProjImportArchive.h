@@ -42,6 +42,13 @@ typedef NS_ENUM(NSInteger, AMProjImportArchiveErrorCode) {
  still extracted and integrity-checked. References whose files are absent remain
  unchanged and are counted in `missing_reference_count`. The caller owns the
  successful extraction directory and should remove it after use.
+
+ Manifest SHA-1 values are also applied to matching `<media>` elements as an
+ uppercase `sig` attribute. Existing non-empty signatures must match the
+ manifest (case-insensitively); missing or empty signatures are filled in.
+ Metrics additionally report `media_signature_count`,
+ `rewritten_media_signature_count`, `missing_media_signature_count`, and the
+ internal `resource_hashes` filename-to-SHA-1 map.
  */
 FOUNDATION_EXPORT BOOL AMProjPrepareNativeImport(
     NSURL *archiveURL,

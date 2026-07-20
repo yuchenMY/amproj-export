@@ -53,6 +53,22 @@ class ImportArchiveHostTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(archive.read_bytes()).digest(), source_hash)
         return work / "normalized.amproj"
 
+    def run_native_helper(self, archive, mode, missing=0):
+        """Run the preparation path and return its rewritten primary XML."""
+        source_hash = hashlib.sha256(archive.read_bytes()).digest()
+        work = self.temp / f"work-{archive.stem}"
+        result = subprocess.run(
+            [str(self.executable), str(archive), str(work), mode, str(missing)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(hashlib.sha256(archive.read_bytes()).digest(), source_hash)
+        candidates = list(work.rglob("*.native-import.xml"))
+        self.assertEqual(len(candidates), 1, result.stderr)
+        return candidates[0].read_text(encoding="utf-8")
+
     @staticmethod
     def manifest_bytes(resources, line_ending="\n", trailing=False):
         lines = [
@@ -99,6 +115,23 @@ class ImportArchiveHostTests(unittest.TestCase):
                 )
         return archive
 
+    def make_media_signature_archive(self, name, signature=None):
+        archive = self.temp / name
+        asset = b"media-resource"
+        digest = hashlib.sha1(asset).hexdigest().upper()
+        sig_attribute = f' sig="{signature}"' if signature is not None else ""
+        xml = (
+            '<?xml version="1.0"?><scene>'
+            f'<media uri="amproj:asset.bin" type="video/mp4"{sig_attribute}/>'
+            '<shape fillVideo="amproj:asset.bin"/>'
+            '</scene>'
+        )
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.writestr("scene.xml", xml)
+            output.writestr("asset.bin", asset)
+            output.writestr("manifest.txt", f"{digest}:asset.bin".encode("ascii"))
+        return archive, digest
+
     def test_deflate_without_manifest_and_stored_with_manifest(self):
         self.run_helper(self.make_archive("deflated.amproj", zipfile.ZIP_DEFLATED))
         self.run_helper(
@@ -110,6 +143,27 @@ class ImportArchiveHostTests(unittest.TestCase):
         source_hash = hashlib.sha256(archive.read_bytes()).digest()
         self.run_helper(archive, mode="multi", missing=0)
         self.assertEqual(hashlib.sha256(archive.read_bytes()).digest(), source_hash)
+
+    def test_media_sig_is_synthesized_from_verified_manifest(self):
+        archive, digest = self.make_media_signature_archive("media-sig-missing.amproj")
+        xml = self.run_native_helper(archive, mode="media-sig")
+        self.assertIn(f'sig="{digest}"', xml)
+        self.assertIn("file://", xml)
+
+    def test_existing_media_sig_is_preserved(self):
+        expected = hashlib.sha1(b"media-resource").hexdigest().upper()
+        archive, digest = self.make_media_signature_archive(
+            "media-sig-existing.amproj", signature=expected
+        )
+        xml = self.run_native_helper(archive, mode="media-sig-existing")
+        self.assertIn(f'sig="{digest}"', xml)
+        self.assertEqual(xml.count(f'sig="{digest}"'), 1)
+
+    def test_mismatched_media_sig_is_rejected(self):
+        archive, _ = self.make_media_signature_archive(
+            "media-sig-wrong.amproj", signature="0" * 40
+        )
+        self.run_helper(archive, mode="media-sig-wrong", missing=0)
 
     def test_accepts_strict_manifest_line_endings_and_empty_manifest(self):
         asset = b"resource-one"

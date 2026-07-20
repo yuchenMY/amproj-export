@@ -15,11 +15,15 @@ int main(int argc, const char *argv[]) {
         BOOL expectSuccess = strcmp(argv[3], "ok") == 0 ||
             strcmp(argv[3], "multi") == 0 ||
             strcmp(argv[3], "manifest") == 0 ||
-            strcmp(argv[3], "manifest-empty") == 0;
+            strcmp(argv[3], "manifest-empty") == 0 ||
+            strcmp(argv[3], "media-sig") == 0 ||
+            strcmp(argv[3], "media-sig-existing") == 0;
         BOOL multiXML = strcmp(argv[3], "multi") == 0;
         BOOL verifiedManifest = strcmp(argv[3], "manifest") == 0 || multiXML;
         BOOL emptyManifest = strcmp(argv[3], "manifest-empty") == 0;
-        BOOL standardFixture = !multiXML && !emptyManifest;
+        BOOL mediaSignature = strcmp(argv[3], "media-sig") == 0 ||
+            strcmp(argv[3], "media-sig-existing") == 0;
+        BOOL standardFixture = !multiXML && !emptyManifest && !mediaSignature;
         BOOL normalize = strcmp(argv[3], "normalize") == 0;
         NSUInteger expectedMissing = (NSUInteger)strtoull(argv[4], NULL, 10);
 
@@ -58,6 +62,12 @@ int main(int argc, const char *argv[]) {
             (verifiedManifest && [metrics[@"resource_count"] unsignedIntegerValue] != 1) ||
             (verifiedManifest && [metrics[@"manifest_entry_count"] unsignedIntegerValue] != 1) ||
             (verifiedManifest && [metrics[@"manifest_verified_resource_count"] unsignedIntegerValue] != 1) ||
+            (mediaSignature && [metrics[@"media_signature_count"] unsignedIntegerValue] != 1) ||
+            (mediaSignature && [metrics[@"missing_media_signature_count"] unsignedIntegerValue] != 0) ||
+            (strcmp(argv[3], "media-sig") == 0 &&
+             [metrics[@"rewritten_media_signature_count"] unsignedIntegerValue] != 1) ||
+            (strcmp(argv[3], "media-sig-existing") == 0 &&
+             [metrics[@"rewritten_media_signature_count"] unsignedIntegerValue] != 0) ||
             (emptyManifest && ![metrics[@"manifest_verified"] boolValue]) ||
             (emptyManifest && [metrics[@"resource_count"] unsignedIntegerValue] != 0) ||
             (emptyManifest && [metrics[@"manifest_entry_count"] unsignedIntegerValue] != 0) ||
@@ -78,6 +88,17 @@ int main(int argc, const char *argv[]) {
             (standardFixture && ![xml containsString:@"amproj:missing.mp4"])) {
             NSLog(@"rewritten XML is incorrect: %@ error=%@", xml, error);
             return 5;
+        }
+        if (strcmp(argv[3], "media-sig") == 0 &&
+            (![xml containsString:@"sig=\"D7816E7A58061716DCFAFB4BD985116DDD418826\""] ||
+             ![xml containsString:@"file://"])) {
+            NSLog(@"media sig was not synthesized: %@", xml);
+            return 7;
+        }
+        if (strcmp(argv[3], "media-sig-existing") == 0 &&
+            ![xml containsString:@"sig=\"D7816E7A58061716DCFAFB4BD985116DDD418826\""]) {
+            NSLog(@"existing media sig was not preserved: %@", xml);
+            return 8;
         }
         return 0;
     }

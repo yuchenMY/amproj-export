@@ -161,6 +161,10 @@ static BOOL AMProjFinishNativeBridge(BOOL success, NSError *error) {
             @"generation": @(generation),
             @"filename": filename ?: @"project.amproj",
             @"success": @(success),
+            @"progress_owner_class": progressOwner
+                ? NSStringFromClass(progressOwner.class) : @"",
+            @"progress_owner_presented":
+                @(progressOwner.presentingViewController != nil),
             @"error_domain": error.domain ?: @"",
             @"error_code": @(error.code),
             @"error": error.localizedDescription ?: @""
@@ -940,6 +944,9 @@ static BOOL AMProjStartNativePackageImport(
         @"filename": originalName ?: packageURL.lastPathComponent ?: @"project.amproj",
         @"package_path": packageURL.path ?: @"",
         @"owner_class": NSStringFromClass(owner.class) ?: @"",
+        @"progress_owner_class": NSStringFromClass(progressOwner.class) ?: @"",
+        @"progress_owner_presented":
+            @(progressOwner.presentingViewController != nil),
         @"owner_window_active":
             @(owner.viewIfLoaded.window.windowScene.activationState ==
               UISceneActivationStateForegroundActive)

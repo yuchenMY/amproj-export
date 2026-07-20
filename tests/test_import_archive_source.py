@@ -86,6 +86,22 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn("UPPERCASE_SHA1:filename", header)
         self.assertIn("manifest_verified_resource_count", header)
 
+    def test_media_signatures_are_derived_from_manifest_and_checked(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        for required in (
+            "resourceHashesByNameOut",
+            "AMProjImportMediaResourceName",
+            "media_signature_count",
+            "rewritten_media_signature_count",
+            "missing_media_signature_count",
+            "A project media sig does not match manifest.txt",
+            "sig=\\\"%@\\\"",
+        ):
+            self.assertIn(required, source)
+        # Signature edits and URI rewrites are collected before applying from
+        # right to left; this prevents a longer file URL from shifting ranges.
+        self.assertIn("Apply all disjoint edits from right to left", source)
+
     def test_native_preparation_accepts_multiple_xml_files_and_reports_names(self):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn("if (xmlEntries.count == 0)", source)

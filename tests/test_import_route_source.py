@@ -37,19 +37,19 @@ def function_body(signature: str, next_signature: str) -> str:
 
 class NativeImportRouteSourceTests(unittest.TestCase):
     def test_release_version_metadata_is_consistent(self):
-        self.assertIn('kAMProjPluginVersion = @"25";', SOURCE)
-        self.assertIn('kAMDebugPluginVersion = @"25";', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("AMProj v25", SOURCE)
+        self.assertIn('kAMProjPluginVersion = @"26";', SOURCE)
+        self.assertIn('kAMDebugPluginVersion = @"26";', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("AMProj v26", SOURCE)
         self.assertNotIn("AMProj v23", SOURCE)
         self.assertIn("AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs", WORKFLOW)
-        self.assertIn("AMPROJ_RELEASE_VERSION: '25'", WORKFLOW)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '26'", WORKFLOW)
         self.assertIn('"commit": os.environ["GITHUB_SHA"]', WORKFLOW)
         self.assertIn('"run_id": os.environ["GITHUB_RUN_ID"]', WORKFLOW)
         self.assertIn('"sha256": {', WORKFLOW)
         self.assertIn("build-metadata.json", WORKFLOW)
-        self.assertIn("AM_v1_direct_v25.ipa", README)
-        self.assertIn("AM_v1_direct_v25_debug.ipa", README)
-        self.assertIn("AM_v1_direct_v25.ipa", BUILD_SCRIPT)
+        self.assertIn("AM_v1_direct_v26.ipa", README)
+        self.assertIn("AM_v1_direct_v26_debug.ipa", README)
+        self.assertIn("AM_v1_direct_v26.ipa", BUILD_SCRIPT)
 
     def assert_capture_short_circuits_original(
         self, signature: str, next_signature: str, native_imp_type: str
@@ -172,6 +172,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_nativeBridgeProgressOwner = progressOwner", BRIDGE_SOURCE)
         self.assertIn("amproj_nativeBridgeProgressOwner = nil", BRIDGE_SOURCE)
         self.assertIn('progress_owner_created', BRIDGE_SOURCE)
+        self.assertIn('progress_owner_class', BRIDGE_SOURCE)
+        self.assertIn('progress_owner_presented', BRIDGE_SOURCE)
         self.assertNotIn("reference,\n            nil,", call)
         self.assertIn("explicit x2", BRIDGE_SOURCE)
         self.assertIn("x20 context", BRIDGE_SOURCE)
@@ -359,7 +361,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_arm64_shim_sets_hidden_owner_without_corrupting_callee_saved_state(self):
         self.assertIn("_AMProjCallNativePackageImport", BRIDGE_ASSEMBLY)
         self.assertIn("str x20, [sp, #16]", BRIDGE_ASSEMBLY)
-        self.assertIn("weak presentation owner in the hidden Swift x20 context", BRIDGE_ASSEMBLY)
+        self.assertIn("presentation owner in hidden Swift x20", BRIDGE_ASSEMBLY)
         self.assertIn("mov x20, x7", BRIDGE_ASSEMBLY)
         self.assertIn("blr x9", BRIDGE_ASSEMBLY)
         self.assertIn("ldr x20, [sp, #16]", BRIDGE_ASSEMBLY)
@@ -560,9 +562,11 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertLess(legacy_route, normalize)
         self.assertLess(normalize, queue)
         self.assertIn('route = @"validated_original_package"', body[original_route:legacy_route])
+        self.assertIn('route = @"normalized_manifest_media_signatures"', body[original_route:queue])
+        self.assertIn('rewritten_media_signature_count', body[original_route:queue])
         self.assertIn('route = @"normalized_legacy_package"', body[legacy_route:queue])
-        self.assertNotIn("AMProjNormalizeProjectArchive", body[original_route:legacy_route])
         self.assertIn('preparationMetrics[@"missing_reference_count"]', body)
+        self.assertIn('import.missing_media_signatures', body)
 
     def test_incomplete_resource_archive_is_rejected_before_native_bridge(self):
         body = function_body(
@@ -628,7 +632,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_tryDispatchPendingImport",
         )
         success_branch = finish.index("if (success)")
-        self.assertNotIn('@"AMProj v25 · 4/4', finish[success_branch:])
+        self.assertNotIn('@"AMProj v26 · 4/4', finish[success_branch:])
         self.assertIn("amproj_importVerificationActive = YES", finish[success_branch:])
         self.assertIn('@"verifying_project_row"', finish[success_branch:])
         self.assertIn("amproj_verifyImportedProjectRow", finish[success_branch:])
@@ -642,7 +646,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         verified_branch = verification[verification.index("if (verified)") :]
         self.assertIn('@"import.project_row_verified"', verification)
         self.assertIn("amproj_releaseImportTransaction(transactionID, YES)", verified_branch)
-        self.assertIn('AMProj v25 · 4/4', verified_branch)
+        self.assertIn('AMProj v26 · 4/4', verified_branch)
         self.assertIn('amproj_resumeQueuedImports(@"project_row_verified")', verified_branch)
         self.assertIn('@"import.project_row_missing"', verification)
         self.assertIn("amproj_activateNextPendingImport()", verification)
@@ -650,7 +654,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertEqual(SOURCE.count("AMProj v25 · 4/4"), 1)
+        self.assertEqual(SOURCE.count("AMProj v26 · 4/4"), 1)
 
     def test_native_failure_alert_is_observed_without_replacing_it(self):
         detector = function_body(
@@ -662,6 +666,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('containsString:@"import failed"', detector)
         self.assertIn('containsString:@"upload failed"', detector)
         self.assertIn('containsString:@"corrupt"', detector)
+        self.assertIn('containsString:@"missing media"', detector)
+        self.assertIn('containsString:@"\\u5a92\\u4f53\\u7f3a\\u5931"', detector)
 
         present = function_body(
             "static void hooked_presentVC",
@@ -672,7 +678,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v25 \\u00b7 E40", present)
+        self.assertIn("AMProj v26 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),
