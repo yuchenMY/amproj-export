@@ -83,12 +83,21 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("UIActivityIndicatorView.class", helper)
         self.assertIn("UIButton.class", helper)
+        self.assertIn("amproj_startupLoadingButtonLooksLikeClose", helper)
         self.assertIn("button.alpha = 1.0", helper)
         self.assertIn("button.hidden = NO", helper)
         self.assertIn("bringSubviewToFront:button", helper)
         self.assertIn("NSArray<UIView *> *children = [view.subviews copy]", helper)
         self.assertNotIn("UIControl *", helper)
         self.assertNotIn("enabled = YES", helper)
+
+        windows = function_body(
+            "static BOOL amproj_hideStartupLoadingInWindows",
+            "static NSUInteger amproj_startupLoadingSkipAttempt",
+        )
+        self.assertIn("amproj_findPaywallController", windows)
+        self.assertIn("UISceneActivationStateForegroundActive", windows)
+        self.assertIn("paywall.viewIfLoaded", windows)
 
         scheduler = function_body(
             "static void amproj_scheduleStartupLoadingSkip",
@@ -97,6 +106,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("dispatch_once", scheduler)
         self.assertIn("300 * NSEC_PER_MSEC", scheduler)
         self.assertIn("amproj_skipStartupLoadingPass", scheduler)
+        pass_body = function_body(
+            "static void amproj_skipStartupLoadingPass",
+            "static void amproj_scheduleStartupLoadingSkip",
+        )
+        self.assertIn("amproj_armPaywallStartupFallback", pass_body)
+        self.assertIn("amproj_startupLoadingSkipAttempt < 20", pass_body)
 
     def test_package_flow_predicate_is_narrow(self):
         body = function_body(
