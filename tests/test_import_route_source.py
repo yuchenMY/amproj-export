@@ -37,19 +37,40 @@ def function_body(signature: str, next_signature: str) -> str:
 
 class NativeImportRouteSourceTests(unittest.TestCase):
     def test_release_version_metadata_is_consistent(self):
-        self.assertIn('kAMProjPluginVersion = @"26";', SOURCE)
-        self.assertIn('kAMDebugPluginVersion = @"26";', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("AMProj v26", SOURCE)
+        self.assertIn('kAMProjPluginVersion = @"27";', SOURCE)
+        self.assertIn('kAMDebugPluginVersion = @"27";', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("AMProj v27", SOURCE)
         self.assertNotIn("AMProj v23", SOURCE)
         self.assertIn("AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs", WORKFLOW)
-        self.assertIn("AMPROJ_RELEASE_VERSION: '26'", WORKFLOW)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '27'", WORKFLOW)
         self.assertIn('"commit": os.environ["GITHUB_SHA"]', WORKFLOW)
         self.assertIn('"run_id": os.environ["GITHUB_RUN_ID"]', WORKFLOW)
         self.assertIn('"sha256": {', WORKFLOW)
         self.assertIn("build-metadata.json", WORKFLOW)
-        self.assertIn("AM_v1_direct_v26.ipa", README)
-        self.assertIn("AM_v1_direct_v26_debug.ipa", README)
-        self.assertIn("AM_v1_direct_v26.ipa", BUILD_SCRIPT)
+        self.assertIn("AM_v1_direct_v27.ipa", README)
+        self.assertIn("AM_v1_direct_v27_debug.ipa", README)
+        self.assertIn("AM_v1_direct_v27.ipa", BUILD_SCRIPT)
+
+    def test_paywall_filter_requires_multiple_subscription_markers(self):
+        self.assertIn("paywall.detected", SOURCE)
+        self.assertIn("paywall.dismissed", SOURCE)
+        self.assertIn("选择一个套餐", SOURCE)
+        self.assertIn("已经购买", SOURCE)
+        self.assertIn("每周", SOURCE)
+        self.assertIn("continue", SOURCE)
+        self.assertIn("amproj_schedulePaywallScan", SOURCE)
+        self.assertIn("did_become_active", SOURCE)
+        # A generic hosting controller must not be dismissed by class name alone.
+        self.assertIn("BOOL markerMatch = plan && continueMarker", SOURCE)
+        self.assertIn("ShareProjectPackageVC", SOURCE)
+
+    def test_package_flow_predicate_is_narrow(self):
+        body = function_body(
+            "static BOOL amproj_isPackageControllerName",
+            "static BOOL amproj_isSharePackageControllerRecursive",
+        )
+        self.assertIn("ShareProjectPackageVC", body)
+        self.assertNotIn('containsString:@"Package"]', body)
 
     def assert_capture_short_circuits_original(
         self, signature: str, next_signature: str, native_imp_type: str
@@ -632,7 +653,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_tryDispatchPendingImport",
         )
         success_branch = finish.index("if (success)")
-        self.assertNotIn('@"AMProj v26 · 4/4', finish[success_branch:])
+        self.assertNotIn('@"AMProj v27 · 4/4', finish[success_branch:])
         self.assertIn("amproj_importVerificationActive = YES", finish[success_branch:])
         self.assertIn('@"verifying_project_row"', finish[success_branch:])
         self.assertIn("amproj_verifyImportedProjectRow", finish[success_branch:])
@@ -646,7 +667,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         verified_branch = verification[verification.index("if (verified)") :]
         self.assertIn('@"import.project_row_verified"', verification)
         self.assertIn("amproj_releaseImportTransaction(transactionID, YES)", verified_branch)
-        self.assertIn('AMProj v26 · 4/4', verified_branch)
+        self.assertIn('AMProj v27 · 4/4', verified_branch)
         self.assertIn('amproj_resumeQueuedImports(@"project_row_verified")', verified_branch)
         self.assertIn('@"import.project_row_missing"', verification)
         self.assertIn("amproj_activateNextPendingImport()", verification)
@@ -654,7 +675,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertEqual(SOURCE.count("AMProj v26 · 4/4"), 1)
+        self.assertEqual(SOURCE.count("AMProj v27 · 4/4"), 1)
 
     def test_native_failure_alert_is_observed_without_replacing_it(self):
         detector = function_body(
@@ -678,7 +699,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v26 \\u00b7 E40", present)
+        self.assertIn("AMProj v27 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),

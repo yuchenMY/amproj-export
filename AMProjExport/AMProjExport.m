@@ -40,7 +40,7 @@
 #import "AMProjImportArchive.h"
 #import "AMProjNativeImportBridge.h"
 
-static NSString *const kAMProjPluginVersion = @"26";
+static NSString *const kAMProjPluginVersion = @"27";
 
 #if AMPROJ_DEBUG
 #import "AMDebugTransport.h"
@@ -3290,10 +3290,10 @@ static NSString* amproj_visibleImportFileError(NSError *error) {
     }
     NSString *diagnostics = amproj_copyDiagnosticSummary(error);
     if (diagnostics.length) {
-        return [NSString stringWithFormat:@"AMProj v26 \u00b7 %@ (E%ld \u00b7 %@)",
+        return [NSString stringWithFormat:@"AMProj v27 \u00b7 %@ (E%ld \u00b7 %@)",
                                           message, (long)error.code, diagnostics];
     }
-    return [NSString stringWithFormat:@"AMProj v26 \u00b7 %@ (E%ld)",
+    return [NSString stringWithFormat:@"AMProj v27 \u00b7 %@ (E%ld)",
                                       message, (long)error.code];
 }
 
@@ -4043,7 +4043,7 @@ static UIViewController* amproj_topViewController(UIViewController *controller) 
     }
     NSURL *selectedURL = [URLs.firstObject copy];
     BOOL heldSecurityScope = [selectedURL startAccessingSecurityScopedResource];
-    amproj_showImportStatus(@"AMProj v26 · 1/4 已选择 .amproj 文件", NO);
+    amproj_showImportStatus(@"AMProj v27 · 1/4 已选择 .amproj 文件", NO);
     dispatch_async(amproj_importInboxQueue(), ^{
         BOOL prepared = NO;
         AMProjIncomingURLResult result = amproj_handleIncomingProjectURLSafely(
@@ -4206,7 +4206,7 @@ static BOOL amproj_pauseForNativeBridgeRestart(NSString *transactionID,
     if (amproj_nativeBridgeRestartNoticeShown) return YES;
     amproj_nativeBridgeRestartNoticeShown = YES;
     NSString *message =
-        @"AMProj v26 \u539f\u751f\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u5b8c\u5168\u5173\u95ed\u5e76\u91cd\u65b0\u6253\u5f00 Alight Motion \u540e\u518d\u91cd\u8bd5\u3002\u5df2\u4fdd\u7559\u5bfc\u5165\u7f13\u5b58\u5305\u3002";
+        @"AMProj v27 \u539f\u751f\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u5b8c\u5168\u5173\u95ed\u5e76\u91cd\u65b0\u6253\u5f00 Alight Motion \u540e\u518d\u91cd\u8bd5\u3002\u5df2\u4fdd\u7559\u5bfc\u5165\u7f13\u5b58\u5305\u3002";
     amproj_debugEvent(@"import.local_bridge_requires_restart", @{
         @"transaction_id": transactionID ?: @"",
         @"filename": name ?: @"project.amproj",
@@ -4229,7 +4229,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
         @autoreleasepool {
             @try {
             amproj_showImportStatusForTransaction(
-                @"AMProj v26 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u5e76\u89c4\u8303\u5316\u9879\u76ee\u5305",
+                @"AMProj v27 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u5e76\u89c4\u8303\u5316\u9879\u76ee\u5305",
                 NO, transactionID);
 
             NSDictionary *validationMetrics = nil;
@@ -4384,7 +4384,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                         ? preparationError.localizedDescription
                         : @"\u9879\u76ee\u5305\u5b8c\u6574\u6027\u6821\u9a8c\u6216\u89c4\u8303\u5316\u5931\u8d25";
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v26 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u89c4\u8303\u5316\uff1a%@", detail];
+                        @"AMProj v27 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u89c4\u8303\u5316\uff1a%@", detail];
                     amproj_showImportStatusForTransaction(visible, YES, transactionID);
                     amproj_presentImportError(visible);
                 }
@@ -4451,7 +4451,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                 return;
             }
             amproj_showImportStatusForTransaction(
-                @"AMProj v26 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165",
+                @"AMProj v27 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165",
                 NO, transactionID);
             amproj_queuePreparedImport(preparedURL, nameSnapshot, transactionID);
             } @catch (NSException *exception) {
@@ -4473,7 +4473,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                 });
                 if (!silentErrors) {
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v26 · 项目包处理异常：%@", reason];
+                        @"AMProj v27 · 项目包处理异常：%@", reason];
                     amproj_showImportStatusForTransaction(visible, YES, transactionID);
                     amproj_presentImportError(visible);
                 }
@@ -4547,7 +4547,7 @@ static void amproj_activateNextPendingImport(void) {
     amproj_markImportTransactionState(
         transactionID, AMProjImportTransactionWaitingForProjects);
     amproj_showImportStatusForTransaction(
-        @"AMProj v26 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d",
+        @"AMProj v27 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d",
         NO, transactionID);
     amproj_tryDispatchPendingImport(generation);
 }
@@ -4758,7 +4758,7 @@ static void amproj_verifyImportedProjectRow(NSUInteger generation,
             amproj_importVisibleStageRank = 0;
             amproj_visibleStatusTransactionID = nil;
             amproj_showImportStatusForTransaction(
-                @"AMProj v26 · 4/4 已验证项目已出现在底部“项目”", NO,
+                @"AMProj v27 · 4/4 已验证项目已出现在底部“项目”", NO,
                 transactionID);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC),
                            dispatch_get_main_queue(), ^{
@@ -4804,7 +4804,7 @@ static void amproj_verifyImportedProjectRow(NSUInteger generation,
             @"error": verifyError.localizedDescription
         });
         NSString *visible = [NSString stringWithFormat:
-            @"AMProj v26 · 导入未完成：%@。缓存包已保留，可重试。",
+            @"AMProj v27 · 导入未完成：%@。缓存包已保留，可重试。",
             verifyError.localizedDescription];
         amproj_showImportStatusForTransaction(visible, YES, transactionID);
         amproj_presentImportErrorOfferingPicker(visible, NO);
@@ -4872,7 +4872,7 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
                                          amproj_importTransactionForID(transactionID).fingerprint,
                                          @"verifying_project_row", nil, nil, @4, nil);
             amproj_showImportStatusForTransaction(
-                @"AMProj v26 · 原生回调完成，正在确认项目已出现在底部“项目”",
+                @"AMProj v27 · 原生回调完成，正在确认项目已出现在底部“项目”",
                 NO, transactionID);
             amproj_verifyImportedProjectRow(amproj_importVerificationGeneration,
                                             name ?: @"project.amproj",
@@ -4890,7 +4890,7 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
             NSString *detail = error.localizedDescription.length
                 ? error.localizedDescription : @"AM \u672c\u5730\u9879\u76ee\u5305\u5bfc\u5165\u5931\u8d25";
             NSString *visible = [NSString stringWithFormat:
-                @"AMProj v26 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d\uff1a%@", detail];
+                @"AMProj v27 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d\uff1a%@", detail];
             amproj_showImportStatusForTransaction(visible, YES, transactionID);
             if (![error.userInfo[@"AMProjNativeAlertPresented"] boolValue]) {
                 amproj_presentImportErrorOfferingPicker(visible, NO);
@@ -5022,7 +5022,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             } else if (started &&
                        generation == amproj_activeNativeImportGeneration) {
                 amproj_showImportStatusForTransaction(
-                    @"AMProj v26 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u5e95\u90e8\u201c\u9879\u76ee\u201d",
+                    @"AMProj v27 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u5e95\u90e8\u201c\u9879\u76ee\u201d",
                     NO, transactionID);
                 amproj_debugEvent(@"import.local_bridge_started", @{
                     @"success": @YES,
@@ -5057,7 +5057,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                 @"bridge_available": @NO
             });
             amproj_showImportStatusForTransaction(
-                @"AMProj v26 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea",
+                @"AMProj v27 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea",
                 YES, transactionID);
             amproj_presentImportErrorOfferingPicker(
                 @"\u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c\u901a\u8fc7\uff0c\u4f46 Alight Motion \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u672a\u80fd\u5c31\u7eea\u3002\u672c\u6b21\u6ca1\u6709\u56de\u9000\u5230\u4efb\u4f55\u4e0a\u4f20\u5165\u53e3\u3002",
@@ -5341,7 +5341,7 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
             });
             if (!silentErrors) {
                 amproj_showImportStatusForTransaction(
-                    @"AMProj v26 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25",
+                    @"AMProj v27 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25",
                     YES, transactionID);
                 amproj_presentImportError(@"无法创建导入缓存，请检查设备剩余空间后重试。");
             }
@@ -5502,10 +5502,10 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
         });
         amproj_markImportTransactionState(transactionID, AMProjImportTransactionValidating);
         amproj_showImportStatusForTransaction(
-            @"AMProj v26 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587件",
+            @"AMProj v27 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587件",
             NO, transactionID);
         amproj_showImportStatusForTransaction(
-            @"AMProj v26 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305",
+            @"AMProj v27 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305",
             NO, transactionID);
         amproj_prepareCopiedArchive(
             destination, directory, originalName, source, silentErrors, transactionID);
@@ -6336,7 +6336,7 @@ static void hooked_projectsImportAlertViewDidLoad(id self, SEL _cmd) {
     });
     if (recognizedQueuedPackage) {
         amproj_showImportStatus(
-            @"AMProj v26 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d", NO);
+            @"AMProj v27 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d", NO);
     }
 }
 
@@ -6354,7 +6354,7 @@ static void hooked_projectsImportAlertOnPressImport(id self, SEL _cmd, id sender
     });
     if (tracked) {
         amproj_showImportStatus(
-            @"AMProj v26 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
+            @"AMProj v27 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
     }
     if (orig_projectsImportAlertOnPressImport) {
         orig_projectsImportAlertOnPressImport(self, _cmd, sender);
@@ -6479,7 +6479,10 @@ static NSArray<NSString*>* amproj_controllerClassChain(void) {
 }
 
 static BOOL amproj_isPackageControllerName(NSString *className) {
-    return className.length && [className containsString:@"Package"];
+    // Do not classify unrelated monetization/transport controllers as an
+    // export package flow. The v27b binary's concrete controller is the
+    // Swift-mangled ShareProjectPackageVC.
+    return className.length && [className containsString:@"ShareProjectPackageVC"];
 }
 
 static BOOL amproj_isSharePackageControllerRecursive(UIViewController *controller,
@@ -6658,6 +6661,284 @@ static BOOL amproj_isIPAFireWelcome(UIViewController *controller) {
          [content containsString:@"شكراً لاستخدامك تطبيقاتنا"]);
 }
 
+static BOOL amproj_paywallContentContainsAny(NSString *content,
+                                             NSArray<NSString *> *markers) {
+    if (!content.length) return NO;
+    for (NSString *marker in markers) {
+        if (marker.length && [content containsString:marker]) return YES;
+    }
+    return NO;
+}
+
+static void amproj_appendPaywallViewText(UIView *view, NSMutableString *output,
+                                         NSMutableSet<NSValue *> *visited,
+                                         NSUInteger depth) {
+    if (!view || !output || depth > 32) return;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)view];
+    if ([visited containsObject:identity]) return;
+    [visited addObject:identity];
+
+    NSArray<NSString *> *values = @[
+        view.accessibilityLabel ?: @"",
+        [view.accessibilityValue isKindOfClass:NSString.class] ? view.accessibilityValue : @"",
+        [view.accessibilityHint isKindOfClass:NSString.class] ? view.accessibilityHint : @"",
+        [view isKindOfClass:UILabel.class] ? ((UILabel *)view).text ?: @"" : @"",
+        [view isKindOfClass:UITextView.class] ? ((UITextView *)view).text ?: @"" : @"",
+        [view isKindOfClass:UITextField.class] ? ((UITextField *)view).text ?: @"" : @""
+    ];
+    for (NSString *value in values) {
+        if (value.length) {
+            [output appendString:value];
+            [output appendString:@"\n"];
+        }
+    }
+    if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)view;
+        NSString *title = [button titleForState:UIControlStateNormal];
+        if (title.length) {
+            [output appendString:title];
+            [output appendString:@"\n"];
+        }
+    }
+    for (UIView *child in view.subviews) {
+        amproj_appendPaywallViewText(child, output, visited, depth + 1);
+    }
+}
+
+static NSString *amproj_paywallTextForController(UIViewController *controller) {
+    if (!controller) return @"";
+    NSMutableString *text = [NSMutableString string];
+    NSString *className = NSStringFromClass(controller.class);
+    if (className.length) [text appendFormat:@"%@\n", className];
+    if (controller.title.length) [text appendFormat:@"%@\n", controller.title];
+    if (controller.navigationItem.title.length) {
+        [text appendFormat:@"%@\n", controller.navigationItem.title];
+    }
+    UIView *view = controller.viewIfLoaded;
+    if (view) {
+        amproj_appendPaywallViewText(view, text, [NSMutableSet set], 0);
+    }
+    return text;
+}
+
+static BOOL amproj_isPaywallController(UIViewController *controller,
+                                       NSDictionary **evidenceOut) {
+    if (!controller) return NO;
+    UIView *view = controller.viewIfLoaded;
+    if (view && (view.hidden || view.alpha <= 0.01 || !view.window)) return NO;
+
+    NSString *rawText = amproj_paywallTextForController(controller);
+    NSString *content = rawText.lowercaseString;
+    BOOL plan = amproj_paywallContentContainsAny(content, @[
+        @"选择一个套餐", @"选择套餐", @"choose a plan", @"select a plan",
+        @"choose a subscription", @"select a subscription"
+    ]);
+    BOOL purchased = amproj_paywallContentContainsAny(content, @[
+        @"已经购买", @"已购买", @"already purchased", @"restore purchase",
+        @"restore purchases"
+    ]);
+    BOOL cadence = amproj_paywallContentContainsAny(content, @[
+        @"每周", @"每年", @"weekly", @"yearly", @"per week", @"per year",
+        @"week", @"year"
+    ]);
+    BOOL continueMarker = amproj_paywallContentContainsAny(content, @[
+        @"继续", @"continue", @"start free trial", @"subscribe"
+    ]);
+    NSString *className = NSStringFromClass(controller.class).lowercaseString ?: @"";
+    BOOL classHint = [className containsString:@"paywall"] ||
+        [className containsString:@"monetization"] ||
+        [className containsString:@"comparison"] ||
+        [className containsString:@"purchase"] ||
+        [className containsString:@"subscription"] ||
+        [className containsString:@"otheroptions"];
+    BOOL markerMatch = plan && continueMarker &&
+        ((purchased && cadence) || (purchased && classHint) || (cadence && classHint));
+    if (!markerMatch) return NO;
+
+    if (evidenceOut) {
+        *evidenceOut = @{
+            @"controller": NSStringFromClass(controller.class) ?: @"",
+            @"plan": @(plan),
+            @"purchased": @(purchased),
+            @"cadence": @(cadence),
+            @"continue": @(continueMarker),
+            @"class_hint": @(classHint)
+        };
+    }
+    return YES;
+}
+
+static UIViewController *amproj_findPaywallController(UIViewController *controller,
+                                                       NSMutableSet<NSValue *> *visited,
+                                                       NSUInteger depth,
+                                                       NSDictionary **evidenceOut) {
+    if (!controller || depth > 16) return nil;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+
+    // Check the visible modal/content child first so a paywall nested in a
+    // navigation controller is dismissed at the correct presentation level.
+    if (controller.presentedViewController) {
+        UIViewController *found = amproj_findPaywallController(
+            controller.presentedViewController, visited, depth + 1, evidenceOut);
+        if (found) return found;
+    }
+    if ([controller isKindOfClass:UINavigationController.class]) {
+        UIViewController *found = amproj_findPaywallController(
+            ((UINavigationController *)controller).visibleViewController,
+            visited, depth + 1, evidenceOut);
+        if (found) return found;
+    }
+    for (UIViewController *child in controller.childViewControllers) {
+        UIViewController *found = amproj_findPaywallController(
+            child, visited, depth + 1, evidenceOut);
+        if (found) return found;
+    }
+    if (amproj_isPaywallController(controller, evidenceOut)) return controller;
+    return nil;
+}
+
+static UIButton *amproj_findPaywallCloseButton(UIView *view,
+                                               NSMutableSet<NSValue *> *visited,
+                                               NSUInteger depth) {
+    if (!view || depth > 32) return nil;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)view];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+    if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)view;
+        NSString *title = [[button titleForState:UIControlStateNormal] lowercaseString] ?: @"";
+        NSString *label = [button.accessibilityLabel.lowercaseString copy] ?: @"";
+        if ([title isEqualToString:@"x"] || [title containsString:@"关闭"] ||
+            [title containsString:@"close"] || [label isEqualToString:@"x"] ||
+            [label containsString:@"关闭"] || [label containsString:@"close"]) {
+            return button;
+        }
+    }
+    for (UIView *child in view.subviews) {
+        UIButton *button = amproj_findPaywallCloseButton(child, visited, depth + 1);
+        if (button) return button;
+    }
+    return nil;
+}
+
+static void amproj_dismissDetectedPaywallFrom(UIViewController *candidate,
+                                              NSString *source) {
+    if (![NSThread isMainThread]) {
+        __weak UIViewController *weakCandidate = candidate;
+        NSString *sourceCopy = [source copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            amproj_dismissDetectedPaywallFrom(weakCandidate, sourceCopy);
+        });
+        return;
+    }
+    if (!candidate) return;
+    NSDictionary *evidence = nil;
+    UIViewController *paywall = amproj_findPaywallController(
+        candidate, [NSMutableSet set], 0, &evidence);
+    if (!paywall) return;
+
+    static __weak UIViewController *lastPaywall;
+    static CFAbsoluteTime lastDismissAt = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (lastPaywall == paywall && now - lastDismissAt < 10.0) return;
+
+    NSMutableDictionary *fields = [evidence mutableCopy] ?: [NSMutableDictionary dictionary];
+    fields[@"source"] = source ?: @"unknown";
+    amproj_debugEvent(@"paywall.detected", fields);
+    NSLog(@"[AMProjExport] Detected stalled subscription paywall (%@)",
+          fields[@"controller"] ?: @"");
+
+    UIViewController *dismissOwner = paywall;
+    while (dismissOwner.parentViewController && !dismissOwner.presentingViewController) {
+        dismissOwner = dismissOwner.parentViewController;
+    }
+    BOOL hasModalPresentation = dismissOwner.presentingViewController != nil ||
+        paywall.presentingViewController != nil;
+    if (hasModalPresentation) {
+        lastPaywall = paywall;
+        lastDismissAt = now;
+        [dismissOwner dismissViewControllerAnimated:YES completion:^{
+            amproj_debugEvent(@"paywall.dismissed", @{
+                @"source": source ?: @"unknown",
+                @"controller": fields[@"controller"] ?: @"",
+                @"method": @"dismiss"
+            });
+        }];
+        return;
+    }
+
+    // A few SwiftUI paywalls are hosted in a dedicated window rather than a
+    // modal presentation. In that case, use only an explicitly labelled close
+    // button after the strict marker match above.
+    UIButton *closeButton = amproj_findPaywallCloseButton(
+        paywall.viewIfLoaded, [NSMutableSet set], 0);
+    if (closeButton) {
+        lastPaywall = paywall;
+        lastDismissAt = now;
+        [closeButton sendActionsForControlEvents:UIControlEventTouchUpInside];
+        amproj_debugEvent(@"paywall.dismissed", @{
+            @"source": source ?: @"unknown",
+            @"controller": fields[@"controller"] ?: @"",
+            @"method": @"close_button"
+        });
+    } else {
+        amproj_debugEvent(@"paywall.dismiss_failed", @{
+            @"source": source ?: @"unknown",
+            @"controller": fields[@"controller"] ?: @"",
+            @"reason": @"no_modal_or_labelled_close_button"
+        });
+    }
+}
+
+static void amproj_scanVisiblePaywall(NSString *source) {
+    if (![NSThread isMainThread]) {
+        NSString *sourceCopy = [source copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            amproj_scanVisiblePaywall(sourceCopy);
+        });
+        return;
+    }
+    NSMutableSet<NSValue *> *seenWindows = [NSMutableSet set];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] ||
+            scene.activationState == UISceneActivationStateUnattached) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (!window.rootViewController || window.hidden || window.alpha <= 0.01) continue;
+            NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)window];
+            if ([seenWindows containsObject:identity]) continue;
+            [seenWindows addObject:identity];
+            amproj_dismissDetectedPaywallFrom(window.rootViewController, source);
+        }
+    }
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (!window.rootViewController || window.hidden || window.alpha <= 0.01) continue;
+        NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)window];
+        if ([seenWindows containsObject:identity]) continue;
+        [seenWindows addObject:identity];
+        amproj_dismissDetectedPaywallFrom(window.rootViewController, source);
+    }
+}
+
+static void amproj_schedulePaywallScan(UIViewController *candidate, NSString *source) {
+    NSString *sourceCopy = [source copy] ?: @"unknown";
+    __weak UIViewController *weakCandidate = candidate;
+    NSArray<NSNumber *> *delays = @[@0.05, @0.25, @0.75, @1.5, @3.0, @6.0];
+    for (NSNumber *delay in delays) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                      (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIViewController *root = weakCandidate;
+            if (root) {
+                amproj_dismissDetectedPaywallFrom(root, sourceCopy);
+            } else {
+                amproj_scanVisiblePaywall(sourceCopy);
+            }
+        });
+    }
+}
+
 static NSString* amproj_projectTitleRecursive(UIViewController *controller, NSUInteger depth,
                                                NSMutableSet<NSValue *> *visited) {
     if (!controller || depth > 8) return nil;
@@ -6812,7 +7093,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             amproj_importDispatchCoolingDown = NO;
         }
         amproj_showImportStatus([NSString stringWithFormat:
-            @"AMProj v26 \u00b7 E40 \u00b7 %@", failureDescription], YES);
+            @"AMProj v27 \u00b7 E40 \u00b7 %@", failureDescription], YES);
         amproj_flushDebugEvents();
         if (!bridgeHandled) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
@@ -6853,6 +7134,9 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         amproj_debugEvent(@"present.return", @{
             @"duration_ms": @((CFAbsoluteTimeGetCurrent() - started) * 1000.0)
         });
+    }
+    if (!isActivity && ![controller isKindOfClass:UIAlertController.class]) {
+        amproj_schedulePaywallScan(controller, @"presentation");
     }
 }
 
@@ -7853,7 +8137,7 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                 if (phase.length && ![phase isEqualToString:@"completed"] &&
                     ![phase isEqualToString:@"failed"]) {
                     amproj_showImportStatus([NSString stringWithFormat:
-                        @"AMProj v26 · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
+                        @"AMProj v27 · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
                         interruptedStage], YES);
                 }
             }
@@ -7871,6 +8155,7 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
             amproj_debugEvent(@"bootstrap.ready", @{@"trigger": startupTrigger});
 #endif
             amproj_installExportHooks();
+            amproj_schedulePaywallScan(nil, @"bootstrap");
         });
     });
 }
@@ -7879,9 +8164,9 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v26-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v27-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v26 =====");
+        NSLog(@"[AMProjExport] ===== Loading v27 =====");
 #endif
 
         // ObjC classes are registered before image constructors. Installing only
@@ -7914,10 +8199,11 @@ static void AMProjExportInit(void) {
         amproj_didBecomeActiveObserver = [center
             addObserverForName:UIApplicationDidBecomeActiveNotification
                         object:nil
-                         queue:[NSOperationQueue mainQueue]
+                        queue:[NSOperationQueue mainQueue]
                     usingBlock:^(__unused NSNotification *notification) {
             amproj_bootstrapAfterLaunch(@"did_become_active");
             amproj_installImportHook();
+            amproj_schedulePaywallScan(nil, @"did_become_active");
             // The launch URL is the current user action. Consume its deferred
             // candidate first; only then inspect stale app-owned Inbox files.
             amproj_retryDeferredLaunchImportCandidates();
@@ -7947,6 +8233,7 @@ static void AMProjExportInit(void) {
                        dispatch_get_main_queue(), ^{
             amproj_bootstrapAfterLaunch(@"main_queue_fallback");
             amproj_installImportHook();
+            amproj_schedulePaywallScan(nil, @"main_queue_fallback");
         });
 
         NSLog(@"[AMProjExport] Hooks scheduled for launch, activation, and delayed fallback");
