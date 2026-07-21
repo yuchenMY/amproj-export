@@ -7346,6 +7346,33 @@ static void SkipLoadingScreen(void) {
     });
 }
 
+static BOOL amproj_isLatePaywallLoadingController(UIViewController *controller) {
+    NSString *className = NSStringFromClass(controller.class) ?: @"";
+    return [className containsString:@"PaywallLoadingScreenView"] ||
+        [className containsString:@"CloudCardsTiersPaywallView"];
+}
+
+static void amproj_scheduleLatePaywallLoadingBypass(UIViewController *controller) {
+    if (!amproj_isLatePaywallLoadingController(controller)) return;
+    __weak UIViewController *weakController = controller;
+    NSString *className = NSStringFromClass(controller.class) ?: @"";
+    NSArray<NSNumber *> *delays = @[@0.05, @0.3, @0.8, @1.5, @3.0];
+    for (NSNumber *delay in delays) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIViewController *current = weakController;
+            BOOL found = current ? HideLoadingInView(current.viewIfLoaded) : NO;
+            amproj_debugEvent(@"startup_loading.controller_pass", @{
+                @"controller": className,
+                @"delay_ms": @(delay.doubleValue * 1000.0),
+                @"found": @(found),
+                @"has_window": @(current.viewIfLoaded.window != nil)
+            });
+        });
+    }
+}
+
 static NSString* amproj_projectTitleRecursive(UIViewController *controller, NSUInteger depth,
                                                NSMutableSet<NSValue *> *visited) {
     if (!controller || depth > 8) return nil;
@@ -7537,6 +7564,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     orig_presentVC(self, _cmd, controller, animated, completion);
+    amproj_scheduleLatePaywallLoadingBypass(controller);
     if (isActivity) {
         amproj_debugEvent(@"present.return", @{
             @"duration_ms": @((CFAbsoluteTimeGetCurrent() - started) * 1000.0)

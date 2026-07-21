@@ -117,6 +117,29 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("SkipLoadingScreenOnce", scheduler)
         self.assertEqual(SOURCE.count("SkipLoadingScreen();"), 1)
 
+    def test_late_paywall_loading_views_receive_targeted_runtime_passes(self):
+        predicate = function_body(
+            "static BOOL amproj_isLatePaywallLoadingController",
+            "static void amproj_scheduleLatePaywallLoadingBypass",
+        )
+        self.assertIn("PaywallLoadingScreenView", predicate)
+        self.assertIn("CloudCardsTiersPaywallView", predicate)
+
+        scheduler = function_body(
+            "static void amproj_scheduleLatePaywallLoadingBypass",
+            "static NSString* amproj_projectTitleRecursive",
+        )
+        self.assertIn("amproj_isLatePaywallLoadingController", scheduler)
+        self.assertIn("HideLoadingInView(current.viewIfLoaded)", scheduler)
+        self.assertIn("startup_loading.controller_pass", scheduler)
+        self.assertIn("dispatch_get_main_queue()", scheduler)
+        self.assertIn("@0.05, @0.3, @0.8, @1.5, @3.0", scheduler)
+
+        present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
+        original = present.index("orig_presentVC(self, _cmd, controller, animated, completion)")
+        targeted = present.index("amproj_scheduleLatePaywallLoadingBypass(controller)")
+        self.assertLess(original, targeted)
+
     def test_package_flow_predicate_is_narrow(self):
         body = function_body(
             "static BOOL amproj_isPackageControllerName",
