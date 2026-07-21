@@ -24,22 +24,22 @@ project.amproj
 
 完整格式见 `format_spec.md`。
 
-## v28 离线导入
+## v29 离线导入
 
-### v28 启动套餐页恢复
+### v29 启动套餐页恢复
 
 - 自签包的 StoreKit 商品身份可能与 App Store 商品不一致，套餐页会停在加载遮罩且左上角关闭按钮不可用；VPN/加速器不会改变这一结果。
-- v28 只处理启动期由 `NodeHostingControllerWithCustomStatusbarContent` 展示的 `PaywallLoadingScreenView` 及其 `CloudCardsTiersPaywallView` 子页。外层页面先完成真实 presentation，再由插件关闭并确认 `MainNC/MainVC` 已稳定可见，避免 AM 反复重试展示。
-- 自动关闭连续失败三次或超过三秒时，会在现有主窗口显示“进入主页”按钮；不会新建窗口、隐藏主窗口或替换 root view controller。
+- v29 在 `WillFinishLaunching` 阶段捕获 `NodeHostingControllerWithCustomStatusbarContent` 展示的 `PaywallLoadingScreenView` 及其 `CloudCardsTiersPaywallView` 子页，避免漏掉启动完成前的首次 presentation。
+- 卡住 1.5 秒后，会在套餐页所在的现有前台窗口显示左上角 `×` 和底部“继续进入”。两者直接退出套餐页；不会新建窗口、隐藏主窗口或替换 root view controller。
 - 普通系统弹窗、导入错误、导出分享面板和用户主动打开的其他购买页面不受影响。Debug 版记录 `presentation_seen → outer_presented → dismiss_requested → dismiss_verified → main_visible`。
 
-### v28 媒体签名修复
+### v29 媒体签名修复
 
-- Android 官方项目包可能在 `manifest.txt` 中提供媒体 SHA-1，却省略 XML `<media>` 的 `sig` 属性。v28 会按资源字节计算并补写大写 SHA-1，避免 iOS 原生 importer 报 `Missing Media`。
+- Android 官方项目包可能在 `manifest.txt` 中提供媒体 SHA-1，却省略 XML `<media>` 的 `sig` 属性。v29 会按资源字节计算并补写大写 SHA-1，避免 iOS 原生 importer 报 `Missing Media`。
 - 已有非空 `sig` 必须与 `manifest.txt` 一致；哈希不匹配、缺少被 XML 引用的媒体或 ZIP 校验失败时会在原生导入前拒绝，不生成假项目。
 - 单 XML 的 manifest 包会在需要时重新生成 ZIP，仅改写 XML 签名并保留 `amproj:` URI、所有 XML 和媒体字节；已有完整签名的多 XML 包保持原 ZIP 不变。
 
-### v25 稳定性修复（v28 保留）
+### v25 稳定性修复（v29 保留）
 
 - 修复 v24 在 `storage_status_4_returned` 后的确定性闪退：AM 会无条件关闭原生 `AMProgressAlert`，v24 传入 `nil` 后命中主程序的主动崩溃指令；v25 从 App 自带 storyboard 创建真实控制器并强持有到原生 completion。
 - 保留 v24 的观察器句柄修复：`observeStatus:handler:` 返回 `NSString` 对象句柄，不再把整数 `1/2/3` 当对象地址 retain。
@@ -56,7 +56,7 @@ project.amproj
 但必须作为非空 `x3` 传入，因为 AM 在 status 4 后会无条件向它发送 dismiss。
 复制任务完成时同时发出 Firebase 的进度终态 `2` 和成功终态 `4`，失败仍发出 `5`。
 
-因此，`2/4` 或 `3/4` 停住、闪退的旧 v20-v25 包不要继续重复安装；请使用 v28 构建。v28 保留 Android 官方多 XML + `manifest.txt` 包的完整资源校验，并为缺失 XML `sig` 的单 XML 包自动补齐签名；请确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
+因此，`2/4` 或 `3/4` 停住、闪退的旧 v20-v25 包不要继续重复安装；请使用 v29 构建。v29 保留 Android 官方多 XML + `manifest.txt` 包的完整资源校验，并为缺失 XML `sig` 的单 XML 包自动补齐签名；请确保 ZIP 内包含 XML 引用的全部图片、音频、视频和字体。
 
 稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 先记录候选 URL，再复制一份 launch options，仅从转发给原 AppDelegate 的副本中移除 `.amproj` URL 或对应的 user activity，其他启动参数保持不变；原始字典不会被就地修改。这样可避免 AM 的原生 URL 路径同时处理同一个包。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
 
@@ -79,14 +79,14 @@ AMProjShareExtension/build/AMProjShareExtension.appex
 AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-下载名为 `AMProjExport-v28-dylibs` 的 artifact。其中的 `build-metadata.json`
+下载名为 `AMProjExport-v29-dylibs` 的 artifact。其中的 `build-metadata.json`
 记录插件版本、commit、Actions run ID 以及每个二进制文件的 SHA-256，注入前可用它确认没有混入旧版本产物。
 
-## 从干净 IPA 生成 v28
+## 从干净 IPA 生成 v29
 
 必须以未注入的 `AM_v1.ipa` 为输入，不要用旧测试包继续叠加。主 App Bundle ID 保持 `com.amayaka.meow`。
 
-v28 原生导入桥只支持这份已核验的主程序：
+v29 原生导入桥只支持这份已核验的主程序：
 
 ```text
 AM_v1.ipa SHA-256: B135D99E81E0F3F976CBF4C30BCC491B4B770BD9D0A6841D48083B7A7EA29413
@@ -99,7 +99,7 @@ Mach-O UUID:       4b22d43f-09fc-3bde-859b-78a5d573a503
 
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v28.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v29.ipa `
   --expected-main-uuid $uuid
 ```
 
@@ -108,7 +108,7 @@ python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_d
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v28_debug.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v29_debug.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid
 python .\debug_backend\server.py --token $token
 ```
@@ -118,9 +118,9 @@ python .\debug_backend\server.py --token $token
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = "<与云端后端一致的 Bearer token>"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v28_cloud_debug.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v29_cloud_debug.ipa `
   --server-url https://bug.meowcr.cn --no-discovery --debug-mode full `
-  --debug-token $token --build-id v28-cloud-<commit> --expected-main-uuid $uuid
+  --debug-token $token --build-id v29-cloud-<commit> --expected-main-uuid $uuid
 ```
 
 实验分享版：
@@ -128,7 +128,7 @@ python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v28_share_exp.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v29_share_exp.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid `
   --share-extension .\AMProjShareExtension\build\AMProjShareExtension.appex `
   --app-group-id group.com.amayaka.meow.amprojshare
