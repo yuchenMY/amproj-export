@@ -34,7 +34,7 @@ static const NSTimeInterval kAMDebugDiscoveryRetryInterval = 15.0;
 static const NSTimeInterval kAMDebugDiscoveryTimeout = 1.5;
 static const NSUInteger kAMDebugDiscoveryMaxPacketBytes = 512;
 static const NSUInteger kAMDebugDiscoveryMaxSubnetHosts = 1024;
-static NSString *const kAMDebugPluginVersion = @"29";
+static NSString *const kAMDebugPluginVersion = @"30";
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
 
 static BOOL AMDebugPrivateIPv4(uint32_t address) {
@@ -527,7 +527,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
     NSString *scheme = baseURL.scheme.lowercaseString;
 
     if (AMDebugValidMode(defaultMode)) _mode = [defaultMode copy];
-    _buildIdentifier = buildIdentifier.length ? [buildIdentifier copy] : @"v29-debug";
+    _buildIdentifier = buildIdentifier.length ? [buildIdentifier copy] : @"v30-debug";
     NSCharacterSet *newlines = NSCharacterSet.newlineCharacterSet;
     BOOL safeToken = token.length && [token rangeOfCharacterFromSet:newlines].location == NSNotFound;
     BOOL validProtocolVersion = [protocolVersion isKindOfClass:NSNumber.class] ||
@@ -603,7 +603,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         @"plugin": @{
             @"version": kAMDebugPluginVersion,
             @"variant": @"debug",
-            @"build_id": self.buildIdentifier ?: @"v29-debug"
+            @"build_id": self.buildIdentifier ?: @"v30-debug"
         }
     };
 

@@ -43,12 +43,11 @@ typedef NS_ENUM(NSInteger, AMProjImportArchiveErrorCode) {
  unchanged and are counted in `missing_reference_count`. The caller owns the
  successful extraction directory and should remove it after use.
 
- Manifest SHA-1 values are also applied to matching `<media>` elements as an
- uppercase `sig` attribute. Existing non-empty signatures must match the
- manifest (case-insensitively); missing or empty signatures are filled in.
- Metrics additionally report `media_signature_count`,
- `rewritten_media_signature_count`, `missing_media_signature_count`, and the
- internal `resource_hashes` filename-to-SHA-1 map.
+ XML bytes in the source package are treated as opaque project data. The
+ temporary native XML rewrites only `amproj:` references to extracted file
+ URLs; media `sig` attributes are neither added nor validated. Metrics retain
+ the three media-signature counters as zero for wire compatibility and include
+ the internal `resource_hashes` filename-to-SHA-1 map.
  */
 FOUNDATION_EXPORT BOOL AMProjPrepareNativeImport(
     NSURL *archiveURL,
@@ -58,11 +57,11 @@ FOUNDATION_EXPORT BOOL AMProjPrepareNativeImport(
     NSError * _Nullable * _Nullable error);
 
 /**
- Fully validates and extracts an input package, then writes a canonical ZIP32
- `.amproj` with resources first, one UUID scene XML, and a recalculated
- `manifest.txt`. Missing input manifests are synthesized. Missing `amproj:`
- resources remain referenced so Alight Motion can use its native missing-media
- warning flow.
+ Fully validates an input package. Packages with a valid `manifest.txt` are
+ copied byte-for-byte. A legacy single-XML package receives only a synthesized
+ `manifest.txt`; all pre-existing ZIP entries, XML bytes, filenames, metadata,
+ compression and resource payloads are preserved. Multi-XML packages without
+ a manifest remain unsupported.
  */
 FOUNDATION_EXPORT BOOL AMProjNormalizeProjectArchive(
     NSURL *archiveURL,

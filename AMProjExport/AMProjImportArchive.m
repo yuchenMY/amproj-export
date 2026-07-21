@@ -42,6 +42,49 @@ static const uint16_t kAMProjImportUTF8Flag = 0x0800;
 @end
 
 static BOOL AMProjImportFail(NSError **error, AMProjImportArchiveErrorCode code,
+                             NSString *description, NSDictionary *details);
+
+@interface AMProjImportSceneProbe : NSObject <NSXMLParserDelegate>
+@property(nonatomic) BOOL sawRoot;
+@property(nonatomic) BOOL validRoot;
+@property(nonatomic, copy) NSString *title;
+@end
+
+@implementation AMProjImportSceneProbe
+- (void)parser:(NSXMLParser *)parser
+ didStartElement:(NSString *)elementName
+    namespaceURI:(NSString *)namespaceURI
+   qualifiedName:(NSString *)qualifiedName
+      attributes:(NSDictionary<NSString *, NSString *> *)attributes {
+    (void)parser;
+    (void)namespaceURI;
+    (void)qualifiedName;
+    if (self.sawRoot) return;
+    self.sawRoot = YES;
+    self.validRoot = [elementName isEqualToString:@"scene"];
+    if (self.validRoot) self.title = attributes[@"title"] ?: @"";
+}
+@end
+
+static BOOL AMProjImportProbeSceneXML(NSData *xmlData, NSString **title,
+                                      NSError **error) {
+    AMProjImportSceneProbe *probe = [AMProjImportSceneProbe new];
+    NSXMLParser *parser = [[NSXMLParser alloc] initWithData:xmlData];
+    parser.delegate = probe;
+    BOOL parsed = [parser parse];
+    if (!parsed || !probe.validRoot) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
+                                @"The project XML must contain a valid scene root",
+                                @{ @"reason": parser.parserError.localizedDescription ?: @"" });
+    }
+    if (title) {
+        *title = [probe.title stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    }
+    return YES;
+}
+
+static BOOL AMProjImportFail(NSError **error, AMProjImportArchiveErrorCode code,
                              NSString *description, NSDictionary *details) {
     if (error) {
         NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:details ?: @{}];
@@ -951,39 +994,6 @@ static NSURL * _Nullable AMProjImportURLForReference(
     return url;
 }
 
-static NSString *AMProjImportXMLAttributeValue(NSString *tag, NSString *attributeName,
-                                                NSRange *valueRangeOut) {
-    if (valueRangeOut) *valueRangeOut = NSMakeRange(NSNotFound, 0);
-    if (!tag.length || !attributeName.length) return nil;
-    NSString *pattern = [NSString stringWithFormat:
-        @"\\b%@\\s*=\\s*(?:\\\"([^\\\"]*)\\\"|'([^']*)')",
-        [NSRegularExpression escapedPatternForString:attributeName]];
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern
-                                                                                options:NSRegularExpressionCaseInsensitive
-                                                                                  error:nil];
-    NSTextCheckingResult *match = [regex firstMatchInString:tag options:0
-                                                      range:NSMakeRange(0, tag.length)];
-    if (!match) return nil;
-    NSRange valueRange = [match rangeAtIndex:1];
-    if (valueRange.location == NSNotFound) valueRange = [match rangeAtIndex:2];
-    if (valueRange.location == NSNotFound) return nil;
-    if (valueRangeOut) *valueRangeOut = valueRange;
-    return [tag substringWithRange:valueRange];
-}
-
-static NSString *AMProjImportMediaResourceName(NSString *rawURI) {
-    NSString *uri = AMProjImportDecodeXMLReference(rawURI);
-    if (uri.length < 7 ||
-        ![[uri substringToIndex:7].lowercaseString isEqualToString:@"amproj:"]) {
-        return nil;
-    }
-    NSString *reference = [uri substringFromIndex:7];
-    BOOL ignoredDirectory = NO;
-    NSError *ignoredError = nil;
-    NSString *safeName = AMProjImportSafeName(reference, &ignoredDirectory, &ignoredError);
-    return safeName && !ignoredDirectory ? safeName : nil;
-}
-
 static void AMProjImportAppendRewriteOperation(NSMutableArray<NSDictionary *> *operations,
                                                 NSRange range, NSString *replacement) {
     if (!replacement) return;
@@ -1006,6 +1016,7 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
                                       NSUInteger *rewrittenMediaSignatureCount,
                                       NSUInteger *missingMediaSignatureCount,
                                       NSError **error) {
+    (void)resourceHashesByName;
     if (mediaSignatureCount) *mediaSignatureCount = 0;
     if (rewrittenMediaSignatureCount) *rewrittenMediaSignatureCount = 0;
     if (missingMediaSignatureCount) *missingMediaSignatureCount = 0;
@@ -1023,18 +1034,6 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
         AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
                          @"Unable to prepare the project XML matcher",
                          @{ @"reason": regexError.localizedDescription ?: @"" });
-        return nil;
-    }
-
-    NSError *mediaRegexError = nil;
-    NSRegularExpression *mediaRegex = [NSRegularExpression
-        regularExpressionWithPattern:@"<media\\b[^<>]*>"
-                              options:NSRegularExpressionCaseInsensitive
-                                error:&mediaRegexError];
-    if (!mediaRegex) {
-        AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
-                         @"Unable to prepare the project media matcher",
-                         @{ @"reason": mediaRegexError.localizedDescription ?: @"" });
         return nil;
     }
 
@@ -1074,61 +1073,8 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
         }
     }
 
-    NSUInteger localMediaSignatureCount = 0;
-    NSUInteger localRewrittenMediaSignatureCount = 0;
-    NSUInteger localMissingMediaSignatureCount = 0;
-    for (NSTextCheckingResult *mediaMatch in
-         [mediaRegex matchesInString:xml options:0 range:NSMakeRange(0, xml.length)]) {
-        NSRange tagRange = mediaMatch.range;
-        NSString *tag = [xml substringWithRange:tagRange];
-        NSRange uriRange = NSMakeRange(NSNotFound, 0);
-        NSString *rawURI = AMProjImportXMLAttributeValue(tag, @"uri", &uriRange);
-        NSString *resourceName = AMProjImportMediaResourceName(rawURI);
-        if (!resourceName.length) continue;
-        NSString *foldedName = AMProjImportFoldedName(resourceName);
-        NSString *expectedHash = resourceHashesByName[foldedName];
-        if (expectedHash.length != CC_SHA1_DIGEST_LENGTH * 2) {
-            localMissingMediaSignatureCount++;
-            continue;
-        }
-        localMediaSignatureCount++;
-
-        NSRange sigRange = NSMakeRange(NSNotFound, 0);
-        NSString *currentSignature = AMProjImportXMLAttributeValue(tag, @"sig", &sigRange);
-        if (currentSignature.length &&
-            ![currentSignature.uppercaseString isEqualToString:expectedHash]) {
-            AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
-                             @"A project media sig does not match manifest.txt",
-                             @{ @"entry": resourceName,
-                                @"expected_sha1": expectedHash,
-                                @"actual_sig": currentSignature });
-            return nil;
-        }
-        if (sigRange.location != NSNotFound) {
-            if (![currentSignature isEqualToString:expectedHash]) {
-                NSRange absoluteRange = NSMakeRange(tagRange.location + sigRange.location,
-                                                    sigRange.length);
-                AMProjImportAppendRewriteOperation(operations, absoluteRange, expectedHash);
-                localRewrittenMediaSignatureCount++;
-            }
-        } else {
-            // Keep the original XML layout and insert the attribute immediately
-            // before the closing `>` (or `/>'`) so all non-media bytes remain
-            // untouched.
-            NSUInteger insertionOffset = tagRange.location + tag.length;
-            if ([tag hasSuffix:@"/>"]) insertionOffset -= 2;
-            else if ([tag hasSuffix:@">"]) insertionOffset -= 1;
-            else continue;
-            AMProjImportAppendRewriteOperation(
-                operations, NSMakeRange(insertionOffset, 0),
-                [NSString stringWithFormat:@" sig=\"%@\"", expectedHash]);
-            localRewrittenMediaSignatureCount++;
-        }
-    }
-
-    // URI replacements and signature edits can occur in the same media tag.
-    // Apply all disjoint edits from right to left so source ranges remain
-    // valid even when a file URL is longer than its amproj reference.
+    // Apply URI replacements from right to left so source ranges remain valid
+    // even when a file URL is longer than its amproj reference.
     [operations sortUsingComparator:^NSComparisonResult(NSDictionary *left,
                                                          NSDictionary *right) {
         NSUInteger leftLocation = [left[@"location"] unsignedIntegerValue];
@@ -1160,13 +1106,6 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
     if (missingNames) {
         *missingNames = [missingReferences.allObjects
             sortedArrayUsingSelector:@selector(compare:)];
-    }
-    if (mediaSignatureCount) *mediaSignatureCount = localMediaSignatureCount;
-    if (rewrittenMediaSignatureCount) {
-        *rewrittenMediaSignatureCount = localRewrittenMediaSignatureCount;
-    }
-    if (missingMediaSignatureCount) {
-        *missingMediaSignatureCount = localMissingMediaSignatureCount;
     }
     return result;
 }
@@ -1354,6 +1293,7 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
     NSUInteger rewrittenMediaSignatureCount = 0;
     NSUInteger missingMediaSignatureCount = 0;
     NSMutableSet<NSString *> *missingReferenceNames = [NSMutableSet set];
+    NSMutableArray<NSString *> *sceneTitles = [NSMutableArray array];
     NSData *nativeData = nil;
     AMProjImportEntry *primaryXMLEntry = xmlEntries.firstObject;
     for (AMProjImportEntry *xmlEntry in xmlEntries) {
@@ -1367,6 +1307,12 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
                                     @{ @"entry": xmlEntry.name ?: @"",
                                        @"reason": fileError.localizedDescription ?: @"" });
         }
+        NSString *sceneTitle = nil;
+        if (!AMProjImportProbeSceneXML(xmlData, &sceneTitle, error)) {
+            [fileManager removeItemAtURL:extractionURL error:nil];
+            return NO;
+        }
+        [sceneTitles addObject:sceneTitle ?: @""];
         NSUInteger xmlReferenceCount = 0;
         NSUInteger xmlRewrittenCount = 0;
         NSUInteger xmlMissingCount = 0;
@@ -1430,8 +1376,384 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
             @"missing_reference_names": [missingReferenceNames.allObjects
                 sortedArrayUsingSelector:@selector(compare:)],
             @"xml_names": [xmlNames copy],
+            @"scene_title": sceneTitles.firstObject ?: @"",
+            @"scene_titles": [sceneTitles copy],
             @"extraction_directory": extractionURL.path ?: @"",
             @"native_xml": nativeURL.path ?: @"",
+        };
+    }
+    return YES;
+}
+
+static void AMProjImportPut16(uint8_t *bytes, NSUInteger offset, uint16_t value) {
+    bytes[offset] = (uint8_t)(value & 0xff);
+    bytes[offset + 1] = (uint8_t)(value >> 8);
+}
+
+static void AMProjImportPut32(uint8_t *bytes, NSUInteger offset, uint32_t value) {
+    bytes[offset] = (uint8_t)(value & 0xff);
+    bytes[offset + 1] = (uint8_t)((value >> 8) & 0xff);
+    bytes[offset + 2] = (uint8_t)((value >> 16) & 0xff);
+    bytes[offset + 3] = (uint8_t)(value >> 24);
+}
+
+static BOOL AMProjImportCopyRange(int sourceFD, int destinationFD,
+                                  uint64_t offset, uint64_t length,
+                                  NSError **error) {
+    uint8_t buffer[kAMProjImportBufferSize];
+    while (length > 0) {
+        size_t requested = (size_t)MIN((uint64_t)sizeof(buffer), length);
+        ssize_t count = pread(sourceFD, buffer, requested, (off_t)offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                    @"Unable to read the validated project archive",
+                                    @{ @"offset": @(offset), @"errno": @(errno) });
+        }
+        if (!AMProjImportWriteAll(destinationFD, buffer, (size_t)count, error)) return NO;
+        offset += (uint64_t)count;
+        length -= (uint64_t)count;
+    }
+    return YES;
+}
+
+static BOOL AMProjImportReadEOCDMetadata(int fd, uint64_t archiveSize,
+                                         uint64_t *eocdOffsetOut,
+                                         uint32_t *centralSizeOut,
+                                         uint32_t *centralOffsetOut,
+                                         uint16_t *entryCountOut,
+                                         NSData **commentOut,
+                                         NSError **error) {
+    const uint64_t maximumTail = 22 + UINT16_MAX;
+    size_t tailLength = (size_t)MIN(archiveSize, maximumTail);
+    NSMutableData *tail = [NSMutableData dataWithLength:tailLength];
+    uint64_t tailOffset = archiveSize - tailLength;
+    if (!AMProjImportReadAt(fd, tailOffset, tail.mutableBytes, tailLength, error)) return NO;
+
+    const uint8_t *bytes = tail.bytes;
+    NSInteger eocdIndex = -1;
+    for (NSInteger index = (NSInteger)tailLength - 22; index >= 0; index--) {
+        if (AMProjImportGet32(bytes, (NSUInteger)index) != 0x06054b50) continue;
+        uint16_t commentLength = AMProjImportGet16(bytes, (NSUInteger)index + 20);
+        if ((NSUInteger)index + 22 + commentLength == tailLength) {
+            eocdIndex = index;
+            break;
+        }
+    }
+    if (eocdIndex < 0) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidZIP,
+                                @"The project package has no valid ZIP32 end record", nil);
+    }
+
+    const uint8_t *eocd = bytes + eocdIndex;
+    uint16_t disk = AMProjImportGet16(eocd, 4);
+    uint16_t centralDisk = AMProjImportGet16(eocd, 6);
+    uint16_t diskEntries = AMProjImportGet16(eocd, 8);
+    uint16_t totalEntries = AMProjImportGet16(eocd, 10);
+    uint32_t centralSize = AMProjImportGet32(eocd, 12);
+    uint32_t centralOffset = AMProjImportGet32(eocd, 16);
+    uint16_t commentLength = AMProjImportGet16(eocd, 20);
+    uint64_t eocdOffset = tailOffset + (uint64_t)eocdIndex;
+    if (disk != 0 || centralDisk != 0 || diskEntries != totalEntries ||
+        (uint64_t)centralOffset + centralSize != eocdOffset) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidZIP,
+                                @"The ZIP32 end record is inconsistent", nil);
+    }
+
+    if (eocdOffsetOut) *eocdOffsetOut = eocdOffset;
+    if (centralSizeOut) *centralSizeOut = centralSize;
+    if (centralOffsetOut) *centralOffsetOut = centralOffset;
+    if (entryCountOut) *entryCountOut = totalEntries;
+    if (commentOut) {
+        *commentOut = [NSData dataWithBytes:eocd + 22 length:commentLength];
+    }
+    return YES;
+}
+
+static NSURL *AMProjImportPartialArchiveURL(NSURL *destinationURL) {
+    NSString *name = [NSString stringWithFormat:@".%@.%@.partial",
+                      destinationURL.lastPathComponent ?: @"project.amproj",
+                      NSUUID.UUID.UUIDString];
+    return [destinationURL.URLByDeletingLastPathComponent
+        URLByAppendingPathComponent:name isDirectory:NO];
+}
+
+static BOOL AMProjImportPublishExactArchive(NSURL *archiveURL,
+                                            NSURL *destinationURL,
+                                            NSError **error) {
+    int sourceFD = open(archiveURL.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
+    if (sourceFD < 0) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorSourceUnavailable,
+                                @"Unable to reopen the validated project package",
+                                @{ @"errno": @(errno) });
+    }
+    struct stat sourceStat = {0};
+    if (fstat(sourceFD, &sourceStat) != 0 || !S_ISREG(sourceStat.st_mode)) {
+        int savedErrno = errno;
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorSourceUnavailable,
+                                @"The validated project package is no longer a regular file",
+                                @{ @"errno": @(savedErrno) });
+    }
+
+    NSURL *partialURL = AMProjImportPartialArchiveURL(destinationURL);
+    int destinationFD = open(partialURL.fileSystemRepresentation,
+                             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (destinationFD < 0) {
+        int savedErrno = errno;
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                @"Unable to create the preserved project archive",
+                                @{ @"errno": @(savedErrno) });
+    }
+
+    BOOL success = AMProjImportCopyRange(sourceFD, destinationFD, 0,
+                                         (uint64_t)sourceStat.st_size, error);
+    if (close(sourceFD) != 0 && success) {
+        success = AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                   @"Unable to close the validated project archive",
+                                   @{ @"errno": @(errno) });
+    }
+    if (success && fsync(destinationFD) != 0) {
+        success = AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                   @"Unable to flush the preserved project archive",
+                                   @{ @"errno": @(errno) });
+    }
+    if (close(destinationFD) != 0 && success) {
+        success = AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                   @"Unable to close the preserved project archive",
+                                   @{ @"errno": @(errno) });
+    }
+    if (success && rename(partialURL.fileSystemRepresentation,
+                          destinationURL.fileSystemRepresentation) != 0) {
+        success = AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                   @"Unable to publish the preserved project archive",
+                                   @{ @"errno": @(errno) });
+    }
+    if (!success) unlink(partialURL.fileSystemRepresentation);
+    return success;
+}
+
+static NSData *AMProjImportSynthesizedManifest(
+    NSArray<AMProjImportEntry *> *entries,
+    NSDictionary<NSString *, NSString *> *resourceHashesByName,
+    NSError **error) {
+    NSMutableArray<AMProjImportEntry *> *resources = [NSMutableArray array];
+    for (AMProjImportEntry *entry in entries) {
+        if (!entry.directory && !AMProjImportEntryIsXML(entry) &&
+            !AMProjImportEntryIsManifest(entry)) {
+            [resources addObject:entry];
+        }
+    }
+    [resources sortUsingComparator:^NSComparisonResult(AMProjImportEntry *left,
+                                                         AMProjImportEntry *right) {
+        return [left.name compare:right.name];
+    }];
+
+    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithCapacity:resources.count];
+    NSMutableSet<NSString *> *seenHashes = [NSMutableSet set];
+    for (AMProjImportEntry *entry in resources) {
+        NSString *hash = resourceHashesByName[AMProjImportFoldedName(entry.name)];
+        if (!AMProjImportIsUpperSHA1(hash)) {
+            AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                             @"Unable to synthesize a verified project resource manifest",
+                             @{ @"entry": entry.name ?: @"" });
+            return nil;
+        }
+        if ([seenHashes containsObject:hash]) {
+            AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                             @"Project resources must have unique SHA-1 values",
+                             @{ @"entry": entry.name ?: @"", @"sha1": hash });
+            return nil;
+        }
+        [seenHashes addObject:hash];
+        [lines addObject:[NSString stringWithFormat:@"%@:%@", hash, entry.name]];
+    }
+    return [[lines componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+static BOOL AMProjImportPublishArchiveByAddingManifest(
+    NSURL *archiveURL, NSURL *destinationURL,
+    NSDictionary<NSString *, NSString *> *resourceHashesByName,
+    NSDictionary<NSString *, NSNumber *> **zipMetrics,
+    NSError **error) {
+    if (zipMetrics) *zipMetrics = nil;
+    int sourceFD = open(archiveURL.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
+    if (sourceFD < 0) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorSourceUnavailable,
+                                @"Unable to reopen the validated project package",
+                                @{ @"errno": @(errno) });
+    }
+    struct stat sourceStat = {0};
+    if (fstat(sourceFD, &sourceStat) != 0 || !S_ISREG(sourceStat.st_mode) ||
+        sourceStat.st_size < 22) {
+        int savedErrno = errno;
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorSourceUnavailable,
+                                @"The validated project package is no longer available",
+                                @{ @"errno": @(savedErrno) });
+    }
+    uint64_t archiveSize = (uint64_t)sourceStat.st_size;
+    uint64_t parsedCentralOffset = 0;
+    uint64_t compressedTotal = 0;
+    uint64_t uncompressedTotal = 0;
+    NSArray<AMProjImportEntry *> *entries = AMProjImportReadDirectory(
+        sourceFD, archiveSize, &parsedCentralOffset, &compressedTotal,
+        &uncompressedTotal, error);
+    if (!entries || !AMProjImportValidateLocalHeaders(sourceFD, entries,
+                                                       parsedCentralOffset, error)) {
+        close(sourceFD);
+        return NO;
+    }
+
+    NSUInteger xmlCount = 0;
+    NSUInteger manifestCount = 0;
+    for (AMProjImportEntry *entry in entries) {
+        if (!entry.directory && AMProjImportEntryIsXML(entry)) xmlCount++;
+        if (!entry.directory && AMProjImportEntryIsManifest(entry)) manifestCount++;
+    }
+    if (xmlCount != 1 || manifestCount != 0) {
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidZIP,
+                                @"Only a single-XML package without manifest.txt can be upgraded",
+                                @{ @"xml_count": @(xmlCount),
+                                   @"manifest_count": @(manifestCount) });
+    }
+
+    NSData *manifest = AMProjImportSynthesizedManifest(entries,
+                                                        resourceHashesByName, error);
+    if (!manifest || manifest.length > UINT32_MAX) {
+        close(sourceFD);
+        if (manifest && error && !*error) {
+            AMProjImportFail(error, AMProjImportArchiveErrorLimitExceeded,
+                             @"The synthesized project resource manifest is too large", nil);
+        }
+        return NO;
+    }
+
+    uint64_t eocdOffset = 0;
+    uint32_t centralSize = 0;
+    uint32_t centralOffset = 0;
+    uint16_t entryCount = 0;
+    NSData *comment = nil;
+    if (!AMProjImportReadEOCDMetadata(sourceFD, archiveSize, &eocdOffset,
+                                      &centralSize, &centralOffset, &entryCount,
+                                      &comment, error)) {
+        close(sourceFD);
+        return NO;
+    }
+    NSData *manifestName = [@"manifest.txt" dataUsingEncoding:NSASCIIStringEncoding];
+    uint64_t localRecordSize = 30ULL + manifestName.length + manifest.length;
+    uint64_t manifestCentralSize = 46ULL + manifestName.length;
+    uint64_t newCentralOffset64 = (uint64_t)centralOffset + localRecordSize;
+    uint64_t newCentralSize64 = (uint64_t)centralSize + manifestCentralSize;
+    if (parsedCentralOffset != centralOffset || eocdOffset !=
+            (uint64_t)centralOffset + centralSize ||
+        entryCount != entries.count || entryCount == UINT16_MAX ||
+        newCentralOffset64 > UINT32_MAX || newCentralSize64 > UINT32_MAX) {
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorUnsupportedZIP,
+                                @"The project package cannot be upgraded within ZIP32 limits", nil);
+    }
+
+    uLong manifestCRC = crc32(0L, Z_NULL, 0);
+    manifestCRC = crc32(manifestCRC, manifest.bytes, (uInt)manifest.length);
+    uint8_t localHeader[30] = {0};
+    AMProjImportPut32(localHeader, 0, 0x04034b50);
+    AMProjImportPut16(localHeader, 4, 20);
+    AMProjImportPut16(localHeader, 6, kAMProjImportUTF8Flag);
+    AMProjImportPut16(localHeader, 8, 0);
+    AMProjImportPut16(localHeader, 10, 0);
+    AMProjImportPut16(localHeader, 12, 0x0021);
+    AMProjImportPut32(localHeader, 14, (uint32_t)manifestCRC);
+    AMProjImportPut32(localHeader, 18, (uint32_t)manifest.length);
+    AMProjImportPut32(localHeader, 22, (uint32_t)manifest.length);
+    AMProjImportPut16(localHeader, 26, (uint16_t)manifestName.length);
+
+    uint8_t centralHeader[46] = {0};
+    AMProjImportPut32(centralHeader, 0, 0x02014b50);
+    AMProjImportPut16(centralHeader, 4, 0x0314);
+    AMProjImportPut16(centralHeader, 6, 20);
+    AMProjImportPut16(centralHeader, 8, kAMProjImportUTF8Flag);
+    AMProjImportPut16(centralHeader, 10, 0);
+    AMProjImportPut16(centralHeader, 12, 0);
+    AMProjImportPut16(centralHeader, 14, 0x0021);
+    AMProjImportPut32(centralHeader, 16, (uint32_t)manifestCRC);
+    AMProjImportPut32(centralHeader, 20, (uint32_t)manifest.length);
+    AMProjImportPut32(centralHeader, 24, (uint32_t)manifest.length);
+    AMProjImportPut16(centralHeader, 28, (uint16_t)manifestName.length);
+    AMProjImportPut32(centralHeader, 38, 0100600U << 16);
+    AMProjImportPut32(centralHeader, 42, centralOffset);
+
+    uint8_t eocd[22] = {0};
+    AMProjImportPut32(eocd, 0, 0x06054b50);
+    AMProjImportPut16(eocd, 8, entryCount + 1);
+    AMProjImportPut16(eocd, 10, entryCount + 1);
+    AMProjImportPut32(eocd, 12, (uint32_t)newCentralSize64);
+    AMProjImportPut32(eocd, 16, (uint32_t)newCentralOffset64);
+    AMProjImportPut16(eocd, 20, (uint16_t)comment.length);
+
+    NSURL *partialURL = AMProjImportPartialArchiveURL(destinationURL);
+    int destinationFD = open(partialURL.fileSystemRepresentation,
+                             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (destinationFD < 0) {
+        int savedErrno = errno;
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                @"Unable to create the upgraded project archive",
+                                @{ @"errno": @(savedErrno) });
+    }
+
+    BOOL success = AMProjImportCopyRange(sourceFD, destinationFD, 0,
+                                         centralOffset, error) &&
+        AMProjImportWriteAll(destinationFD, localHeader, sizeof(localHeader), error) &&
+        AMProjImportWriteAll(destinationFD, manifestName.bytes, manifestName.length, error) &&
+        AMProjImportWriteAll(destinationFD, manifest.bytes, manifest.length, error) &&
+        AMProjImportCopyRange(sourceFD, destinationFD, centralOffset,
+                              centralSize, error) &&
+        AMProjImportWriteAll(destinationFD, centralHeader, sizeof(centralHeader), error) &&
+        AMProjImportWriteAll(destinationFD, manifestName.bytes, manifestName.length, error) &&
+        AMProjImportWriteAll(destinationFD, eocd, sizeof(eocd), error) &&
+        AMProjImportWriteAll(destinationFD, comment.bytes, comment.length, error);
+    if (close(sourceFD) != 0 && success) {
+        success = AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                   @"Unable to close the validated project archive",
+                                   @{ @"errno": @(errno) });
+    }
+    if (success && fsync(destinationFD) != 0) {
+        success = AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                   @"Unable to flush the upgraded project archive",
+                                   @{ @"errno": @(errno) });
+    }
+    if (close(destinationFD) != 0 && success) {
+        success = AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                   @"Unable to close the upgraded project archive",
+                                   @{ @"errno": @(errno) });
+    }
+    if (success && rename(partialURL.fileSystemRepresentation,
+                          destinationURL.fileSystemRepresentation) != 0) {
+        success = AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                   @"Unable to publish the upgraded project archive",
+                                   @{ @"errno": @(errno) });
+    }
+    if (!success) {
+        unlink(partialURL.fileSystemRepresentation);
+        return NO;
+    }
+
+    if (zipMetrics) {
+        uint64_t outputBytes = newCentralOffset64 + newCentralSize64 +
+            sizeof(eocd) + comment.length;
+        *zipMetrics = @{
+            @"entry_count": @(entryCount + 1),
+            @"xml_count": @1,
+            @"manifest_count": @1,
+            @"uncompressed_bytes": @(uncompressedTotal + manifest.length),
+            @"compressed_bytes": @(compressedTotal + manifest.length),
+            @"archive_bytes": @(outputBytes),
+            @"crc_verified": @YES,
+            @"manifest_verified": @YES,
+            @"source_entries_preserved": @YES,
         };
     }
     return YES;
@@ -1462,113 +1784,47 @@ BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
     NSFileManager *manager = NSFileManager.defaultManager;
 
     @try {
-        NSError *fileError = nil;
-        NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:extractionURL
-            includingPropertiesForKeys:@[NSURLIsDirectoryKey, NSURLIsRegularFileKey]
-                               options:0
-                                 error:&fileError];
-        if (!children) {
-            return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
-                                    @"Unable to inspect the validated project package",
-                                    @{ @"reason": fileError.localizedDescription ?: @"" });
-        }
-
-        NSURL *sceneXMLURL = nil;
-        NSMutableDictionary<NSString *, NSURL *> *resourceURLs = [NSMutableDictionary dictionary];
-        for (NSURL *child in children) {
-            NSNumber *isDirectory = nil;
-            NSNumber *isRegular = nil;
-            NSError *resourceError = nil;
-            BOOL readDirectory = [child getResourceValue:&isDirectory
-                                                   forKey:NSURLIsDirectoryKey
-                                                    error:&resourceError];
-            BOOL readRegular = readDirectory && [child getResourceValue:&isRegular
-                                                                  forKey:NSURLIsRegularFileKey
-                                                                   error:&resourceError];
-            if (!readRegular) {
-                return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
-                                        @"Unable to inspect an extracted project entry",
-                                        @{ @"entry": child.lastPathComponent ?: @"",
-                                           @"reason": resourceError.localizedDescription ?: @"" });
-            }
-            if (isDirectory.boolValue) {
-                return AMProjImportFail(error, AMProjImportArchiveErrorUnsafeEntry,
-                                        @"Canonical project packages require flat resource filenames",
-                                        @{ @"entry": child.lastPathComponent ?: @"" });
-            }
-            BOOL isGeneratedXML = [child.URLByStandardizingPath.path
-                isEqualToString:nativeXMLURL.URLByStandardizingPath.path];
-            if (!isRegular.boolValue || isGeneratedXML) continue;
-            NSString *name = child.lastPathComponent ?: @"";
-            if ([name.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame) {
-                if (sceneXMLURL) {
-                    return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
-                                            @"Validated project package contains multiple scene XML files", nil);
-                }
-                sceneXMLURL = child;
-                continue;
-            }
-            if ([name caseInsensitiveCompare:@"manifest.txt"] == NSOrderedSame) continue;
-            if (!name.length || resourceURLs[name]) {
-                return AMProjImportFail(error, AMProjImportArchiveErrorUnsafeEntry,
-                                        @"Project package contains duplicate resource filenames",
-                                        @{ @"entry": name });
-            }
-            resourceURLs[name] = child;
-        }
-        if (!sceneXMLURL) {
-            return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
-                                    @"Validated project package has no scene XML", nil);
-        }
-
-        NSData *sceneXML = [NSData dataWithContentsOfURL:sceneXMLURL
-                                                 options:NSDataReadingMappedIfSafe
-                                                   error:&fileError];
-        if (!sceneXML.length) {
-            return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
-                                    @"Unable to read the validated scene XML",
-                                    @{ @"reason": fileError.localizedDescription ?: @"" });
-        }
-
-        // The canonical package keeps `amproj:` references so Alight Motion
-        // can resolve resources from the ZIP. Add the same SHA-1 identity that
-        // the manifest carries without converting those references to local
-        // extraction paths (the native-import XML uses that separate mode).
-        NSDictionary<NSString *, NSString *> *resourceHashes =
-            [preparationMetrics[@"resource_hashes"] isKindOfClass:NSDictionary.class]
-                ? preparationMetrics[@"resource_hashes"] : @{};
-        NSUInteger mediaSignatureCount = 0;
-        NSUInteger rewrittenMediaSignatureCount = 0;
-        NSUInteger missingMediaSignatureCount = 0;
-        NSData *signedSceneXML = AMProjImportRewriteXML(
-            sceneXML, @[], resourceHashes, NO, NULL, NULL, NULL, NULL,
-            &mediaSignatureCount, &rewrittenMediaSignatureCount,
-            &missingMediaSignatureCount, &fileError);
-        if (!signedSceneXML) {
-            if (error) *error = fileError;
-            return NO;
-        }
-        sceneXML = signedSceneXML;
-
+        NSUInteger inputManifestCount =
+            [preparationMetrics[@"manifest_count"] unsignedIntegerValue];
+        BOOL archivePreserved = inputManifestCount == 1;
         NSDictionary<NSString *, NSNumber *> *zipMetrics = nil;
-        NSError *zipError = nil;
-        BOOL written = AMProjZIPWriteProjectArchive(destinationURL, sceneXML, resourceURLs,
-                                                     &zipMetrics, &zipError);
-        if (!written) {
-            if (error) *error = zipError;
-            return NO;
+        if (archivePreserved) {
+            if (!AMProjImportPublishExactArchive(archiveURL, destinationURL, error)) return NO;
+            zipMetrics = @{
+                @"entry_count": preparationMetrics[@"entry_count"] ?: @0,
+                @"xml_count": preparationMetrics[@"xml_count"] ?: @0,
+                @"manifest_count": @1,
+                @"archive_bytes": preparationMetrics[@"archive_bytes"] ?: @0,
+                @"crc_verified": @YES,
+                @"manifest_verified": @YES,
+                @"source_entries_preserved": @YES,
+                @"archive_preserved": @YES,
+            };
+        } else {
+            NSDictionary<NSString *, NSString *> *resourceHashes =
+                [preparationMetrics[@"resource_hashes"] isKindOfClass:NSDictionary.class]
+                    ? preparationMetrics[@"resource_hashes"] : @{};
+            if (!AMProjImportPublishArchiveByAddingManifest(
+                    archiveURL, destinationURL, resourceHashes, &zipMetrics, error)) {
+                return NO;
+            }
         }
+
         if (metrics) {
             *metrics = @{
                 @"entry_count": preparationMetrics[@"entry_count"] ?: @0,
-                @"input_manifest_count": preparationMetrics[@"manifest_count"] ?: @0,
+                @"input_manifest_count": @(inputManifestCount),
+                @"scene_title": preparationMetrics[@"scene_title"] ?: @"",
+                @"scene_titles": preparationMetrics[@"scene_titles"] ?: @[],
                 @"reference_count": preparationMetrics[@"reference_count"] ?: @0,
-                @"media_signature_count": @(mediaSignatureCount),
-                @"rewritten_media_signature_count": @(rewrittenMediaSignatureCount),
-                @"missing_media_signature_count": @(missingMediaSignatureCount),
+                @"media_signature_count": @0,
+                @"rewritten_media_signature_count": @0,
+                @"missing_media_signature_count": @0,
                 @"missing_reference_count": preparationMetrics[@"missing_reference_count"] ?: @0,
                 @"missing_reference_names": preparationMetrics[@"missing_reference_names"] ?: @[],
-                @"resource_count": @(resourceURLs.count),
+                @"resource_count": preparationMetrics[@"resource_count"] ?: @0,
+                @"archive_preserved": @(archivePreserved),
+                @"xml_preserved": @YES,
                 @"normalized_archive": destinationURL.path ?: @"",
                 @"zip": zipMetrics ?: @{}
             };

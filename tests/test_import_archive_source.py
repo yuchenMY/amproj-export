@@ -86,21 +86,20 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn("UPPERCASE_SHA1:filename", header)
         self.assertIn("manifest_verified_resource_count", header)
 
-    def test_media_signatures_are_derived_from_manifest_and_checked(self):
+    def test_media_signatures_are_treated_as_opaque_xml(self):
         source = SOURCE.read_text(encoding="utf-8")
         for required in (
             "resourceHashesByNameOut",
-            "AMProjImportMediaResourceName",
             "media_signature_count",
             "rewritten_media_signature_count",
             "missing_media_signature_count",
-            "A project media sig does not match manifest.txt",
-            "sig=\\\"%@\\\"",
+            "(void)resourceHashesByName",
         ):
             self.assertIn(required, source)
-        # Signature edits and URI rewrites are collected before applying from
-        # right to left; this prevents a longer file URL from shifting ranges.
-        self.assertIn("Apply all disjoint edits from right to left", source)
+        self.assertNotIn("AMProjImportMediaResourceName", source)
+        self.assertNotIn("A project media sig does not match manifest.txt", source)
+        self.assertNotIn('sig=\\\"%@\\\"', source)
+        self.assertIn("Apply URI replacements from right to left", source)
 
     def test_native_preparation_accepts_multiple_xml_files_and_reports_names(self):
         source = SOURCE.read_text(encoding="utf-8")
@@ -111,16 +110,17 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn('"missing_reference_names"', source)
         self.assertNotIn("xmlEntries.count != 1", source)
 
-    def test_normalization_rebuilds_manifest_and_preserves_missing_references(self):
+    def test_normalization_preserves_source_entries_and_adds_only_manifest(self):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn("AMProjNormalizeProjectArchive", source)
-        self.assertIn("AMProjZIPWriteProjectArchive", source)
+        self.assertIn("AMProjImportPublishExactArchive", source)
+        self.assertIn("AMProjImportPublishArchiveByAddingManifest", source)
+        self.assertIn("AMProjImportSynthesizedManifest", source)
+        self.assertIn("AMProjImportCopyRange", source)
         self.assertIn('preparationMetrics[@"missing_reference_count"]', source)
-        self.assertIn('caseInsensitiveCompare:@"manifest.txt"', source)
-        self.assertIn("resourceURLs[name] = child", source)
-        self.assertIn("includingPropertiesForKeys:@[NSURLIsDirectoryKey", source)
-        self.assertIn("options:0", source)
-        self.assertIn("Unable to inspect an extracted project entry", source)
+        self.assertIn('@"archive_preserved": @(archivePreserved)', source)
+        self.assertIn('@"xml_preserved": @YES', source)
+        self.assertNotIn("AMProjZIPWriteProjectArchive(destinationURL", source)
 
 
 if __name__ == "__main__":
