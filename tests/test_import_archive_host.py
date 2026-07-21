@@ -132,6 +132,34 @@ class ImportArchiveHostTests(unittest.TestCase):
             output.writestr("manifest.txt", f"{digest}:asset.bin".encode("ascii"))
         return archive, digest
 
+    def make_multi_xml_nested_media_archive(self, name):
+        archive = self.temp / name
+        resources = {
+            "fonts/custom/font.ttf": b"font-resource-v31",
+            "media/images/picture.png": b"image-resource-v31",
+            "media/video/clip.mp4": b"video-resource-v31",
+        }
+        first_xml = (
+            '<?xml version="1.0"?><scene title="First">'
+            '<media uri="amproj:media/images/picture.png" type="image/png"/>'
+            '<shape fillImage="amproj:media/images/picture.png"/>'
+            '<text font="amproj:fonts/custom/font.ttf"/>'
+            '</scene>'
+        )
+        second_xml = (
+            '<?xml version="1.0"?><scene title="Second">'
+            '<media uri="amproj:media/video/clip.mp4" type="video/mp4"/>'
+            '<shape fillVideo="amproj:media/video/clip.mp4"/>'
+            '</scene>'
+        )
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.writestr("scenes/first.xml", first_xml)
+            output.writestr("scenes/second.xml", second_xml)
+            for resource_name, data in resources.items():
+                output.writestr(resource_name, data)
+            output.writestr("manifest.txt", self.manifest_bytes(resources))
+        return archive, resources
+
     def test_deflate_without_manifest_and_stored_with_manifest(self):
         self.run_helper(self.make_archive("deflated.amproj", zipfile.ZIP_DEFLATED))
         self.run_helper(
@@ -144,10 +172,11 @@ class ImportArchiveHostTests(unittest.TestCase):
         normalized = self.run_helper(archive, mode="normalize", missing=0)
         self.assertEqual(normalized.read_bytes(), source)
 
-    def test_missing_media_sig_is_not_synthesized(self):
-        archive, _ = self.make_media_signature_archive("media-sig-missing.amproj")
+    def test_missing_media_sig_is_synthesized_from_manifest(self):
+        archive, expected = self.make_media_signature_archive("media-sig-missing.amproj")
         xml = self.run_native_helper(archive, mode="manifest", missing=1)
-        self.assertNotIn(" sig=", xml)
+        self.assertIn(f'sig="{expected}"', xml)
+        self.assertEqual(xml.count(f'sig="{expected}"'), 1)
         self.assertIn("file://", xml)
 
     def test_existing_media_sig_is_preserved(self):
@@ -159,18 +188,56 @@ class ImportArchiveHostTests(unittest.TestCase):
         self.assertIn(f'sig="{expected}"', xml)
         self.assertEqual(xml.count(f'sig="{expected}"'), 1)
 
-    def test_mismatched_media_sig_is_treated_as_opaque_xml(self):
+    def test_mismatched_media_sig_is_rejected(self):
         archive, _ = self.make_media_signature_archive(
             "media-sig-wrong.amproj", signature="0" * 40
         )
-        xml = self.run_native_helper(archive, mode="manifest", missing=1)
-        self.assertIn(f'sig="{"0" * 40}"', xml)
+        self.run_helper(archive, mode="fail", missing=0)
 
-    def test_manifest_package_without_media_sig_is_preserved_byte_for_byte(self):
-        archive, _ = self.make_media_signature_archive("manifest-preserved.amproj")
-        source = archive.read_bytes()
+    def test_manifest_package_without_media_sig_is_rebuilt_with_all_resources(self):
+        archive, expected = self.make_media_signature_archive("manifest-signed.amproj")
         normalized = self.run_helper(archive, mode="normalize", missing=1)
-        self.assertEqual(normalized.read_bytes(), source)
+        with zipfile.ZipFile(normalized) as output:
+            self.assertIsNone(output.testzip())
+            self.assertEqual(output.read("asset.bin"), b"media-resource")
+            xml_name = next(name for name in output.namelist() if name.endswith(".xml"))
+            xml = output.read(xml_name).decode("utf-8")
+            self.assertIn(f'sig="{expected}"', xml)
+            self.assertEqual(
+                output.read("manifest.txt"),
+                f"{expected}:asset.bin".encode("ascii"),
+            )
+
+    def test_multi_xml_nested_media_and_font_are_all_preserved_and_signed(self):
+        archive, resources = self.make_multi_xml_nested_media_archive(
+            "multi-nested-media.amproj"
+        )
+        normalized = self.run_helper(archive, mode="normalize", missing=0)
+        with zipfile.ZipFile(normalized) as output:
+            self.assertIsNone(output.testzip())
+            names = output.namelist()
+            self.assertIn("scenes/first.xml", names)
+            self.assertIn("scenes/second.xml", names)
+            for resource_name, expected_data in resources.items():
+                self.assertEqual(output.read(resource_name), expected_data)
+            first = output.read("scenes/first.xml").decode("utf-8")
+            second = output.read("scenes/second.xml").decode("utf-8")
+            image_hash = hashlib.sha1(
+                resources["media/images/picture.png"]
+            ).hexdigest().upper()
+            video_hash = hashlib.sha1(
+                resources["media/video/clip.mp4"]
+            ).hexdigest().upper()
+            self.assertIn(f'sig="{image_hash}"', first)
+            self.assertIn(f'sig="{video_hash}"', second)
+            manifest_lines = set(output.read("manifest.txt").decode().splitlines())
+            self.assertEqual(
+                manifest_lines,
+                {
+                    f"{hashlib.sha1(data).hexdigest().upper()}:{resource_name}"
+                    for resource_name, data in resources.items()
+                },
+            )
 
     def test_accepts_strict_manifest_line_endings_and_empty_manifest(self):
         asset = b"resource-one"
@@ -257,30 +324,17 @@ class ImportArchiveHostTests(unittest.TestCase):
         archive = self.make_archive("normalize.amproj", zipfile.ZIP_DEFLATED)
         with zipfile.ZipFile(archive) as source:
             source_xml = source.read("scene.xml")
-            source_names = source.namelist()
-            source_infos = {
-                info.filename: (
-                    info.CRC,
-                    info.compress_size,
-                    info.file_size,
-                    info.flag_bits,
-                    info.date_time,
-                    info.external_attr,
-                )
-                for info in source.infolist()
-            }
-            source_prefix_end = source.start_dir
-            source_comment = source.comment
-        source_prefix = archive.read_bytes()[:source_prefix_end]
+            source_asset = source.read("asset & one.bin")
         normalized = self.run_helper(archive, mode="normalize")
         with zipfile.ZipFile(normalized) as output:
             self.assertIsNone(output.testzip())
             names = output.namelist()
-            self.assertEqual(names[:-1], source_names)
-            self.assertEqual(names[-1], "manifest.txt")
             self.assertEqual(sum(name.endswith(".xml") for name in names), 1)
+            self.assertIn("asset & one.bin", names)
+            self.assertIn("manifest.txt", names)
             normalized_xml = next(name for name in names if name.endswith(".xml"))
             self.assertEqual(output.read(normalized_xml), source_xml)
+            self.assertEqual(output.read("asset & one.bin"), source_asset)
             self.assertEqual(
                 output.read("manifest.txt"),
                 (
@@ -288,22 +342,6 @@ class ImportArchiveHostTests(unittest.TestCase):
                     "asset & one.bin"
                 ).encode(),
             )
-            output_infos = {info.filename: info for info in output.infolist()}
-            for name, expected in source_infos.items():
-                info = output_infos[name]
-                self.assertEqual(
-                    (
-                        info.CRC,
-                        info.compress_size,
-                        info.file_size,
-                        info.flag_bits,
-                        info.date_time,
-                        info.external_attr,
-                    ),
-                    expected,
-                )
-            self.assertEqual(output.comment, source_comment)
-        self.assertEqual(normalized.read_bytes()[:source_prefix_end], source_prefix)
 
     def test_normalizes_data_descriptor_input(self):
         class NonSeekable(io.BytesIO):
@@ -323,11 +361,9 @@ class ImportArchiveHostTests(unittest.TestCase):
             self.assertTrue(all(info.flag_bits & 0x08 for info in source.infolist()))
         normalized = self.run_helper(archive, mode="normalize", missing=0)
         with zipfile.ZipFile(normalized) as output:
-            original = [
-                info for info in output.infolist()
-                if info.filename.casefold() != "manifest.txt"
-            ]
-            self.assertTrue(all(info.flag_bits & 0x08 for info in original))
+            self.assertIsNone(output.testzip())
+            self.assertEqual(output.read("asset.bin"), b"fixture" * 4096)
+            self.assertEqual(sum(name.endswith(".xml") for name in output.namelist()), 1)
 
     def test_counts_each_missing_resource_once(self):
         archive = self.temp / "duplicate-missing-reference.amproj"

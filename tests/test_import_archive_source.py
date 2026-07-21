@@ -6,6 +6,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "AMProjExport" / "AMProjImportArchive.m"
 HEADER = ROOT / "AMProjExport" / "AMProjImportArchive.h"
 MAKEFILE = ROOT / "AMProjExport" / "Makefile"
+ZIP_SOURCE = ROOT / "AMProjExport" / "AMProjZIPWriter.m"
+ZIP_HEADER = ROOT / "AMProjExport" / "AMProjZIPWriter.h"
 
 
 class ImportArchiveSourceTests(unittest.TestCase):
@@ -86,20 +88,21 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn("UPPERCASE_SHA1:filename", header)
         self.assertIn("manifest_verified_resource_count", header)
 
-    def test_media_signatures_are_treated_as_opaque_xml(self):
+    def test_media_signatures_are_derived_from_verified_manifest(self):
         source = SOURCE.read_text(encoding="utf-8")
         for required in (
             "resourceHashesByNameOut",
             "media_signature_count",
             "rewritten_media_signature_count",
             "missing_media_signature_count",
-            "(void)resourceHashesByName",
+            "AMProjImportMediaResourceName",
+            "A project media sig does not match manifest.txt",
+            "resourceHashesByName[AMProjImportFoldedName(resourceName)]",
         ):
             self.assertIn(required, source)
-        self.assertNotIn("AMProjImportMediaResourceName", source)
-        self.assertNotIn("A project media sig does not match manifest.txt", source)
-        self.assertNotIn('sig=\\\"%@\\\"', source)
-        self.assertIn("Apply URI replacements from right to left", source)
+        self.assertIn('sig=\\\"%@\\\"', source)
+        self.assertNotIn("(void)resourceHashesByName", source)
+        self.assertIn("URI replacements and signature edits", source)
 
     def test_native_preparation_accepts_multiple_xml_files_and_reports_names(self):
         source = SOURCE.read_text(encoding="utf-8")
@@ -110,17 +113,29 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn('"missing_reference_names"', source)
         self.assertNotIn("xmlEntries.count != 1", source)
 
-    def test_normalization_preserves_source_entries_and_adds_only_manifest(self):
+    def test_normalization_rebuilds_complete_signed_multi_scene_archive(self):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn("AMProjNormalizeProjectArchive", source)
         self.assertIn("AMProjImportPublishExactArchive", source)
-        self.assertIn("AMProjImportPublishArchiveByAddingManifest", source)
-        self.assertIn("AMProjImportSynthesizedManifest", source)
-        self.assertIn("AMProjImportCopyRange", source)
+        self.assertIn("AMProjZIPWriteProjectArchiveFiles(destinationURL", source)
+        self.assertIn("signedSceneXMLFiles", source)
+        self.assertIn("enumeratorAtURL:extractionURL", source)
+        self.assertIn("resourceURLs", source)
         self.assertIn('preparationMetrics[@"missing_reference_count"]', source)
-        self.assertIn('@"archive_preserved": @(archivePreserved)', source)
+        self.assertIn('@"archive_preserved": @NO', source)
         self.assertIn('@"xml_preserved": @YES', source)
-        self.assertNotIn("AMProjZIPWriteProjectArchive(destinationURL", source)
+
+    def test_streaming_writer_accepts_safe_relative_paths_and_multiple_xml(self):
+        source = ZIP_SOURCE.read_text(encoding="utf-8")
+        header = ZIP_HEADER.read_text(encoding="utf-8")
+        self.assertIn("AMProjZIPWriteProjectArchiveFiles", source)
+        self.assertIn("AMProjZIPWriteProjectArchiveFiles", header)
+        self.assertIn("sceneXMLFiles.count", source)
+        self.assertIn('componentsSeparatedByString:@"/"', source)
+        self.assertIn('[name hasPrefix:@"~"]', source)
+        self.assertIn('[name containsString:@":"]', source)
+        self.assertIn('[name containsString:@"\\\\"]', source)
+        self.assertNotIn("filenames must be non-empty flat filenames", source)
 
 
 if __name__ == "__main__":

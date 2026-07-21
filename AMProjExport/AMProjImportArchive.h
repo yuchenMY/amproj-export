@@ -43,11 +43,11 @@ typedef NS_ENUM(NSInteger, AMProjImportArchiveErrorCode) {
  unchanged and are counted in `missing_reference_count`. The caller owns the
  successful extraction directory and should remove it after use.
 
- XML bytes in the source package are treated as opaque project data. The
- temporary native XML rewrites only `amproj:` references to extracted file
- URLs; media `sig` attributes are neither added nor validated. Metrics retain
- the three media-signature counters as zero for wire compatibility and include
- the internal `resource_hashes` filename-to-SHA-1 map.
+ PackageImporter on this iOS build resolves packaged media through the
+ uppercase SHA-1 in each matching `<media sig>` attribute. Missing attributes
+ are filled from the verified manifest; existing attributes must match it.
+ Metrics include `media_signature_count`, `rewritten_media_signature_count`,
+ `missing_media_signature_count`, and the internal `resource_hashes` map.
  */
 FOUNDATION_EXPORT BOOL AMProjPrepareNativeImport(
     NSURL *archiveURL,
@@ -57,11 +57,11 @@ FOUNDATION_EXPORT BOOL AMProjPrepareNativeImport(
     NSError * _Nullable * _Nullable error);
 
 /**
- Fully validates an input package. Packages with a valid `manifest.txt` are
- copied byte-for-byte. A legacy single-XML package receives only a synthesized
- `manifest.txt`; all pre-existing ZIP entries, XML bytes, filenames, metadata,
- compression and resource payloads are preserved. Multi-XML packages without
- a manifest remain unsupported.
+ Fully validates an input package for the iOS PackageImporter. A manifest
+ package whose XML already carries every required media signature is copied
+ byte-for-byte. A package with missing signatures is rebuilt as a complete ZIP
+ containing every signed XML, every original resource path, and a recalculated
+ manifest. Multi-XML packages without a manifest remain unsupported.
  */
 FOUNDATION_EXPORT BOOL AMProjNormalizeProjectArchive(
     NSURL *archiveURL,

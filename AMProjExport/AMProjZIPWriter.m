@@ -82,26 +82,38 @@ static BOOL AMProjZIPSeek(int fd, uint64_t offset, NSError **error) {
     return YES;
 }
 
-static BOOL AMProjZIPValidResourceName(NSString *name, NSData **nameData,
-                                       NSError **error) {
+static BOOL AMProjZIPValidEntryName(NSString *name, BOOL requireXML,
+                                    NSData **nameData, NSError **error) {
     if (![name isKindOfClass:NSString.class] || name.length == 0 ||
-        [name isEqualToString:@"."] || [name isEqualToString:@".."] ||
-        [name hasPrefix:@"/"] || [name containsString:@"/"] ||
+        [name hasPrefix:@"/"] || [name hasPrefix:@"~"] ||
+        [name hasSuffix:@"/"] || [name containsString:@":"] ||
         [name containsString:@"\\"] ||
         [name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound) {
         return AMProjZIPFail(error, AMProjZIPErrorInvalidEntry,
-                             @"Resource filenames must be non-empty flat filenames",
+                             @"Project archive entry path is unsafe",
                              @{ @"entry": name ?: @"" });
     }
-    if ([name.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame) {
+    for (NSString *component in [name componentsSeparatedByString:@"/"]) {
+        if (component.length == 0 || [component isEqualToString:@"."] ||
+            [component isEqualToString:@".."]) {
+            return AMProjZIPFail(error, AMProjZIPErrorInvalidEntry,
+                                 @"Project archive entry has an unsafe path component",
+                                 @{ @"entry": name });
+        }
+    }
+    BOOL isXML =
+        [name.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame;
+    if (requireXML != isXML) {
         return AMProjZIPFail(error, AMProjZIPErrorInvalidEntry,
-                             @"A project package may contain only one XML file",
+                             requireXML
+                                ? @"A scene entry must use the XML extension"
+                                : @"A resource entry must not use the XML extension",
                              @{ @"entry": name });
     }
     NSData *encoded = [name dataUsingEncoding:NSUTF8StringEncoding];
     if (!encoded || encoded.length == 0 || encoded.length > UINT16_MAX) {
         return AMProjZIPFail(error, AMProjZIPErrorInvalidEntry,
-                             @"Resource filename is not valid ZIP UTF-8",
+                             @"Project archive entry is not valid ZIP UTF-8",
                              @{ @"entry": name });
     }
     if (nameData) *nameData = encoded;
@@ -167,43 +179,40 @@ static NSData *AMProjZIPManifestData(NSArray<AMProjZIPEntry *> *entries,
     return [[lines componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
 }
 
-static BOOL AMProjZIPPrepareEntries(NSData *sceneXML,
-                                    NSDictionary<NSString *, NSURL *> *resourceURLs,
-                                    NSArray<AMProjZIPEntry *> **preparedEntries,
-                                    uint64_t *uncompressedBytes,
-                                    uint64_t *requiredBytes,
-                                    NSError **error) {
-    if (sceneXML.length == 0) {
+static BOOL AMProjZIPPrepareEntries(
+    NSDictionary<NSString *, NSData *> *sceneXMLFiles,
+    NSDictionary<NSString *, NSURL *> *resourceURLs,
+    NSArray<AMProjZIPEntry *> **preparedEntries,
+    uint64_t *uncompressedBytes,
+    uint64_t *requiredBytes,
+    NSError **error) {
+    if (![sceneXMLFiles isKindOfClass:NSDictionary.class] ||
+        sceneXMLFiles.count == 0) {
         return AMProjZIPFail(error, AMProjZIPErrorInvalidArgument,
-                             @"Scene XML is empty", nil);
+                             @"A project package requires at least one scene XML", nil);
     }
-    if (sceneXML.length > UINT32_MAX || resourceURLs.count > UINT16_MAX - 2) {
+    if (sceneXMLFiles.count > UINT16_MAX - 1 ||
+        resourceURLs.count > UINT16_MAX - 1 - sceneXMLFiles.count) {
         return AMProjZIPFail(error, AMProjZIPErrorZIP32Limit,
                              @"Project contents exceed ZIP32 limits", nil);
     }
 
     NSMutableArray<AMProjZIPEntry *> *entries = [NSMutableArray array];
-    AMProjZIPEntry *xmlEntry = [AMProjZIPEntry new];
-    xmlEntry.name = [[NSUUID.UUID.UUIDString lowercaseString]
-        stringByAppendingPathExtension:@"xml"];
-    xmlEntry.nameData = [xmlEntry.name dataUsingEncoding:NSUTF8StringEncoding];
-    xmlEntry.data = sceneXML;
-    xmlEntry.sourceLength = sceneXML.length;
-
     AMProjZIPEntry *manifestEntry = [AMProjZIPEntry new];
     manifestEntry.name = @"manifest.txt";
     manifestEntry.nameData = [manifestEntry.name dataUsingEncoding:NSUTF8StringEncoding];
 
-    NSMutableSet<NSString *> *seenNames = [NSMutableSet setWithObjects:
-        xmlEntry.name.lowercaseString, manifestEntry.name.lowercaseString, nil];
+    NSMutableSet<NSString *> *seenNames = [NSMutableSet setWithObject:
+        manifestEntry.name.precomposedStringWithCanonicalMapping.lowercaseString];
     NSArray<NSString *> *resourceNames = [resourceURLs.allKeys
         sortedArrayUsingSelector:@selector(compare:)];
     NSFileManager *fileManager = [NSFileManager defaultManager];
     for (NSString *name in resourceNames) {
         NSURL *sourceURL = resourceURLs[name];
         NSData *nameData = nil;
-        if (!AMProjZIPValidResourceName(name, &nameData, error)) return NO;
-        NSString *foldedName = name.lowercaseString;
+        if (!AMProjZIPValidEntryName(name, NO, &nameData, error)) return NO;
+        NSString *foldedName =
+            name.precomposedStringWithCanonicalMapping.lowercaseString;
         if ([seenNames containsObject:foldedName]) {
             return AMProjZIPFail(error, AMProjZIPErrorInvalidEntry,
                                  @"Project archive contains duplicate filenames",
@@ -236,7 +245,35 @@ static BOOL AMProjZIPPrepareEntries(NSData *sceneXML,
         [seenNames addObject:foldedName];
     }
 
-    [entries addObject:xmlEntry];
+    NSArray<NSString *> *xmlNames = [sceneXMLFiles.allKeys
+        sortedArrayUsingSelector:@selector(compare:)];
+    for (NSString *name in xmlNames) {
+        NSData *xmlData = sceneXMLFiles[name];
+        NSData *nameData = nil;
+        if (!AMProjZIPValidEntryName(name, YES, &nameData, error)) return NO;
+        if (![xmlData isKindOfClass:NSData.class] || xmlData.length == 0 ||
+            xmlData.length > UINT32_MAX) {
+            return AMProjZIPFail(error, AMProjZIPErrorZIP32Limit,
+                                 @"A scene XML is empty or exceeds ZIP32 limits",
+                                 @{ @"entry": name ?: @"",
+                                    @"bytes": @(xmlData.length) });
+        }
+        NSString *foldedName =
+            name.precomposedStringWithCanonicalMapping.lowercaseString;
+        if ([seenNames containsObject:foldedName]) {
+            return AMProjZIPFail(error, AMProjZIPErrorInvalidEntry,
+                                 @"Project archive contains duplicate filenames",
+                                 @{ @"entry": name });
+        }
+        AMProjZIPEntry *entry = [AMProjZIPEntry new];
+        entry.name = name;
+        entry.nameData = nameData;
+        entry.data = xmlData;
+        entry.sourceLength = xmlData.length;
+        [entries addObject:entry];
+        [seenNames addObject:foldedName];
+    }
+
     manifestEntry.data = AMProjZIPManifestData(entries, NO, error);
     if (!manifestEntry.data) return NO;
     manifestEntry.sourceLength = manifestEntry.data.length;
@@ -271,7 +308,8 @@ static BOOL AMProjZIPDeflateEntry(AMProjZIPEntry *entry, int outputFD,
                                   uint64_t *outputOffset, NSError **error) {
     int inputFD = -1;
     if (entry.sourceURL) {
-        inputFD = open(entry.sourceURL.fileSystemRepresentation, O_RDONLY);
+        inputFD = open(entry.sourceURL.fileSystemRepresentation,
+                       O_RDONLY | O_NOFOLLOW);
         if (inputFD < 0) {
             return AMProjZIPFail(error, AMProjZIPErrorSourceUnavailable,
                                  @"Unable to open a resource file",
@@ -558,15 +596,15 @@ static BOOL AMProjZIPVerifyEntries(NSURL *archiveURL,
     return success;
 }
 
-BOOL AMProjZIPWriteProjectArchive(
+BOOL AMProjZIPWriteProjectArchiveFiles(
     NSURL *destinationURL,
-    NSData *sceneXML,
+    NSDictionary<NSString *, NSData *> *sceneXMLFiles,
     NSDictionary<NSString *, NSURL *> *resourceURLs,
     NSDictionary<NSString *, NSNumber *> **metrics,
     NSError **error) {
     if (metrics) *metrics = nil;
     if (![destinationURL isKindOfClass:NSURL.class] || !destinationURL.isFileURL ||
-        ![sceneXML isKindOfClass:NSData.class] ||
+        ![sceneXMLFiles isKindOfClass:NSDictionary.class] ||
         ![resourceURLs isKindOfClass:NSDictionary.class]) {
         return AMProjZIPFail(error, AMProjZIPErrorInvalidArgument,
                              @"Invalid project archive arguments", nil);
@@ -575,7 +613,7 @@ BOOL AMProjZIPWriteProjectArchive(
     NSArray<AMProjZIPEntry *> *entries = nil;
     uint64_t uncompressedBytes = 0;
     uint64_t requiredBytes = 0;
-    if (!AMProjZIPPrepareEntries(sceneXML, resourceURLs, &entries,
+    if (!AMProjZIPPrepareEntries(sceneXMLFiles, resourceURLs, &entries,
                                  &uncompressedBytes, &requiredBytes, error)) return NO;
 
     NSURL *directoryURL = [destinationURL URLByDeletingLastPathComponent];
@@ -679,7 +717,7 @@ BOOL AMProjZIPWriteProjectArchive(
     if (metrics) {
         *metrics = @{
             @"entry_count": @(entries.count),
-            @"xml_count": @1,
+            @"xml_count": @(sceneXMLFiles.count),
             @"manifest_count": @1,
             @"uncompressed_bytes": @(uncompressedBytes),
             @"compressed_bytes": @(compressedBytes),
@@ -691,6 +729,22 @@ BOOL AMProjZIPWriteProjectArchive(
         };
     }
     return YES;
+}
+
+BOOL AMProjZIPWriteProjectArchive(
+    NSURL *destinationURL,
+    NSData *sceneXML,
+    NSDictionary<NSString *, NSURL *> *resourceURLs,
+    NSDictionary<NSString *, NSNumber *> **metrics,
+    NSError **error) {
+    if (![sceneXML isKindOfClass:NSData.class]) {
+        return AMProjZIPFail(error, AMProjZIPErrorInvalidArgument,
+                             @"Scene XML is unavailable", nil);
+    }
+    NSString *xmlName = [[NSUUID.UUID.UUIDString lowercaseString]
+        stringByAppendingPathExtension:@"xml"];
+    return AMProjZIPWriteProjectArchiveFiles(
+        destinationURL, @{ xmlName: sceneXML }, resourceURLs, metrics, error);
 }
 
 BOOL AMProjWriteArchive(NSURL *destinationURL, NSData *xmlData,
