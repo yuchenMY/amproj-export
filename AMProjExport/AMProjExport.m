@@ -4612,6 +4612,7 @@ static NSArray<UIViewController *> *amproj_visibleProjectsControllers(void) {
     NSMutableArray<UIViewController *> *result = [NSMutableArray array];
     NSMutableSet<NSValue *> *visited = [NSMutableSet set];
     __block void (^walk)(UIViewController *);
+    __block __weak void (^weakWalk)(UIViewController *);
     walk = ^(UIViewController *controller) {
         if (!controller) return;
         NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
@@ -4624,15 +4625,21 @@ static NSArray<UIViewController *> *amproj_visibleProjectsControllers(void) {
             controller.viewIfLoaded.alpha > 0.01) {
             [result addObject:controller];
         }
-        for (UIViewController *child in controller.childViewControllers) walk(child);
-        walk(controller.presentedViewController);
+        void (^recurse)(UIViewController *) = weakWalk;
+        for (UIViewController *child in controller.childViewControllers) recurse(child);
+        recurse(controller.presentedViewController);
         if ([controller isKindOfClass:UINavigationController.class]) {
-            for (UIViewController *child in ((UINavigationController *)controller).viewControllers) walk(child);
+            for (UIViewController *child in ((UINavigationController *)controller).viewControllers) {
+                recurse(child);
+            }
         }
         if ([controller isKindOfClass:UITabBarController.class]) {
-            for (UIViewController *child in ((UITabBarController *)controller).viewControllers) walk(child);
+            for (UIViewController *child in ((UITabBarController *)controller).viewControllers) {
+                recurse(child);
+            }
         }
     };
+    weakWalk = walk;
     NSMutableSet<NSValue *> *windowIDs = [NSMutableSet set];
     NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
     void (^appendWindow)(UIWindow *) = ^(UIWindow *window) {
@@ -4651,6 +4658,8 @@ static NSArray<UIViewController *> *amproj_visibleProjectsControllers(void) {
     for (UIWindow *window in windows) {
         walk(window.rootViewController);
     }
+    weakWalk = nil;
+    walk = nil;
     return result;
 }
 
@@ -4890,8 +4899,8 @@ static NSDictionary* amproj_importPersistenceDelta(NSDictionary *baseline,
     NSMutableArray<NSString *> *sceneXML = [NSMutableArray array];
     NSMutableArray<NSString *> *databases = [NSMutableArray array];
     NSMutableArray<NSString *> *applicationSupport = [NSMutableArray array];
-    NSUInteger changedCount = 0;
-    NSUInteger stableChangedCount = 0;
+    __block NSUInteger changedCount = 0;
+    __block NSUInteger stableChangedCount = 0;
     [after enumerateKeysAndObjectsUsingBlock:
         ^(NSString *path, NSDictionary *metadata, BOOL *stop) {
         (void)stop;
@@ -4999,9 +5008,12 @@ static BOOL amproj_projectRowVerifiedForName(NSString *name) {
     }
     for (UIView *list in amproj_visibleProjectLists()) {
         @try {
-            id dataSource = [list isKindOfClass:UICollectionView.class]
-                ? ((UICollectionView *)list).dataSource
-                : ((UITableView *)list).dataSource;
+            id dataSource = nil;
+            if ([list isKindOfClass:UICollectionView.class]) {
+                dataSource = ((UICollectionView *)list).dataSource;
+            } else if ([list isKindOfClass:UITableView.class]) {
+                dataSource = ((UITableView *)list).dataSource;
+            }
             if (amproj_textMatchesImportedTitle([dataSource description], title)) return YES;
         } @catch (NSException *exception) {
             amproj_debugEvent(@"import.project_row_probe_exception", @{
