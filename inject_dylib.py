@@ -17,6 +17,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 
 AMPROJ_UTI = "com.alightcreative.motion.amproj"
@@ -50,6 +51,9 @@ class DebugSettings:
     server_port: int = DEFAULT_SERVER_PORT
     token: Optional[str] = None
     mode: str = DEFAULT_DEBUG_MODE
+    server_url: Optional[str] = None
+    discovery_enabled: Optional[bool] = None
+    build_identifier: Optional[str] = None
 
 
 def parse_macho_data(data, label="<memory>"):
@@ -558,21 +562,94 @@ def choose_server_ip(explicit=None, adapter_records=None):
     return candidates[0][1]
 
 
-def make_debug_config(server_ip, server_port, token, mode):
+def normalize_debug_server_url(value):
+    """Validate a debug endpoint and return a canonical origin URL."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Debug server URL must not be empty")
+    try:
+        parsed = urlsplit(value.strip())
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"Invalid debug server URL: {value}") from error
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Debug server URL must use http or https and include a host")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Debug server URL must not include credentials, query, or fragment")
+    if parsed.path not in ("", "/"):
+        raise ValueError("Debug server URL must not include a path")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Debug server URL port must be between 1 and 65535")
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit((parsed.scheme.lower(), netloc, "", "", ""))
+
+
+def debug_config_needs_local_network_settings(config):
+    """Return whether Info.plist needs local-network and relaxed ATS settings."""
+    if not isinstance(config, dict):
+        return False
+    if type(config.get("DiscoveryEnabled")) is bool and config["DiscoveryEnabled"]:
+        return True
+    base_url = config.get("BaseURL")
+    if not isinstance(base_url, str):
+        return False
+    try:
+        return urlsplit(base_url).scheme.lower() == "http"
+    except ValueError:
+        return False
+
+
+def validate_debug_config(config):
+    """Validate config fields whose plist types affect runtime permissions."""
+    if not isinstance(config, dict):
+        raise ValueError("Debug config root must be a dictionary")
+    if "DiscoveryEnabled" in config and type(config["DiscoveryEnabled"]) is not bool:
+        raise ValueError("Debug config DiscoveryEnabled must be a plist Boolean")
+    return config
+
+
+def make_debug_config(
+    server_ip,
+    server_port,
+    token,
+    mode,
+    *,
+    server_url=None,
+    discovery_enabled=None,
+    build_identifier=None,
+):
     if mode not in DEBUG_MODES:
         raise ValueError(f"Invalid debug mode: {mode}")
     if not 1 <= server_port <= 65535:
         raise ValueError(f"Invalid server port: {server_port}")
     if len(token) < 16:
         raise ValueError("Debug token must contain at least 16 characters")
-    return {
-        "BaseURL": f"http://{server_ip}:{server_port}",
+
+    if server_url is not None:
+        base_url = normalize_debug_server_url(server_url)
+        parsed = urlsplit(base_url)
+        endpoint_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        discovery = False if discovery_enabled is None else discovery_enabled
+    else:
+        if server_ip is None:
+            raise ValueError("Debug server IP is required when --server-url is absent")
+        base_url = f"http://{server_ip}:{server_port}"
+        endpoint_port = server_port
+        discovery = True if discovery_enabled is None else discovery_enabled
+
+    config = {
+        "BaseURL": base_url,
         "Token": token,
         "ProtocolVersion": 1,
         "DefaultMode": mode,
-        "DiscoveryEnabled": True,
-        "DiscoveryPort": server_port,
+        "DiscoveryEnabled": bool(discovery),
+        "DiscoveryPort": endpoint_port,
     }
+    if build_identifier:
+        config["BuildIdentifier"] = str(build_identifier)
+    return config
 
 
 def install_debug_config(app_dir, settings, adapter_records=None):
@@ -587,32 +664,46 @@ def install_debug_config(app_dir, settings, adapter_records=None):
             raise FileNotFoundError(f"Debug config not found: {source}")
         with source.open("rb") as file:
             config = plistlib.load(file)
-        if not isinstance(config, dict):
-            raise ValueError("Debug config root must be a dictionary")
+        validate_debug_config(config)
         shutil.copy2(source, destination)
         print(f"[+] Copied debug config to {destination}")
         return config
 
-    server_ip = choose_server_ip(settings.server_ip, adapter_records)
+    server_ip = None
+    if settings.server_url is None:
+        server_ip = choose_server_ip(settings.server_ip, adapter_records)
     token = settings.token or secrets.token_urlsafe(32)
     config = make_debug_config(
-        server_ip, settings.server_port, token, settings.mode
+        server_ip,
+        settings.server_port,
+        token,
+        settings.mode,
+        server_url=settings.server_url,
+        discovery_enabled=settings.discovery_enabled,
+        build_identifier=settings.build_identifier,
     )
+    validate_debug_config(config)
     with destination.open("wb") as file:
         plistlib.dump(config, file, fmt=plistlib.FMT_BINARY)
     print(f"[+] Generated debug config at {destination}")
     print(f"[+] Debug server: {config['BaseURL']}")
-    print(f"[+] Debug discovery: UDP {server_ip}:{config['DiscoveryPort']}")
-    print(f"[+] Debug token: {config['Token']}")
+    if config["DiscoveryEnabled"]:
+        print(f"[+] Debug discovery: UDP {server_ip}:{config['DiscoveryPort']}")
+    else:
+        print("[+] Debug discovery: disabled")
+    print("[+] Debug token configured (value hidden)")
     return config
 
 
 def _debug_settings_from_args(args, parser):
     generation_values = (
         args.server_ip,
+        args.server_url,
         args.server_port,
         args.debug_token,
         args.debug_mode,
+        True if args.no_discovery else None,
+        args.build_id,
     )
     if args.debug_config is not None and any(
         value is not None for value in generation_values
@@ -620,6 +711,10 @@ def _debug_settings_from_args(args, parser):
         parser.error(
             "--debug-config cannot be combined with generated-config options"
         )
+    if args.server_ip is not None and args.server_url is not None:
+        parser.error("--server-ip and --server-url are mutually exclusive")
+    if args.server_url is not None and args.server_port is not None:
+        parser.error("--server-port must be included in --server-url")
 
     debug_dylib = "debug" in Path(args.dylib).stem.lower()
     enabled = (
@@ -634,6 +729,9 @@ def _debug_settings_from_args(args, parser):
         server_port=args.server_port or DEFAULT_SERVER_PORT,
         token=args.debug_token,
         mode=args.debug_mode or DEFAULT_DEBUG_MODE,
+        server_url=args.server_url,
+        discovery_enabled=False if args.no_discovery else None,
+        build_identifier=args.build_id,
     )
 
 
@@ -931,6 +1029,7 @@ def _validate_patched_info_plist(
     settings,
     expected_bundle_identifier,
     expected_app_group_id=None,
+    expected_config=None,
 ):
     if not isinstance(plist, dict):
         raise RuntimeError("Info.plist root is not a dictionary")
@@ -969,7 +1068,7 @@ def _validate_patched_info_plist(
             raise RuntimeError(
                 f"Info.plist is missing the {AMPROJ_URL_SCHEME} URL scheme"
             )
-    if settings.enabled:
+    if settings.enabled and debug_config_needs_local_network_settings(expected_config):
         if not isinstance(plist.get("NSLocalNetworkUsageDescription"), str):
             raise RuntimeError("Info.plist is missing NSLocalNetworkUsageDescription")
         ats = plist.get("NSAppTransportSecurity")
@@ -1099,6 +1198,7 @@ def verify_injected_ipa(
                 settings,
                 expected_bundle_identifier,
                 expected_app_group_id,
+                expected_config,
             )
 
             executable_name = plist.get("CFBundleExecutable") or Path(app_root).stem
@@ -1234,7 +1334,10 @@ def inject_ipa(
             print("[*] Binary already patched, continuing...")
 
         config = install_debug_config(app_dir, settings)
-        patch_info_plist(app_dir, enable_debug_network=settings.enabled)
+        patch_info_plist(
+            app_dir,
+            enable_debug_network=debug_config_needs_local_network_settings(config),
+        )
 
         if share_extension_path is not None:
             patch_share_extension_host_info(app_dir, app_group_id)
@@ -1338,11 +1441,25 @@ def build_argument_parser():
         "--server-ip",
         help="debug backend IPv4 address; otherwise auto-detect RFC 1918 WLAN",
     )
+    parser.add_argument(
+        "--server-url",
+        type=normalize_debug_server_url,
+        help="debug backend origin URL, for example https://debug.example.test",
+    )
     parser.add_argument("--server-port", type=_port, help="debug backend port")
+    parser.add_argument(
+        "--no-discovery",
+        action="store_true",
+        help="disable UDP LAN endpoint discovery",
+    )
     parser.add_argument(
         "--debug-token", type=_token, help="debug backend bearer token"
     )
     parser.add_argument("--debug-mode", choices=DEBUG_MODES, help="initial mode")
+    parser.add_argument(
+        "--build-id",
+        help="opaque build identifier embedded in the debug config",
+    )
     parser.add_argument(
         "--expected-main-uuid",
         type=_macho_uuid,

@@ -37,19 +37,23 @@ def function_body(signature: str, next_signature: str) -> str:
 
 class NativeImportRouteSourceTests(unittest.TestCase):
     def test_release_version_metadata_is_consistent(self):
-        self.assertIn('kAMProjPluginVersion = @"27";', SOURCE)
-        self.assertIn('kAMDebugPluginVersion = @"27";', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("AMProj v27", SOURCE)
+        self.assertIn('kAMProjPluginVersion = @"28";', SOURCE)
+        self.assertIn('kAMDebugPluginVersion = @"28";', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("AMProj v28", SOURCE)
+        self.assertNotIn("AMProj v27", SOURCE)
         self.assertNotIn("AMProj v23", SOURCE)
         self.assertIn("AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs", WORKFLOW)
-        self.assertIn("AMPROJ_RELEASE_VERSION: '27'", WORKFLOW)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '28'", WORKFLOW)
         self.assertIn('"commit": os.environ["GITHUB_SHA"]', WORKFLOW)
         self.assertIn('"run_id": os.environ["GITHUB_RUN_ID"]', WORKFLOW)
         self.assertIn('"sha256": {', WORKFLOW)
         self.assertIn("build-metadata.json", WORKFLOW)
-        self.assertIn("AM_v1_direct_v27.ipa", README)
-        self.assertIn("AM_v1_direct_v27_debug.ipa", README)
-        self.assertIn("AM_v1_direct_v27.ipa", BUILD_SCRIPT)
+        self.assertIn("AM_v1_direct_v28.ipa", README)
+        self.assertIn("AM_v1_direct_v28_debug.ipa", README)
+        self.assertIn("AM_v1_direct_v28.ipa", BUILD_SCRIPT)
+        self.assertIn('config[@"BuildIdentifier"]', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn('@"variant": @"debug"', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn('@"build_id": self.buildIdentifier', DEBUG_TRANSPORT_SOURCE)
 
     def test_paywall_filter_requires_multiple_subscription_markers(self):
         self.assertIn("paywall.detected", SOURCE)
@@ -69,9 +73,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("paywall.scan_root", SOURCE)
         self.assertIn("amproj_armPaywallStartupFallback", SOURCE)
         self.assertIn("startupLoadingFallback", SOURCE)
-        self.assertIn("HideLoadingInView", SOURCE)
-        self.assertIn("startup_loading.skip_pass", SOURCE)
-        self.assertIn("SkipLoadingScreen();", SOURCE)
+        self.assertNotIn("HideLoadingInView", SOURCE)
+        self.assertNotIn("startup_loading.skip_pass", SOURCE)
+        self.assertNotIn("SkipLoadingScreen", SOURCE)
         self.assertNotIn("hide_dedicated_window", SOURCE)
         self.assertNotIn("amproj_alternateVisibleWindow", SOURCE)
         self.assertIn("[presentingController dismissViewControllerAnimated", SOURCE)
@@ -85,67 +89,105 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("[presentingController dismissViewControllerAnimated", dismiss)
         self.assertNotIn("paywallWindow.hidden = YES", dismiss)
         self.assertNotIn("makeKeyAndVisible", dismiss)
+        self.assertIn("startupTransactionOwnsPaywall", dismiss)
+        self.assertIn("startup_loading.legacy_scan_deferred", dismiss)
 
-    def test_startup_loading_bypass_matches_documented_view_scope(self):
-        helper = function_body(
-            "static BOOL HideLoadingInView",
-            "static void SkipLoadingScreenOnce",
-        )
-        self.assertIn("UIActivityIndicatorView.class", helper)
-        self.assertIn("UIButton.class", helper)
-        self.assertIn("button.currentTitle.length > 0", helper)
-        self.assertIn("button.accessibilityLabel.length > 0", helper)
-        self.assertIn("view.alpha = 1.0", helper)
-        self.assertIn("view.hidden = NO", helper)
-        self.assertIn("bringSubviewToFront:view", helper)
-        self.assertIn("NSArray<UIView *> *subviews = [view.subviews copy]", helper)
+    def test_global_md_loading_scan_is_replaced_by_state_machine(self):
+        self.assertNotIn("HideLoadingInView", SOURCE)
+        self.assertNotIn("SkipLoadingScreenOnce", SOURCE)
+        self.assertNotIn("SkipLoadingScreen", SOURCE)
+        self.assertNotIn("startup_loading.skip_pass", SOURCE)
+        self.assertIn("AMProjStartupPaywallState", SOURCE)
 
-        retry = function_body(
-            "static void SkipLoadingScreenOnce",
-            "static void SkipLoadingScreen(void)",
-        )
-        self.assertIn("if (attempts++ > 20) return", retry)
-        self.assertIn("UIApplication.sharedApplication.windows", retry)
-        self.assertIn("if (!found)", retry)
-        self.assertIn("300 * NSEC_PER_MSEC", retry)
-
-        scheduler = function_body(
-            "static void SkipLoadingScreen(void)",
+    def test_stalled_startup_paywall_establishes_then_dismisses(self):
+        state_machine = function_body(
+            "typedef NS_ENUM(NSUInteger, AMProjStartupPresentationDecision)",
             "static NSString* amproj_projectTitleRecursive",
         )
-        self.assertIn("300 * NSEC_PER_MSEC", scheduler)
-        self.assertIn("SkipLoadingScreenOnce", scheduler)
-        self.assertEqual(SOURCE.count("SkipLoadingScreen();"), 1)
-
-    def test_stalled_startup_paywall_is_suppressed_once_before_presentation(self):
-        suppression = function_body(
-            "static BOOL amproj_shouldSuppressStalledStartupPaywall",
-            "static NSString* amproj_projectTitleRecursive",
+        for symbol in (
+            "PaywallLoadingScreenView",
+            "CloudCardsTiersPaywallView",
+            "NodeHostingControllerWithCustomStatusbarContent",
+            "AMProjStartupPresentationDecisionTrackOuter",
+            "AMProjStartupPresentationDecisionSuppress",
+            "presenter == amproj_startupPaywallOuter",
+            "presenter == amproj_startupPaywallSuppressedRetryOuter",
+            "dismissViewControllerAnimated:NO",
+            "500 * NSEC_PER_MSEC",
+            "amproj_startupPaywallDismissFailures >= 3",
+            "elapsed >= 3.0",
+            '@"\u8fdb\u5165\u4e3b\u9875"',
+            "mainWindow addSubview:button",
+            "mainNCVisible && mainVCVisible",
+            "amproj_startupPaywallTailSuppressionUntil",
+            "presenter == amproj_startupPaywallPresenter",
+        ):
+            self.assertIn(symbol, state_machine)
+        for event in (
+            "presentation_seen",
+            "outer_presented",
+            "dismiss_requested",
+            "dismiss_verified",
+            "main_visible",
+        ):
+            self.assertIn(f'@"{event}"', state_machine)
+        self.assertIn('fields[@"state"]', state_machine)
+        self.assertIn('fields[@"failure_count"]', state_machine)
+        self.assertIn('fields[@"failure"]', state_machine)
+        self.assertNotIn("window.hidden = YES", state_machine)
+        self.assertNotIn("[[UIWindow alloc]", state_machine)
+        self.assertNotIn("makeKey", state_machine)
+        self.assertNotIn("rootViewController =", state_machine)
+        self.assertNotIn("reconcileRetry", state_machine)
+        self.assertIn(
+            "amproj_startupPaywallTailSuppressionUntil = "
+            "CFAbsoluteTimeGetCurrent() + 1.5",
+            state_machine,
         )
-        self.assertIn("amproj_startupPaywallSuppressionUntil", suppression)
-        self.assertIn("amproj_startupPaywallSuppressionArmed", suppression)
-        self.assertIn("PaywallLoadingScreenView", suppression)
-        self.assertIn("CloudCardsTiersPaywallView", suppression)
-        self.assertIn("NodeHostingControllerWithCustomStatusbarContent", suppression)
-        self.assertIn("presenter == amproj_suppressedStartupPaywallOuter", suppression)
-        self.assertIn("amproj_startupPaywallSuppressionArmed = NO", suppression)
-        self.assertNotIn("window.hidden", suppression)
-        self.assertNotIn("makeKey", suppression)
+
+        verify = source_body(
+            state_machine,
+            "static void amproj_verifyStartupPaywallDismiss",
+            "static void amproj_requestStartupPaywallDismiss",
+        )
+        fallback = verify.index("amproj_showStartupPaywallFallbackButton(failure)")
+        retry = verify.index("amproj_reconcileStartupPaywall", fallback)
+        self.assertIn("return;", verify[fallback:retry])
+
+        reconcile = source_body(
+            state_machine,
+            "static void amproj_reconcileStartupPaywall",
+            "static AMProjStartupPresentationDecision",
+        )
+        stable_fallback = reconcile.index(
+            "amproj_startupPaywallState == "
+            "AMProjStartupPaywallStateFallbackVisible"
+        )
+        auto_dismiss = reconcile.index(
+            "amproj_requestStartupPaywallDismiss", stable_fallback
+        )
+        self.assertIn("return;", reconcile[stable_fallback:auto_dismiss])
 
         arm = function_body(
             "static void amproj_armPaywallStartupFallback",
             "static BOOL amproj_paywallContentContainsAny",
         )
         self.assertIn("amproj_startupPaywallSuppressionUntil = now + 30.0", arm)
-        self.assertIn("amproj_startupPaywallSuppressionArmed = YES", arm)
+        self.assertIn("AMProjStartupPaywallStateArmed", arm)
 
         present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
-        self.assertIn("amproj_shouldSuppressStalledStartupPaywall", present)
-        self.assertIn("startup_loading.modal_suppressed", present)
+        self.assertIn("amproj_startupPaywallPresentationDecision", present)
+        self.assertIn("AMProjStartupPresentationDecisionTrackOuter", present)
+        self.assertIn("amproj_markStartupPaywallOuterPresented", present)
+        self.assertIn("presentation_completion", present)
         self.assertIn("dispatch_async(dispatch_get_main_queue(), completion)", present)
-        suppression_call = present.index("amproj_shouldSuppressStalledStartupPaywall")
+        decision = present.index("amproj_startupPaywallPresentationDecision")
         original = present.index("orig_presentVC(self, _cmd, controller, animated, completion)")
-        self.assertLess(suppression_call, original)
+        tracked_original = present.index(
+            "orig_presentVC(self, _cmd, controller, animated, trackedCompletion)"
+        )
+        self.assertLess(decision, tracked_original)
+        self.assertLess(tracked_original, original)
         self.assertNotIn("amproj_scheduleLatePaywallLoadingBypass", SOURCE)
         self.assertNotIn("startup_loading.controller_pass", SOURCE)
 
@@ -738,7 +780,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_tryDispatchPendingImport",
         )
         success_branch = finish.index("if (success)")
-        self.assertNotIn('@"AMProj v27 · 4/4', finish[success_branch:])
+        self.assertNotIn('@"AMProj v28 · 4/4', finish[success_branch:])
         self.assertIn("amproj_importVerificationActive = YES", finish[success_branch:])
         self.assertIn('@"verifying_project_row"', finish[success_branch:])
         self.assertIn("amproj_verifyImportedProjectRow", finish[success_branch:])
@@ -752,7 +794,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         verified_branch = verification[verification.index("if (verified)") :]
         self.assertIn('@"import.project_row_verified"', verification)
         self.assertIn("amproj_releaseImportTransaction(transactionID, YES)", verified_branch)
-        self.assertIn('AMProj v27 · 4/4', verified_branch)
+        self.assertIn('AMProj v28 · 4/4', verified_branch)
         self.assertIn('amproj_resumeQueuedImports(@"project_row_verified")', verified_branch)
         self.assertIn('@"import.project_row_missing"', verification)
         self.assertIn("amproj_activateNextPendingImport()", verification)
@@ -760,7 +802,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertEqual(SOURCE.count("AMProj v27 · 4/4"), 1)
+        self.assertEqual(SOURCE.count("AMProj v28 · 4/4"), 1)
 
     def test_native_failure_alert_is_observed_without_replacing_it(self):
         detector = function_body(
@@ -784,7 +826,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v27 \\u00b7 E40", present)
+        self.assertIn("AMProj v28 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),

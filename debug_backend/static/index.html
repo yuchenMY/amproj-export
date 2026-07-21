@@ -206,7 +206,12 @@
         const name = document.createElement("strong");
         name.textContent = session.device_model || session.device_id || "未知设备";
         const version = document.createElement("span");
-        version.textContent = `iOS ${session.os_version || "?"} · App ${session.app_version || "?"}`;
+        const plugin = [
+          session.plugin_version ? `AMProj v${session.plugin_version}` : "AMProj ?",
+          session.plugin_variant || "",
+          session.plugin_build_id || ""
+        ].filter(Boolean).join(" · ");
+        version.textContent = `iOS ${session.os_version || "?"} · App ${session.app_version || "?"} · ${plugin}`;
         const seen = document.createElement("span");
         seen.textContent = `最后活动 ${new Date(session.last_seen).toLocaleTimeString()} · ${session.session_id}`;
         row.append(name, version, seen);

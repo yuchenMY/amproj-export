@@ -195,6 +195,8 @@ class BackendState:
                 "os_version": payload.get("os_version") or device.get("os_version"),
                 "device_model": payload.get("device_model") or device.get("model"),
                 "plugin_version": payload.get("plugin_version") or plugin.get("version"),
+                "plugin_variant": payload.get("plugin_variant") or plugin.get("variant"),
+                "plugin_build_id": payload.get("plugin_build_id") or plugin.get("build_id"),
                 "protocol_version": payload.get("protocol_version"),
             }
             self.sessions[session_id] = session

@@ -34,7 +34,7 @@ static const NSTimeInterval kAMDebugDiscoveryRetryInterval = 15.0;
 static const NSTimeInterval kAMDebugDiscoveryTimeout = 1.5;
 static const NSUInteger kAMDebugDiscoveryMaxPacketBytes = 512;
 static const NSUInteger kAMDebugDiscoveryMaxSubnetHosts = 1024;
-static NSString *const kAMDebugPluginVersion = @"27";
+static NSString *const kAMDebugPluginVersion = @"28";
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
 
 static BOOL AMDebugPrivateIPv4(uint32_t address) {
@@ -427,6 +427,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
 @property(nonatomic, strong) id protocolVersion;
 @property(nonatomic, copy) NSString *token;
 @property(nonatomic, copy) NSString *mode;
+@property(nonatomic, copy) NSString *buildIdentifier;
 @property(nonatomic, copy, nullable) NSString *activeTransactionIdentifier;
 @property(nonatomic, copy, nullable) NSString *commandCursor;
 @property(nonatomic, strong) NSDictionary *helloMetadata;
@@ -520,10 +521,13 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         ? config[@"DiscoveryEnabled"] : nil;
     NSString *defaultMode = [config[@"DefaultMode"] isKindOfClass:NSString.class]
         ? [config[@"DefaultMode"] lowercaseString] : nil;
+    NSString *buildIdentifier = [config[@"BuildIdentifier"] isKindOfClass:NSString.class]
+        ? config[@"BuildIdentifier"] : nil;
     NSURL *baseURL = baseString.length ? [NSURL URLWithString:baseString] : nil;
     NSString *scheme = baseURL.scheme.lowercaseString;
 
     if (AMDebugValidMode(defaultMode)) _mode = [defaultMode copy];
+    _buildIdentifier = buildIdentifier.length ? [buildIdentifier copy] : @"v28-debug";
     NSCharacterSet *newlines = NSCharacterSet.newlineCharacterSet;
     BOOL safeToken = token.length && [token rangeOfCharacterFromSet:newlines].location == NSNotFound;
     BOOL validProtocolVersion = [protocolVersion isKindOfClass:NSNumber.class] ||
@@ -597,7 +601,9 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             @"system_version": device.systemVersion ?: @""
         },
         @"plugin": @{
-            @"version": kAMDebugPluginVersion
+            @"version": kAMDebugPluginVersion,
+            @"variant": @"debug",
+            @"build_id": self.buildIdentifier ?: @"v28-debug"
         }
     };
 

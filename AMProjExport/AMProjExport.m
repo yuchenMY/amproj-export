@@ -40,7 +40,7 @@
 #import "AMProjImportArchive.h"
 #import "AMProjNativeImportBridge.h"
 
-static NSString *const kAMProjPluginVersion = @"27";
+static NSString *const kAMProjPluginVersion = @"28";
 
 #if AMPROJ_DEBUG
 #import "AMDebugTransport.h"
@@ -3290,10 +3290,10 @@ static NSString* amproj_visibleImportFileError(NSError *error) {
     }
     NSString *diagnostics = amproj_copyDiagnosticSummary(error);
     if (diagnostics.length) {
-        return [NSString stringWithFormat:@"AMProj v27 \u00b7 %@ (E%ld \u00b7 %@)",
+        return [NSString stringWithFormat:@"AMProj v28 \u00b7 %@ (E%ld \u00b7 %@)",
                                           message, (long)error.code, diagnostics];
     }
-    return [NSString stringWithFormat:@"AMProj v27 \u00b7 %@ (E%ld)",
+    return [NSString stringWithFormat:@"AMProj v28 \u00b7 %@ (E%ld)",
                                       message, (long)error.code];
 }
 
@@ -4043,7 +4043,7 @@ static UIViewController* amproj_topViewController(UIViewController *controller) 
     }
     NSURL *selectedURL = [URLs.firstObject copy];
     BOOL heldSecurityScope = [selectedURL startAccessingSecurityScopedResource];
-    amproj_showImportStatus(@"AMProj v27 · 1/4 已选择 .amproj 文件", NO);
+    amproj_showImportStatus(@"AMProj v28 · 1/4 已选择 .amproj 文件", NO);
     dispatch_async(amproj_importInboxQueue(), ^{
         BOOL prepared = NO;
         AMProjIncomingURLResult result = amproj_handleIncomingProjectURLSafely(
@@ -4206,7 +4206,7 @@ static BOOL amproj_pauseForNativeBridgeRestart(NSString *transactionID,
     if (amproj_nativeBridgeRestartNoticeShown) return YES;
     amproj_nativeBridgeRestartNoticeShown = YES;
     NSString *message =
-        @"AMProj v27 \u539f\u751f\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u5b8c\u5168\u5173\u95ed\u5e76\u91cd\u65b0\u6253\u5f00 Alight Motion \u540e\u518d\u91cd\u8bd5\u3002\u5df2\u4fdd\u7559\u5bfc\u5165\u7f13\u5b58\u5305\u3002";
+        @"AMProj v28 \u539f\u751f\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u5b8c\u5168\u5173\u95ed\u5e76\u91cd\u65b0\u6253\u5f00 Alight Motion \u540e\u518d\u91cd\u8bd5\u3002\u5df2\u4fdd\u7559\u5bfc\u5165\u7f13\u5b58\u5305\u3002";
     amproj_debugEvent(@"import.local_bridge_requires_restart", @{
         @"transaction_id": transactionID ?: @"",
         @"filename": name ?: @"project.amproj",
@@ -4229,7 +4229,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
         @autoreleasepool {
             @try {
             amproj_showImportStatusForTransaction(
-                @"AMProj v27 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u5e76\u89c4\u8303\u5316\u9879\u76ee\u5305",
+                @"AMProj v28 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u5e76\u89c4\u8303\u5316\u9879\u76ee\u5305",
                 NO, transactionID);
 
             NSDictionary *validationMetrics = nil;
@@ -4384,7 +4384,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                         ? preparationError.localizedDescription
                         : @"\u9879\u76ee\u5305\u5b8c\u6574\u6027\u6821\u9a8c\u6216\u89c4\u8303\u5316\u5931\u8d25";
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v27 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u89c4\u8303\u5316\uff1a%@", detail];
+                        @"AMProj v28 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u89c4\u8303\u5316\uff1a%@", detail];
                     amproj_showImportStatusForTransaction(visible, YES, transactionID);
                     amproj_presentImportError(visible);
                 }
@@ -4451,7 +4451,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                 return;
             }
             amproj_showImportStatusForTransaction(
-                @"AMProj v27 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165",
+                @"AMProj v28 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165",
                 NO, transactionID);
             amproj_queuePreparedImport(preparedURL, nameSnapshot, transactionID);
             } @catch (NSException *exception) {
@@ -4473,7 +4473,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                 });
                 if (!silentErrors) {
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v27 · 项目包处理异常：%@", reason];
+                        @"AMProj v28 · 项目包处理异常：%@", reason];
                     amproj_showImportStatusForTransaction(visible, YES, transactionID);
                     amproj_presentImportError(visible);
                 }
@@ -4547,7 +4547,7 @@ static void amproj_activateNextPendingImport(void) {
     amproj_markImportTransactionState(
         transactionID, AMProjImportTransactionWaitingForProjects);
     amproj_showImportStatusForTransaction(
-        @"AMProj v27 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d",
+        @"AMProj v28 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d",
         NO, transactionID);
     amproj_tryDispatchPendingImport(generation);
 }
@@ -4758,7 +4758,7 @@ static void amproj_verifyImportedProjectRow(NSUInteger generation,
             amproj_importVisibleStageRank = 0;
             amproj_visibleStatusTransactionID = nil;
             amproj_showImportStatusForTransaction(
-                @"AMProj v27 · 4/4 已验证项目已出现在底部“项目”", NO,
+                @"AMProj v28 · 4/4 已验证项目已出现在底部“项目”", NO,
                 transactionID);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC),
                            dispatch_get_main_queue(), ^{
@@ -4804,7 +4804,7 @@ static void amproj_verifyImportedProjectRow(NSUInteger generation,
             @"error": verifyError.localizedDescription
         });
         NSString *visible = [NSString stringWithFormat:
-            @"AMProj v27 · 导入未完成：%@。缓存包已保留，可重试。",
+            @"AMProj v28 · 导入未完成：%@。缓存包已保留，可重试。",
             verifyError.localizedDescription];
         amproj_showImportStatusForTransaction(visible, YES, transactionID);
         amproj_presentImportErrorOfferingPicker(visible, NO);
@@ -4872,7 +4872,7 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
                                          amproj_importTransactionForID(transactionID).fingerprint,
                                          @"verifying_project_row", nil, nil, @4, nil);
             amproj_showImportStatusForTransaction(
-                @"AMProj v27 · 原生回调完成，正在确认项目已出现在底部“项目”",
+                @"AMProj v28 · 原生回调完成，正在确认项目已出现在底部“项目”",
                 NO, transactionID);
             amproj_verifyImportedProjectRow(amproj_importVerificationGeneration,
                                             name ?: @"project.amproj",
@@ -4890,7 +4890,7 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
             NSString *detail = error.localizedDescription.length
                 ? error.localizedDescription : @"AM \u672c\u5730\u9879\u76ee\u5305\u5bfc\u5165\u5931\u8d25";
             NSString *visible = [NSString stringWithFormat:
-                @"AMProj v27 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d\uff1a%@", detail];
+                @"AMProj v28 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d\uff1a%@", detail];
             amproj_showImportStatusForTransaction(visible, YES, transactionID);
             if (![error.userInfo[@"AMProjNativeAlertPresented"] boolValue]) {
                 amproj_presentImportErrorOfferingPicker(visible, NO);
@@ -5022,7 +5022,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             } else if (started &&
                        generation == amproj_activeNativeImportGeneration) {
                 amproj_showImportStatusForTransaction(
-                    @"AMProj v27 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u5e95\u90e8\u201c\u9879\u76ee\u201d",
+                    @"AMProj v28 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u5e95\u90e8\u201c\u9879\u76ee\u201d",
                     NO, transactionID);
                 amproj_debugEvent(@"import.local_bridge_started", @{
                     @"success": @YES,
@@ -5057,7 +5057,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                 @"bridge_available": @NO
             });
             amproj_showImportStatusForTransaction(
-                @"AMProj v27 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea",
+                @"AMProj v28 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea",
                 YES, transactionID);
             amproj_presentImportErrorOfferingPicker(
                 @"\u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c\u901a\u8fc7\uff0c\u4f46 Alight Motion \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u672a\u80fd\u5c31\u7eea\u3002\u672c\u6b21\u6ca1\u6709\u56de\u9000\u5230\u4efb\u4f55\u4e0a\u4f20\u5165\u53e3\u3002",
@@ -5341,7 +5341,7 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
             });
             if (!silentErrors) {
                 amproj_showImportStatusForTransaction(
-                    @"AMProj v27 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25",
+                    @"AMProj v28 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25",
                     YES, transactionID);
                 amproj_presentImportError(@"无法创建导入缓存，请检查设备剩余空间后重试。");
             }
@@ -5502,10 +5502,10 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
         });
         amproj_markImportTransactionState(transactionID, AMProjImportTransactionValidating);
         amproj_showImportStatusForTransaction(
-            @"AMProj v27 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587件",
+            @"AMProj v28 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587件",
             NO, transactionID);
         amproj_showImportStatusForTransaction(
-            @"AMProj v27 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305",
+            @"AMProj v28 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305",
             NO, transactionID);
         amproj_prepareCopiedArchive(
             destination, directory, originalName, source, silentErrors, transactionID);
@@ -6336,7 +6336,7 @@ static void hooked_projectsImportAlertViewDidLoad(id self, SEL _cmd) {
     });
     if (recognizedQueuedPackage) {
         amproj_showImportStatus(
-            @"AMProj v27 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d", NO);
+            @"AMProj v28 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165\u5230\u201c\u9879\u76ee\u201d", NO);
     }
 }
 
@@ -6354,7 +6354,7 @@ static void hooked_projectsImportAlertOnPressImport(id self, SEL _cmd, id sender
     });
     if (tracked) {
         amproj_showImportStatus(
-            @"AMProj v27 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
+            @"AMProj v28 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d", NO);
     }
     if (orig_projectsImportAlertOnPressImport) {
         orig_projectsImportAlertOnPressImport(self, _cmd, sender);
@@ -6667,7 +6667,27 @@ static BOOL amproj_isIPAFireWelcome(UIViewController *controller) {
 // screens are never treated as stuck pages.
 static CFAbsoluteTime amproj_paywallStartupFallbackUntil = 0;
 static CFAbsoluteTime amproj_startupPaywallSuppressionUntil = 0;
-static BOOL amproj_startupPaywallSuppressionArmed = NO;
+
+typedef NS_ENUM(NSUInteger, AMProjStartupPaywallState) {
+    AMProjStartupPaywallStateIdle = 0,
+    AMProjStartupPaywallStateArmed,
+    AMProjStartupPaywallStatePresentationSeen,
+    AMProjStartupPaywallStateOuterPresented,
+    AMProjStartupPaywallStateDismissRequested,
+    AMProjStartupPaywallStateVerifying,
+    AMProjStartupPaywallStateFallbackVisible,
+    AMProjStartupPaywallStateMainVisible,
+};
+
+static AMProjStartupPaywallState amproj_startupPaywallState =
+    AMProjStartupPaywallStateIdle;
+static CFAbsoluteTime amproj_startupPaywallStartedAt = 0;
+static NSUInteger amproj_startupPaywallGeneration = 0;
+static NSUInteger amproj_startupPaywallDismissSequence = 0;
+static NSUInteger amproj_startupPaywallDismissFailures = 0;
+static BOOL amproj_startupPaywallDismissInFlight = NO;
+static BOOL amproj_startupPaywallOuterPresentedRecorded = NO;
+static CFAbsoluteTime amproj_startupPaywallTailSuppressionUntil = 0;
 
 static void amproj_armPaywallStartupFallback(void) {
     if (![NSThread isMainThread]) return;
@@ -6675,7 +6695,7 @@ static void amproj_armPaywallStartupFallback(void) {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         amproj_paywallStartupFallbackUntil = now + 120.0;
         amproj_startupPaywallSuppressionUntil = now + 30.0;
-        amproj_startupPaywallSuppressionArmed = YES;
+        amproj_startupPaywallState = AMProjStartupPaywallStateArmed;
     }
 }
 
@@ -7117,6 +7137,20 @@ static void amproj_dismissDetectedPaywallFrom(UIViewController *candidate,
     UIViewController *paywall = amproj_findPaywallController(
         candidate, [NSMutableSet set], 0, &evidence);
     if (!paywall) return;
+    NSString *paywallClassName = NSStringFromClass(paywall.class) ?: @"";
+    BOOL startupTransactionOwnsPaywall =
+        amproj_startupPaywallState != AMProjStartupPaywallStateIdle &&
+        amproj_startupPaywallState != AMProjStartupPaywallStateArmed &&
+        amproj_startupPaywallState != AMProjStartupPaywallStateMainVisible &&
+        ([paywallClassName containsString:@"PaywallLoadingScreenView"] ||
+         [paywallClassName containsString:@"CloudCardsTiersPaywallView"]);
+    if (startupTransactionOwnsPaywall) {
+        amproj_debugEvent(@"startup_loading.legacy_scan_deferred", @{
+            @"source": source ?: @"unknown",
+            @"controller": paywallClassName
+        });
+        return;
+    }
 
     static __weak UIViewController *lastPaywall;
     static CFAbsoluteTime lastDismissAt = 0;
@@ -7297,87 +7331,473 @@ static void amproj_schedulePaywallScan(UIViewController *candidate, NSString *so
     }
 }
 
-// MARK: - Startup loading overlay bypass
-// Runtime implementation from 跳过启动加载圈_代码.md.
+// MARK: - Startup paywall recovery
 
-static BOOL HideLoadingInView(UIView *view) {
-    BOOL found = NO;
-    if ([view isKindOfClass:UIActivityIndicatorView.class]) {
-        view.alpha = 0.0;
-        view.hidden = YES;
-        found = YES;
+typedef NS_ENUM(NSUInteger, AMProjStartupPresentationDecision) {
+    AMProjStartupPresentationDecisionPass = 0,
+    AMProjStartupPresentationDecisionTrackOuter,
+    AMProjStartupPresentationDecisionSuppress,
+};
+
+static __weak UIViewController *amproj_startupPaywallOuter;
+static __weak UIViewController *amproj_startupPaywallSuppressedRetryOuter;
+static __weak UIViewController *amproj_startupPaywallPresenter;
+static __weak UIButton *amproj_startupPaywallFallbackButton;
+
+static NSString *amproj_startupPaywallStateName(void) {
+    switch (amproj_startupPaywallState) {
+        case AMProjStartupPaywallStateArmed: return @"armed";
+        case AMProjStartupPaywallStatePresentationSeen: return @"presentation_seen";
+        case AMProjStartupPaywallStateOuterPresented: return @"outer_presented";
+        case AMProjStartupPaywallStateDismissRequested: return @"dismiss_requested";
+        case AMProjStartupPaywallStateVerifying: return @"verifying";
+        case AMProjStartupPaywallStateFallbackVisible: return @"fallback_visible";
+        case AMProjStartupPaywallStateMainVisible: return @"main_visible";
+        default: return @"idle";
     }
-    if ([view isKindOfClass:UIButton.class]) {
-        UIButton *button = (UIButton *)view;
-        if (button.currentTitle.length > 0 || button.accessibilityLabel.length > 0) {
-            view.alpha = 1.0;
-            view.hidden = NO;
-            [view.superview bringSubviewToFront:view];
-            found = YES;
-        }
-    }
-    NSArray<UIView *> *subviews = [view.subviews copy];
-    for (UIView *subview in subviews) {
-        found |= HideLoadingInView(subview);
-    }
-    return found;
 }
 
-static void SkipLoadingScreenOnce(void) {
-    static int attempts = 0;
-    if (attempts++ > 20) return;
-
-    BOOL found = NO;
-    for (UIWindow *window in UIApplication.sharedApplication.windows) {
-        found |= HideLoadingInView(window);
+static void amproj_startupPaywallEvent(NSString *name,
+                                       NSDictionary<NSString *, id> *extra) {
+    NSMutableDictionary *fields = [extra mutableCopy] ?: [NSMutableDictionary dictionary];
+    fields[@"state"] = amproj_startupPaywallStateName();
+    fields[@"failure_count"] = @(amproj_startupPaywallDismissFailures);
+    fields[@"failure"] = [fields[@"failure"] isKindOfClass:NSString.class]
+        ? fields[@"failure"] : @"";
+    if (amproj_startupPaywallStartedAt > 0) {
+        fields[@"elapsed_ms"] = @((CFAbsoluteTimeGetCurrent() -
+                                     amproj_startupPaywallStartedAt) * 1000.0);
     }
-    amproj_debugEvent(@"startup_loading.skip_pass", @{
-        @"attempt": @(attempts),
-        @"found": @(found)
-    });
+    amproj_debugEvent([@"startup_loading." stringByAppendingString:name], fields);
+}
 
-    if (!found) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
+static BOOL amproj_isStartupPaywallClassName(NSString *className) {
+    return [className containsString:@"PaywallLoadingScreenView"] ||
+        [className containsString:@"CloudCardsTiersPaywallView"];
+}
+
+static BOOL amproj_isStartupPaywallOuterClassName(NSString *className) {
+    return [className containsString:@"PaywallLoadingScreenView"];
+}
+
+static BOOL amproj_isStartupPresenterClassName(NSString *className) {
+    return [className containsString:
+        @"NodeHostingControllerWithCustomStatusbarContent"];
+}
+
+static void amproj_inspectStartupController(UIViewController *controller,
+                                            UIWindow *window,
+                                            NSMutableSet<NSValue *> *visited,
+                                            BOOL *mainNCVisible,
+                                            BOOL *mainVCVisible,
+                                            BOOL *paywallVisible,
+                                            UIViewController *__autoreleasing *paywallOut) {
+    if (!controller) return;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
+    if ([visited containsObject:identity]) return;
+    [visited addObject:identity];
+
+    UIView *view = controller.viewIfLoaded;
+    BOOL mounted = view.window == window && !view.hidden && view.alpha > 0.01;
+    NSString *className = NSStringFromClass(controller.class) ?: @"";
+    if (mounted && ([className isEqualToString:@"AlightMotion.MainNC"] ||
+                    [className hasSuffix:@".MainNC"])) {
+        if (mainNCVisible) *mainNCVisible = YES;
+    }
+    if (mounted && ([className isEqualToString:@"AlightMotion.MainVC"] ||
+                    [className hasSuffix:@".MainVC"])) {
+        if (mainVCVisible) *mainVCVisible = YES;
+    }
+    if (mounted && amproj_isStartupPaywallClassName(className)) {
+        if (paywallVisible) *paywallVisible = YES;
+        if (paywallOut && !*paywallOut) *paywallOut = controller;
+    }
+
+    amproj_inspectStartupController(controller.presentedViewController, window,
+        visited, mainNCVisible, mainVCVisible, paywallVisible, paywallOut);
+    if ([controller isKindOfClass:UINavigationController.class]) {
+        amproj_inspectStartupController(
+            ((UINavigationController *)controller).visibleViewController, window,
+            visited, mainNCVisible, mainVCVisible, paywallVisible, paywallOut);
+    }
+    for (UIViewController *child in controller.childViewControllers) {
+        amproj_inspectStartupController(child, window, visited, mainNCVisible,
+            mainVCVisible, paywallVisible, paywallOut);
+    }
+}
+
+static void amproj_startupPaywallSnapshot(BOOL *mainVisibleOut,
+                                           BOOL *paywallVisibleOut,
+                                           UIWindow *__autoreleasing *mainWindowOut,
+                                           UIViewController *__autoreleasing *paywallOut) {
+    BOOL mainNCVisible = NO;
+    BOOL mainVCVisible = NO;
+    BOOL paywallVisible = NO;
+    UIWindow *mainWindow = nil;
+    UIViewController *visiblePaywall = nil;
+    NSMutableSet<NSValue *> *seenWindows = [NSMutableSet set];
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] ||
+            scene.activationState == UISceneActivationStateUnattached) continue;
+        [windows addObjectsFromArray:((UIWindowScene *)scene).windows];
+    }
+    [windows addObjectsFromArray:UIApplication.sharedApplication.windows];
+    for (UIWindow *window in windows) {
+        if (!window.rootViewController || window.hidden || window.alpha <= 0.01) continue;
+        NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)window];
+        if ([seenWindows containsObject:identity]) continue;
+        [seenWindows addObject:identity];
+        BOOL windowMainNC = NO;
+        BOOL windowMainVC = NO;
+        amproj_inspectStartupController(window.rootViewController, window,
+            [NSMutableSet set], &windowMainNC, &windowMainVC, &paywallVisible,
+            &visiblePaywall);
+        if ((windowMainNC || windowMainVC) && !mainWindow) mainWindow = window;
+        mainNCVisible |= windowMainNC;
+        mainVCVisible |= windowMainVC;
+    }
+    if (mainVisibleOut) *mainVisibleOut = mainNCVisible && mainVCVisible;
+    if (paywallVisibleOut) *paywallVisibleOut = paywallVisible;
+    if (mainWindowOut) *mainWindowOut = mainWindow;
+    if (paywallOut) *paywallOut = visiblePaywall;
+}
+
+static void amproj_reconcileStartupPaywall(NSUInteger generation,
+                                            NSString *source);
+static void amproj_requestStartupPaywallDismiss(NSUInteger generation,
+                                                 NSString *source);
+
+static void amproj_removeStartupPaywallFallbackButton(void) {
+    UIButton *button = amproj_startupPaywallFallbackButton;
+    [button removeFromSuperview];
+    amproj_startupPaywallFallbackButton = nil;
+}
+
+static void amproj_startupPaywallFallbackTapped(void) {
+    NSUInteger generation = amproj_startupPaywallGeneration;
+    amproj_startupPaywallEvent(@"fallback_tapped", @{
+        @"source": @"fallback_button",
+        @"manual": @YES,
+        @"failure": @"manual_retry"
+    });
+    amproj_requestStartupPaywallDismiss(generation, @"fallback_button");
+}
+
+@interface AMProjStartupHomeButton : UIButton
+@end
+
+@implementation AMProjStartupHomeButton
+- (void)amproj_enterHomeTapped:(__unused id)sender {
+    amproj_startupPaywallFallbackTapped();
+}
+@end
+
+static void amproj_showStartupPaywallFallbackButton(NSString *failure) {
+    if (amproj_startupPaywallState == AMProjStartupPaywallStateMainVisible) return;
+    BOOL mainVisible = NO;
+    BOOL paywallVisible = NO;
+    UIWindow *mainWindow = nil;
+    amproj_startupPaywallSnapshot(&mainVisible, &paywallVisible, &mainWindow, nil);
+    if (!mainWindow) {
+        amproj_startupPaywallEvent(@"dismiss_verified", @{
+            @"success": @NO,
+            @"source": @"fallback",
+            @"failure": @"main_window_missing"
+        });
+        NSUInteger generation = amproj_startupPaywallGeneration;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
-            SkipLoadingScreenOnce();
+            amproj_reconcileStartupPaywall(generation, @"fallback_window_retry");
+        });
+        return;
+    }
+
+    UIButton *existing = amproj_startupPaywallFallbackButton;
+    if (existing.superview == mainWindow) {
+        [mainWindow bringSubviewToFront:existing];
+        return;
+    }
+    [existing removeFromSuperview];
+
+    AMProjStartupHomeButton *button = [AMProjStartupHomeButton buttonWithType:UIButtonTypeSystem];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    [button setTitle:@"进入主页" forState:UIControlStateNormal];
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
+    button.backgroundColor = [UIColor colorWithRed:0.0 green:0.55 blue:0.42 alpha:0.96];
+    button.layer.cornerRadius = 8.0;
+    button.accessibilityLabel = @"进入主页";
+    [button addTarget:button action:@selector(amproj_enterHomeTapped:)
+      forControlEvents:UIControlEventTouchUpInside];
+    [mainWindow addSubview:button];
+    [NSLayoutConstraint activateConstraints:@[
+        [button.centerXAnchor constraintEqualToAnchor:mainWindow.centerXAnchor],
+        [button.topAnchor constraintEqualToAnchor:mainWindow.safeAreaLayoutGuide.topAnchor
+                                         constant:12.0],
+        [button.widthAnchor constraintEqualToConstant:132.0],
+        [button.heightAnchor constraintEqualToConstant:44.0]
+    ]];
+    [mainWindow bringSubviewToFront:button];
+    amproj_startupPaywallFallbackButton = button;
+    amproj_startupPaywallState = AMProjStartupPaywallStateFallbackVisible;
+    amproj_startupPaywallEvent(@"dismiss_verified", @{
+        @"success": @NO,
+        @"source": @"fallback",
+        @"failure": failure.length ? failure : @"dismiss_timeout",
+        @"fallback_button": @YES,
+        @"paywall_visible": @(paywallVisible),
+        @"main_visible": @(mainVisible)
+    });
+}
+
+static void amproj_markStartupMainVisible(NSString *source,
+                                          NSUInteger verifiedAfterMS) {
+    if (amproj_startupPaywallState == AMProjStartupPaywallStateMainVisible) return;
+    amproj_startupPaywallState = AMProjStartupPaywallStateMainVisible;
+    amproj_startupPaywallDismissInFlight = NO;
+    amproj_startupPaywallTailSuppressionUntil = CFAbsoluteTimeGetCurrent() + 1.5;
+    amproj_removeStartupPaywallFallbackButton();
+    amproj_startupPaywallEvent(@"main_visible", @{
+        @"source": source ?: @"unknown",
+        @"verified_after_ms": @(verifiedAfterMS),
+        @"failure": @""
+    });
+}
+
+static void amproj_verifyStartupPaywallDismiss(NSUInteger generation,
+                                                NSUInteger dismissSequence,
+                                                NSString *source) {
+    if (generation != amproj_startupPaywallGeneration ||
+        dismissSequence != amproj_startupPaywallDismissSequence ||
+        amproj_startupPaywallState == AMProjStartupPaywallStateMainVisible) return;
+    amproj_startupPaywallDismissInFlight = NO;
+    amproj_startupPaywallState = AMProjStartupPaywallStateVerifying;
+    BOOL mainVisible = NO;
+    BOOL paywallVisible = NO;
+    amproj_startupPaywallSnapshot(&mainVisible, &paywallVisible, nil, nil);
+    BOOL success = mainVisible && !paywallVisible;
+    if (success) {
+        amproj_startupPaywallEvent(@"dismiss_verified", @{
+            @"success": @YES,
+            @"source": source ?: @"unknown",
+            @"main_visible": @YES,
+            @"paywall_visible": @NO,
+            @"failure": @""
+        });
+        amproj_markStartupMainVisible(source, 500);
+        return;
+    }
+
+    amproj_startupPaywallDismissFailures++;
+    NSString *failure = paywallVisible ? @"paywall_still_visible" : @"main_not_visible";
+    amproj_startupPaywallEvent(@"dismiss_verified", @{
+        @"success": @NO,
+        @"source": source ?: @"unknown",
+        @"main_visible": @(mainVisible),
+        @"paywall_visible": @(paywallVisible),
+        @"failure": failure
+    });
+    CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - amproj_startupPaywallStartedAt;
+    if (amproj_startupPaywallDismissFailures >= 3 || elapsed >= 3.0) {
+        amproj_showStartupPaywallFallbackButton(failure);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        amproj_reconcileStartupPaywall(generation, @"verification_retry");
+    });
+}
+
+static void amproj_requestStartupPaywallDismiss(NSUInteger generation,
+                                                 NSString *source) {
+    if (generation != amproj_startupPaywallGeneration ||
+        amproj_startupPaywallState == AMProjStartupPaywallStateMainVisible ||
+        amproj_startupPaywallDismissInFlight) return;
+    UIViewController *outer = amproj_startupPaywallOuter;
+    UIViewController *presenter = outer.presentingViewController;
+    if (!outer || !presenter || !outer.viewIfLoaded.window ||
+        outer.isBeingPresented || outer.isBeingDismissed ||
+        presenter.isBeingDismissed || outer.transitionCoordinator) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            amproj_reconcileStartupPaywall(generation, @"presentation_settle");
+        });
+        return;
+    }
+
+    amproj_startupPaywallDismissInFlight = YES;
+    amproj_startupPaywallState = AMProjStartupPaywallStateDismissRequested;
+    NSUInteger dismissSequence = ++amproj_startupPaywallDismissSequence;
+    amproj_startupPaywallEvent(@"dismiss_requested", @{
+        @"source": source ?: @"unknown",
+        @"attempt": @(dismissSequence),
+        @"presenter": NSStringFromClass(presenter.class) ?: @"",
+        @"controller": NSStringFromClass(outer.class) ?: @"",
+        @"failure": @""
+    });
+    [presenter dismissViewControllerAnimated:NO completion:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        amproj_verifyStartupPaywallDismiss(generation, dismissSequence,
+                                           source ?: @"unknown");
+    });
+}
+
+static void amproj_markStartupPaywallOuterPresented(UIViewController *outer,
+                                                     NSString *source) {
+    if (!outer || outer != amproj_startupPaywallOuter ||
+        !outer.presentingViewController || !outer.viewIfLoaded.window) return;
+    if (!amproj_startupPaywallOuterPresentedRecorded) {
+        amproj_startupPaywallOuterPresentedRecorded = YES;
+        if (!amproj_startupPaywallFallbackButton.superview) {
+            amproj_startupPaywallState = AMProjStartupPaywallStateOuterPresented;
+        }
+        amproj_startupPaywallEvent(@"outer_presented", @{
+            @"source": source ?: @"unknown",
+            @"presenter": NSStringFromClass(outer.presentingViewController.class) ?: @"",
+            @"controller": NSStringFromClass(outer.class) ?: @"",
+            @"failure": @""
         });
     }
 }
 
-static void SkipLoadingScreen(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
+static void amproj_reconcileStartupPaywall(NSUInteger generation,
+                                            NSString *source) {
+    if (generation != amproj_startupPaywallGeneration ||
+        amproj_startupPaywallState == AMProjStartupPaywallStateIdle ||
+        amproj_startupPaywallState == AMProjStartupPaywallStateArmed ||
+        amproj_startupPaywallState == AMProjStartupPaywallStateMainVisible) return;
+    if (amproj_startupPaywallState == AMProjStartupPaywallStateFallbackVisible) {
+        BOOL mainVisible = NO;
+        BOOL paywallVisible = NO;
+        amproj_startupPaywallSnapshot(&mainVisible, &paywallVisible, nil, nil);
+        if (mainVisible && !paywallVisible) {
+            amproj_markStartupMainVisible(source, 0);
+        }
+        return;
+    }
+    CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - amproj_startupPaywallStartedAt;
+    if (elapsed >= 3.0) {
+        BOOL mainVisible = NO;
+        BOOL paywallVisible = NO;
+        amproj_startupPaywallSnapshot(&mainVisible, &paywallVisible, nil, nil);
+        if (mainVisible && !paywallVisible) {
+            amproj_startupPaywallEvent(@"dismiss_verified", @{
+                @"success": @YES,
+                @"source": source ?: @"unknown",
+                @"main_visible": @YES,
+                @"paywall_visible": @NO,
+                @"failure": @""
+            });
+            amproj_markStartupMainVisible(
+                source, (NSUInteger)MAX(0.0, elapsed * 1000.0));
+            return;
+        }
+        amproj_showStartupPaywallFallbackButton(
+            paywallVisible ? @"three_second_timeout" : @"presentation_not_established");
+        return;
+    }
+
+    UIViewController *outer = amproj_startupPaywallOuter;
+    if (outer.presentingViewController && outer.viewIfLoaded.window) {
+        amproj_markStartupPaywallOuterPresented(outer, source);
+        amproj_requestStartupPaywallDismiss(generation, source);
+        return;
+    }
+    if (elapsed >= 3.0) {
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
-        SkipLoadingScreenOnce();
+        amproj_reconcileStartupPaywall(generation, @"outer_wait");
     });
 }
 
-static __weak UIViewController *amproj_suppressedStartupPaywallOuter;
-
-static BOOL amproj_shouldSuppressStalledStartupPaywall(UIViewController *presenter,
-                                                        UIViewController *controller,
-                                                        NSString **reasonOut) {
-    if (![NSThread isMainThread] || !presenter || !controller ||
-        amproj_startupPaywallSuppressionUntil <= 0 ||
-        CFAbsoluteTimeGetCurrent() >= amproj_startupPaywallSuppressionUntil) return NO;
+static AMProjStartupPresentationDecision
+amproj_startupPaywallPresentationDecision(UIViewController *presenter,
+                                           UIViewController *controller,
+                                           NSString **reasonOut) {
+    if (![NSThread isMainThread] || !presenter || !controller) {
+        return AMProjStartupPresentationDecisionPass;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL withinInitialWindow = amproj_startupPaywallSuppressionUntil > 0 &&
+        now < amproj_startupPaywallSuppressionUntil;
+    BOOL transactionActive = amproj_startupPaywallStartedAt > 0 &&
+        amproj_startupPaywallState != AMProjStartupPaywallStateMainVisible;
+    BOOL tailRetry = amproj_startupPaywallState ==
+        AMProjStartupPaywallStateMainVisible &&
+        now < amproj_startupPaywallTailSuppressionUntil &&
+        presenter == amproj_startupPaywallPresenter;
+    BOOL tailChild = amproj_startupPaywallState ==
+        AMProjStartupPaywallStateMainVisible &&
+        now < amproj_startupPaywallTailSuppressionUntil &&
+        (presenter == amproj_startupPaywallOuter ||
+         presenter == amproj_startupPaywallSuppressedRetryOuter);
+    if (!withinInitialWindow && !transactionActive && !tailRetry && !tailChild) {
+        return AMProjStartupPresentationDecisionPass;
+    }
 
     NSString *controllerName = NSStringFromClass(controller.class) ?: @"";
-    if ([controllerName containsString:@"PaywallLoadingScreenView"]) {
-        if (!amproj_startupPaywallSuppressionArmed) return NO;
-        NSString *presenterName = NSStringFromClass(presenter.class) ?: @"";
-        if (![presenterName containsString:
-                @"NodeHostingControllerWithCustomStatusbarContent"]) return NO;
-        amproj_startupPaywallSuppressionArmed = NO;
-        amproj_suppressedStartupPaywallOuter = controller;
-        if (reasonOut) *reasonOut = @"startup_loading_root";
-        return YES;
+    NSString *presenterName = NSStringFromClass(presenter.class) ?: @"";
+    if (amproj_isStartupPaywallOuterClassName(controllerName) &&
+        amproj_isStartupPresenterClassName(presenterName)) {
+        if (amproj_startupPaywallState == AMProjStartupPaywallStateArmed) {
+            amproj_startupPaywallState = AMProjStartupPaywallStatePresentationSeen;
+            amproj_startupPaywallStartedAt = now;
+            amproj_startupPaywallDismissFailures = 0;
+            amproj_startupPaywallDismissInFlight = NO;
+            amproj_startupPaywallOuterPresentedRecorded = NO;
+            amproj_startupPaywallDismissSequence = 0;
+            NSUInteger generation = ++amproj_startupPaywallGeneration;
+            amproj_startupPaywallOuter = controller;
+            amproj_startupPaywallPresenter = presenter;
+            amproj_startupPaywallSuppressedRetryOuter = nil;
+            amproj_startupPaywallTailSuppressionUntil = 0;
+            if (reasonOut) *reasonOut = @"startup_loading_root";
+            amproj_startupPaywallEvent(@"presentation_seen", @{
+                @"reason": @"startup_loading_root",
+                @"presenter": presenterName,
+                @"controller": controllerName,
+                @"suppressed": @NO,
+                @"failure": @""
+            });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                amproj_reconcileStartupPaywall(generation, @"three_second_watchdog");
+            });
+            return AMProjStartupPresentationDecisionTrackOuter;
+        }
+        if (transactionActive || tailRetry) {
+            amproj_startupPaywallSuppressedRetryOuter = controller;
+            if (reasonOut) *reasonOut = @"startup_loading_retry";
+            amproj_startupPaywallEvent(@"presentation_seen", @{
+                @"reason": @"startup_loading_retry",
+                @"presenter": presenterName,
+                @"controller": controllerName,
+                @"suppressed": @YES,
+                @"failure": @"retry_suppressed"
+            });
+            return AMProjStartupPresentationDecisionSuppress;
+        }
     }
 
     if ([controllerName containsString:@"CloudCardsTiersPaywallView"] &&
-        presenter == amproj_suppressedStartupPaywallOuter) {
+        (presenter == amproj_startupPaywallOuter ||
+         presenter == amproj_startupPaywallSuppressedRetryOuter) &&
+        (transactionActive || tailChild)) {
         if (reasonOut) *reasonOut = @"startup_loading_child";
-        return YES;
+        amproj_startupPaywallEvent(@"presentation_seen", @{
+            @"reason": @"startup_loading_child",
+            @"presenter": presenterName,
+            @"controller": controllerName,
+            @"suppressed": @YES,
+            @"failure": @"child_suppressed"
+        });
+        return AMProjStartupPresentationDecisionSuppress;
     }
-    return NO;
+    return AMProjStartupPresentationDecisionPass;
 }
 
 static NSString* amproj_projectTitleRecursive(UIViewController *controller, NSUInteger depth,
@@ -7473,16 +7893,34 @@ static BOOL amproj_isNativeImportFailureAlert(UIViewController *controller,
 
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
-    NSString *startupSuppressionReason = nil;
-    if (amproj_shouldSuppressStalledStartupPaywall(
+    NSString *startupPresentationReason = nil;
+    AMProjStartupPresentationDecision startupDecision =
+        amproj_startupPaywallPresentationDecision(
             [self isKindOfClass:UIViewController.class] ? self : nil,
-            controller, &startupSuppressionReason)) {
-        amproj_debugEvent(@"startup_loading.modal_suppressed", @{
-            @"reason": startupSuppressionReason ?: @"unknown",
-            @"presenter": NSStringFromClass([self class]) ?: @"",
-            @"controller": NSStringFromClass(controller.class) ?: @""
-        });
+            controller, &startupPresentationReason);
+    if (startupDecision == AMProjStartupPresentationDecisionSuppress) {
         if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        return;
+    }
+    if (startupDecision == AMProjStartupPresentationDecisionTrackOuter) {
+        NSUInteger generation = amproj_startupPaywallGeneration;
+        __weak UIViewController *weakOuter = controller;
+        void (^originalCompletion)(void) = [completion copy];
+        void (^trackedCompletion)(void) = ^{
+            UIViewController *outer = weakOuter;
+            amproj_markStartupPaywallOuterPresented(
+                outer, @"presentation_completion");
+            if (originalCompletion) originalCompletion();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                amproj_reconcileStartupPaywall(
+                    generation, @"presentation_completion");
+            });
+        };
+        orig_presentVC(self, _cmd, controller, animated, trackedCompletion);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            amproj_reconcileStartupPaywall(generation, @"presentation_probe");
+        });
         return;
     }
     if (amproj_isIPAFireWelcome(controller)) {
@@ -7546,7 +7984,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             amproj_importDispatchCoolingDown = NO;
         }
         amproj_showImportStatus([NSString stringWithFormat:
-            @"AMProj v27 \u00b7 E40 \u00b7 %@", failureDescription], YES);
+            @"AMProj v28 \u00b7 E40 \u00b7 %@", failureDescription], YES);
         amproj_flushDebugEvents();
         if (!bridgeHandled) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
@@ -8558,6 +8996,7 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
         if (amproj_mainThread == MACH_PORT_NULL) amproj_mainThread = mach_thread_self();
 #endif
         amproj_installPresentationHook();
+        amproj_armPaywallStartupFallback();
         amproj_installImportHook();
         AMProjRegisterNativePackageImportEventHandler(
             ^(NSString *event, NSDictionary<NSString *, id> *fields) {
@@ -8594,7 +9033,7 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                 if (phase.length && ![phase isEqualToString:@"completed"] &&
                     ![phase isEqualToString:@"failed"]) {
                     amproj_showImportStatus([NSString stringWithFormat:
-                        @"AMProj v27 · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
+                        @"AMProj v28 · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
                         interruptedStage], YES);
                 }
             }
@@ -8612,7 +9051,6 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
             amproj_debugEvent(@"bootstrap.ready", @{@"trigger": startupTrigger});
 #endif
             amproj_installExportHooks();
-            amproj_armPaywallStartupFallback();
             amproj_schedulePaywallScan(nil, @"bootstrap");
         });
     });
@@ -8622,9 +9060,9 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v27-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v28-debug =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v27 =====");
+        NSLog(@"[AMProjExport] ===== Loading v28 =====");
 #endif
 
         // ObjC classes are registered before image constructors. Installing only
@@ -8696,9 +9134,6 @@ static void AMProjExportInit(void) {
             amproj_schedulePaywallScan(nil, @"main_queue_fallback");
         });
 
-        // The delayed task is safe during early process initialization and
-        // implements the startup-loading bypass documented for this build.
-        SkipLoadingScreen();
         NSLog(@"[AMProjExport] Hooks scheduled for launch, activation, and delayed fallback");
     }
 }

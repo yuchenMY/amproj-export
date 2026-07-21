@@ -353,6 +353,82 @@ class ConfigTests(unittest.TestCase):
                 (app / inject_dylib.DEBUG_CONFIG_NAME).read_bytes(), original
             )
 
+    def test_rejects_integer_discovery_flag_in_custom_plist(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = root / "App"
+            app.mkdir()
+            source = root / "source.plist"
+            with source.open("wb") as file:
+                plistlib.dump(
+                    {
+                        "BaseURL": "https://bug.meowcr.cn",
+                        "Token": "cloud-token-123456",
+                        "DiscoveryEnabled": 1,
+                    },
+                    file,
+                )
+            settings = inject_dylib.DebugSettings(
+                enabled=True,
+                config_path=source,
+            )
+
+            with self.assertRaisesRegex(ValueError, "plist Boolean"):
+                inject_dylib.install_debug_config(app, settings)
+
+    def test_generates_https_config_with_discovery_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = inject_dylib.DebugSettings(
+                enabled=True,
+                server_url="https://bug.meowcr.cn/",
+                token="cloud-token-123456",
+                mode="full",
+                build_identifier="v28-cloud-test",
+            )
+            config = inject_dylib.install_debug_config(temp_dir, settings)
+
+            self.assertEqual(config["BaseURL"], "https://bug.meowcr.cn")
+            self.assertIs(config["DiscoveryEnabled"], False)
+            self.assertEqual(config["DiscoveryPort"], 443)
+            self.assertEqual(config["BuildIdentifier"], "v28-cloud-test")
+            self.assertFalse(
+                inject_dylib.debug_config_needs_local_network_settings(config)
+            )
+
+    def test_rejects_debug_server_url_with_path_or_credentials(self):
+        for value in (
+            "https://bug.meowcr.cn/api",
+            "https://admin:secret@bug.meowcr.cn",
+            "ftp://bug.meowcr.cn",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    inject_dylib.normalize_debug_server_url(value)
+
+    def test_cloud_debug_plist_does_not_add_local_network_permissions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = Path(temp_dir)
+            with (app / "Info.plist").open("wb") as file:
+                plistlib.dump({}, file)
+            cloud_config = {
+                "BaseURL": "https://bug.meowcr.cn",
+                "DiscoveryEnabled": False,
+            }
+
+            inject_dylib.patch_info_plist(
+                app,
+                enable_debug_network=(
+                    inject_dylib.debug_config_needs_local_network_settings(
+                        cloud_config
+                    )
+                ),
+            )
+            with (app / "Info.plist").open("rb") as file:
+                result = plistlib.load(file)
+
+            self.assertNotIn("NSLocalNetworkUsageDescription", result)
+            self.assertNotIn("NSAppTransportSecurity", result)
+
 
 class InjectionTests(unittest.TestCase):
     def test_injection_rejects_unverified_main_uuid(self):

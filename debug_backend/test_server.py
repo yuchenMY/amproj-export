@@ -162,10 +162,19 @@ class BackendHTTPTests(unittest.TestCase):
                 "session": "transport-session",
                 "device": {"id": "ios-device", "model": "iPhone", "os_version": "26.1"},
                 "app": {"version": "7.0", "build": "27b"},
-                "plugin": {"version": "debug"},
+                "plugin": {
+                    "version": "28",
+                    "variant": "debug",
+                    "build_id": "v28-cloud-test",
+                },
             },
         )
         self.assertEqual(hello["session_id"], "transport-session")
+        _, sessions = self.request("/api/v1/sessions")
+        session = sessions["sessions"][0]
+        self.assertEqual(session["plugin_version"], "28")
+        self.assertEqual(session["plugin_variant"], "debug")
+        self.assertEqual(session["plugin_build_id"], "v28-cloud-test")
         _, result = self.request(
             "/api/v1/events",
             "POST",
