@@ -6666,11 +6666,16 @@ static BOOL amproj_isIPAFireWelcome(UIViewController *controller) {
 // startup-only fallback window so normal, intentionally opened subscription
 // screens are never treated as stuck pages.
 static CFAbsoluteTime amproj_paywallStartupFallbackUntil = 0;
+static CFAbsoluteTime amproj_startupPaywallSuppressionUntil = 0;
+static BOOL amproj_startupPaywallSuppressionArmed = NO;
 
 static void amproj_armPaywallStartupFallback(void) {
     if (![NSThread isMainThread]) return;
     if (amproj_paywallStartupFallbackUntil <= 0) {
-        amproj_paywallStartupFallbackUntil = CFAbsoluteTimeGetCurrent() + 120.0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        amproj_paywallStartupFallbackUntil = now + 120.0;
+        amproj_startupPaywallSuppressionUntil = now + 30.0;
+        amproj_startupPaywallSuppressionArmed = YES;
     }
 }
 
@@ -7346,31 +7351,33 @@ static void SkipLoadingScreen(void) {
     });
 }
 
-static BOOL amproj_isLatePaywallLoadingController(UIViewController *controller) {
-    NSString *className = NSStringFromClass(controller.class) ?: @"";
-    return [className containsString:@"PaywallLoadingScreenView"] ||
-        [className containsString:@"CloudCardsTiersPaywallView"];
-}
+static __weak UIViewController *amproj_suppressedStartupPaywallOuter;
 
-static void amproj_scheduleLatePaywallLoadingBypass(UIViewController *controller) {
-    if (!amproj_isLatePaywallLoadingController(controller)) return;
-    __weak UIViewController *weakController = controller;
-    NSString *className = NSStringFromClass(controller.class) ?: @"";
-    NSArray<NSNumber *> *delays = @[@0.05, @0.3, @0.8, @1.5, @3.0];
-    for (NSNumber *delay in delays) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            UIViewController *current = weakController;
-            BOOL found = current ? HideLoadingInView(current.viewIfLoaded) : NO;
-            amproj_debugEvent(@"startup_loading.controller_pass", @{
-                @"controller": className,
-                @"delay_ms": @(delay.doubleValue * 1000.0),
-                @"found": @(found),
-                @"has_window": @(current.viewIfLoaded.window != nil)
-            });
-        });
+static BOOL amproj_shouldSuppressStalledStartupPaywall(UIViewController *presenter,
+                                                        UIViewController *controller,
+                                                        NSString **reasonOut) {
+    if (![NSThread isMainThread] || !presenter || !controller ||
+        amproj_startupPaywallSuppressionUntil <= 0 ||
+        CFAbsoluteTimeGetCurrent() >= amproj_startupPaywallSuppressionUntil) return NO;
+
+    NSString *controllerName = NSStringFromClass(controller.class) ?: @"";
+    if ([controllerName containsString:@"PaywallLoadingScreenView"]) {
+        if (!amproj_startupPaywallSuppressionArmed) return NO;
+        NSString *presenterName = NSStringFromClass(presenter.class) ?: @"";
+        if (![presenterName containsString:
+                @"NodeHostingControllerWithCustomStatusbarContent"]) return NO;
+        amproj_startupPaywallSuppressionArmed = NO;
+        amproj_suppressedStartupPaywallOuter = controller;
+        if (reasonOut) *reasonOut = @"startup_loading_root";
+        return YES;
     }
+
+    if ([controllerName containsString:@"CloudCardsTiersPaywallView"] &&
+        presenter == amproj_suppressedStartupPaywallOuter) {
+        if (reasonOut) *reasonOut = @"startup_loading_child";
+        return YES;
+    }
+    return NO;
 }
 
 static NSString* amproj_projectTitleRecursive(UIViewController *controller, NSUInteger depth,
@@ -7466,6 +7473,18 @@ static BOOL amproj_isNativeImportFailureAlert(UIViewController *controller,
 
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
+    NSString *startupSuppressionReason = nil;
+    if (amproj_shouldSuppressStalledStartupPaywall(
+            [self isKindOfClass:UIViewController.class] ? self : nil,
+            controller, &startupSuppressionReason)) {
+        amproj_debugEvent(@"startup_loading.modal_suppressed", @{
+            @"reason": startupSuppressionReason ?: @"unknown",
+            @"presenter": NSStringFromClass([self class]) ?: @"",
+            @"controller": NSStringFromClass(controller.class) ?: @""
+        });
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        return;
+    }
     if (amproj_isIPAFireWelcome(controller)) {
         NSLog(@"[AMProjExport] Suppressed IPAFire welcome alert");
         amproj_debugEvent(@"popup.suppressed", @{@"fingerprint": @"IPAFire welcome"});
@@ -7564,7 +7583,6 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     orig_presentVC(self, _cmd, controller, animated, completion);
-    amproj_scheduleLatePaywallLoadingBypass(controller);
     if (isActivity) {
         amproj_debugEvent(@"present.return", @{
             @"duration_ms": @((CFAbsoluteTimeGetCurrent() - started) * 1000.0)

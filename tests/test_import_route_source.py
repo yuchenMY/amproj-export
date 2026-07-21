@@ -117,28 +117,37 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("SkipLoadingScreenOnce", scheduler)
         self.assertEqual(SOURCE.count("SkipLoadingScreen();"), 1)
 
-    def test_late_paywall_loading_views_receive_targeted_runtime_passes(self):
-        predicate = function_body(
-            "static BOOL amproj_isLatePaywallLoadingController",
-            "static void amproj_scheduleLatePaywallLoadingBypass",
-        )
-        self.assertIn("PaywallLoadingScreenView", predicate)
-        self.assertIn("CloudCardsTiersPaywallView", predicate)
-
-        scheduler = function_body(
-            "static void amproj_scheduleLatePaywallLoadingBypass",
+    def test_stalled_startup_paywall_is_suppressed_once_before_presentation(self):
+        suppression = function_body(
+            "static BOOL amproj_shouldSuppressStalledStartupPaywall",
             "static NSString* amproj_projectTitleRecursive",
         )
-        self.assertIn("amproj_isLatePaywallLoadingController", scheduler)
-        self.assertIn("HideLoadingInView(current.viewIfLoaded)", scheduler)
-        self.assertIn("startup_loading.controller_pass", scheduler)
-        self.assertIn("dispatch_get_main_queue()", scheduler)
-        self.assertIn("@0.05, @0.3, @0.8, @1.5, @3.0", scheduler)
+        self.assertIn("amproj_startupPaywallSuppressionUntil", suppression)
+        self.assertIn("amproj_startupPaywallSuppressionArmed", suppression)
+        self.assertIn("PaywallLoadingScreenView", suppression)
+        self.assertIn("CloudCardsTiersPaywallView", suppression)
+        self.assertIn("NodeHostingControllerWithCustomStatusbarContent", suppression)
+        self.assertIn("presenter == amproj_suppressedStartupPaywallOuter", suppression)
+        self.assertIn("amproj_startupPaywallSuppressionArmed = NO", suppression)
+        self.assertNotIn("window.hidden", suppression)
+        self.assertNotIn("makeKey", suppression)
+
+        arm = function_body(
+            "static void amproj_armPaywallStartupFallback",
+            "static BOOL amproj_paywallContentContainsAny",
+        )
+        self.assertIn("amproj_startupPaywallSuppressionUntil = now + 30.0", arm)
+        self.assertIn("amproj_startupPaywallSuppressionArmed = YES", arm)
 
         present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
+        self.assertIn("amproj_shouldSuppressStalledStartupPaywall", present)
+        self.assertIn("startup_loading.modal_suppressed", present)
+        self.assertIn("dispatch_async(dispatch_get_main_queue(), completion)", present)
+        suppression_call = present.index("amproj_shouldSuppressStalledStartupPaywall")
         original = present.index("orig_presentVC(self, _cmd, controller, animated, completion)")
-        targeted = present.index("amproj_scheduleLatePaywallLoadingBypass(controller)")
-        self.assertLess(original, targeted)
+        self.assertLess(suppression_call, original)
+        self.assertNotIn("amproj_scheduleLatePaywallLoadingBypass", SOURCE)
+        self.assertNotIn("startup_loading.controller_pass", SOURCE)
 
     def test_package_flow_predicate_is_narrow(self):
         body = function_body(
