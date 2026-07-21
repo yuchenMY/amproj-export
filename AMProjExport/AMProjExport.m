@@ -7293,146 +7293,56 @@ static void amproj_schedulePaywallScan(UIViewController *candidate, NSString *so
 }
 
 // MARK: - Startup loading overlay bypass
-// This implements the documented runtime-only workaround after launch on the
-// main queue. It is intentionally restricted to a controller already matched
-// by the stalled-paywall predicate, never to ordinary application windows.
+// Runtime implementation from 跳过启动加载圈_代码.md.
 
-static BOOL amproj_startupLoadingButtonLooksLikeClose(UIButton *button) {
-    if (!button) return NO;
-    NSString *title = button.currentTitle.lowercaseString ?: @"";
-    NSString *label = button.accessibilityLabel.lowercaseString ?: @"";
-    BOOL explicitClose = [title isEqualToString:@"x"] ||
-        [title isEqualToString:@"close"] || [title isEqualToString:@"cancel"] ||
-        [label isEqualToString:@"x"] || [label isEqualToString:@"close"] ||
-        [label isEqualToString:@"cancel"];
-    CGRect frame = button.window
-        ? [button convertRect:button.bounds toView:button.window] : CGRectZero;
-    BOOL topLeftCloseCandidate = button.window &&
-        CGRectGetMinX(frame) >= 0.0 && CGRectGetMinX(frame) <= 128.0 &&
-        CGRectGetMinY(frame) >= 72.0 && CGRectGetMinY(frame) <= 260.0 &&
-        CGRectGetWidth(frame) <= 128.0 && CGRectGetHeight(frame) <= 128.0;
-    return explicitClose || topLeftCloseCandidate;
-}
-
-static BOOL amproj_revealStartupLoadingCloseInView(UIView *view,
-                                                    BOOL *changedOut) {
-    if (!view) return NO;
-    BOOL closeCandidate = NO;
-    if ([view isKindOfClass:UIButton.class]) {
-        UIButton *button = (UIButton *)view;
-        if (amproj_startupLoadingButtonLooksLikeClose(button)) {
-            closeCandidate = YES;
-            if (button.hidden || button.alpha < 0.99) {
-                if (changedOut) *changedOut = YES;
-            }
-            button.alpha = 1.0;
-            button.hidden = NO;
-            [button.superview bringSubviewToFront:button];
-        }
-    }
-    NSArray<UIView *> *children = [view.subviews copy];
-    for (UIView *child in children) {
-        if (amproj_revealStartupLoadingCloseInView(child, changedOut)) {
-            closeCandidate = YES;
-        }
-    }
-    return closeCandidate;
-}
-
-static NSUInteger amproj_hideStartupLoadingSpinnersInView(UIView *view) {
-    if (!view) return 0;
-    NSUInteger hiddenSpinnerCount = 0;
-    if ([view isKindOfClass:UIActivityIndicatorView.class] &&
-        (!view.hidden || view.alpha > 0.01)) {
+static BOOL HideLoadingInView(UIView *view) {
+    BOOL found = NO;
+    if ([view isKindOfClass:UIActivityIndicatorView.class]) {
         view.alpha = 0.0;
         view.hidden = YES;
-        hiddenSpinnerCount++;
+        found = YES;
     }
-    NSArray<UIView *> *children = [view.subviews copy];
-    for (UIView *child in children) {
-        hiddenSpinnerCount += amproj_hideStartupLoadingSpinnersInView(child);
+    if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)view;
+        if (button.currentTitle.length > 0 || button.accessibilityLabel.length > 0) {
+            view.alpha = 1.0;
+            view.hidden = NO;
+            [view.superview bringSubviewToFront:view];
+            found = YES;
+        }
     }
-    return hiddenSpinnerCount;
+    NSArray<UIView *> *subviews = [view.subviews copy];
+    for (UIView *subview in subviews) {
+        found |= HideLoadingInView(subview);
+    }
+    return found;
 }
 
-static BOOL amproj_hideStartupLoadingInView(UIView *view,
-                                            BOOL *closeCandidateOut,
-                                            NSUInteger *hiddenSpinnerCountOut) {
-    BOOL closeChanged = NO;
-    BOOL closeCandidate = amproj_revealStartupLoadingCloseInView(view, &closeChanged);
-    NSUInteger hiddenSpinnerCount = closeCandidate
-        ? amproj_hideStartupLoadingSpinnersInView(view) : 0;
-    if (closeCandidateOut) *closeCandidateOut = closeCandidate;
-    if (hiddenSpinnerCountOut) *hiddenSpinnerCountOut = hiddenSpinnerCount;
-    return closeChanged || hiddenSpinnerCount > 0;
-}
+static void SkipLoadingScreenOnce(void) {
+    static int attempts = 0;
+    if (attempts++ > 20) return;
 
-static BOOL amproj_hideStartupLoadingInWindows(void) {
-    NSMutableSet<NSValue *> *seen = [NSMutableSet set];
-    __block BOOL changed = NO;
-    void (^scanWindow)(UIWindow *) = ^(UIWindow *window) {
-        if (!window || !window.rootViewController || window.hidden || window.alpha <= 0.01) return;
-        NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)window];
-        if ([seen containsObject:identity]) return;
-        [seen addObject:identity];
-        NSDictionary *evidence = nil;
-        UIViewController *paywall = amproj_findPaywallController(
-            window.rootViewController, [NSMutableSet set], 0, &evidence);
-        if (!paywall) return;
-        BOOL closeCandidate = NO;
-        NSUInteger hiddenSpinnerCount = 0;
-        BOOL candidateChanged = amproj_hideStartupLoadingInView(
-            paywall.viewIfLoaded, &closeCandidate, &hiddenSpinnerCount);
-        if (candidateChanged) changed = YES;
-        amproj_debugEvent(@"startup_loading.paywall_candidate", @{
-            @"controller": NSStringFromClass(paywall.class) ?: @"",
-            @"changed": @(candidateChanged),
-            @"close_candidate": @(closeCandidate),
-            @"spinners_hidden": @(hiddenSpinnerCount),
-            @"startup_fallback": evidence[@"startup_fallback"] ?: @NO
-        });
-    };
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class] ||
-            scene.activationState != UISceneActivationStateForegroundActive) continue;
-        for (UIWindow *window in ((UIWindowScene *)scene).windows) scanWindow(window);
+    BOOL found = NO;
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        found |= HideLoadingInView(window);
     }
-    if (!seen.count) {
-        for (UIWindow *window in UIApplication.sharedApplication.windows) scanWindow(window);
-    }
-    return changed;
-}
-
-static NSUInteger amproj_startupLoadingSkipAttempt = 0;
-
-static void amproj_skipStartupLoadingPass(void) {
-    if (![NSThread isMainThread]) return;
-    if (amproj_startupLoadingSkipAttempt++ >= 20) {
-        return;
-    }
-    amproj_armPaywallStartupFallback();
-    BOOL changed = amproj_hideStartupLoadingInWindows();
     amproj_debugEvent(@"startup_loading.skip_pass", @{
-        @"attempt": @(amproj_startupLoadingSkipAttempt),
-        @"changed": @(changed)
+        @"attempt": @(attempts),
+        @"found": @(found)
     });
-    // SwiftUI can attach the paywall after the first layout pass. Keep the
-    // documented 0.3 s cadence for the full bounded startup window.
-    if (amproj_startupLoadingSkipAttempt < 20) {
+
+    if (!found) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
-            amproj_skipStartupLoadingPass();
+            SkipLoadingScreenOnce();
         });
     }
 }
 
-static void amproj_scheduleStartupLoadingSkip(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
-                       dispatch_get_main_queue(), ^{
-            amproj_skipStartupLoadingPass();
-        });
+static void SkipLoadingScreen(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        SkipLoadingScreenOnce();
     });
 }
 
@@ -8742,7 +8652,7 @@ static void AMProjExportInit(void) {
 
         // The delayed task is safe during early process initialization and
         // implements the startup-loading bypass documented for this build.
-        amproj_scheduleStartupLoadingSkip();
+        SkipLoadingScreen();
         NSLog(@"[AMProjExport] Hooks scheduled for launch, activation, and delayed fallback");
     }
 }

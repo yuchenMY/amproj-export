@@ -69,9 +69,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("paywall.scan_root", SOURCE)
         self.assertIn("amproj_armPaywallStartupFallback", SOURCE)
         self.assertIn("startupLoadingFallback", SOURCE)
-        self.assertIn("amproj_hideStartupLoadingInView", SOURCE)
+        self.assertIn("HideLoadingInView", SOURCE)
         self.assertIn("startup_loading.skip_pass", SOURCE)
-        self.assertIn("amproj_scheduleStartupLoadingSkip();", SOURCE)
+        self.assertIn("SkipLoadingScreen();", SOURCE)
         self.assertNotIn("hide_dedicated_window", SOURCE)
         self.assertNotIn("amproj_alternateVisibleWindow", SOURCE)
         self.assertIn("[presentingController dismissViewControllerAnimated", SOURCE)
@@ -88,55 +88,34 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
     def test_startup_loading_bypass_matches_documented_view_scope(self):
         helper = function_body(
-            "static BOOL amproj_hideStartupLoadingInView",
-            "static BOOL amproj_hideStartupLoadingInWindows",
+            "static BOOL HideLoadingInView",
+            "static void SkipLoadingScreenOnce",
         )
-        self.assertIn("amproj_revealStartupLoadingCloseInView", helper)
-        self.assertIn("amproj_hideStartupLoadingSpinnersInView", helper)
-        self.assertIn("? amproj_hideStartupLoadingSpinnersInView(view) : 0", helper)
-        self.assertIn("closeCandidateOut", helper)
+        self.assertIn("UIActivityIndicatorView.class", helper)
+        self.assertIn("UIButton.class", helper)
+        self.assertIn("button.currentTitle.length > 0", helper)
+        self.assertIn("button.accessibilityLabel.length > 0", helper)
+        self.assertIn("view.alpha = 1.0", helper)
+        self.assertIn("view.hidden = NO", helper)
+        self.assertIn("bringSubviewToFront:view", helper)
+        self.assertIn("NSArray<UIView *> *subviews = [view.subviews copy]", helper)
 
-        close_helper = function_body(
-            "static BOOL amproj_revealStartupLoadingCloseInView",
-            "static NSUInteger amproj_hideStartupLoadingSpinnersInView",
+        retry = function_body(
+            "static void SkipLoadingScreenOnce",
+            "static void SkipLoadingScreen(void)",
         )
-        self.assertIn("UIButton.class", close_helper)
-        self.assertIn("amproj_startupLoadingButtonLooksLikeClose", close_helper)
-        self.assertIn("button.alpha = 1.0", close_helper)
-        self.assertIn("button.hidden = NO", close_helper)
-        self.assertIn("bringSubviewToFront:button", close_helper)
-        self.assertIn("NSArray<UIView *> *children = [view.subviews copy]", close_helper)
-        self.assertNotIn("UIControl *", close_helper)
-        self.assertNotIn("enabled = YES", close_helper)
-
-        spinner_helper = function_body(
-            "static NSUInteger amproj_hideStartupLoadingSpinnersInView",
-            "static BOOL amproj_hideStartupLoadingInView",
-        )
-        self.assertIn("UIActivityIndicatorView.class", spinner_helper)
-        self.assertIn("NSArray<UIView *> *children = [view.subviews copy]", spinner_helper)
-
-        windows = function_body(
-            "static BOOL amproj_hideStartupLoadingInWindows",
-            "static NSUInteger amproj_startupLoadingSkipAttempt",
-        )
-        self.assertIn("amproj_findPaywallController", windows)
-        self.assertIn("UISceneActivationStateForegroundActive", windows)
-        self.assertIn("paywall.viewIfLoaded", windows)
+        self.assertIn("if (attempts++ > 20) return", retry)
+        self.assertIn("UIApplication.sharedApplication.windows", retry)
+        self.assertIn("if (!found)", retry)
+        self.assertIn("300 * NSEC_PER_MSEC", retry)
 
         scheduler = function_body(
-            "static void amproj_scheduleStartupLoadingSkip",
+            "static void SkipLoadingScreen(void)",
             "static NSString* amproj_projectTitleRecursive",
         )
-        self.assertIn("dispatch_once", scheduler)
         self.assertIn("300 * NSEC_PER_MSEC", scheduler)
-        self.assertIn("amproj_skipStartupLoadingPass", scheduler)
-        pass_body = function_body(
-            "static void amproj_skipStartupLoadingPass",
-            "static void amproj_scheduleStartupLoadingSkip",
-        )
-        self.assertIn("amproj_armPaywallStartupFallback", pass_body)
-        self.assertIn("amproj_startupLoadingSkipAttempt < 20", pass_body)
+        self.assertIn("SkipLoadingScreenOnce", scheduler)
+        self.assertEqual(SOURCE.count("SkipLoadingScreen();"), 1)
 
     def test_package_flow_predicate_is_narrow(self):
         body = function_body(
