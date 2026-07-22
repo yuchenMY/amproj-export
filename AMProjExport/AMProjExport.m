@@ -2828,8 +2828,14 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
 static void amproj_retryDeferredLaunchImportCandidates(void);
 static void amproj_installNativeXMLDelegateHook(Class cls);
 static NSString* amproj_compactNativeDiagnostic(NSString *text,
-                                                NSUInteger maximumLength);
+                                                 NSUInteger maximumLength);
 static NSString* amproj_visibleNativeParserSummary(NSDictionary *snapshot);
+static AMProjImportTransaction *amproj_importTransactionForID(
+    NSString *transactionID);
+static void amproj_releaseImportTransaction(NSString *transactionID,
+                                             BOOL success);
+static void amproj_showImportStatusForTransaction(NSString *text, BOOL error,
+                                                   NSString *transactionID);
 static void amproj_failImportedProjectVerification(
     NSString *transactionID, NSString *name, NSUInteger attempt,
     NSString *reason) {
