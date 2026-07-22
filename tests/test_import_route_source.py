@@ -741,8 +741,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static id amproj_findSwiftUIAction",
             "static void amproj_cleanupSwiftUIPromotedTemplate",
         )
-        self.assertIn("amproj_templateScopedActionOwner", scoped_action)
+        self.assertIn("amproj_boundSwiftUITemplateActionOwner", scoped_action)
+        self.assertIn("amproj_boundSwiftUIConfirmationOwner", scoped_action)
         self.assertIn("confirmationController", scoped_action)
+        self.assertNotIn("amproj_templateScopedActionOwner", scoped_action)
         self.assertNotIn("amproj_foregroundApplicationWindows", scoped_action)
 
         verifier = function_body(
@@ -781,6 +783,52 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_resumeAfterXMLResultAlert(0)", resume)
         self.assertGreaterEqual(
             verifier.count("amproj_failImportedProjectVerification"), 4
+        )
+
+    def test_v34_swiftui_delete_owners_require_new_title_bound_presentations(self):
+        action_owner = function_body(
+            "static UIViewController *amproj_boundSwiftUITemplateActionOwner",
+            "static UIViewController *amproj_boundSwiftUIConfirmationOwner",
+        )
+        self.assertIn("templateCardActivationBaselineTop", action_owner)
+        self.assertIn("templateCardActivationBaselinePresented", action_owner)
+        self.assertIn("top == base", action_owner)
+        self.assertIn("top == baselineTop", action_owner)
+        self.assertIn("top.viewIfLoaded.window != window", action_owner)
+        self.assertIn("presented !=", action_owner)
+        self.assertIn("amproj_controllerContainsExactTemplateTitle(top, title)", action_owner)
+        self.assertNotIn("sameNavigation || directPresentation", action_owner)
+
+        confirmation_owner = function_body(
+            "static UIViewController *amproj_boundSwiftUIConfirmationOwner",
+            "static BOOL amproj_activateTemplateCreationAction",
+        )
+        self.assertIn("templateDeleteActivationBaselineTop", confirmation_owner)
+        self.assertIn("templateDeleteActivationBaselinePresented", confirmation_owner)
+        self.assertIn("if (!presented ||", confirmation_owner)
+        self.assertIn("presented ==", confirmation_owner)
+        self.assertIn("owner == actionOwner", confirmation_owner)
+        self.assertIn("owner.viewIfLoaded.window != window", confirmation_owner)
+        self.assertIn(
+            "amproj_controllerContainsExactTemplateTitle(owner, title)",
+            confirmation_owner,
+        )
+
+        cleanup = function_body(
+            "static void amproj_cleanupSwiftUIPromotedTemplate",
+            "static void amproj_cleanupPromotedTemplate",
+        )
+        self.assertLess(
+            cleanup.index("templateCardActivationBaselineTop = baselineTop"),
+            cleanup.index("amproj_activateView(target)"),
+        )
+        self.assertLess(
+            cleanup.index("templateDeleteActivationBaselineTop ="),
+            cleanup.index("amproj_activateView(deleteAction)"),
+        )
+        self.assertNotIn(
+            "transaction.templateActionOwner ?: amproj_templateScopedActionOwner",
+            cleanup,
         )
 
     def test_native_observer_exceptions_are_contained(self):

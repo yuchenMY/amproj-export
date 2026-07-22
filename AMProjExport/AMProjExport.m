@@ -2724,6 +2724,10 @@ typedef NS_ENUM(NSInteger, AMProjTemplateProbeCapability) {
 @property(nonatomic, weak) UIViewController *templateMenuOwner;
 @property(nonatomic, weak) UIViewController *templateActionOwner;
 @property(nonatomic, weak) UIViewController *templateConfirmationOwner;
+@property(nonatomic, strong) UIViewController *templateCardActivationBaselineTop;
+@property(nonatomic, strong) UIViewController *templateCardActivationBaselinePresented;
+@property(nonatomic, strong) UIViewController *templateDeleteActivationBaselineTop;
+@property(nonatomic, strong) UIViewController *templateDeleteActivationBaselinePresented;
 @property(nonatomic, copy) NSString *templateSelectedFingerprint;
 @property(nonatomic, copy) NSString *templateSelectedStableKey;
 @property(nonatomic) NSInteger projectTitleMatchBaselineCount;
@@ -2788,6 +2792,10 @@ static void amproj_invalidateTemplateProbe(
     transaction.templateMenuOwner = nil;
     transaction.templateActionOwner = nil;
     transaction.templateConfirmationOwner = nil;
+    transaction.templateCardActivationBaselineTop = nil;
+    transaction.templateCardActivationBaselinePresented = nil;
+    transaction.templateDeleteActivationBaselineTop = nil;
+    transaction.templateDeleteActivationBaselinePresented = nil;
     transaction.templateSelectedFingerprint = nil;
     transaction.templateSelectedStableKey = nil;
     transaction.projectTitlePresentAtBaseline = NO;
@@ -6164,6 +6172,90 @@ static UIViewController *amproj_templateScopedActionOwner(
     return (sameNavigation || directPresentation) ? top : nil;
 }
 
+static UIViewController *amproj_presentedControllerFromOwnerHierarchy(
+    UIViewController *owner) {
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    UIViewController *cursor = owner;
+    while (cursor) {
+        NSValue *identity = [NSValue valueWithPointer:
+            (__bridge const void *)cursor];
+        if ([visited containsObject:identity]) return nil;
+        [visited addObject:identity];
+        if (cursor.presentedViewController) {
+            return cursor.presentedViewController;
+        }
+        cursor = cursor.parentViewController;
+    }
+    return nil;
+}
+
+static BOOL amproj_controllerContainsExactTemplateTitle(
+    UIViewController *controller, NSString *title) {
+    UIView *view = controller.viewIfLoaded;
+    NSString *expected = amproj_templateComparableText(title);
+    if (!view || !view.window || !expected.length) return NO;
+    NSMutableArray *matches = [NSMutableArray array];
+    amproj_collectExactTemplateTitleObjects(
+        view, expected, [NSMutableSet set], matches, 0);
+    return matches.count > 0;
+}
+
+static UIViewController *amproj_boundSwiftUITemplateActionOwner(
+    AMProjImportTransaction *transaction) {
+    UIViewController *base = transaction.templateMenuOwner;
+    UIWindow *window = base.viewIfLoaded.window;
+    UIViewController *baselineTop =
+        transaction.templateCardActivationBaselineTop;
+    if (!base || !window || !baselineTop ||
+        !transaction.templateCleanupStarted) return nil;
+
+    UIViewController *presented =
+        amproj_presentedControllerFromOwnerHierarchy(base);
+    UIViewController *container = base.navigationController ?: base;
+    UIViewController *top = presented
+        ? amproj_topViewController(presented)
+        : amproj_topViewController(container);
+    if (!top || top == base || top == baselineTop ||
+        top == transaction.templateCardActivationBaselinePresented ||
+        top.viewIfLoaded.window != window) return nil;
+
+    BOOL newPresentation = presented &&
+        presented != transaction.templateCardActivationBaselinePresented;
+    BOOL newNavigationTop = base.navigationController &&
+        top.navigationController == base.navigationController &&
+        top != baselineTop;
+    if (!newPresentation && !newNavigationTop) return nil;
+
+    NSString *title = amproj_transactionExpectedTitle(
+        transaction, transaction.name);
+    return amproj_controllerContainsExactTemplateTitle(top, title) ? top : nil;
+}
+
+static UIViewController *amproj_boundSwiftUIConfirmationOwner(
+    AMProjImportTransaction *transaction) {
+    UIViewController *actionOwner = transaction.templateActionOwner;
+    UIWindow *window = actionOwner.viewIfLoaded.window;
+    UIViewController *baselineTop =
+        transaction.templateDeleteActivationBaselineTop;
+    if (!actionOwner || !window || !baselineTop ||
+        !transaction.templateDeleteActionSent) return nil;
+
+    UIViewController *presented =
+        amproj_presentedControllerFromOwnerHierarchy(actionOwner);
+    if (!presented ||
+        presented == transaction.templateDeleteActivationBaselinePresented) {
+        return nil;
+    }
+    UIViewController *owner = amproj_topViewController(presented);
+    if (!owner || owner == actionOwner || owner == baselineTop ||
+        owner == transaction.templateDeleteActivationBaselinePresented ||
+        owner.viewIfLoaded.window != window) return nil;
+
+    NSString *title = amproj_transactionExpectedTitle(
+        transaction, transaction.name);
+    return amproj_controllerContainsExactTemplateTitle(owner, title) ? owner : nil;
+}
+
 static BOOL amproj_activateTemplateCreationAction(AMProjImportTransaction *transaction) {
     if (transaction.templateCreationActionSent) return YES;
     NSArray<NSString *> *terms = @[
@@ -7990,14 +8082,7 @@ static id amproj_findSwiftUIAction(AMProjImportTransaction *transaction,
     if (!transaction || !terms.count) return nil;
     UIViewController *owner = nil;
     if (confirmationOnly) {
-        UIViewController *actionOwner = transaction.templateActionOwner ?:
-            amproj_templateScopedActionOwner(transaction);
-        UIViewController *presented = actionOwner.presentedViewController;
-        if (!presented) {
-            actionOwner = amproj_templateScopedActionOwner(transaction);
-            presented = actionOwner.presentedViewController;
-        }
-        owner = presented ? amproj_topViewController(presented) : nil;
+        owner = amproj_boundSwiftUIConfirmationOwner(transaction);
         NSString *className = NSStringFromClass(owner.class).lowercaseString ?: @"";
         BOOL confirmationController =
             [owner isKindOfClass:UIAlertController.class] ||
@@ -8007,7 +8092,7 @@ static id amproj_findSwiftUIAction(AMProjImportTransaction *transaction,
         if (!owner || !confirmationController) return nil;
         transaction.templateConfirmationOwner = owner;
     } else {
-        owner = amproj_templateScopedActionOwner(transaction);
+        owner = amproj_boundSwiftUITemplateActionOwner(transaction);
         if (!owner) return nil;
         transaction.templateActionOwner = owner;
     }
@@ -8120,10 +8205,24 @@ static void amproj_cleanupSwiftUIPromotedTemplate(NSString *transactionID,
             id target = amproj_uniqueActivatableTemplateTitleObject(title);
             UIViewController *templateOwner =
                 amproj_visibleTemplatesControllers().firstObject;
-            if (target && templateOwner && amproj_activateView(target)) {
+            UIViewController *container =
+                templateOwner.navigationController ?: templateOwner;
+            UIViewController *baselineTop = templateOwner
+                ? amproj_topViewController(container) : nil;
+            UIViewController *baselinePresented = templateOwner
+                ? amproj_presentedControllerFromOwnerHierarchy(templateOwner) : nil;
+            if (target && templateOwner && baselineTop) {
                 transaction.templateMenuOwner = templateOwner;
                 transaction.templateActionOwner = nil;
                 transaction.templateConfirmationOwner = nil;
+                transaction.templateCardActivationBaselineTop = baselineTop;
+                transaction.templateCardActivationBaselinePresented =
+                    baselinePresented;
+                transaction.templateDeleteActivationBaselineTop = nil;
+                transaction.templateDeleteActivationBaselinePresented = nil;
+            }
+            if (target && templateOwner && baselineTop &&
+                amproj_activateView(target)) {
                 transaction.templateCleanupStarted = YES;
                 amproj_markImportTransactionState(
                     transactionID, AMProjImportTransactionCleaningTemplate);
@@ -8132,13 +8231,31 @@ static void amproj_cleanupSwiftUIPromotedTemplate(NSString *transactionID,
                     @"title": title ?: @"",
                     @"route": @"swiftui_accessibility"
                 });
+            } else {
+                transaction.templateMenuOwner = nil;
+                transaction.templateActionOwner = nil;
+                transaction.templateConfirmationOwner = nil;
+                transaction.templateCardActivationBaselineTop = nil;
+                transaction.templateCardActivationBaselinePresented = nil;
             }
         } else if (!transaction.templateDeleteActionSent) {
             id deleteAction = amproj_findSwiftUIAction(
                 transaction,
                 @[@"删除模板", @"delete template", @"删除", @"delete"],
                 NO);
-            if (deleteAction && amproj_activateView(deleteAction)) {
+            UIViewController *deleteOwner = transaction.templateActionOwner;
+            UIViewController *deleteBaselineTop = deleteOwner
+                ? amproj_topViewController(deleteOwner) : nil;
+            UIViewController *deleteBaselinePresented = deleteOwner
+                ? amproj_presentedControllerFromOwnerHierarchy(deleteOwner) : nil;
+            if (deleteAction && deleteOwner && deleteBaselineTop) {
+                transaction.templateDeleteActivationBaselineTop =
+                    deleteBaselineTop;
+                transaction.templateDeleteActivationBaselinePresented =
+                    deleteBaselinePresented;
+            }
+            if (deleteAction && deleteOwner && deleteBaselineTop &&
+                amproj_activateView(deleteAction)) {
                 transaction.templateDeleteActionSent = YES;
                 transaction.templateDeleteActionCount = 1;
                 amproj_debugEvent(@"import.template_delete_action", @{
@@ -8146,7 +8263,12 @@ static void amproj_cleanupSwiftUIPromotedTemplate(NSString *transactionID,
                     @"route": @"swiftui_accessibility",
                     @"target": NSStringFromClass([deleteAction class]) ?: @""
                 });
-            } else if (!transaction.templateOverflowActionSent) {
+            } else {
+                transaction.templateDeleteActivationBaselineTop = nil;
+                transaction.templateDeleteActivationBaselinePresented = nil;
+            }
+            if (!transaction.templateDeleteActionSent &&
+                !transaction.templateOverflowActionSent) {
                 id moreAction = amproj_findSwiftUIAction(
                     transaction,
                     @[@"更多", @"菜单", @"more", @"options", @"overflow"],
