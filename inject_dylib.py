@@ -22,6 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 AMPROJ_UTI = "com.alightcreative.motion.amproj"
 AMPROJ_UTI_CONFORMANCES = ("public.data", "public.archive", "public.zip-archive")
+XML_UTI = "public.xml"
 DEBUG_CONFIG_NAME = "AMProjDebugConfig.plist"
 DEFAULT_SERVER_PORT = 8765
 DEFAULT_DEBUG_MODE = "full"
@@ -253,6 +254,27 @@ def _amproj_document_type(plist):
     )
 
 
+def _has_xml_document_type(plist):
+    return _xml_document_type(plist) is not None
+
+
+def _xml_document_type(plist):
+    candidates = [
+        document_type
+        for document_type in plist.get("CFBundleDocumentTypes", [])
+        if isinstance(document_type, dict)
+        and XML_UTI in document_type.get("LSItemContentTypes", [])
+    ]
+    return next(
+        (
+            document_type
+            for document_type in candidates
+            if document_type.get("LSItemContentTypes") == [XML_UTI]
+        ),
+        candidates[0] if candidates else None,
+    )
+
+
 def _has_amproj_uti(plist):
     return any(
         declaration.get("UTTypeIdentifier") == AMPROJ_UTI
@@ -274,7 +296,7 @@ def _amproj_uti_declaration(plist):
 
 
 def patch_info_plist(app_dir, enable_debug_network=False):
-    """Patch the .amproj UTI and, for debug builds, local-network settings."""
+    """Patch project document types and optional debug-network settings."""
     info_path = os.path.join(app_dir, "Info.plist")
     if not os.path.exists(info_path):
         print("[!] Info.plist not found")
@@ -363,6 +385,72 @@ def patch_info_plist(app_dir, enable_debug_network=False):
         for key, value in expected_document_values.items():
             if amproj_document_type.get(key) != value:
                 amproj_document_type[key] = value
+                changed = True
+
+    # Collapse malformed/duplicated public.xml registrations to one document
+    # type. A system UTI must not be left attached to an unrelated document
+    # declaration, otherwise LaunchServices may choose the wrong handler.
+    xml_candidates = [
+        document_type
+        for document_type in document_types
+        if isinstance(document_type, dict)
+        and XML_UTI in document_type.get("LSItemContentTypes", [])
+    ]
+    xml_document_type = _xml_document_type(plist)
+    if len(xml_candidates) > 1:
+        canonical = xml_document_type or xml_candidates[0]
+        retained = []
+        for document_type in document_types:
+            if document_type is canonical:
+                retained.append(document_type)
+                continue
+            if document_type not in xml_candidates:
+                retained.append(document_type)
+                continue
+            content_types = document_type.get("LSItemContentTypes")
+            if not isinstance(content_types, list):
+                content_types = []
+            remaining = [value for value in content_types if value != XML_UTI]
+            if remaining:
+                document_type["LSItemContentTypes"] = remaining
+                retained.append(document_type)
+            changed = True
+        if retained != document_types:
+            plist["CFBundleDocumentTypes"] = document_types = retained
+            changed = True
+        xml_document_type = canonical
+    if xml_document_type is not None:
+        content_types = xml_document_type.get("LSItemContentTypes")
+        if content_types != [XML_UTI]:
+            remaining_types = [
+                content_type
+                for content_type in content_types
+                if content_type != XML_UTI
+            ]
+            if remaining_types:
+                xml_document_type["LSItemContentTypes"] = remaining_types
+                xml_document_type = None
+            else:
+                xml_document_type["LSItemContentTypes"] = [XML_UTI]
+            changed = True
+    if xml_document_type is None:
+        xml_document_type = {
+            "CFBundleTypeName": "Alight Motion XML Project",
+            "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Alternate",
+            "LSItemContentTypes": [XML_UTI],
+        }
+        document_types.append(xml_document_type)
+        changed = True
+    else:
+        expected_xml_document_values = {
+            "CFBundleTypeName": "Alight Motion XML Project",
+            "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Alternate",
+        }
+        for key, value in expected_xml_document_values.items():
+            if xml_document_type.get(key) != value:
+                xml_document_type[key] = value
                 changed = True
 
     for key in (
@@ -1053,6 +1141,26 @@ def _validate_patched_info_plist(
     tags = declaration.get("UTTypeTagSpecification", {})
     if "amproj" not in tags.get("public.filename-extension", []):
         raise RuntimeError("Info.plist .amproj UTI is missing its filename extension")
+    xml_document_types = [
+        item
+        for item in plist.get("CFBundleDocumentTypes", [])
+        if isinstance(item, dict)
+        and XML_UTI in item.get("LSItemContentTypes", [])
+    ]
+    if len(xml_document_types) != 1:
+        raise RuntimeError(
+            "Info.plist must contain exactly one public.xml document registration"
+        )
+    xml_document_type = xml_document_types[0]
+    if xml_document_type is None:
+        raise RuntimeError("Info.plist is missing the public.xml document registration")
+    if (
+        xml_document_type.get("CFBundleTypeRole") != "Editor"
+        or xml_document_type.get("LSHandlerRank") != "Alternate"
+    ):
+        raise RuntimeError(
+            "Info.plist public.xml document type must be Editor with Alternate rank"
+        )
     for key in (
         "LSSupportsOpeningDocumentsInPlace",
         "UISupportsDocumentBrowser",

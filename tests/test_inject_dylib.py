@@ -232,16 +232,30 @@ class PlistTests(unittest.TestCase):
             ats = result["NSAppTransportSecurity"]
             self.assertIs(ats["NSAllowsLocalNetworking"], True)
             self.assertIs(ats["NSAllowsArbitraryLoads"], True)
-            self.assertEqual(len(result["CFBundleDocumentTypes"]), 1)
+            self.assertEqual(len(result["CFBundleDocumentTypes"]), 2)
             self.assertEqual(
-                result["CFBundleDocumentTypes"][0]["CFBundleTypeRole"],
+                inject_dylib._amproj_document_type(result)["CFBundleTypeRole"],
                 "Editor",
             )
             self.assertEqual(
-                result["CFBundleDocumentTypes"][0]["LSHandlerRank"],
+                inject_dylib._amproj_document_type(result)["LSHandlerRank"],
                 "Owner",
             )
+            xml_document_type = inject_dylib._xml_document_type(result)
+            self.assertEqual(xml_document_type["CFBundleTypeRole"], "Editor")
+            self.assertEqual(xml_document_type["LSHandlerRank"], "Alternate")
+            self.assertEqual(
+                xml_document_type["LSItemContentTypes"],
+                [inject_dylib.XML_UTI],
+            )
             self.assertEqual(len(result["UTExportedTypeDeclarations"]), 1)
+            self.assertNotIn(
+                inject_dylib.XML_UTI,
+                {
+                    declaration.get("UTTypeIdentifier")
+                    for declaration in result["UTExportedTypeDeclarations"]
+                },
+            )
             self.assertIn(
                 "public.zip-archive",
                 result["UTExportedTypeDeclarations"][0]["UTTypeConformsTo"],
@@ -271,6 +285,111 @@ class PlistTests(unittest.TestCase):
                 result = plistlib.load(file)
             self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], False)
             self.assertIs(result["UISupportsDocumentBrowser"], False)
+
+    def test_xml_document_type_is_added_without_exporting_system_uti(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = Path(temp_dir)
+            with (app / "Info.plist").open("wb") as file:
+                plistlib.dump({}, file)
+
+            self.assertTrue(inject_dylib.patch_info_plist(app))
+            with (app / "Info.plist").open("rb") as file:
+                result = plistlib.load(file)
+
+            xml_document_type = inject_dylib._xml_document_type(result)
+            self.assertEqual(
+                xml_document_type,
+                {
+                    "CFBundleTypeName": "Alight Motion XML Project",
+                    "CFBundleTypeRole": "Editor",
+                    "LSHandlerRank": "Alternate",
+                    "LSItemContentTypes": [inject_dylib.XML_UTI],
+                },
+            )
+            self.assertFalse(
+                any(
+                    declaration.get("UTTypeIdentifier") == inject_dylib.XML_UTI
+                    for declaration in result["UTExportedTypeDeclarations"]
+                )
+            )
+
+    def test_existing_xml_document_type_is_upgraded_and_patch_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = Path(temp_dir)
+            with (app / "Info.plist").open("wb") as file:
+                plistlib.dump(
+                    {
+                        "CFBundleDocumentTypes": [
+                            {
+                                "CFBundleTypeName": "Old XML",
+                                "CFBundleTypeRole": "Viewer",
+                                "LSHandlerRank": "Default",
+                                "LSItemContentTypes": [inject_dylib.XML_UTI],
+                            }
+                        ]
+                    },
+                    file,
+                )
+
+            self.assertTrue(inject_dylib.patch_info_plist(app))
+            with (app / "Info.plist").open("rb") as file:
+                upgraded_bytes = file.read()
+            upgraded = plistlib.loads(upgraded_bytes)
+            xml_document_type = inject_dylib._xml_document_type(upgraded)
+            self.assertEqual(xml_document_type["CFBundleTypeRole"], "Editor")
+            self.assertEqual(xml_document_type["LSHandlerRank"], "Alternate")
+            self.assertEqual(
+                sum(
+                    inject_dylib.XML_UTI
+                    in document_type.get("LSItemContentTypes", [])
+                    for document_type in upgraded["CFBundleDocumentTypes"]
+                ),
+                1,
+            )
+
+            self.assertFalse(inject_dylib.patch_info_plist(app))
+            self.assertEqual((app / "Info.plist").read_bytes(), upgraded_bytes)
+
+    def test_duplicate_xml_document_types_are_collapsed_without_losing_other_utis(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = Path(temp_dir)
+            with (app / "Info.plist").open("wb") as file:
+                plistlib.dump(
+                    {
+                        "CFBundleDocumentTypes": [
+                            {
+                                "CFBundleTypeName": "XML One",
+                                "LSItemContentTypes": [inject_dylib.XML_UTI],
+                            },
+                            {
+                                "CFBundleTypeName": "Mixed",
+                                "LSItemContentTypes": [
+                                    "public.text",
+                                    inject_dylib.XML_UTI,
+                                ],
+                            },
+                        ]
+                    },
+                    file,
+                )
+
+            self.assertTrue(inject_dylib.patch_info_plist(app))
+            with (app / "Info.plist").open("rb") as file:
+                result = plistlib.load(file)
+
+            xml_types = [
+                item
+                for item in result["CFBundleDocumentTypes"]
+                if inject_dylib.XML_UTI in item.get("LSItemContentTypes", [])
+            ]
+            self.assertEqual(len(xml_types), 1)
+            self.assertEqual(xml_types[0]["LSItemContentTypes"], [inject_dylib.XML_UTI])
+            self.assertTrue(
+                any(
+                    item.get("LSItemContentTypes") == ["public.text"]
+                    for item in result["CFBundleDocumentTypes"]
+                )
+            )
 
 
 class AddressSelectionTests(unittest.TestCase):
@@ -544,6 +663,17 @@ class InjectionTests(unittest.TestCase):
                 info["NSAppTransportSecurity"]["NSAllowsLocalNetworking"],
                 True,
             )
+            self.assertTrue(inject_dylib._has_xml_document_type(info))
+            self.assertEqual(
+                inject_dylib._xml_document_type(info)["LSHandlerRank"],
+                "Alternate",
+            )
+            self.assertFalse(
+                any(
+                    declaration.get("UTTypeIdentifier") == inject_dylib.XML_UTI
+                    for declaration in info["UTExportedTypeDeclarations"]
+                )
+            )
             with (result_app / inject_dylib.DEBUG_CONFIG_NAME).open(
                 "rb"
             ) as file:
@@ -564,6 +694,29 @@ class InjectionTests(unittest.TestCase):
                 verification["bundle_identifier"], "com.example.fixture"
             )
             self.assertIsNone(verification["share_extension"])
+
+            info["CFBundleDocumentTypes"] = [
+                document_type
+                for document_type in info["CFBundleDocumentTypes"]
+                if inject_dylib.XML_UTI
+                not in document_type.get("LSItemContentTypes", [])
+            ]
+            with (result_app / "Info.plist").open("wb") as file:
+                plistlib.dump(info, file)
+            missing_xml_ipa = root / "missing-xml-registration.ipa"
+            with zipfile.ZipFile(
+                missing_xml_ipa, "w", zipfile.ZIP_DEFLATED
+            ) as archive:
+                for path in extracted.rglob("*"):
+                    archive.write(path, path.relative_to(extracted))
+            with self.assertRaisesRegex(RuntimeError, "public.xml"):
+                inject_dylib.verify_injected_ipa(
+                    missing_xml_ipa,
+                    dylib,
+                    settings,
+                    expected_config=config,
+                    expected_bundle_identifier="com.example.fixture",
+                )
 
     def test_fake_ipa_installs_and_verifies_share_extension(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -776,14 +929,14 @@ class ArgumentTests(unittest.TestCase):
                 "0123456789abcdef",
                 "--no-discovery",
                 "--build-id",
-                "v32-cloud-test",
+                "v33-cloud-test",
             ]
         )
         settings = inject_dylib._debug_settings_from_args(args, parser)
         self.assertTrue(settings.enabled)
         self.assertEqual(settings.server_url, "https://bug.meowcr.cn")
         self.assertIs(settings.discovery_enabled, False)
-        self.assertEqual(settings.build_identifier, "v32-cloud-test")
+        self.assertEqual(settings.build_identifier, "v33-cloud-test")
 
     def test_debug_token_must_match_backend_minimum_length(self):
         parser = inject_dylib.build_argument_parser()

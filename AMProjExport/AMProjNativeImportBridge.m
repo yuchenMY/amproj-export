@@ -335,6 +335,7 @@ static UIViewController *AMProjCreateProgressOwner(NSError **error) {
     NSLog(@"[AMProjExport] Native import storage finished success=%d callbacks=%lu progress=1",
           error == nil, (unsigned long)callbacks.count);
     void (^invokeCallbacks)(void) = ^{
+        NSError *observerError = nil;
         for (NSDictionary *observer in callbacks) {
             void (^handler)(id) = observer[@"handler"];
             if (!handler) continue;
@@ -342,8 +343,29 @@ static UIViewController *AMProjCreateProgressOwner(NSError **error) {
                    [observer[@"status"] integerValue]);
             NSInteger status = [observer[@"status"] integerValue];
             [self emitStatusEvent:status];
-            handler([self snapshot]);
+            @try {
+                handler([self snapshot]);
+            } @catch (NSException *exception) {
+                NSLog(@"[AMProjExport] Native import storage observer raised: %@",
+                      exception.reason ?: @"unknown exception");
+                AMProjEmitNativeBridgeEvent(@"storage_observer_exception", @{
+                    @"generation": @(self.bridgeGeneration),
+                    @"status": @(status),
+                    @"exception": exception.name ?: @"",
+                    @"reason": exception.reason ?: @""
+                });
+                observerError = AMProjNativeBridgeError(
+                    111,
+                    exception.reason ?: @"The native storage observer raised an exception",
+                    @{ @"status": @(status),
+                       @"exception": exception.name ?: @"" });
+            }
             [self emitStatusReturnedEvent:status];
+            if (observerError) break;
+        }
+        if (observerError) {
+            AMProjPoisonNativeBridge();
+            AMProjFinishNativeBridge(NO, observerError);
         }
     };
     if ([NSThread isMainThread]) invokeCallbacks();
@@ -429,7 +451,24 @@ static UIViewController *AMProjCreateProgressOwner(NSError **error) {
         void (^callback)(id) = [handler copy];
         dispatch_async(dispatch_get_main_queue(), ^{
             [self emitStatusEvent:status];
-            callback(terminalSnapshot ?: [self snapshot]);
+            @try {
+                callback(terminalSnapshot ?: [self snapshot]);
+            } @catch (NSException *exception) {
+                NSLog(@"[AMProjExport] Native import terminal observer raised: %@",
+                      exception.reason ?: @"unknown exception");
+                AMProjEmitNativeBridgeEvent(@"storage_observer_exception", @{
+                    @"generation": @(self.bridgeGeneration),
+                    @"status": @(status),
+                    @"exception": exception.name ?: @"",
+                    @"reason": exception.reason ?: @""
+                });
+                AMProjPoisonNativeBridge();
+                AMProjFinishNativeBridge(NO, AMProjNativeBridgeError(
+                    111,
+                    exception.reason ?: @"The native terminal observer raised an exception",
+                    @{ @"status": @(status),
+                       @"exception": exception.name ?: @"" }));
+            }
             [self emitStatusReturnedEvent:status];
         });
     }

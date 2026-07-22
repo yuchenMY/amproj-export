@@ -1,9 +1,9 @@
 @echo off
 REM ============================================================
-REM  build_and_inject.bat — Windows v32 稳定离线版 IPA 注入脚本
+REM  build_and_inject.bat — Windows v33 稳定离线版 IPA 注入脚本
 REM
 REM  用法: build_and_inject.bat <输入.ipa> [输出.ipa]
-REM  示例: build_and_inject.bat AM_v1.ipa AM_v1_direct_v32.ipa
+REM  示例: build_and_inject.bat AM_v1.ipa AM_v1_direct_v33.ipa
 REM
 REM  前提:
 REM    1. 将 Actions artifact 解压到仓库根目录
@@ -16,7 +16,7 @@ setlocal enabledelayedexpansion
 
 set INPUT_IPA=%1
 set OUTPUT_IPA=%2
-if "%OUTPUT_IPA%"=="" set OUTPUT_IPA=AM_v1_direct_v32.ipa
+if "%OUTPUT_IPA%"=="" set OUTPUT_IPA=AM_v1_direct_v33.ipa
 set DYLIB_PATH=AMProjExport\AMProjExport.dylib
 set EXPECTED_UUID=4b22d43f-09fc-3bde-859b-78a5d573a503
 
