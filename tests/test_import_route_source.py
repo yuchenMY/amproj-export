@@ -409,8 +409,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             present.index("NSString *nativeFailureTitle")
         ]
         self.assertIn("amproj_finishXMLTemplateImport(transactionID, YES", xml_branch)
-        self.assertIn("amproj_finishXMLTemplateImportInternal", xml_branch)
-        self.assertIn("NO);", xml_branch)
+        self.assertIn("amproj_finishXMLTemplateImportAfterPicker", xml_branch)
+        self.assertIn("NO, 0);", xml_branch)
         self.assertLess(
             xml_branch.index("orig_presentVC(self, _cmd, controller, animated, completion)"),
             xml_branch.index("amproj_finishXMLTemplateImport(transactionID, YES"),
@@ -640,6 +640,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("control.allControlEvents", activate_control)
         self.assertIn("UIControlEventPrimaryActionTriggered", activate_control)
         self.assertIn("accessibilityActivate", activate_control)
+        self.assertIn("@catch (__unused NSException *exception) {\n        return NO;", activate_control)
         self.assertNotIn(
             "sendActionsForControlEvents:UIControlEventTouchUpInside];\n        return YES",
             activate_control,
@@ -666,6 +667,22 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             xml_begin.index("xmlTemplatePickerDelegateInvoked = YES"),
             xml_begin.index("delegate, multipleSelector, nativePicker, @[URL]"),
         )
+        self.assertIn("amproj_waitForXMLPickerDismissal", xml_begin)
+
+        picker_wait = function_body(
+            "static void amproj_waitForXMLPickerDismissal",
+            "static void amproj_beginXMLTemplateImport",
+        )
+        self.assertIn("dismissViewControllerAnimated:NO", picker_wait)
+        self.assertIn("xmlTemplatePickerDismissVerified = YES", picker_wait)
+        self.assertIn("attempt >= 40", picker_wait)
+
+        picker_finish = function_body(
+            "static void amproj_finishXMLTemplateImportAfterPicker",
+            "static void amproj_finishXMLTemplateImport(",
+        )
+        self.assertIn("pickerVisible && attempt < 40", picker_finish)
+        self.assertIn("finalSuccess = success && pickerClosed", picker_finish)
 
         alert = function_body(
             "static AMProjXMLImportAlertResult amproj_XMLImportAlertResult",
@@ -678,6 +695,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("ownerWindow != presenterWindow", alert)
         self.assertIn("xmlTemplatePickerPresenter", alert)
         self.assertIn("presenterMatches", alert)
+        self.assertIn("presenter == expectedPicker", alert)
+        self.assertNotIn("presenter == expectedPresenter", alert)
         self.assertIn("failureTitles containsObject:normalizedTitle", alert)
         self.assertIn("successTitles containsObject:normalizedTitle", alert)
         self.assertNotIn("content containsString", alert)
@@ -718,6 +737,13 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("templateDeleteActionSent", swiftui_cleanup)
         self.assertIn("amproj_completePackageTransaction", swiftui_cleanup)
         self.assertIn("amproj_finishTemplateCleanupFailure", swiftui_cleanup)
+        scoped_action = function_body(
+            "static id amproj_findSwiftUIAction",
+            "static void amproj_cleanupSwiftUIPromotedTemplate",
+        )
+        self.assertIn("amproj_templateScopedActionOwner", scoped_action)
+        self.assertIn("confirmationController", scoped_action)
+        self.assertNotIn("amproj_foregroundApplicationWindows", scoped_action)
 
         verifier = function_body(
             "static void amproj_verifyImportedProjectRow",
@@ -739,6 +765,22 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertLess(
             retry.index("amproj_invalidateTemplateProbe(dispatchTransaction)"),
             retry.index("++amproj_pendingImportGeneration"),
+        )
+
+        pump = function_body(
+            "static void amproj_pumpXMLTemplateImports",
+            "static void amproj_resumeAfterXMLResultAlert",
+        )
+        resume = function_body(
+            "static void amproj_resumeQueuedImports",
+            "static BOOL amproj_isImportCommandURL",
+        )
+        self.assertIn("amproj_xmlTemplateResultQuarantineUntil", pump)
+        self.assertIn("amproj_xmlTemplateResultQuarantineUntil", resume)
+        self.assertIn("amproj_resumeAfterXMLResultAlert(0)", pump)
+        self.assertIn("amproj_resumeAfterXMLResultAlert(0)", resume)
+        self.assertGreaterEqual(
+            verifier.count("amproj_failImportedProjectVerification"), 4
         )
 
     def test_native_observer_exceptions_are_contained(self):
@@ -1358,8 +1400,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_completePackageTransaction", verified_branch)
         self.assertIn('AMProj v34 · 4/4', SOURCE)
         self.assertIn('amproj_beginTemplatePromotion', verified_branch)
-        self.assertIn('@"import.project_row_missing"', verification)
-        self.assertIn('amproj_resumeQueuedImports(@"project_row_missing")', verification)
+        self.assertIn("amproj_failImportedProjectVerification", verification)
+        verification_failure = function_body(
+            "static void amproj_failImportedProjectVerification",
+            "static void amproj_verifyImportedProjectRow",
+        )
+        self.assertIn('@"import.project_row_missing"', verification_failure)
+        self.assertIn(
+            'amproj_resumeQueuedImports(@"project_row_missing")',
+            verification_failure,
+        )
         self.assertNotIn("4/4", function_body(
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
