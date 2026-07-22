@@ -339,7 +339,9 @@ class ImportArchiveHostTests(unittest.TestCase):
             self.assertIn("manifest.txt", names)
             normalized_xml = next(name for name in names if name.endswith(".xml"))
             self.assertNotEqual(output.read(normalized_xml), source_xml)
-            self.assertIn(b'<scene type="project" ', output.read(normalized_xml))
+            normalized_xml_data = output.read(normalized_xml)
+            self.assertIn(b'type="project"', normalized_xml_data)
+            self.assertEqual(normalized_xml_data.count(b'type="project"'), 1)
             self.assertEqual(output.read("asset & one.bin"), source_asset)
             self.assertEqual(
                 output.read("manifest.txt"),
