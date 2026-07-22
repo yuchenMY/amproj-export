@@ -999,21 +999,71 @@ static NSString *AMProjImportXMLAttributeValue(NSString *tag,
                                                 NSRange *valueRangeOut) {
     if (valueRangeOut) *valueRangeOut = NSMakeRange(NSNotFound, 0);
     if (!tag.length || !attributeName.length) return nil;
-    NSString *pattern = [NSString stringWithFormat:
-        @"(?:^|\\s)%@\\s*=\\s*(?:\\\"([^\\\"]*)\\\"|'([^']*)')",
-        [NSRegularExpression escapedPatternForString:attributeName]];
-    NSRegularExpression *regex = [NSRegularExpression
-        regularExpressionWithPattern:pattern
-                              options:NSRegularExpressionCaseInsensitive
-                                error:nil];
-    NSTextCheckingResult *match = [regex firstMatchInString:tag options:0
-                                                      range:NSMakeRange(0, tag.length)];
-    if (!match) return nil;
-    NSRange valueRange = [match rangeAtIndex:1];
-    if (valueRange.location == NSNotFound) valueRange = [match rangeAtIndex:2];
-    if (valueRange.location == NSNotFound) return nil;
-    if (valueRangeOut) *valueRangeOut = valueRange;
-    return [tag substringWithRange:valueRange];
+    NSCharacterSet *whitespace = NSCharacterSet.whitespaceAndNewlineCharacterSet;
+    NSUInteger cursor = 0;
+    if ([tag characterAtIndex:cursor] != '<') return nil;
+    cursor++;
+    if (cursor < tag.length && [tag characterAtIndex:cursor] == '/') cursor++;
+
+    // Skip the element name. Attribute-looking text inside a quoted value must
+    // never be mistaken for a real attribute (for example a project title that
+    // literally contains `type="preset"`).
+    while (cursor < tag.length) {
+        unichar character = [tag characterAtIndex:cursor];
+        if ([whitespace characterIsMember:character] ||
+            character == '/' || character == '>') {
+            break;
+        }
+        cursor++;
+    }
+
+    while (cursor < tag.length) {
+        while (cursor < tag.length &&
+               [whitespace characterIsMember:[tag characterAtIndex:cursor]]) {
+            cursor++;
+        }
+        if (cursor >= tag.length) return nil;
+        unichar character = [tag characterAtIndex:cursor];
+        if (character == '/' || character == '>') return nil;
+
+        NSUInteger nameStart = cursor;
+        while (cursor < tag.length) {
+            character = [tag characterAtIndex:cursor];
+            if ([whitespace characterIsMember:character] || character == '=' ||
+                character == '/' || character == '>') {
+                break;
+            }
+            cursor++;
+        }
+        if (cursor == nameStart) return nil;
+        NSRange nameRange = NSMakeRange(nameStart, cursor - nameStart);
+
+        while (cursor < tag.length &&
+               [whitespace characterIsMember:[tag characterAtIndex:cursor]]) {
+            cursor++;
+        }
+        if (cursor >= tag.length || [tag characterAtIndex:cursor] != '=') return nil;
+        cursor++;
+        while (cursor < tag.length &&
+               [whitespace characterIsMember:[tag characterAtIndex:cursor]]) {
+            cursor++;
+        }
+        if (cursor >= tag.length) return nil;
+        unichar quote = [tag characterAtIndex:cursor];
+        if (quote != '\'' && quote != '"') return nil;
+        NSUInteger valueStart = ++cursor;
+        while (cursor < tag.length && [tag characterAtIndex:cursor] != quote) cursor++;
+        if (cursor >= tag.length) return nil;
+
+        NSString *name = [tag substringWithRange:nameRange];
+        if ([name caseInsensitiveCompare:attributeName] == NSOrderedSame) {
+            NSRange valueRange = NSMakeRange(valueStart, cursor - valueStart);
+            if (valueRangeOut) *valueRangeOut = valueRange;
+            return [tag substringWithRange:valueRange];
+        }
+        cursor++;
+    }
+    return nil;
 }
 
 static NSString *AMProjImportMediaResourceName(NSString *rawURI) {
@@ -1040,6 +1090,124 @@ static void AMProjImportAppendRewriteOperation(NSMutableArray<NSDictionary *> *o
     }];
 }
 
+static BOOL AMProjImportIsXMLWhitespace(unichar character) {
+    return character == ' ' || character == '\t' || character == '\r' ||
+        character == '\n';
+}
+
+static NSRange AMProjImportRootSceneTagRange(NSString *xml) {
+    NSUInteger cursor = 0;
+    if (xml.length && [xml characterAtIndex:0] == 0xfeff) cursor++;
+
+    while (cursor < xml.length) {
+        while (cursor < xml.length &&
+               AMProjImportIsXMLWhitespace([xml characterAtIndex:cursor])) {
+            cursor++;
+        }
+        if (cursor >= xml.length) return NSMakeRange(NSNotFound, 0);
+
+        NSRange remainder = NSMakeRange(cursor, xml.length - cursor);
+        if ([xml compare:@"<?" options:0 range:NSMakeRange(cursor, MIN(2, remainder.length))]
+                == NSOrderedSame) {
+            NSRange end = [xml rangeOfString:@"?>" options:0 range:remainder];
+            if (end.location == NSNotFound) return NSMakeRange(NSNotFound, 0);
+            cursor = NSMaxRange(end);
+            continue;
+        }
+        if (remainder.length >= 4 &&
+            [xml compare:@"<!--" options:0 range:NSMakeRange(cursor, 4)] == NSOrderedSame) {
+            NSRange end = [xml rangeOfString:@"-->" options:0 range:remainder];
+            if (end.location == NSNotFound) return NSMakeRange(NSNotFound, 0);
+            cursor = NSMaxRange(end);
+            continue;
+        }
+        if (remainder.length >= 9 &&
+            [xml compare:@"<!DOCTYPE" options:NSCaseInsensitiveSearch
+                   range:NSMakeRange(cursor, 9)] == NSOrderedSame) {
+            NSUInteger index = cursor + 9;
+            NSUInteger subsetDepth = 0;
+            unichar quote = 0;
+            for (; index < xml.length; index++) {
+                unichar character = [xml characterAtIndex:index];
+                if (quote) {
+                    if (character == quote) quote = 0;
+                    continue;
+                }
+                if (character == '\'' || character == '"') {
+                    quote = character;
+                } else if (character == '[') {
+                    subsetDepth++;
+                } else if (character == ']' && subsetDepth) {
+                    subsetDepth--;
+                } else if (character == '>' && subsetDepth == 0) {
+                    cursor = index + 1;
+                    break;
+                }
+            }
+            if (index >= xml.length) return NSMakeRange(NSNotFound, 0);
+            continue;
+        }
+        break;
+    }
+
+    static NSString *const prefix = @"<scene";
+    if (xml.length - cursor < prefix.length ||
+        [xml compare:prefix options:0 range:NSMakeRange(cursor, prefix.length)] !=
+            NSOrderedSame) {
+        return NSMakeRange(NSNotFound, 0);
+    }
+    NSUInteger index = cursor + prefix.length;
+    if (index < xml.length) {
+        unichar boundary = [xml characterAtIndex:index];
+        if (!AMProjImportIsXMLWhitespace(boundary) && boundary != '>' && boundary != '/') {
+            return NSMakeRange(NSNotFound, 0);
+        }
+    }
+
+    unichar quote = 0;
+    for (; index < xml.length; index++) {
+        unichar character = [xml characterAtIndex:index];
+        if (quote) {
+            if (character == quote) quote = 0;
+            continue;
+        }
+        if (character == '\'' || character == '"') {
+            quote = character;
+        } else if (character == '>') {
+            return NSMakeRange(cursor, index - cursor + 1);
+        }
+    }
+    return NSMakeRange(NSNotFound, 0);
+}
+
+static NSString *AMProjImportEnsureProjectSceneRoot(NSString *xml, BOOL *rewritten,
+                                                     NSError **error) {
+    if (rewritten) *rewritten = NO;
+    NSRange tagRange = AMProjImportRootSceneTagRange(xml);
+    if (tagRange.location == NSNotFound) {
+        AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
+                         @"Unable to locate the project scene root tag", nil);
+        return nil;
+    }
+    NSString *tag = [xml substringWithRange:tagRange];
+    NSRange typeRange = NSMakeRange(NSNotFound, 0);
+    NSString *type = AMProjImportXMLAttributeValue(tag, @"type", &typeRange);
+    if ([type isEqualToString:@"project"]) return xml;
+
+    NSMutableString *normalized = [xml mutableCopy];
+    if (typeRange.location != NSNotFound) {
+        NSRange absoluteRange = NSMakeRange(tagRange.location + typeRange.location,
+                                            typeRange.length);
+        [normalized replaceCharactersInRange:absoluteRange withString:@"project"];
+    } else {
+        NSUInteger insertionOffset = NSMaxRange(tagRange) - 1;
+        if ([tag hasSuffix:@"/>"]) insertionOffset--;
+        [normalized insertString:@" type=\"project\"" atIndex:insertionOffset];
+    }
+    if (rewritten) *rewritten = YES;
+    return normalized;
+}
+
 static NSData *AMProjImportRewriteXML(NSData *xmlData,
                                       NSArray<AMProjImportEntry *> *entries,
                                       NSDictionary<NSString *, NSString *> *resourceHashesByName,
@@ -1051,16 +1219,23 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
                                       NSUInteger *mediaSignatureCount,
                                       NSUInteger *rewrittenMediaSignatureCount,
                                       NSUInteger *missingMediaSignatureCount,
+                                      NSUInteger *projectSceneCount,
+                                      NSUInteger *rewrittenProjectSceneCount,
                                       NSError **error) {
     if (mediaSignatureCount) *mediaSignatureCount = 0;
     if (rewrittenMediaSignatureCount) *rewrittenMediaSignatureCount = 0;
     if (missingMediaSignatureCount) *missingMediaSignatureCount = 0;
+    if (projectSceneCount) *projectSceneCount = 0;
+    if (rewrittenProjectSceneCount) *rewrittenProjectSceneCount = 0;
     NSString *xml = [[NSString alloc] initWithData:xmlData encoding:NSUTF8StringEncoding];
     if (!xml) {
         AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
                          @"The project XML is not valid UTF-8", nil);
         return nil;
     }
+    BOOL projectSceneRewritten = NO;
+    xml = AMProjImportEnsureProjectSceneRoot(xml, &projectSceneRewritten, error);
+    if (!xml) return nil;
     NSError *regexError = nil;
     NSRegularExpression *regex = [NSRegularExpression
         regularExpressionWithPattern:@"amproj:((?:&(?:amp|quot|apos|lt|gt);|[^\\\"'<>&])+)"
@@ -1213,6 +1388,10 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
     }
     if (missingMediaSignatureCount) {
         *missingMediaSignatureCount = localMissingMediaSignatureCount;
+    }
+    if (projectSceneCount) *projectSceneCount = 1;
+    if (rewrittenProjectSceneCount) {
+        *rewrittenProjectSceneCount = projectSceneRewritten ? 1 : 0;
     }
     return result;
 }
@@ -1399,6 +1578,8 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
     NSUInteger mediaSignatureCount = 0;
     NSUInteger rewrittenMediaSignatureCount = 0;
     NSUInteger missingMediaSignatureCount = 0;
+    NSUInteger projectSceneCount = 0;
+    NSUInteger rewrittenProjectSceneCount = 0;
     NSMutableSet<NSString *> *missingReferenceNames = [NSMutableSet set];
     NSMutableArray<NSString *> *sceneTitles = [NSMutableArray array];
     NSData *nativeData = nil;
@@ -1426,12 +1607,15 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
         NSUInteger xmlMediaSignatureCount = 0;
         NSUInteger xmlRewrittenMediaSignatureCount = 0;
         NSUInteger xmlMissingMediaSignatureCount = 0;
+        NSUInteger xmlProjectSceneCount = 0;
+        NSUInteger xmlRewrittenProjectSceneCount = 0;
         NSArray<NSString *> *xmlMissingNames = nil;
         NSData *rewritten = AMProjImportRewriteXML(
             xmlData, entries, resourceHashesByName, YES, &xmlReferenceCount,
             &xmlRewrittenCount, &xmlMissingCount, &xmlMissingNames,
             &xmlMediaSignatureCount, &xmlRewrittenMediaSignatureCount,
-            &xmlMissingMediaSignatureCount, error);
+            &xmlMissingMediaSignatureCount, &xmlProjectSceneCount,
+            &xmlRewrittenProjectSceneCount, error);
         if (!rewritten) {
             [fileManager removeItemAtURL:extractionURL error:nil];
             return NO;
@@ -1441,6 +1625,8 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
         mediaSignatureCount += xmlMediaSignatureCount;
         rewrittenMediaSignatureCount += xmlRewrittenMediaSignatureCount;
         missingMediaSignatureCount += xmlMissingMediaSignatureCount;
+        projectSceneCount += xmlProjectSceneCount;
+        rewrittenProjectSceneCount += xmlRewrittenProjectSceneCount;
         [missingReferenceNames addObjectsFromArray:xmlMissingNames ?: @[]];
         if (xmlEntry == primaryXMLEntry) nativeData = rewritten;
     }
@@ -1479,6 +1665,8 @@ BOOL AMProjPrepareNativeImport(NSURL *archiveURL, NSURL *workDirectoryURL,
             @"media_signature_count": @(mediaSignatureCount),
             @"rewritten_media_signature_count": @(rewrittenMediaSignatureCount),
             @"missing_media_signature_count": @(missingMediaSignatureCount),
+            @"project_scene_count": @(projectSceneCount),
+            @"rewritten_project_scene_count": @(rewrittenProjectSceneCount),
             @"missing_reference_count": @(missingCount),
             @"missing_reference_names": [missingReferenceNames.allObjects
                 sortedArrayUsingSelector:@selector(compare:)],
@@ -1899,6 +2087,8 @@ BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
             [preparationMetrics[@"rewritten_media_signature_count"] unsignedIntegerValue];
         NSUInteger missingMediaSignatures =
             [preparationMetrics[@"missing_media_signature_count"] unsignedIntegerValue];
+        NSUInteger projectSceneRewrites =
+            [preparationMetrics[@"rewritten_project_scene_count"] unsignedIntegerValue];
 
         if (missingMediaSignatures) {
             return AMProjImportFail(
@@ -1907,7 +2097,8 @@ BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
                 @{ @"missing_media_signature_count": @(missingMediaSignatures) });
         }
 
-        BOOL archivePreserved = inputManifestCount == 1 && signatureRewrites == 0;
+        BOOL archivePreserved = inputManifestCount == 1 && signatureRewrites == 0 &&
+            projectSceneRewrites == 0;
         if (archivePreserved) {
             if (!AMProjImportPublishExactArchive(archiveURL, destinationURL, error)) return NO;
             NSDictionary<NSString *, NSNumber *> *zipMetrics = @{
@@ -1931,6 +2122,9 @@ BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
                         preparationMetrics[@"media_signature_count"] ?: @0,
                     @"rewritten_media_signature_count": @0,
                     @"missing_media_signature_count": @0,
+                    @"project_scene_count":
+                        preparationMetrics[@"project_scene_count"] ?: @0,
+                    @"rewritten_project_scene_count": @0,
                     @"missing_reference_count":
                         preparationMetrics[@"missing_reference_count"] ?: @0,
                     @"missing_reference_names":
@@ -2038,6 +2232,8 @@ BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
         NSUInteger mediaSignatureCount = 0;
         NSUInteger rewrittenMediaSignatureCount = 0;
         NSUInteger normalizedMissingMediaSignatureCount = 0;
+        NSUInteger projectSceneCount = 0;
+        NSUInteger rewrittenProjectSceneCount = 0;
         NSMutableDictionary<NSString *, NSData *> *signedSceneXMLFiles =
             [NSMutableDictionary dictionaryWithCapacity:sceneXMLURLs.count];
         for (NSString *name in [sceneXMLURLs.allKeys
@@ -2055,10 +2251,13 @@ BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
             NSUInteger sceneMediaSignatureCount = 0;
             NSUInteger sceneRewrittenMediaSignatureCount = 0;
             NSUInteger sceneMissingMediaSignatureCount = 0;
+            NSUInteger sceneProjectSceneCount = 0;
+            NSUInteger sceneRewrittenProjectSceneCount = 0;
             NSData *signedSceneXML = AMProjImportRewriteXML(
                 sceneXML, @[], resourceHashes, NO, NULL, NULL, NULL, NULL,
                 &sceneMediaSignatureCount, &sceneRewrittenMediaSignatureCount,
-                &sceneMissingMediaSignatureCount, &fileError);
+                &sceneMissingMediaSignatureCount, &sceneProjectSceneCount,
+                &sceneRewrittenProjectSceneCount, &fileError);
             if (!signedSceneXML) {
                 if (error) *error = fileError;
                 return NO;
@@ -2066,6 +2265,8 @@ BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
             mediaSignatureCount += sceneMediaSignatureCount;
             rewrittenMediaSignatureCount += sceneRewrittenMediaSignatureCount;
             normalizedMissingMediaSignatureCount += sceneMissingMediaSignatureCount;
+            projectSceneCount += sceneProjectSceneCount;
+            rewrittenProjectSceneCount += sceneRewrittenProjectSceneCount;
             signedSceneXMLFiles[name] = signedSceneXML;
         }
         if (normalizedMissingMediaSignatureCount) {
@@ -2096,11 +2297,14 @@ BOOL AMProjNormalizeProjectArchive(NSURL *archiveURL, NSURL *workDirectoryURL,
                 @"rewritten_media_signature_count":
                     @(rewrittenMediaSignatureCount),
                 @"missing_media_signature_count": @0,
+                @"project_scene_count": @(projectSceneCount),
+                @"rewritten_project_scene_count": @(rewrittenProjectSceneCount),
                 @"missing_reference_count": preparationMetrics[@"missing_reference_count"] ?: @0,
                 @"missing_reference_names": preparationMetrics[@"missing_reference_names"] ?: @[],
                 @"resource_count": @(resourceURLs.count),
                 @"archive_preserved": @NO,
-                @"xml_preserved": @(rewrittenMediaSignatureCount == 0),
+                @"xml_preserved": @(rewrittenMediaSignatureCount == 0 &&
+                                     rewrittenProjectSceneCount == 0),
                 @"normalized_archive": destinationURL.path ?: @"",
                 @"zip": zipMetrics ?: @{}
             };

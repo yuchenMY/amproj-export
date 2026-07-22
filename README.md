@@ -3,11 +3,12 @@
 为 Alight Motion iOS v27b 注入 `.amproj` 导出与本地导入能力。项目包含：
 
 - `AMProjExport.dylib`：离线 Release 版。
+- `AMProjExportCloud.dylib`：日常使用的云端统一版；导入/导出逻辑与 Release 相同，只异步上报核心诊断事件，不安装完整 Debug hook。
 - `AMProjExportDebug.dylib`：带 Windows 调试后端遥测的 Debug 版；后端不可达不会阻塞导入或导出。
 - `AMProjShareExtension.appex`：实验性“导入到 AM”分享扩展。
 - `inject_dylib.py`：Windows IPA 注入、Info.plist 修补和产物验证工具。
 
-Debug IPA 会优先连接注入时记录的 Windows 地址；地址变化或连接失败时，会在后台通过带 token 认证的 UDP 单播自动发现同一 Wi-Fi 内的后端。默认 TCP/UDP 均使用端口 `8765`，Windows 防火墙需要同时允许这两个协议。后端只接收诊断事件和用户明确请求的调试产物，不参与文件解析、项目保存或导入控制；发现失败只会缺少调试日志，不会阻塞导入、导出。
+Cloud IPA 直接连接注入时配置的 HTTPS 后端，不显示 Debug 状态条、不轮询远程控制命令、不上传项目文件，也不安装全局 UI、网络或解析诊断 hook。完整 Debug IPA 仍支持本地发现、模式控制和按需产物捕获。两者的后端都不参与文件解析、项目保存或导入控制；连接失败只会缺少日志，不会阻塞导入、导出。
 
 ## `.amproj` 格式
 
@@ -24,7 +25,16 @@ project.amproj
 
 完整格式见 `format_spec.md`。
 
-## v31 iOS 媒体映射与完整导入
+## v32 直接导入项目与完整媒体
+
+### v32 项目分类
+
+- Android 和插件导出的 XML 顶层 `<scene>` 可能没有 `type`。当前 iOS PackageImporter 会把缺失类型按 preset/element 落库，结果是完整素材出现在“您的模板”，用户点击模板后才创建项目。
+- v32 只在私有导入副本中把每个 XML 的顶层场景规范为 `type="project"`；嵌套 `<scene>` 不修改，用户原始 `.amproj` 不修改。
+- 已有正确项目类型和媒体签名的包继续按原 ZIP 字节导入；需要规范化时仍把全部 XML、图片、视频、音频、字体和 manifest 作为一个完整包交给原生 PackageImporter。
+- 云端事件记录 `project_scene_count`、`rewritten_project_scene_count` 和 `route=ios_project_archive_normalized`。只有底部“项目”出现新项目才显示 `4/4`。
+
+## v31 iOS 媒体映射与完整导入（v32 保留）
 
 ### v31 启动套餐页恢复
 
@@ -65,7 +75,7 @@ project.amproj
 但必须作为非空 `x3` 传入，因为 AM 在 status 4 后会无条件向它发送 dismiss。
 复制任务完成时同时发出 Firebase 的进度终态 `2` 和成功终态 `4`，失败仍发出 `5`。
 
-因此，`2/4` 或 `3/4` 停住、闪退的旧 v20-v30 包不要继续重复安装；请使用 v31 构建。v31 会在私有工作副本中补齐 iOS 所需的媒体 SHA-1，再把 XML 与全部图片、音频、视频和字体作为一个完整项目包交给 AM。
+因此，`2/4` 或 `3/4` 停住、闪退的旧 v20-v30 包不要继续重复安装；请使用 v32 构建。v32 会在私有工作副本中补齐 iOS 所需的媒体 SHA-1 和顶层项目类型，再把 XML 与全部图片、音频、视频和字体作为一个完整项目包交给 AM。
 
 稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。冷启动的 `didFinishLaunching` 先记录候选 URL，再复制一份 launch options，仅从转发给原 AppDelegate 的副本中移除 `.amproj` URL 或对应的 user activity，其他启动参数保持不变；原始字典不会被就地修改。这样可避免 AM 的原生 URL 路径同时处理同一个包。App 激活后先扫描 `Documents/Inbox`，再对候选 URL 做一次不弹错误框的兜底读取。
 
@@ -75,7 +85,7 @@ project.amproj
 
 实验入口是 QQ 分享面板中的“导入到 AM”。扩展先把一个 `.amproj` 原子写入 App Group，再尝试用 `alightmotion://amproj-import` 唤起主 App。免费自签不一定能保留 App Group 或允许扩展自动唤起，因此实验包与稳定包分开生成。
 
-整个导入链不依赖 Wi-Fi、5G、VPN、网络或调试后端。Debug 后端不可达时只会缺少诊断日志。
+整个导入链不依赖 Wi-Fi、5G、VPN、网络或调试后端。Cloud/Debug 后端不可达时只会缺少诊断日志。
 
 ## GitHub Actions 构建
 
@@ -83,19 +93,20 @@ project.amproj
 
 ```text
 AMProjExport/AMProjExport.dylib
+AMProjExport/AMProjExportCloud.dylib
 AMProjExport/AMProjExportDebug.dylib
 AMProjShareExtension/build/AMProjShareExtension.appex
 AMProjShareExtension/build/AMProjShareExtension.entitlements
 ```
 
-下载名为 `AMProjExport-v31-dylibs` 的 artifact。其中的 `build-metadata.json`
+下载名为 `AMProjExport-v32-dylibs` 的 artifact。其中的 `build-metadata.json`
 记录插件版本、commit、Actions run ID 以及每个二进制文件的 SHA-256，注入前可用它确认没有混入旧版本产物。
 
-## 从干净 IPA 生成 v31
+## 从干净 IPA 生成 v32
 
 必须以未注入的 `AM_v1.ipa` 为输入，不要用旧测试包继续叠加。主 App Bundle ID 保持 `com.amayaka.meow`。
 
-v31 原生导入桥只支持这份已核验的主程序：
+v32 原生导入桥只支持这份已核验的主程序：
 
 ```text
 AM_v1.ipa SHA-256: B135D99E81E0F3F976CBF4C30BCC491B4B770BD9D0A6841D48083B7A7EA29413
@@ -108,28 +119,38 @@ Mach-O UUID:       4b22d43f-09fc-3bde-859b-78a5d573a503
 
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v31.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExport.dylib .\AM_v1_direct_v32.ipa `
   --expected-main-uuid $uuid
 ```
 
-带本地后端诊断的 Debug 版：
-
-```powershell
-$uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
-$token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v31_debug.ipa `
-  --debug-mode full --debug-token $token --expected-main-uuid $uuid
-python .\debug_backend\server.py --token $token
-```
-
-云端 HTTPS Debug 版不使用局域网发现，也不需要 iOS 本地网络权限：
+日常使用的云端统一版（稳定逻辑 + 核心云端日志）：
 
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = "<与云端后端一致的 Bearer token>"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v31_cloud_debug.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportCloud.dylib .\AM_v1_direct_v32_cloud.ipa `
   --server-url https://bug.meowcr.cn --no-discovery --debug-mode full `
-  --debug-token $token --build-id v31-cloud-<commit> --expected-main-uuid $uuid
+  --debug-token $token --build-id v32-cloud-<commit> --expected-main-uuid $uuid
+```
+
+带本地后端完整诊断的 Debug 版：
+
+```powershell
+$uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
+$token = python -c "import secrets; print(secrets.token_urlsafe(32))"
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v32_debug.ipa `
+  --debug-mode full --debug-token $token --expected-main-uuid $uuid
+python .\debug_backend\server.py --token $token
+```
+
+需要完整 hook 和按需 artifact 的云端 HTTPS Debug 版：
+
+```powershell
+$uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
+$token = "<与云端后端一致的 Bearer token>"
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v32_cloud_debug.ipa `
+  --server-url https://bug.meowcr.cn --no-discovery --debug-mode full `
+  --debug-token $token --build-id v32-debug-<commit> --expected-main-uuid $uuid
 ```
 
 实验分享版：
@@ -137,7 +158,7 @@ python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM
 ```powershell
 $uuid = "4b22d43f-09fc-3bde-859b-78a5d573a503"
 $token = python -c "import secrets; print(secrets.token_urlsafe(32))"
-python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v31_share_exp.ipa `
+python .\inject_dylib.py .\AM_v1.ipa .\AMProjExport\AMProjExportDebug.dylib .\AM_v1_direct_v32_share_exp.ipa `
   --debug-mode full --debug-token $token --expected-main-uuid $uuid `
   --share-extension .\AMProjShareExtension\build\AMProjShareExtension.appex `
   --app-group-id group.com.amayaka.meow.amprojshare

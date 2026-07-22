@@ -102,11 +102,13 @@ class ImportArchiveHostTests(unittest.TestCase):
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
             output.writestr(
                 "first.xml",
-                '<?xml version="1.0"?><scene asset="amproj:asset%20&amp;%20one.bin"/>',
+                '<?xml version="1.0"?><scene type="project" '
+                'asset="amproj:asset%20&amp;%20one.bin"/>',
             )
             output.writestr(
                 "second.xml",
-                '<?xml version="1.0"?><scene asset="amproj:asset%20&amp;%20one.bin"/>',
+                '<?xml version="1.0"?><scene type="project" '
+                'asset="amproj:asset%20&amp;%20one.bin"/>',
             )
             output.writestr("asset & one.bin", asset)
             if manifest:
@@ -177,6 +179,7 @@ class ImportArchiveHostTests(unittest.TestCase):
         xml = self.run_native_helper(archive, mode="manifest", missing=1)
         self.assertIn(f'sig="{expected}"', xml)
         self.assertEqual(xml.count(f'sig="{expected}"'), 1)
+        self.assertIn('<scene type="project">', xml)
         self.assertIn("file://", xml)
 
     def test_existing_media_sig_is_preserved(self):
@@ -222,6 +225,8 @@ class ImportArchiveHostTests(unittest.TestCase):
                 self.assertEqual(output.read(resource_name), expected_data)
             first = output.read("scenes/first.xml").decode("utf-8")
             second = output.read("scenes/second.xml").decode("utf-8")
+            self.assertIn('<scene title="First" type="project">', first)
+            self.assertIn('<scene title="Second" type="project">', second)
             image_hash = hashlib.sha1(
                 resources["media/images/picture.png"]
             ).hexdigest().upper()
@@ -333,7 +338,8 @@ class ImportArchiveHostTests(unittest.TestCase):
             self.assertIn("asset & one.bin", names)
             self.assertIn("manifest.txt", names)
             normalized_xml = next(name for name in names if name.endswith(".xml"))
-            self.assertEqual(output.read(normalized_xml), source_xml)
+            self.assertNotEqual(output.read(normalized_xml), source_xml)
+            self.assertIn(b'<scene type="project" ', output.read(normalized_xml))
             self.assertEqual(output.read("asset & one.bin"), source_asset)
             self.assertEqual(
                 output.read("manifest.txt"),
@@ -364,6 +370,73 @@ class ImportArchiveHostTests(unittest.TestCase):
             self.assertIsNone(output.testzip())
             self.assertEqual(output.read("asset.bin"), b"fixture" * 4096)
             self.assertEqual(sum(name.endswith(".xml") for name in output.namelist()), 1)
+
+    def test_normalize_rebuilds_when_only_root_project_type_is_missing(self):
+        archive = self.temp / "missing-project-type.amproj"
+        asset = b"root-type-resource"
+        xml = (
+            '<?xml version="1.0"?>\n<!-- root marker -->\n'
+            '<scene title="Root"><scene type="component" title="Nested"/></scene>'
+        )
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.writestr("scene.xml", xml)
+            output.writestr("asset.bin", asset)
+            output.writestr(
+                "manifest.txt", self.manifest_bytes({"asset.bin": asset})
+            )
+        source = archive.read_bytes()
+
+        normalized = self.run_helper(archive, mode="normalize", missing=0)
+        self.assertNotEqual(normalized.read_bytes(), source)
+        with zipfile.ZipFile(normalized) as output:
+            normalized_xml = output.read("scene.xml").decode("utf-8")
+            self.assertIn('<scene title="Root" type="project">', normalized_xml)
+            self.assertEqual(normalized_xml.count('type="project"'), 1)
+            self.assertIn('<scene type="component" title="Nested"/>', normalized_xml)
+            self.assertEqual(output.read("asset.bin"), asset)
+
+    def test_normalize_replaces_non_project_root_type_without_touching_nested_scene(self):
+        archive = self.temp / "template-root-type.amproj"
+        xml = (
+            '<scene type="preset" title="Root">'
+            '<scene type="element" title="Nested"/>'
+            '</scene>'
+        )
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.writestr("scene.xml", xml)
+            output.writestr("manifest.txt", b"")
+
+        normalized = self.run_helper(archive, mode="normalize", missing=0)
+        with zipfile.ZipFile(normalized) as output:
+            normalized_xml = output.read("scene.xml").decode("utf-8")
+            self.assertIn('<scene type="project" title="Root">', normalized_xml)
+            self.assertIn('<scene type="element" title="Nested"/>', normalized_xml)
+            self.assertNotIn('type="preset"', normalized_xml)
+
+    def test_attribute_like_title_text_does_not_hide_missing_project_type(self):
+        archive = self.temp / "quoted-fake-project-type.amproj"
+        xml = '<scene title=\'Keep type="preset" literal\'><shape/></scene>'
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.writestr("scene.xml", xml)
+            output.writestr("manifest.txt", b"")
+
+        normalized = self.run_helper(archive, mode="normalize", missing=0)
+        with zipfile.ZipFile(normalized) as output:
+            normalized_xml = output.read("scene.xml").decode("utf-8")
+            self.assertIn('title=\'Keep type="preset" literal\'', normalized_xml)
+            self.assertIn('type="project"', normalized_xml)
+            self.assertEqual(normalized_xml.count('type="project"'), 1)
+
+    def test_real_project_type_wins_over_attribute_like_title_text(self):
+        archive = self.temp / "quoted-existing-project-type.amproj"
+        xml = '<scene title=\'Keep type="preset" literal\' type="project"><shape/></scene>'
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.writestr("scene.xml", xml)
+            output.writestr("manifest.txt", b"")
+        source = archive.read_bytes()
+
+        normalized = self.run_helper(archive, mode="normalize", missing=0)
+        self.assertEqual(normalized.read_bytes(), source)
 
     def test_counts_each_missing_resource_once(self):
         archive = self.temp / "duplicate-missing-reference.amproj"

@@ -16,7 +16,8 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn("AMProjPrepareNativeImport", header)
         self.assertIn("AMProjNormalizeProjectArchive", header)
         makefile = MAKEFILE.read_text(encoding="utf-8")
-        self.assertEqual(makefile.count("AMProjZIPWriter.m AMProjImportArchive.m"), 2)
+        self.assertEqual(makefile.count("AMProjZIPWriter.m AMProjImportArchive.m"), 3)
+        self.assertIn("AMProjExportCloud.dylib", makefile)
 
     def test_zip_safety_and_integrity_checks_are_present(self):
         source = SOURCE.read_text(encoding="utf-8")
@@ -103,6 +104,30 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn('sig=\\\"%@\\\"', source)
         self.assertNotIn("(void)resourceHashesByName", source)
         self.assertIn("URI replacements and signature edits", source)
+
+    def test_root_scene_is_normalized_to_project_without_touching_nested_scenes(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        for required in (
+            "AMProjImportRootSceneTagRange",
+            "AMProjImportEnsureProjectSceneRoot",
+            '@"type"',
+            '@"project"',
+            'project_scene_count',
+            'rewritten_project_scene_count',
+        ):
+            self.assertIn(required, source)
+        self.assertIn(
+            "projectSceneRewrites == 0", source
+        )
+        self.assertIn(
+            "rewrittenProjectSceneCount == 0", source
+        )
+        self.assertIn("Attribute-looking text inside a quoted value", source)
+        self.assertIn("[name caseInsensitiveCompare:attributeName]", source)
+
+        header = HEADER.read_text(encoding="utf-8")
+        self.assertIn('type="project"', header)
+        self.assertIn("nested scenes are not", header)
 
     def test_native_preparation_accepts_multiple_xml_files_and_reports_names(self):
         source = SOURCE.read_text(encoding="utf-8")

@@ -1,7 +1,7 @@
 name: Build AMProjExport dylibs
 
 env:
-  AMPROJ_RELEASE_VERSION: '31'
+  AMPROJ_RELEASE_VERSION: '32'
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
           python3 -m unittest discover -s tests -v
           python3 -m unittest debug_backend.test_server -v
 
-      - name: Build release and debug dylibs
+      - name: Build release, cloud, and debug dylibs
         working-directory: AMProjExport
         run: make
 
@@ -45,6 +45,7 @@ jobs:
           }
           for path in (
               "AMProjExport/AMProjExport.dylib",
+              "AMProjExport/AMProjExportCloud.dylib",
               "AMProjExport/AMProjExportDebug.dylib",
           ):
               info = verify_dylib_architecture(path)
@@ -117,6 +118,7 @@ jobs:
 
           artifact_paths = (
               Path("AMProjExport/AMProjExport.dylib"),
+              Path("AMProjExport/AMProjExportCloud.dylib"),
               Path("AMProjExport/AMProjExportDebug.dylib"),
               Path("AMProjShareExtension/build/AMProjShareExtension.appex/AMProjShareExtension"),
               Path("AMProjShareExtension/build/AMProjShareExtension.appex/Info.plist"),
@@ -147,6 +149,7 @@ jobs:
           path: |
             build-metadata.json
             AMProjExport/AMProjExport.dylib
+            AMProjExport/AMProjExportCloud.dylib
             AMProjExport/AMProjExportDebug.dylib
             AMProjShareExtension/build/AMProjShareExtension.appex
             AMProjShareExtension/build/AMProjShareExtension.entitlements

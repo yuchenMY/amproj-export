@@ -34,7 +34,14 @@ static const NSTimeInterval kAMDebugDiscoveryRetryInterval = 15.0;
 static const NSTimeInterval kAMDebugDiscoveryTimeout = 1.5;
 static const NSUInteger kAMDebugDiscoveryMaxPacketBytes = 512;
 static const NSUInteger kAMDebugDiscoveryMaxSubnetHosts = 1024;
-static NSString *const kAMDebugPluginVersion = @"31";
+static NSString *const kAMDebugPluginVersion = @"32";
+#if AMPROJ_TELEMETRY
+static NSString *const kAMDebugPluginVariant = @"cloud";
+static NSString *const kAMDebugDefaultBuildIdentifier = @"v32-cloud";
+#else
+static NSString *const kAMDebugPluginVariant = @"debug";
+static NSString *const kAMDebugDefaultBuildIdentifier = @"v32-debug";
+#endif
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
 
 static BOOL AMDebugPrivateIPv4(uint32_t address) {
@@ -340,11 +347,16 @@ static void AMDebugShowStatusAttempt(NSString *mode, AMDebugBackendState state,
 }
 
 static void AMDebugShowStatus(NSString *mode, AMDebugBackendState state) {
+#if AMPROJ_TELEMETRY
+    (void)mode;
+    (void)state;
+#else
     NSString *modeSnapshot = [mode copy];
     dispatch_async(dispatch_get_main_queue(), ^{
         AMDebugStatusGeneration += 1;
         AMDebugShowStatusAttempt(modeSnapshot, state, 0, AMDebugStatusGeneration);
     });
+#endif
 }
 
 static NSNumber *AMDebugNowMilliseconds(void) {
@@ -526,8 +538,13 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
     NSURL *baseURL = baseString.length ? [NSURL URLWithString:baseString] : nil;
     NSString *scheme = baseURL.scheme.lowercaseString;
 
+#if AMPROJ_TELEMETRY
+    (void)defaultMode;
+#else
     if (AMDebugValidMode(defaultMode)) _mode = [defaultMode copy];
-    _buildIdentifier = buildIdentifier.length ? [buildIdentifier copy] : @"v31-debug";
+#endif
+    _buildIdentifier = buildIdentifier.length ? [buildIdentifier copy]
+                                              : kAMDebugDefaultBuildIdentifier;
     NSCharacterSet *newlines = NSCharacterSet.newlineCharacterSet;
     BOOL safeToken = token.length && [token rangeOfCharacterFromSet:newlines].location == NSNotFound;
     BOOL validProtocolVersion = [protocolVersion isKindOfClass:NSNumber.class] ||
@@ -543,7 +560,11 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             discoveryPort = baseURL.port.integerValue ?: 8765;
         }
         _discoveryPort = (NSUInteger)discoveryPort;
+#if AMPROJ_TELEMETRY
+        _discoveryEnabled = NO;
+#else
         _discoveryEnabled = configuredDiscoveryEnabled ? configuredDiscoveryEnabled.boolValue : YES;
+#endif
         _endpointGeneration = 1;
         _enabled = YES;
     } else {
@@ -602,8 +623,8 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         },
         @"plugin": @{
             @"version": kAMDebugPluginVersion,
-            @"variant": @"debug",
-            @"build_id": self.buildIdentifier ?: @"v31-debug"
+            @"variant": kAMDebugPluginVariant,
+            @"build_id": self.buildIdentifier ?: kAMDebugDefaultBuildIdentifier
         }
     };
 
@@ -685,6 +706,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         dispatch_resume(timer);
         self.flushTimer = timer;
     }
+#if !AMPROJ_TELEMETRY
     if (!self.pollTimer) {
         __weak typeof(self) weakSelf = self;
         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self.queue);
@@ -694,6 +716,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
         dispatch_resume(timer);
         self.pollTimer = timer;
     }
+#endif
 }
 
 - (void)stopTimers {
@@ -800,6 +823,13 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
                       name:(NSString *)name
                   mimeType:(NSString *)mimeType
                transaction:(NSString *)transactionIdentifier {
+#if AMPROJ_TELEMETRY
+    (void)data;
+    (void)name;
+    (void)mimeType;
+    (void)transactionIdentifier;
+    return NO;
+#else
     if (!data || !name.length || !transactionIdentifier.length) return NO;
 
     __block BOOL accepted = NO;
@@ -823,6 +853,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
                      transaction:transactionIdentifier];
     });
     return YES;
+#endif
 }
 
 - (NSMutableURLRequest *)requestForPath:(NSString *)path method:(NSString *)method {
@@ -891,7 +922,9 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             strongSelf.nextHelloAttempt = NSProcessInfo.processInfo.systemUptime + delay;
             if (strongSelf.helloDelivered) {
                 [strongSelf flushEvents];
+#if !AMPROJ_TELEMETRY
                 [strongSelf pollCommands];
+#endif
             } else {
                 [strongSelf startDiscoveryIfNeeded];
             }
@@ -1075,6 +1108,9 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
 }
 
 - (void)pollCommands {
+#if AMPROJ_TELEMETRY
+    return;
+#else
     if (!self.started || !self.foreground || !self.helloDelivered ||
         !self.URLSession || self.pollInFlight) return;
 
@@ -1128,6 +1164,7 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
             if (acknowledged.count) [strongSelf acknowledgeCommands:acknowledged];
         });
     }] resume];
+#endif
 }
 
 - (void)applyCommand:(NSDictionary *)command {

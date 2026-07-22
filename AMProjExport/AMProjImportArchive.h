@@ -47,7 +47,10 @@ typedef NS_ENUM(NSInteger, AMProjImportArchiveErrorCode) {
  uppercase SHA-1 in each matching `<media sig>` attribute. Missing attributes
  are filled from the verified manifest; existing attributes must match it.
  Metrics include `media_signature_count`, `rewritten_media_signature_count`,
- `missing_media_signature_count`, and the internal `resource_hashes` map.
+ `missing_media_signature_count`, `project_scene_count`,
+ `rewritten_project_scene_count`, and the internal `resource_hashes` map. Every
+ rewritten XML has `type="project"` on its root `<scene>`; nested scenes are not
+ modified.
  */
 FOUNDATION_EXPORT BOOL AMProjPrepareNativeImport(
     NSURL *archiveURL,
@@ -58,10 +61,12 @@ FOUNDATION_EXPORT BOOL AMProjPrepareNativeImport(
 
 /**
  Fully validates an input package for the iOS PackageImporter. A manifest
- package whose XML already carries every required media signature is copied
- byte-for-byte. A package with missing signatures is rebuilt as a complete ZIP
- containing every signed XML, every original resource path, and a recalculated
- manifest. Multi-XML packages without a manifest remain unsupported.
+ package whose XML already carries every required media signature and whose
+ root scenes all have `type="project"` is copied byte-for-byte. A package with
+ missing signatures or a missing/non-project root type is rebuilt as a complete
+ ZIP containing every normalized XML, every original resource path, and a
+ recalculated manifest. Multi-XML packages without a manifest remain
+ unsupported.
  */
 FOUNDATION_EXPORT BOOL AMProjNormalizeProjectArchive(
     NSURL *archiveURL,

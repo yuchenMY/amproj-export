@@ -41,6 +41,7 @@ ZIP 内文件的发现依赖于文件名扩展:
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
+| `type` | `project` / `preset` | 平台相关 | 顶层场景在 iOS 导入时必须为 `project` 才会直接进入底部“项目”；缺失时当前 iOS PackageImporter 会按 preset/element 处理 |
 | `title` | string | `""` | 项目名称 |
 | `width` | u32 | 1280 | 画布宽度 (像素) |
 | `height` | u32 | 1280 | 画布高度 (像素) |
@@ -52,6 +53,9 @@ ZIP 内文件的发现依赖于文件名扩展:
 | `amver` | i32 | 0 | AM 版本号 |
 | `retime` | string | `""` | 时间重映射 |
 | `precompose` | string | `""` | 预合成引用 |
+
+`type="project"` 只约束每个 XML 的文档根 `<scene>`。EmbedScene 等嵌套
+`<scene>` 保留自身语义，导入兼容层不得把嵌套类型批量改写为项目。
 
 ### 2.2 子元素
 

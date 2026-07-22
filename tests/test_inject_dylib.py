@@ -764,6 +764,27 @@ class ArgumentTests(unittest.TestCase):
         self.assertEqual(settings.mode, "full")
         self.assertEqual(settings.server_port, 8765)
 
+    def test_cloud_dylib_accepts_explicit_https_transport_config(self):
+        parser = inject_dylib.build_argument_parser()
+        args = parser.parse_args(
+            [
+                "input.ipa",
+                "AMProjExportCloud.dylib",
+                "--server-url",
+                "https://bug.meowcr.cn",
+                "--debug-token",
+                "0123456789abcdef",
+                "--no-discovery",
+                "--build-id",
+                "v32-cloud-test",
+            ]
+        )
+        settings = inject_dylib._debug_settings_from_args(args, parser)
+        self.assertTrue(settings.enabled)
+        self.assertEqual(settings.server_url, "https://bug.meowcr.cn")
+        self.assertIs(settings.discovery_enabled, False)
+        self.assertEqual(settings.build_identifier, "v32-cloud-test")
+
     def test_debug_token_must_match_backend_minimum_length(self):
         parser = inject_dylib.build_argument_parser()
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):

@@ -1431,7 +1431,10 @@ def build_argument_parser():
         description="Inject an AMProjExport dylib into an iOS IPA."
     )
     parser.add_argument("ipa", help="input IPA")
-    parser.add_argument("dylib", help="AMProjExport or AMProjExportDebug dylib")
+    parser.add_argument(
+        "dylib",
+        help="AMProjExport, AMProjExportCloud, or AMProjExportDebug dylib",
+    )
     parser.add_argument("output", nargs="?", help="output IPA")
     parser.add_argument(
         "--debug-config",

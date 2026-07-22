@@ -37,24 +37,50 @@ def function_body(signature: str, next_signature: str) -> str:
 
 class NativeImportRouteSourceTests(unittest.TestCase):
     def test_release_version_metadata_is_consistent(self):
-        self.assertIn('kAMProjPluginVersion = @"31";', SOURCE)
-        self.assertIn('kAMDebugPluginVersion = @"31";', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("AMProj v31", SOURCE)
+        self.assertIn('kAMProjPluginVersion = @"32";', SOURCE)
+        self.assertIn('kAMDebugPluginVersion = @"32";', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("AMProj v32", SOURCE)
+        self.assertNotIn("AMProj v31", SOURCE)
         self.assertNotIn("AMProj v29", SOURCE)
         self.assertNotIn("AMProj v28", SOURCE)
         self.assertNotIn("AMProj v23", SOURCE)
         self.assertIn("AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs", WORKFLOW)
-        self.assertIn("AMPROJ_RELEASE_VERSION: '31'", WORKFLOW)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '32'", WORKFLOW)
         self.assertIn('"commit": os.environ["GITHUB_SHA"]', WORKFLOW)
         self.assertIn('"run_id": os.environ["GITHUB_RUN_ID"]', WORKFLOW)
         self.assertIn('"sha256": {', WORKFLOW)
         self.assertIn("build-metadata.json", WORKFLOW)
-        self.assertIn("AM_v1_direct_v31.ipa", README)
-        self.assertIn("AM_v1_direct_v31_debug.ipa", README)
-        self.assertIn("AM_v1_direct_v31.ipa", BUILD_SCRIPT)
+        self.assertIn("AM_v1_direct_v32.ipa", README)
+        self.assertIn("AM_v1_direct_v32_cloud.ipa", README)
+        self.assertIn("AM_v1_direct_v32_debug.ipa", README)
+        self.assertIn("AM_v1_direct_v32.ipa", BUILD_SCRIPT)
+        self.assertIn("AMProjExportCloud.dylib", MAKEFILE)
+        self.assertIn("AMProjExport/AMProjExportCloud.dylib", WORKFLOW)
         self.assertIn('config[@"BuildIdentifier"]', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn('@"variant": @"debug"', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn('kAMDebugPluginVariant = @"cloud"', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn('kAMDebugPluginVariant = @"debug"', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn('@"variant": kAMDebugPluginVariant', DEBUG_TRANSPORT_SOURCE)
         self.assertIn('@"build_id": self.buildIdentifier', DEBUG_TRANSPORT_SOURCE)
+
+    def test_cloud_variant_reports_core_events_without_debug_instrumentation(self):
+        self.assertIn("-DAMPROJ_TELEMETRY=1", MAKEFILE)
+        self.assertIn("#if AMPROJ_DEBUG || AMPROJ_TELEMETRY", SOURCE)
+        self.assertIn("#elif AMPROJ_TELEMETRY", SOURCE)
+        self.assertIn("Loading v32-cloud", SOURCE)
+        self.assertIn("#if AMPROJ_TELEMETRY", DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("kAMDebugPluginVariant = @\"cloud\"", DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("kAMDebugDefaultBuildIdentifier = @\"v32-cloud\"", DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("(void)defaultMode", DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("_discoveryEnabled = NO", DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("- (void)pollCommands", DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("- (BOOL)uploadArtifactData", DEBUG_TRANSPORT_SOURCE)
+
+        debug_hooks = function_body(
+            "static void amproj_installExportHooks",
+            "static void amproj_removeBootstrapObservers",
+        )
+        self.assertIn("#if AMPROJ_DEBUG", debug_hooks)
+        self.assertNotIn("#if AMPROJ_TELEMETRY", debug_hooks)
 
     def test_paywall_filter_requires_multiple_subscription_markers(self):
         self.assertIn("paywall.detected", SOURCE)
@@ -530,7 +556,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn(".cfi_offset x20, -16", BRIDGE_ASSEMBLY)
         self.assertIn(".cfi_endproc", BRIDGE_ASSEMBLY)
         self.assertIn("AMProjNativeImportBridge.S", MAKEFILE)
-        self.assertEqual(MAKEFILE.count("AMProjNativeImportBridge.S"), 4)
+        self.assertEqual(MAKEFILE.count("AMProjNativeImportBridge.S"), 6)
 
     def test_bridge_registers_after_launch_and_finishes_only_from_native_result(self):
         bootstrap = function_body(
@@ -712,21 +738,23 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         original_route = body.index('if (inputManifestCount == 1)')
         prepare = body.index("AMProjPrepareNativeImport", original_route)
         original_assignment = body.index("preparedURL = archiveSnapshot", original_route)
-        signature_normalize = body.index('route = @"ios_media_signatures_added"', original_route)
-        legacy_route = body.index('[[@"ios-normalized-"', signature_normalize)
+        project_normalize = body.index('route = @"ios_project_archive_normalized"', original_route)
+        legacy_route = body.index('[[@"ios-normalized-"', project_normalize)
         normalize = body.index("AMProjNormalizeProjectArchive", legacy_route)
         queue = body.index("amproj_queuePreparedImport(preparedURL", legacy_route)
         self.assertLess(worker, validate)
         self.assertLess(validate, original_route)
         self.assertLess(original_route, prepare)
         self.assertLess(prepare, original_assignment)
-        self.assertLess(original_assignment, signature_normalize)
+        self.assertLess(original_assignment, project_normalize)
         self.assertLess(original_route, legacy_route)
         self.assertLess(legacy_route, normalize)
         self.assertLess(normalize, queue)
         self.assertIn('route = @"validated_original_package"', body[original_route:legacy_route])
         self.assertIn('AMProjNormalizeProjectArchive', body[original_route:legacy_route])
-        self.assertIn('route = @"ios_media_signatures_added"', body[original_route:legacy_route])
+        self.assertIn('route = @"ios_project_archive_normalized"', body[original_route:legacy_route])
+        self.assertIn('preparationMetrics[@"rewritten_project_scene_count"]', body)
+        self.assertIn('@"project_scene_count"', body)
         self.assertIn('route = @"legacy_ios_media_normalized"', body[legacy_route:queue])
         self.assertNotIn("A multi-scene package is missing iOS media signatures", body)
         self.assertNotIn("signatureRewrites > 0 && inputXMLCount == 1", body)
@@ -838,7 +866,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         verified_branch = verification[verification.index("if (verified)") :]
         self.assertIn('@"import.project_row_verified"', verification)
         self.assertIn("amproj_releaseImportTransaction(transactionID, YES)", verified_branch)
-        self.assertIn('AMProj v31 · 4/4', verified_branch)
+        self.assertIn('AMProj v32 · 4/4', verified_branch)
         self.assertIn('amproj_resumeQueuedImports(@"project_row_verified")', verified_branch)
         self.assertIn('@"import.project_row_missing"', verification)
         self.assertIn("amproj_activateNextPendingImport()", verification)
@@ -846,7 +874,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertEqual(SOURCE.count("AMProj v31 · 4/4"), 1)
+        self.assertEqual(SOURCE.count("AMProj v32 · 4/4"), 1)
 
     def test_project_verifier_uses_real_uikit_lists_and_persistence_evidence(self):
         self.assertNotIn('@"pCollectionView"', SOURCE)
@@ -905,7 +933,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v31 \\u00b7 E40", present)
+        self.assertIn("AMProj v32 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),
