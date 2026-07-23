@@ -929,14 +929,14 @@ class ArgumentTests(unittest.TestCase):
                 "0123456789abcdef",
                 "--no-discovery",
                 "--build-id",
-                "v35-cloud-test",
+                "v36-cloud-test",
             ]
         )
         settings = inject_dylib._debug_settings_from_args(args, parser)
         self.assertTrue(settings.enabled)
         self.assertEqual(settings.server_url, "https://bug.meowcr.cn")
         self.assertIs(settings.discovery_enabled, False)
-        self.assertEqual(settings.build_identifier, "v35-cloud-test")
+        self.assertEqual(settings.build_identifier, "v36-cloud-test")
 
     def test_debug_token_must_match_backend_minimum_length(self):
         parser = inject_dylib.build_argument_parser()
