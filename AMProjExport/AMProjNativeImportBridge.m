@@ -201,6 +201,10 @@ BOOL AMProjNativePackageImportBridgeFinishFailure(NSError *error) {
     return AMProjFinishNativeBridge(NO, resolved);
 }
 
+BOOL AMProjNativePackageImportBridgeFinishSuccess(void) {
+    return AMProjFinishNativeBridge(YES, nil);
+}
+
 BOOL AMProjNativePackageImportBridgeIsBusy(void) {
     @synchronized (AMProjNativeBridgeLock()) {
         return amproj_nativeBridgePoisoned ||

@@ -28,6 +28,11 @@ FOUNDATION_EXPORT void AMProjInstallNativePackageImportBridge(void);
 FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeFinishFailure(
     NSError *error);
 
+// A native XML warning can explicitly confirm that its template was imported
+// even though AM displays a non-fatal Missing Media alert. Complete only that
+// already-successful transaction without poisoning the bridge.
+FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeFinishSuccess(void);
+
 // Returns YES while the native importer has an in-flight/finishing callback or
 // has been poisoned by a timeout. Callers must keep later packages queued.
 FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeIsBusy(void);
