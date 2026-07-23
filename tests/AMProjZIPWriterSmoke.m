@@ -4,11 +4,13 @@
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc != 2) return 2;
+        if (argc != 3) return 2;
 
         NSString *outputPath = [NSString stringWithUTF8String:argv[1]];
-        if (!outputPath.length) return 2;
+        NSString *emptyOutputPath = [NSString stringWithUTF8String:argv[2]];
+        if (!outputPath.length || !emptyOutputPath.length) return 2;
         NSURL *outputURL = [NSURL fileURLWithPath:outputPath];
+        NSURL *emptyOutputURL = [NSURL fileURLWithPath:emptyOutputPath];
         NSURL *resourceURL = [[outputURL URLByDeletingLastPathComponent]
             URLByAppendingPathComponent:@"amproj-writer-resource.bin"];
         NSMutableData *resource = [NSMutableData dataWithLength:200000];
@@ -49,6 +51,20 @@ int main(int argc, const char *argv[]) {
             error.code != AMProjZIPErrorInvalidEntry) {
             NSLog(@"second XML was not rejected: %@", error);
             return 6;
+        }
+
+        error = nil;
+        NSDictionary<NSString *, NSNumber *> *emptyMetrics = nil;
+        if (!AMProjZIPWriteProjectArchive(emptyOutputURL, xml, @{},
+                                          &emptyMetrics, &error) ||
+            ![emptyMetrics[@"crc_verified"] boolValue] ||
+            ![emptyMetrics[@"manifest_verified"] boolValue] ||
+            [emptyMetrics[@"xml_count"] unsignedIntegerValue] != 1 ||
+            [emptyMetrics[@"manifest_count"] unsignedIntegerValue] != 1 ||
+            [emptyMetrics[@"entry_count"] unsignedIntegerValue] != 2) {
+            NSLog(@"empty manifest archive write failed: %@ metrics=%@",
+                  error, emptyMetrics);
+            return 7;
         }
         return 0;
     }
