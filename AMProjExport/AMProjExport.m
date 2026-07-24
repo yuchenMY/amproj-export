@@ -11325,7 +11325,7 @@ static NSDictionary *amproj_launchOptionsForNativeAppDelegate(
     id activityContainer = launchOptions[UIApplicationLaunchOptionsUserActivityDictionaryKey];
     if ([activityContainer isKindOfClass:NSDictionary.class]) {
         NSMutableDictionary *activities = [activityContainer mutableCopy];
-        BOOL removedStandardActivity = NO;
+        BOOL removedStagedActivity = NO;
         for (id key in [activities.allKeys copy]) {
             id value = activities[key];
             NSURL *activityURL = [value isKindOfClass:NSUserActivity.class]
@@ -11336,14 +11336,11 @@ static NSDictionary *amproj_launchOptionsForNativeAppDelegate(
             if (activityURL &&
                 amproj_isIncomingProjectURL(activityURL, activityOptions) &&
                 amproj_deferredLaunchCandidateWasStaged(activityURL)) {
-                if ([key isEqual:UIApplicationLaunchOptionsUserActivityKey]) {
-                    removedStandardActivity = YES;
-                }
+                removedStagedActivity = YES;
                 [activities removeObjectForKey:key];
             }
         }
-        if (removedStandardActivity) {
-            [activities removeObjectForKey:UIApplicationLaunchOptionsUserActivityKey];
+        if (removedStagedActivity) {
             [activities removeObjectForKey:UIApplicationLaunchOptionsUserActivityTypeKey];
         }
         if (activities.count) filtered[UIApplicationLaunchOptionsUserActivityDictionaryKey] = activities;

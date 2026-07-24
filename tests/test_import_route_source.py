@@ -1654,20 +1654,15 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "amproj_isIncomingProjectURL(activityURL, activityOptions)", filterer
         )
         self.assertIn("amproj_deferredLaunchCandidateWasStaged(activityURL)", filterer)
-        self.assertIn("BOOL removedStandardActivity = NO", filterer)
-        self.assertIn(
-            "[key isEqual:UIApplicationLaunchOptionsUserActivityKey]", filterer
-        )
+        self.assertIn("BOOL removedStagedActivity = NO", filterer)
+        self.assertIn("removedStagedActivity = YES", filterer)
         self.assertIn("[activities removeObjectForKey:key]", filterer)
-        pair_cleanup = filterer.index("if (removedStandardActivity)")
-        self.assertIn(
-            "removeObjectForKey:UIApplicationLaunchOptionsUserActivityKey",
-            filterer[pair_cleanup:],
-        )
+        pair_cleanup = filterer.index("if (removedStagedActivity)")
         self.assertIn(
             "removeObjectForKey:UIApplicationLaunchOptionsUserActivityTypeKey",
             filterer[pair_cleanup:],
         )
+        self.assertNotIn("UIApplicationLaunchOptionsUserActivityKey", filterer)
         self.assertIn("return filtered", filterer)
 
         activity = object()
