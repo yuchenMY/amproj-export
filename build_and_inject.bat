@@ -1,9 +1,9 @@
 @echo off
 REM ============================================================
-REM  build_and_inject.bat — Windows v40 稳定离线版 IPA 注入脚本
+REM  build_and_inject.bat — Windows v41 稳定离线版 IPA 注入脚本
 REM
 REM  用法: build_and_inject.bat <输入.ipa> [输出.ipa]
-REM  示例: build_and_inject.bat AM_v1.ipa AM_v1_direct_v40.ipa
+REM  示例: build_and_inject.bat AM_v1.ipa AM_v1_direct_v41_cloud.ipa
 REM
 REM  前提:
 REM    1. 将 Actions artifact 解压到仓库根目录
@@ -16,8 +16,10 @@ setlocal enabledelayedexpansion
 
 set INPUT_IPA=%1
 set OUTPUT_IPA=%2
-if "%OUTPUT_IPA%"=="" set OUTPUT_IPA=AM_v1_direct_v40.ipa
-set DYLIB_PATH=AMProjExport\AMProjExport.dylib
+if "%OUTPUT_IPA%"=="" set OUTPUT_IPA=AM_v1_direct_v41_cloud.ipa
+set DYLIB_PATH=AMProjExport\AMProjExportCloud.dylib
+set SHARE_EXTENSION_PATH=AMProjShareExtension\build\AMProjShareExtension.appex
+set APP_GROUP_ID=group.com.amayaka.meow.amprojshare
 set EXPECTED_UUID=4b22d43f-09fc-3bde-859b-78a5d573a503
 
 if "%INPUT_IPA%"=="" (
@@ -36,12 +38,18 @@ if not exist "%DYLIB_PATH%" (
     exit /b 1
 )
 
+if not exist "%SHARE_EXTENSION_PATH%" (
+    echo ERROR: Share Extension not found: %SHARE_EXTENSION_PATH%
+    echo Please download the v41 Actions artifact before injecting.
+    exit /b 1
+)
+
 echo [*] Input: %INPUT_IPA%
 echo [*] Output: %OUTPUT_IPA%
 echo [*] Injecting %DYLIB_PATH%...
 
 REM Step 1: Inject dylib using Python script
-python inject_dylib.py "%INPUT_IPA%" "%DYLIB_PATH%" "%OUTPUT_IPA%" --expected-main-uuid %EXPECTED_UUID%
+python inject_dylib.py "%INPUT_IPA%" "%DYLIB_PATH%" "%OUTPUT_IPA%" --expected-main-uuid %EXPECTED_UUID% --share-extension "%SHARE_EXTENSION_PATH%" --app-group-id "%APP_GROUP_ID%"
 if %ERRORLEVEL% neq 0 (
     echo ERROR: Injection failed!
     exit /b 1

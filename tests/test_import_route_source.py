@@ -23,6 +23,9 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(
     encoding="utf-8"
 )
 BUILD_SCRIPT = (ROOT / "build_and_inject.bat").read_text(encoding="utf-8")
+SHARE_EXTENSION_SOURCE = (
+    ROOT / "AMProjShareExtension" / "AMProjShareViewController.m"
+).read_text(encoding="utf-8")
 
 
 def source_body(source: str, signature: str, next_signature: str) -> str:
@@ -140,23 +143,26 @@ class LaunchUserActivityFilterModel:
 
 class NativeImportRouteSourceTests(unittest.TestCase):
     def test_release_version_metadata_is_consistent(self):
-        self.assertIn('kAMProjPluginVersion = @"40";', SOURCE)
-        self.assertIn('kAMDebugPluginVersion = @"40";', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("AMProj v40", SOURCE)
+        self.assertIn('kAMProjPluginVersion = @"41";', SOURCE)
+        self.assertIn('kAMDebugPluginVersion = @"41";', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("AMProj v41", SOURCE)
         self.assertNotIn("AMProj v31", SOURCE)
         self.assertNotIn("AMProj v29", SOURCE)
         self.assertNotIn("AMProj v28", SOURCE)
         self.assertNotIn("AMProj v23", SOURCE)
         self.assertIn("AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs", WORKFLOW)
-        self.assertIn("AMPROJ_RELEASE_VERSION: '40'", WORKFLOW)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '41'", WORKFLOW)
         self.assertIn('"commit": os.environ["GITHUB_SHA"]', WORKFLOW)
         self.assertIn('"run_id": os.environ["GITHUB_RUN_ID"]', WORKFLOW)
         self.assertIn('"sha256": {', WORKFLOW)
         self.assertIn("build-metadata.json", WORKFLOW)
-        self.assertIn("AM_v1_direct_v40.ipa", README)
-        self.assertIn("AM_v1_direct_v40_cloud.ipa", README)
-        self.assertIn("AM_v1_direct_v40_debug.ipa", README)
-        self.assertIn("AM_v1_direct_v40.ipa", BUILD_SCRIPT)
+        self.assertIn("AM_v1_direct_v41.ipa", README)
+        self.assertIn("AM_v1_direct_v41_cloud.ipa", README)
+        self.assertIn("AM_v1_direct_v41_debug.ipa", README)
+        self.assertIn("AM_v1_direct_v41_cloud.ipa", BUILD_SCRIPT)
+        self.assertIn("--share-extension", BUILD_SCRIPT)
+        self.assertIn("--app-group-id", BUILD_SCRIPT)
+        self.assertIn("AMProjShareExtension/build/AMProjShareExtension.appex", README)
         self.assertIn("AMProjExportCloud.dylib", MAKEFILE)
         self.assertIn("AMProjExport/AMProjExportCloud.dylib", WORKFLOW)
         self.assertIn('config[@"BuildIdentifier"]', DEBUG_TRANSPORT_SOURCE)
@@ -169,10 +175,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("-DAMPROJ_TELEMETRY=1", MAKEFILE)
         self.assertIn("#if AMPROJ_DEBUG || AMPROJ_TELEMETRY", SOURCE)
         self.assertIn("#elif AMPROJ_TELEMETRY", SOURCE)
-        self.assertIn("Loading v40-cloud", SOURCE)
+        self.assertIn("Loading v41-cloud", SOURCE)
         self.assertIn("#if AMPROJ_TELEMETRY", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("kAMDebugPluginVariant = @\"cloud\"", DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("kAMDebugDefaultBuildIdentifier = @\"v40-cloud\"", DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("kAMDebugDefaultBuildIdentifier = @\"v41-cloud\"", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("(void)defaultMode", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("_discoveryEnabled = NO", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("- (void)pollCommands", DEBUG_TRANSPORT_SOURCE)
@@ -184,6 +190,18 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("#if AMPROJ_DEBUG", debug_hooks)
         self.assertNotIn("#if AMPROJ_TELEMETRY", debug_hooks)
+
+    def test_share_extension_accepts_amproj_and_xml_inputs(self):
+        self.assertIn('kAMProjXMLTypeIdentifier = @"public.xml"', SHARE_EXTENSION_SOURCE)
+        self.assertIn('isEqualToString:@"xml"', SHARE_EXTENSION_SOURCE)
+        self.assertIn('@"public.xml"', SHARE_EXTENSION_SOURCE)
+        self.assertIn('declaredXML ? @"xml" : @"amproj"', SHARE_EXTENSION_SOURCE)
+        share_scan = function_body(
+            "static BOOL amproj_scanShareInboxNow",
+            "static void amproj_scanLocalImportInboxes",
+        )
+        self.assertIn("supportedShareExtensionName", share_scan)
+        self.assertIn('isEqualToString:@"xml"', share_scan)
 
     def test_paywall_filter_requires_multiple_subscription_markers(self):
         self.assertIn("paywall.detected", SOURCE)
@@ -1854,7 +1872,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static BOOL amproj_captureSystemProjectURL",
         )
         self.assertIn('candidate[@"launch_staging_failed"]', deferred)
-        self.assertIn('options[@"AMProjSilentErrors"] = @(!launchStagingFailed)', deferred)
+        self.assertIn('candidate[@"launch_retry_count"] unsignedIntegerValue', deferred)
+        silent_errors = deferred.index('options[@"AMProjSilentErrors"] =')
+        self.assertIn("launchStagingFailed && retryCount < maxLaunchRetryCount", deferred[silent_errors:])
+        self.assertIn("result == AMProjIncomingURLFailed && launchStagingFailed", deferred)
+        self.assertIn('retryCandidate[@"launch_retry_count"]', deferred)
+        self.assertIn('import.launch_candidate_requeued', deferred)
+        self.assertIn('import.launch_candidate_delayed_retry', deferred)
+        self.assertIn('import.launch_candidate_exhausted', deferred)
+        self.assertIn('maxLaunchRetryCount', deferred)
+        self.assertIn("dispatch_after", deferred)
         self.assertIn('@"_activation_retry"', deferred)
         self.assertNotIn('@"_silent_retry"', deferred)
         self.assertIn('@"launch_staged"', deferred)
@@ -2014,7 +2041,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # v40 accepts a verified complete template when this AM build does not
         # create a project row directly.
         self.assertIn("amproj_completePackageTransaction", verified_branch)
-        self.assertIn('AMProj v40 · 4/4', SOURCE)
+        self.assertIn('AMProj v41 · 4/4', SOURCE)
         self.assertIn('amproj_completePackageAsTemplate', verification)
         self.assertNotIn('amproj_beginTemplatePromotion(', verification)
         self.assertNotIn('amproj_beginSwiftUITemplatePromotion(', verification)
@@ -2032,7 +2059,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertIn("AMProj v40 · 4/4", SOURCE)
+        self.assertIn("AMProj v41 · 4/4", SOURCE)
 
     def test_project_verifier_uses_real_uikit_lists_and_persistence_evidence(self):
         self.assertNotIn('@"pCollectionView"', SOURCE)
@@ -2092,7 +2119,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v40 \\u00b7 E40", present)
+        self.assertIn("AMProj v41 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),

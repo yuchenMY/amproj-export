@@ -1,7 +1,7 @@
 # AMProjShareExtension
 
-Experimental iOS Share Extension for passing one `.amproj` file from QQ or
-Files to the injected Alight Motion app.
+Experimental iOS Share Extension for passing one `.amproj` or XML file from QQ
+or Files to the injected Alight Motion app.
 
 ## Build
 
@@ -33,6 +33,9 @@ AMProjShareInbox/<request UUID>/
   payload.amproj
   request.plist
 ```
+
+The payload filename remains `payload.amproj` for protocol compatibility; the
+descriptor's `original_name` preserves `.xml` when the shared item is XML.
 
 `request.plist` is written last, so the containing app can use it as the commit
 marker. The extension then requests this URL:

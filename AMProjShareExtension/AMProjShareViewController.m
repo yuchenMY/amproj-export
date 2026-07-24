@@ -5,6 +5,7 @@
 
 static NSString *const kAMProjShareErrorDomain = @"com.amproj.share-extension";
 static NSString *const kAMProjTypeIdentifier = @"com.alightcreative.motion.amproj";
+static NSString *const kAMProjXMLTypeIdentifier = @"public.xml";
 static NSString *const kAMProjAppGroupIdentifier = @"group.com.amayaka.meow.amprojshare";
 static NSString *const kAMProjInboxDirectoryName = @"AMProjShareInbox";
 static unsigned long long const kAMProjMaximumFileSize = 512ULL * 1024ULL * 1024ULL;
@@ -182,7 +183,9 @@ static BOOL AMProjTypeConformsTo(NSString *identifier, NSString *parentIdentifie
     }
 
     NSString *suggestedExtension = provider.suggestedName.pathExtension.lowercaseString;
-    if (suggestedExtension.length > 0 && ![suggestedExtension isEqualToString:@"amproj"]) {
+    if (suggestedExtension.length > 0 &&
+        ![suggestedExtension isEqualToString:@"amproj"] &&
+        ![suggestedExtension isEqualToString:@"xml"]) {
         NSError *error = AMProjShareError(
             AMProjShareErrorUnsupportedFile,
             [NSString stringWithFormat:@"“%@”不是 .amproj 文件。", provider.suggestedName.lastPathComponent],
@@ -195,11 +198,13 @@ static BOOL AMProjTypeConformsTo(NSString *identifier, NSString *parentIdentifie
                     message:@"请保持此窗口打开。复制完成前不要返回 QQ。"];
 
     BOOL hasAMProjType = [provider hasItemConformingToTypeIdentifier:kAMProjTypeIdentifier];
+    BOOL hasXMLType = [provider hasItemConformingToTypeIdentifier:kAMProjXMLTypeIdentifier];
+    BOOL hasDeclaredProjectType = hasAMProjType || hasXMLType;
     NSMutableArray<NSString *> *attempts = [NSMutableArray array];
     if ([typeIdentifier isEqualToString:@"public.file-url"]) {
         [self loadItemFromProvider:provider
                    typeIdentifier:typeIdentifier
-                hasDeclaredAMProj:hasAMProjType
+                 hasDeclaredAMProj:hasDeclaredProjectType
                          attempts:attempts
                  allowFinalFailure:YES];
         return;
@@ -207,7 +212,7 @@ static BOOL AMProjTypeConformsTo(NSString *identifier, NSString *parentIdentifie
 
     [self loadFileRepresentationFromProvider:provider
                               typeIdentifier:typeIdentifier
-                           hasDeclaredAMProj:hasAMProjType
+                            hasDeclaredAMProj:hasDeclaredProjectType
                                     attempts:attempts];
 }
 
@@ -224,6 +229,7 @@ static BOOL AMProjTypeConformsTo(NSString *identifier, NSString *parentIdentifie
         @"com.pkware.zip-archive",
         @"public.zip-archive",
         @"public.archive",
+        @"public.xml",
         @"public.data",
         @"public.file-url",
     ];
@@ -484,7 +490,10 @@ static BOOL AMProjTypeConformsTo(NSString *identifier, NSString *parentIdentifie
         name = sourceURL.lastPathComponent;
     }
     NSString *extension = name.pathExtension.lowercaseString;
-    if (extension.length > 0 && ![extension isEqualToString:@"amproj"]) {
+    BOOL declaredXML = [provider hasItemConformingToTypeIdentifier:kAMProjXMLTypeIdentifier];
+    if (extension.length > 0 &&
+        ![extension isEqualToString:@"amproj"] &&
+        ![extension isEqualToString:@"xml"]) {
         if (error) {
             *error = AMProjShareError(
                 AMProjShareErrorUnsupportedFile,
@@ -503,7 +512,9 @@ static BOOL AMProjTypeConformsTo(NSString *identifier, NSString *parentIdentifie
             }
             return nil;
         }
-        name = name.length > 0 ? [name stringByAppendingPathExtension:@"amproj"] : @"project.amproj";
+        name = name.length > 0
+            ? [name stringByAppendingPathExtension:declaredXML ? @"xml" : @"amproj"]
+            : (declaredXML ? @"project.xml" : @"project.amproj");
     }
     return name.lastPathComponent;
 }
