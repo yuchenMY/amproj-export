@@ -1,7 +1,7 @@
 name: Build AMProjExport dylibs
 
 env:
-  AMPROJ_RELEASE_VERSION: '39'
+  AMPROJ_RELEASE_VERSION: '40'
 
 on:
   push:
