@@ -11438,15 +11438,16 @@ static NSDictionary *amproj_launchOptionsForNativeAppDelegate(
     id topLevelActivity =
         launchOptions[kAMProjLaunchOptionsUserActivityKey];
     if ([topLevelActivity isKindOfClass:NSUserActivity.class]) {
-        NSURL *activityURL = amproj_projectURLFromUserActivity(topLevelActivity);
+        NSUserActivity *userActivity = (NSUserActivity *)topLevelActivity;
+        NSURL *activityURL = amproj_projectURLFromUserActivity(userActivity);
         NSDictionary *activityOptions =
-            amproj_projectOptionsFromUserActivity(topLevelActivity);
+            amproj_projectOptionsFromUserActivity(userActivity);
         if (activityURL &&
             amproj_isIncomingProjectURL(activityURL, activityOptions)) {
             removedProjectActivity = YES;
             [filtered removeObjectForKey:kAMProjLaunchOptionsUserActivityKey];
         } else {
-            remainingTopLevelActivityType = [topLevelActivity.activityType copy];
+            remainingTopLevelActivityType = [userActivity.activityType copy];
         }
     }
 
@@ -11459,20 +11460,22 @@ static NSDictionary *amproj_launchOptionsForNativeAppDelegate(
         NSString *remainingNestedActivityType = nil;
         for (id key in [activities.allKeys copy]) {
             id value = activities[key];
-            NSURL *activityURL = [value isKindOfClass:NSUserActivity.class]
-                ? amproj_projectURLFromUserActivity(value) : nil;
-            NSDictionary *activityOptions =
+            NSUserActivity *userActivity =
                 [value isKindOfClass:NSUserActivity.class]
-                    ? amproj_projectOptionsFromUserActivity(value) : nil;
+                    ? (NSUserActivity *)value : nil;
+            NSURL *activityURL = userActivity
+                ? amproj_projectURLFromUserActivity(userActivity) : nil;
+            NSDictionary *activityOptions =
+                userActivity
+                    ? amproj_projectOptionsFromUserActivity(userActivity) : nil;
             if (activityURL &&
                 amproj_isIncomingProjectURL(activityURL, activityOptions)) {
                 removedProjectActivity = YES;
                 removedNestedProjectActivity = YES;
                 [activities removeObjectForKey:key];
-            } else if ([value isKindOfClass:NSUserActivity.class] &&
-                       !remainingNestedActivityType.length) {
-                NSString *activityType = [value.activityType isKindOfClass:NSString.class]
-                    ? value.activityType : nil;
+            } else if (userActivity && !remainingNestedActivityType.length) {
+                NSString *activityType = [userActivity.activityType isKindOfClass:NSString.class]
+                    ? userActivity.activityType : nil;
                 NSString *selectedType = activityType.length
                     ? activityType
                     : ([nestedActivityType isKindOfClass:NSString.class]
