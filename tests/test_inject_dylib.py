@@ -718,6 +718,78 @@ class InjectionTests(unittest.TestCase):
                     expected_bundle_identifier="com.example.fixture",
                 )
 
+    def test_stable_injection_removes_existing_share_extension_and_host_group(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            app = source / "Payload" / "Fixture.app"
+            app.mkdir(parents=True)
+            with (app / "Info.plist").open("wb") as file:
+                plistlib.dump(
+                    {
+                        "CFBundleExecutable": "Fixture",
+                        "CFBundleIdentifier": "com.example.fixture",
+                        inject_dylib.SHARE_APP_GROUP_INFO_KEY: (
+                            "group.com.example.fixture.amprojshare"
+                        ),
+                        "CFBundleURLTypes": [
+                            {
+                                "CFBundleURLName": "AMProj Import",
+                                "CFBundleURLSchemes": [
+                                    inject_dylib.AMPROJ_URL_SCHEME
+                                ],
+                            },
+                            {
+                                "CFBundleURLName": "Keep Me",
+                                "CFBundleURLSchemes": ["fixture"],
+                            },
+                        ],
+                    },
+                    file,
+                )
+            make_macho(app / "Fixture")
+            plugins = app / "PlugIns"
+            plugins.mkdir()
+            stale_source = make_share_extension(root)
+            shutil.copytree(
+                stale_source,
+                plugins / inject_dylib.SHARE_EXTENSION_BUNDLE_NAME,
+            )
+            ipa = root / "input-with-stale-share.ipa"
+            with zipfile.ZipFile(ipa, "w", zipfile.ZIP_DEFLATED) as archive:
+                for path in source.rglob("*"):
+                    archive.write(path, path.relative_to(source))
+
+            dylib = root / "AMProjExportCloud.dylib"
+            make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
+            output = root / "stable-output.ipa"
+            with mock.patch.object(inject_dylib, "_try_resign"):
+                inject_dylib.inject_ipa(ipa, dylib, output)
+
+            extracted = root / "stable-result"
+            shutil.unpack_archive(output, extracted, "zip")
+            result_app = extracted / "Payload" / "Fixture.app"
+            self.assertFalse(
+                (result_app / "PlugIns" / inject_dylib.SHARE_EXTENSION_BUNDLE_NAME).exists()
+            )
+            self.assertFalse((result_app / "PlugIns").exists())
+            with (result_app / "Info.plist").open("rb") as file:
+                info = plistlib.load(file)
+            self.assertNotIn(inject_dylib.SHARE_APP_GROUP_INFO_KEY, info)
+            self.assertEqual(
+                [
+                    item.get("CFBundleURLSchemes")
+                    for item in info.get("CFBundleURLTypes", [])
+                ],
+                [["fixture"]],
+            )
+            inject_dylib.verify_injected_ipa(
+                output,
+                dylib,
+                inject_dylib.DebugSettings(),
+                expected_bundle_identifier="com.example.fixture",
+            )
+
     def test_fake_ipa_installs_and_verifies_share_extension(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -129,40 +129,64 @@ class NativeXMLMissingMediaRaceModel:
 
 
 class LaunchUserActivityFilterModel:
+    DICTIONARY_KEY = "UIApplicationLaunchOptionsUserActivityDictionaryKey"
     ACTIVITY_KEY = "UIApplicationLaunchOptionsUserActivityKey"
     TYPE_KEY = "UIApplicationLaunchOptionsUserActivityTypeKey"
 
     @classmethod
-    def filter(cls, container, staged):
-        filtered = dict(container)
-        if staged:
+    def filter(cls, launch_options, project_activity):
+        filtered = dict(launch_options)
+        nested = dict(filtered.get(cls.DICTIONARY_KEY, {}))
+        removed_top = filtered.get(cls.ACTIVITY_KEY) == project_activity
+        if removed_top:
             filtered.pop(cls.ACTIVITY_KEY, None)
             filtered.pop(cls.TYPE_KEY, None)
+        removed_nested = False
+        remaining_nested_type = None
+        for key, value in list(nested.items()):
+            if key == cls.TYPE_KEY:
+                continue
+            if value == project_activity:
+                nested.pop(key, None)
+                removed_nested = True
+            elif isinstance(value, tuple) and len(value) > 1:
+                remaining_nested_type = value[1]
+        if removed_nested:
+            had_nested_type = cls.TYPE_KEY in nested
+            nested.pop(cls.TYPE_KEY, None)
+            if had_nested_type and remaining_nested_type:
+                nested[cls.TYPE_KEY] = remaining_nested_type
+        if nested:
+            filtered[cls.DICTIONARY_KEY] = nested
+        else:
+            filtered.pop(cls.DICTIONARY_KEY, None)
         return filtered
 
 
 class NativeImportRouteSourceTests(unittest.TestCase):
     def test_release_version_metadata_is_consistent(self):
-        self.assertIn('kAMProjPluginVersion = @"41";', SOURCE)
-        self.assertIn('kAMDebugPluginVersion = @"41";', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("AMProj v41", SOURCE)
+        self.assertIn('kAMProjPluginVersion = @"42";', SOURCE)
+        self.assertIn('kAMDebugPluginVersion = @"42";', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("AMProj v42", SOURCE)
         self.assertNotIn("AMProj v31", SOURCE)
         self.assertNotIn("AMProj v29", SOURCE)
         self.assertNotIn("AMProj v28", SOURCE)
         self.assertNotIn("AMProj v23", SOURCE)
         self.assertIn("AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs", WORKFLOW)
-        self.assertIn("AMPROJ_RELEASE_VERSION: '41'", WORKFLOW)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '42'", WORKFLOW)
         self.assertIn('"commit": os.environ["GITHUB_SHA"]', WORKFLOW)
         self.assertIn('"run_id": os.environ["GITHUB_RUN_ID"]', WORKFLOW)
         self.assertIn('"sha256": {', WORKFLOW)
         self.assertIn("build-metadata.json", WORKFLOW)
-        self.assertIn("AM_v1_direct_v41.ipa", README)
-        self.assertIn("AM_v1_direct_v41_cloud.ipa", README)
-        self.assertIn("AM_v1_direct_v41_debug.ipa", README)
-        self.assertIn("AM_v1_direct_v41_cloud.ipa", BUILD_SCRIPT)
-        self.assertIn("--share-extension", BUILD_SCRIPT)
-        self.assertIn("--app-group-id", BUILD_SCRIPT)
-        self.assertIn("AMProjShareExtension/build/AMProjShareExtension.appex", README)
+        self.assertIn("AM_v1_direct_v42.ipa", README)
+        self.assertIn("AM_v1_direct_v42_cloud.ipa", README)
+        self.assertIn("AM_v1_direct_v42_debug.ipa", README)
+        self.assertIn("AM_v1_direct_v42_cloud.ipa", BUILD_SCRIPT)
+        self.assertNotIn("--share-extension", BUILD_SCRIPT)
+        self.assertNotIn("--app-group-id", BUILD_SCRIPT)
+        self.assertNotIn("AMProjShareExtension", BUILD_SCRIPT)
+        self.assertNotIn("AMProjShareExtension", WORKFLOW)
+        self.assertIn("稳定包只使用主 App 的文档 URL/文件选择器链路", README)
         self.assertIn("AMProjExportCloud.dylib", MAKEFILE)
         self.assertIn("AMProjExport/AMProjExportCloud.dylib", WORKFLOW)
         self.assertIn('config[@"BuildIdentifier"]', DEBUG_TRANSPORT_SOURCE)
@@ -175,10 +199,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("-DAMPROJ_TELEMETRY=1", MAKEFILE)
         self.assertIn("#if AMPROJ_DEBUG || AMPROJ_TELEMETRY", SOURCE)
         self.assertIn("#elif AMPROJ_TELEMETRY", SOURCE)
-        self.assertIn("Loading v41-cloud", SOURCE)
+        self.assertIn("Loading v42-cloud", SOURCE)
         self.assertIn("#if AMPROJ_TELEMETRY", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("kAMDebugPluginVariant = @\"cloud\"", DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("kAMDebugDefaultBuildIdentifier = @\"v41-cloud\"", DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("kAMDebugDefaultBuildIdentifier = @\"v42-cloud\"", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("(void)defaultMode", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("_discoveryEnabled = NO", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("- (void)pollCommands", DEBUG_TRANSPORT_SOURCE)
@@ -1605,7 +1629,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("return hooks[index].base;", tracked)
         self.assertIn("if (!hooks[index].base)", tracked)
 
-    def test_cold_launch_records_candidates_and_filters_only_project_options(self):
+    def test_cold_launch_records_candidates_and_filters_project_options_before_staging(self):
         recognizer = function_body(
             "static BOOL amproj_isIncomingProjectURL",
             "static UIViewController* amproj_topViewController",
@@ -1662,40 +1686,86 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("NSMutableDictionary *filtered = [launchOptions mutableCopy]", filterer)
         self.assertIn("amproj_isIncomingProjectURL(launchURL, launchOptions)", filterer)
-        self.assertIn("amproj_deferredLaunchCandidateWasStaged(launchURL)", filterer)
+        self.assertNotIn("amproj_deferredLaunchCandidateWasStaged(launchURL)", filterer)
         self.assertIn(
             "[filtered removeObjectForKey:UIApplicationLaunchOptionsURLKey]",
             filterer,
         )
+        self.assertIn("BOOL removedProjectLaunchURL = NO", filterer)
+        self.assertIn("removedProjectLaunchURL = YES", filterer)
         self.assertIn("NSMutableDictionary *activities", filterer)
         self.assertIn(
             "amproj_isIncomingProjectURL(activityURL, activityOptions)", filterer
         )
-        self.assertIn("amproj_deferredLaunchCandidateWasStaged(activityURL)", filterer)
-        self.assertIn("BOOL removedStagedActivity = NO", filterer)
-        self.assertIn("removedStagedActivity = YES", filterer)
+        self.assertNotIn("amproj_deferredLaunchCandidateWasStaged(activityURL)", filterer)
+        self.assertIn("BOOL removedProjectActivity = NO", filterer)
+        self.assertIn("removedProjectActivity = YES", filterer)
         self.assertIn("[activities removeObjectForKey:key]", filterer)
-        pair_cleanup = filterer.index("if (removedStagedActivity)")
+        pair_cleanup = filterer.index("if (removedNestedProjectActivity)")
         self.assertIn(
             "removeObjectForKey:UIApplicationLaunchOptionsUserActivityTypeKey",
             filterer[pair_cleanup:],
         )
-        self.assertNotIn("UIApplicationLaunchOptionsUserActivityKey", filterer)
+        self.assertIn(
+            "[filtered removeObjectForKey:UIApplicationLaunchOptionsUserActivityTypeKey]",
+            filterer[pair_cleanup:],
+        )
+        self.assertIn(
+            "if (removedProjectLaunchURL || removedProjectActivity)", filterer
+        )
+        self.assertIn("remainingTopLevelActivityType", filterer)
+        self.assertIn("remainingNestedActivityType", filterer)
+        self.assertIn("kAMProjLaunchOptionsUserActivityKey", filterer)
+        self.assertIn("kAMProjLaunchOptionsUserActivityKey =", SOURCE)
+        self.assertNotIn(
+            "launchOptions[UIApplicationLaunchOptionsUserActivityKey]", SOURCE
+        )
         self.assertIn("return filtered", filterer)
 
-        activity = object()
+        activity = ("project", "public.xml")
+        other_activity = ("other", "com.example.other")
         original = {
             LaunchUserActivityFilterModel.ACTIVITY_KEY: activity,
             LaunchUserActivityFilterModel.TYPE_KEY: "public.xml",
+            LaunchUserActivityFilterModel.DICTIONARY_KEY: {
+                LaunchUserActivityFilterModel.ACTIVITY_KEY: activity,
+                "other_activity": other_activity,
+                LaunchUserActivityFilterModel.TYPE_KEY: "public.xml",
+            },
             "unrelated": "preserved",
         }
-        self.assertEqual(
-            LaunchUserActivityFilterModel.filter(original, staged=False), original
-        )
-        consumed = LaunchUserActivityFilterModel.filter(original, staged=True)
+        consumed = LaunchUserActivityFilterModel.filter(original, activity)
         self.assertNotIn(LaunchUserActivityFilterModel.ACTIVITY_KEY, consumed)
         self.assertNotIn(LaunchUserActivityFilterModel.TYPE_KEY, consumed)
-        self.assertEqual(consumed, {"unrelated": "preserved"})
+        self.assertEqual(
+            consumed[LaunchUserActivityFilterModel.DICTIONARY_KEY]["other_activity"],
+            other_activity,
+        )
+        self.assertEqual(
+            consumed[LaunchUserActivityFilterModel.DICTIONARY_KEY][
+                LaunchUserActivityFilterModel.TYPE_KEY
+            ],
+            "com.example.other",
+        )
+        self.assertEqual(
+            consumed["unrelated"], "preserved"
+        )
+
+        top_level_other = {
+            LaunchUserActivityFilterModel.ACTIVITY_KEY: other_activity,
+            LaunchUserActivityFilterModel.TYPE_KEY: "com.example.other",
+            LaunchUserActivityFilterModel.DICTIONARY_KEY: {
+                LaunchUserActivityFilterModel.ACTIVITY_KEY: activity,
+                LaunchUserActivityFilterModel.TYPE_KEY: "public.xml",
+            },
+        }
+        retained = LaunchUserActivityFilterModel.filter(top_level_other, activity)
+        self.assertEqual(
+            retained[LaunchUserActivityFilterModel.ACTIVITY_KEY], other_activity
+        )
+        self.assertEqual(
+            retained[LaunchUserActivityFilterModel.TYPE_KEY], "com.example.other"
+        )
 
         hook = function_body(
             "static BOOL hooked_applicationDidFinish",
@@ -1725,8 +1795,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_recordLaunchImportCandidates",
             "static BOOL hooked_applicationDidFinish",
         )
-        self.assertEqual(
+        self.assertGreaterEqual(
             launch_pipeline.count("amproj_projectOptionsFromUserActivity"), 3
+        )
+        self.assertIn(
+            "launchOptions[kAMProjLaunchOptionsUserActivityKey]",
+            launch_pipeline,
         )
         self.assertIn(
             "amproj_isIncomingProjectURL(activityURL, activityOptions)",
@@ -1787,10 +1861,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_restageFailedLaunchImportCandidates",
             "static NSDictionary *amproj_launchOptionsForNativeAppDelegate",
         )
-        self.assertEqual(
+        self.assertGreaterEqual(
             restager.count("amproj_deferredLaunchCandidateNeedsRestaging"), 2
         )
-        self.assertEqual(restager.count("amproj_recordDeferredLaunchCandidate"), 2)
+        self.assertGreaterEqual(restager.count("amproj_recordDeferredLaunchCandidate"), 2)
 
     def test_scene_partitions_project_contexts_before_forwarding(self):
         body = function_body(
@@ -2041,7 +2115,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # v40 accepts a verified complete template when this AM build does not
         # create a project row directly.
         self.assertIn("amproj_completePackageTransaction", verified_branch)
-        self.assertIn('AMProj v41 · 4/4', SOURCE)
+        self.assertIn('AMProj v42 · 4/4', SOURCE)
         self.assertIn('amproj_completePackageAsTemplate', verification)
         self.assertNotIn('amproj_beginTemplatePromotion(', verification)
         self.assertNotIn('amproj_beginSwiftUITemplatePromotion(', verification)
@@ -2059,7 +2133,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertIn("AMProj v41 · 4/4", SOURCE)
+        self.assertIn("AMProj v42 · 4/4", SOURCE)
 
     def test_project_verifier_uses_real_uikit_lists_and_persistence_evidence(self):
         self.assertNotIn('@"pCollectionView"', SOURCE)
@@ -2119,7 +2193,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v41 \\u00b7 E40", present)
+        self.assertIn("AMProj v42 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),

@@ -1,13 +1,12 @@
 name: Build AMProjExport dylibs
 
 env:
-  AMPROJ_RELEASE_VERSION: '41'
+  AMPROJ_RELEASE_VERSION: '42'
 
 on:
   push:
     paths:
       - 'AMProjExport/**'
-      - 'AMProjShareExtension/**'
       - 'debug_backend/**'
       - 'inject_dylib.py'
       - 'tests/**'
@@ -28,9 +27,6 @@ jobs:
       - name: Build release, cloud, and debug dylibs
         working-directory: AMProjExport
         run: make
-
-      - name: Build Share Extension
-        run: make -C AMProjShareExtension
 
       - name: Verify built dylib architectures
         run: |
@@ -62,23 +58,6 @@ jobs:
               }
               assert not missing, f"{path} missing symbols: {sorted(missing)}"
               print(f"verified {path}: arm64 MH_DYLIB, {info['ncmds']} load commands")
-          PY
-
-      - name: Verify Share Extension bundle
-        run: |
-          python3 - <<'PY'
-          from inject_dylib import verify_share_extension_bundle
-
-          path = "AMProjShareExtension/build/AMProjShareExtension.appex"
-          info = verify_share_extension_bundle(
-              path,
-              "com.amayaka.meow.amprojshare",
-              "group.com.amayaka.meow.amprojshare",
-          )
-          print(
-              f"verified {path}: {info['bundle_identifier']}, "
-              f"{info['app_group_id']}, arm64 MH_EXECUTE/share-services"
-          )
           PY
 
       - name: Test streaming project archive writer
@@ -132,9 +111,6 @@ jobs:
               Path("AMProjExport/AMProjExport.dylib"),
               Path("AMProjExport/AMProjExportCloud.dylib"),
               Path("AMProjExport/AMProjExportDebug.dylib"),
-              Path("AMProjShareExtension/build/AMProjShareExtension.appex/AMProjShareExtension"),
-              Path("AMProjShareExtension/build/AMProjShareExtension.appex/Info.plist"),
-              Path("AMProjShareExtension/build/AMProjShareExtension.entitlements"),
           )
           metadata = {
               "plugin_version": os.environ["AMPROJ_RELEASE_VERSION"],
@@ -163,5 +139,3 @@ jobs:
             AMProjExport/AMProjExport.dylib
             AMProjExport/AMProjExportCloud.dylib
             AMProjExport/AMProjExportDebug.dylib
-            AMProjShareExtension/build/AMProjShareExtension.appex
-            AMProjShareExtension/build/AMProjShareExtension.entitlements

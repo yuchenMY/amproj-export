@@ -35,6 +35,7 @@ LC_SEGMENT_64 = 0x19
 LC_UUID = 0x1B
 SHARE_EXTENSION_POINT = "com.apple.share-services"
 SHARE_EXTENSION_BUNDLE_SUFFIX = ".amprojshare"
+SHARE_EXTENSION_BUNDLE_NAME = "AMProjShareExtension.appex"
 APPLICATION_GROUPS_ENTITLEMENT = "com.apple.security.application-groups"
 SHARE_APP_GROUP_INFO_KEY = "AMProjShareAppGroupIdentifier"
 AMPROJ_URL_SCHEME = "alightmotion"
@@ -1072,6 +1073,88 @@ def install_share_extension(
     return result
 
 
+def _remove_stable_share_extension(app_dir):
+    """Remove the experimental Share Extension from a stable app bundle."""
+    app_dir = Path(app_dir)
+    removed = []
+    plugins_dir = app_dir / "PlugIns"
+    if plugins_dir.is_dir():
+        for candidate in sorted(plugins_dir.iterdir()):
+            if candidate.name != SHARE_EXTENSION_BUNDLE_NAME and not candidate.name.endswith(
+                SHARE_EXTENSION_BUNDLE_SUFFIX + ".appex"
+            ):
+                continue
+            if candidate.is_dir():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+            removed.append(candidate.name)
+        if not any(plugins_dir.iterdir()):
+            plugins_dir.rmdir()
+
+    info_path = app_dir / "Info.plist"
+    with info_path.open("rb") as file:
+        plist = plistlib.load(file)
+    if not isinstance(plist, dict):
+        raise ValueError("Info.plist root must be a dictionary")
+    changed = SHARE_APP_GROUP_INFO_KEY in plist
+    plist.pop(SHARE_APP_GROUP_INFO_KEY, None)
+
+    url_types = plist.get("CFBundleURLTypes")
+    if isinstance(url_types, list):
+        remaining_url_types = []
+        for url_type in url_types:
+            if not isinstance(url_type, dict):
+                remaining_url_types.append(url_type)
+                continue
+            schemes = url_type.get("CFBundleURLSchemes")
+            if (
+                url_type.get("CFBundleURLName") == "AMProj Import"
+                and isinstance(schemes, list)
+                and AMPROJ_URL_SCHEME in schemes
+            ):
+                kept_schemes = [scheme for scheme in schemes if scheme != AMPROJ_URL_SCHEME]
+                if kept_schemes:
+                    url_type = dict(url_type)
+                    url_type["CFBundleURLSchemes"] = kept_schemes
+                    remaining_url_types.append(url_type)
+                changed = True
+                continue
+            remaining_url_types.append(url_type)
+        if remaining_url_types:
+            if remaining_url_types != url_types:
+                changed = True
+            plist["CFBundleURLTypes"] = remaining_url_types
+        elif url_types:
+            plist.pop("CFBundleURLTypes", None)
+            changed = True
+
+    if changed:
+        with info_path.open("wb") as file:
+            plistlib.dump(plist, file, fmt=plistlib.FMT_BINARY)
+    print(
+        "[+] Stable bundle cleanup: removed "
+        f"{len(removed)} Share Extension(s), host metadata={'yes' if changed else 'no'}"
+    )
+    return removed, changed
+
+
+def _stable_share_extension_entries(names, app_root):
+    """Return experimental Share Extension bundle roots embedded in an IPA."""
+    prefix = f"{app_root}/PlugIns/"
+    roots = set()
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        remainder = name[len(prefix) :]
+        root_name = remainder.split("/", 1)[0]
+        if root_name == SHARE_EXTENSION_BUNDLE_NAME or root_name.endswith(
+            SHARE_EXTENSION_BUNDLE_SUFFIX + ".appex"
+        ):
+            roots.add(root_name)
+    return sorted(roots)
+
+
 def _remove_code_signature_directories(bundle_dir):
     """Remove stale CodeResources from the app and all nested bundles."""
     paths = sorted(
@@ -1301,6 +1384,18 @@ def verify_injected_ipa(
                 plist = plistlib.loads(read_unique("Info.plist"))
             except (plistlib.InvalidFileException, ValueError) as error:
                 raise RuntimeError("Injected Info.plist is invalid") from error
+            if expected_share_extension is None:
+                stale_extensions = _stable_share_extension_entries(names, app_root)
+                if stale_extensions:
+                    raise RuntimeError(
+                        "Stable IPA must not contain Share Extension: "
+                        + ", ".join(stale_extensions)
+                    )
+                if SHARE_APP_GROUP_INFO_KEY in plist:
+                    raise RuntimeError(
+                        "Stable IPA must not contain "
+                        f"{SHARE_APP_GROUP_INFO_KEY}"
+                    )
             _validate_patched_info_plist(
                 plist,
                 settings,
@@ -1455,6 +1550,8 @@ def inject_ipa(
                 app_group_id,
                 original_bundle_identifier,
             )
+        else:
+            _remove_stable_share_extension(app_dir)
 
         removed_signatures = _remove_code_signature_directories(app_dir)
         print(f"[+] Removed {removed_signatures} old code signature directorie(s)")
