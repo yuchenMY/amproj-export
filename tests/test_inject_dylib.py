@@ -205,6 +205,25 @@ class MachOTests(unittest.TestCase):
 
 
 class PlistTests(unittest.TestCase):
+    def test_bundle_version_is_only_changed_when_explicitly_requested(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = Path(temp_dir)
+            with (app / "Info.plist").open("wb") as file:
+                plistlib.dump({"CFBundleVersion": "737"}, file)
+
+            self.assertTrue(inject_dylib.patch_info_plist(app))
+            with (app / "Info.plist").open("rb") as file:
+                self.assertEqual(plistlib.load(file)["CFBundleVersion"], "737")
+
+            self.assertTrue(
+                inject_dylib.patch_info_plist(app, bundle_version="738")
+            )
+            with (app / "Info.plist").open("rb") as file:
+                self.assertEqual(plistlib.load(file)["CFBundleVersion"], "738")
+            self.assertFalse(
+                inject_dylib.patch_info_plist(app, bundle_version="738")
+            )
+
     def test_network_keys_are_patched_when_uti_already_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             app = Path(temp_dir)
@@ -550,6 +569,46 @@ class ConfigTests(unittest.TestCase):
 
 
 class InjectionTests(unittest.TestCase):
+    def test_bundle_version_is_patched_and_verified_end_to_end(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ipa, _ = make_fake_ipa(root)
+            dylib = root / "AMProjExport.dylib"
+            make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
+            output = root / "versioned.ipa"
+
+            with mock.patch.object(inject_dylib, "_try_resign"):
+                inject_dylib.inject_ipa(
+                    ipa,
+                    dylib,
+                    output,
+                    bundle_version="738",
+                )
+
+            with zipfile.ZipFile(output, "r") as archive:
+                info = plistlib.loads(
+                    archive.read("Payload/Fixture.app/Info.plist")
+                )
+            self.assertEqual(info["CFBundleVersion"], "738")
+
+            verification = inject_dylib.verify_injected_ipa(
+                output,
+                dylib,
+                inject_dylib.DebugSettings(),
+                expected_bundle_identifier="com.example.fixture",
+                expected_bundle_version="738",
+            )
+            self.assertEqual(verification["bundle_version"], "738")
+
+            with self.assertRaisesRegex(RuntimeError, "CFBundleVersion"):
+                inject_dylib.verify_injected_ipa(
+                    output,
+                    dylib,
+                    inject_dylib.DebugSettings(),
+                    expected_bundle_identifier="com.example.fixture",
+                    expected_bundle_version="739",
+                )
+
     def test_injection_rejects_unverified_main_uuid(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -957,6 +1016,42 @@ class InjectionTests(unittest.TestCase):
 
 
 class ArgumentTests(unittest.TestCase):
+    def test_bundle_version_accepts_738_and_reaches_injector(self):
+        parser = inject_dylib.build_argument_parser()
+        args = parser.parse_args(
+            ["input.ipa", "lib.dylib", "--bundle-version", "738"]
+        )
+        self.assertEqual(args.bundle_version, "738")
+
+        with mock.patch.object(inject_dylib, "inject_ipa") as injector:
+            self.assertEqual(
+                inject_dylib.main(
+                    [
+                        "input.ipa",
+                        "lib.dylib",
+                        "output.ipa",
+                        "--bundle-version",
+                        "738",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(injector.call_args.kwargs["bundle_version"], "738")
+
+    def test_bundle_version_rejects_non_positive_or_non_canonical_values(self):
+        parser = inject_dylib.build_argument_parser()
+        for value in ("0", "01", "-1", "+1", "1.0", "abc"):
+            with self.subTest(value=value):
+                with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                    parser.parse_args(
+                        [
+                            "input.ipa",
+                            "lib.dylib",
+                            "--bundle-version",
+                            value,
+                        ]
+                    )
+
     def test_expected_main_uuid_is_normalized(self):
         parser = inject_dylib.build_argument_parser()
         args = parser.parse_args(
@@ -980,6 +1075,7 @@ class ArgumentTests(unittest.TestCase):
         self.assertFalse(settings.enabled)
         self.assertIsNone(args.share_extension)
         self.assertIsNone(args.app_group_id)
+        self.assertIsNone(args.bundle_version)
 
     def test_debug_dylib_enables_generated_config(self):
         parser = inject_dylib.build_argument_parser()

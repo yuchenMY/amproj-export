@@ -34,13 +34,13 @@ static const NSTimeInterval kAMDebugDiscoveryRetryInterval = 15.0;
 static const NSTimeInterval kAMDebugDiscoveryTimeout = 1.5;
 static const NSUInteger kAMDebugDiscoveryMaxPacketBytes = 512;
 static const NSUInteger kAMDebugDiscoveryMaxSubnetHosts = 1024;
-static NSString *const kAMDebugPluginVersion = @"42";
+static NSString *const kAMDebugPluginVersion = @"43";
 #if AMPROJ_TELEMETRY
 static NSString *const kAMDebugPluginVariant = @"cloud";
-static NSString *const kAMDebugDefaultBuildIdentifier = @"v42-cloud";
+static NSString *const kAMDebugDefaultBuildIdentifier = @"v43-cloud";
 #else
 static NSString *const kAMDebugPluginVariant = @"debug";
-static NSString *const kAMDebugDefaultBuildIdentifier = @"v42-debug";
+static NSString *const kAMDebugDefaultBuildIdentifier = @"v43-debug";
 #endif
 static void *kAMDebugQueueKey = &kAMDebugQueueKey;
 

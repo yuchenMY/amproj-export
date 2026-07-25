@@ -296,7 +296,11 @@ def _amproj_uti_declaration(plist):
     )
 
 
-def patch_info_plist(app_dir, enable_debug_network=False):
+def patch_info_plist(
+    app_dir,
+    enable_debug_network=False,
+    bundle_version=None,
+):
     """Patch project document types and optional debug-network settings."""
     info_path = os.path.join(app_dir, "Info.plist")
     if not os.path.exists(info_path):
@@ -307,8 +311,16 @@ def patch_info_plist(app_dir, enable_debug_network=False):
         plist = plistlib.load(file)
     if not isinstance(plist, dict):
         raise ValueError("Info.plist root must be a dictionary")
+    if bundle_version is not None:
+        bundle_version = _normalize_bundle_version(bundle_version)
 
     changed = False
+    if (
+        bundle_version is not None
+        and plist.get("CFBundleVersion") != bundle_version
+    ):
+        plist["CFBundleVersion"] = bundle_version
+        changed = True
     declarations = plist.get("UTExportedTypeDeclarations")
     if not isinstance(declarations, list):
         declarations = []
@@ -1201,6 +1213,7 @@ def _validate_patched_info_plist(
     expected_bundle_identifier,
     expected_app_group_id=None,
     expected_config=None,
+    expected_bundle_version=None,
 ):
     if not isinstance(plist, dict):
         raise RuntimeError("Info.plist root is not a dictionary")
@@ -1208,6 +1221,12 @@ def _validate_patched_info_plist(
         plist.get("CFBundleIdentifier") != expected_bundle_identifier
     ):
         raise RuntimeError("Injection changed CFBundleIdentifier")
+    if expected_bundle_version is not None and (
+        plist.get("CFBundleVersion") != expected_bundle_version
+    ):
+        raise RuntimeError(
+            "Info.plist CFBundleVersion does not match the requested bundle version"
+        )
     if not _has_amproj_document_type(plist) or not _has_amproj_uti(plist):
         raise RuntimeError("Info.plist is missing the .amproj document registration")
     document_type = _amproj_document_type(plist)
@@ -1341,6 +1360,7 @@ def verify_injected_ipa(
     expected_share_extension=None,
     expected_app_group_id=None,
     expected_main_uuid=None,
+    expected_bundle_version=None,
 ):
     """Verify the final archive, embedded files, Mach-O layout, and config."""
     ipa_path = Path(ipa_path)
@@ -1402,6 +1422,7 @@ def verify_injected_ipa(
                 expected_bundle_identifier,
                 expected_app_group_id,
                 expected_config,
+                expected_bundle_version,
             )
 
             executable_name = plist.get("CFBundleExecutable") or Path(app_root).stem
@@ -1466,6 +1487,7 @@ def verify_injected_ipa(
     result = {
         "app": app_root,
         "bundle_identifier": plist.get("CFBundleIdentifier", ""),
+        "bundle_version": plist.get("CFBundleVersion"),
         "executable": executable_name,
         "main_uuid": executable_info["uuid"],
         "dylib": dylib_path.name,
@@ -1489,12 +1511,15 @@ def inject_ipa(
     share_extension_path=None,
     app_group_id=None,
     expected_main_uuid=None,
+    bundle_version=None,
 ):
     """Inject one dylib and return the generated/copied debug config, if any."""
     ipa_path = Path(ipa_path)
     dylib_path = Path(dylib_path)
     output_path = Path(output_path)
     settings = debug_settings or DebugSettings()
+    if bundle_version is not None:
+        bundle_version = _normalize_bundle_version(bundle_version)
 
     if (share_extension_path is None) != (app_group_id is None):
         raise ValueError(
@@ -1540,6 +1565,7 @@ def inject_ipa(
         patch_info_plist(
             app_dir,
             enable_debug_network=debug_config_needs_local_network_settings(config),
+            bundle_version=bundle_version,
         )
 
         if share_extension_path is not None:
@@ -1568,6 +1594,7 @@ def inject_ipa(
             expected_share_extension=share_extension_path,
             expected_app_group_id=app_group_id,
             expected_main_uuid=expected_main_uuid,
+            expected_bundle_version=bundle_version,
         )
         print(f"[+] Done: {output_path}")
         return config
@@ -1581,6 +1608,24 @@ def _port(value):
     if not 1 <= port <= 65535:
         raise argparse.ArgumentTypeError("port must be between 1 and 65535")
     return port
+
+
+def _normalize_bundle_version(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or value[0] == "0"
+        or any(character < "0" or character > "9" for character in value)
+    ):
+        raise ValueError("bundle version must be a positive integer string")
+    return value
+
+
+def _bundle_version(value):
+    try:
+        return _normalize_bundle_version(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def _token(value):
@@ -1674,6 +1719,11 @@ def build_argument_parser():
         help="reject an IPA whose main executable UUID does not match",
     )
     parser.add_argument(
+        "--bundle-version",
+        type=_bundle_version,
+        help="set CFBundleVersion to a positive integer, for example 738",
+    )
+    parser.add_argument(
         "--share-extension",
         help="optional AMProjShareExtension.appex bundle to install",
     )
@@ -1705,6 +1755,7 @@ def main(argv=None):
             share_extension_path=share_extension,
             app_group_id=app_group_id,
             expected_main_uuid=args.expected_main_uuid,
+            bundle_version=args.bundle_version,
         )
     except (
         OSError,
