@@ -283,6 +283,17 @@
               const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
               if (!dataLine) continue;
               const update = JSON.parse(dataLine.slice(6));
+              // The server sends a `reset` frame (topic:"reset") when our cursor
+              // has fallen outside the recoverable window (too old, or a future
+              // id after the journal was reset). Re-sync from REST, adopt the
+              // server's current cursor, and reconnect the stream from there —
+              // never silently skip the gap.
+              if (update.topic === "reset") {
+                state.streamAfter = update.current_stream_id || 0;
+                $("connectionText").textContent = "重新同步";
+                await refresh();
+                throw new Error("stream reset: " + (update.reason || "unknown"));
+              }
               state.streamAfter = Math.max(state.streamAfter, update.stream_id || 0);
               if (update.topic === "event") {
                 const event = { ...update.data };
