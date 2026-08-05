@@ -3,6 +3,9 @@ name: Build AMProjExport dylibs
 env:
   AMPROJ_RELEASE_VERSION: '44'
 
+permissions:
+  contents: write
+
 on:
   push:
     paths:
@@ -137,6 +140,7 @@ jobs:
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs
           if-no-files-found: error
@@ -147,3 +151,15 @@ jobs:
             AMProjExport/AMProjExportCloud.dylib
             AMProjExport/AMProjExportDebug.dylib
             AMProjExport/AMMeowLoader.dylib
+
+      - name: Publish Cloud release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="amproj-v${AMPROJ_RELEASE_VERSION}-${GITHUB_SHA:0:12}"
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" \
+            --title "AMProj v${AMPROJ_RELEASE_VERSION} Cloud" \
+            --notes "macOS-built AMProjExportCloud.dylib for commit ${GITHUB_SHA}." \
+            build-metadata.json \
+            AMProjExport/AMProjExportCloud.dylib
