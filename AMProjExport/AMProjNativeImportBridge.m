@@ -10,9 +10,9 @@ static NSString *const AMProjNativeBridgeErrorDomain =
     @"com.amproj.import.native-bridge";
 
 static const uintptr_t AMProjMainPreferredBase = 0x100000000ULL;
-static const uintptr_t AMProjNativeImportEntry = 0x100266ee8ULL;
-static const uintptr_t AMProjNSStringToSwiftStringStub = 0x101fb678cULL;
-static const uintptr_t AMProjSwiftBridgeReleaseStub = 0x101fbc1bcULL;
+// Alight Motion 6.2.55 (build 862) only.  These addresses are part of the
+// verified base package contract and must change together with its UUID.
+static const uintptr_t AMProjNativeImportEntry = 0x100604ac4ULL;
 
 typedef struct {
     uintptr_t word0;
@@ -79,7 +79,7 @@ static NSUInteger amproj_nativeBridgeGeneration = 0;
 static NSString *amproj_nativeBridgeFilename = nil;
 // The verified importer keeps an AMProgressAlert reference in its async
 // continuation and unconditionally dismisses it after status 4.  Passing nil
-// reaches a deliberate `brk` in the clean AM_v1 binary.  Keep the storyboard
+// reaches a deliberate `brk` in the verified 6.2.55 binary. Keep the storyboard
 // instance alive for the whole transaction even though the plugin does not
 // present it (the plugin's own status bar remains the visible progress UI).
 static UIViewController *amproj_nativeBridgeProgressOwner = nil;
@@ -541,8 +541,8 @@ static const struct mach_header_64 *AMProjMainHeader(void) {
 
 static BOOL AMProjMainExecutableMatches(NSError **error) {
     static const uint8_t expectedUUID[16] = {
-        0x4b, 0x22, 0xd4, 0x3f, 0x09, 0xfc, 0x3b, 0xde,
-        0x85, 0x9b, 0x78, 0xa5, 0xd5, 0x73, 0xa5, 0x03,
+        0x01, 0xb7, 0x30, 0x17, 0x1a, 0x6e, 0x3b, 0x17,
+        0x8f, 0x59, 0xc2, 0x74, 0x62, 0xde, 0xa5, 0x63,
     };
     static const uint8_t expectedPrologue[16] = {
         0xfc, 0x6f, 0xba, 0xa9, 0xfa, 0x67, 0x01, 0xa9,
@@ -573,7 +573,7 @@ static BOOL AMProjMainExecutableMatches(NSError **error) {
     }
     if (!uuidMatched) {
         if (error) *error = AMProjNativeBridgeError(
-            100, @"This native importer only supports the supplied clean AM_v1 build", nil);
+            100, @"This native importer only supports Alight Motion 6.2.55 (862)", nil);
         return NO;
     }
 
@@ -943,14 +943,6 @@ static BOOL AMProjStartNativePackageImport(
             "$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ");
     AMProjSwiftBridgeReleaseFn releaseBridge =
         (AMProjSwiftBridgeReleaseFn)dlsym(RTLD_DEFAULT, "swift_bridgeObjectRelease");
-    if (!bridge) {
-        bridge = (AMProjNSStringToSwiftStringFn)AMProjMainAddress(
-            AMProjNSStringToSwiftStringStub);
-    }
-    if (!releaseBridge) {
-        releaseBridge = (AMProjSwiftBridgeReleaseFn)AMProjMainAddress(
-            AMProjSwiftBridgeReleaseStub);
-    }
     void *entry = AMProjMainAddress(AMProjNativeImportEntry);
     if (!bridge || !releaseBridge || !entry) {
         NSError *runtimeError = AMProjNativeBridgeError(

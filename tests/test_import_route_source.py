@@ -165,25 +165,32 @@ class LaunchUserActivityFilterModel:
 
 class NativeImportRouteSourceTests(unittest.TestCase):
     def test_release_version_metadata_is_consistent(self):
-        self.assertIn('kAMProjPluginVersion = @"43";', SOURCE)
-        self.assertIn('kAMDebugPluginVersion = @"43";', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("AMProj v43", SOURCE)
+        self.assertIn('kAMProjPluginVersion = @"44";', SOURCE)
+        self.assertIn('kAMDebugPluginVersion = @"44";', DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("AMProj v44", SOURCE)
         self.assertNotIn("AMProj v31", SOURCE)
         self.assertNotIn("AMProj v29", SOURCE)
         self.assertNotIn("AMProj v28", SOURCE)
         self.assertNotIn("AMProj v23", SOURCE)
         self.assertIn("AMProjExport-v${{ env.AMPROJ_RELEASE_VERSION }}-dylibs", WORKFLOW)
-        self.assertIn("AMPROJ_RELEASE_VERSION: '43'", WORKFLOW)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '44'", WORKFLOW)
         self.assertIn('"commit": os.environ["GITHUB_SHA"]', WORKFLOW)
         self.assertIn('"run_id": os.environ["GITHUB_RUN_ID"]', WORKFLOW)
         self.assertIn('"sha256": {', WORKFLOW)
         self.assertIn("build-metadata.json", WORKFLOW)
-        self.assertIn("AM_v1_direct_v43.ipa", README)
-        self.assertIn("AM_v1_direct_v43_cloud.ipa", README)
-        self.assertIn("AM_v1_direct_v43_debug.ipa", README)
-        self.assertIn("AM_v1_direct_v43_cloud.ipa", BUILD_SCRIPT)
-        self.assertIn("--bundle-version 738", README)
-        self.assertIn("--bundle-version 738", BUILD_SCRIPT)
+        self.assertIn("am_v77_ownbase_directCloud_LCSign.ipa", README)
+        self.assertIn("build_862_direct_package.py", README)
+        self.assertIn("am_v77_ownbase_directCloud_LCSign.ipa", BUILD_SCRIPT)
+        self.assertIn("CFBundleVersion=862", README)
+        self.assertIn("build_862_direct_package.py", BUILD_SCRIPT)
+        self.assertNotIn("--zsign", BUILD_SCRIPT)
+        self.assertNotIn("inject_dylib.py", BUILD_SCRIPT)
+        self.assertNotIn("--bundle-version", BUILD_SCRIPT)
+        self.assertIn("01b73017-1a6e-3b17-8f59-c27462dea563", README)
+        self.assertIn(
+            "37054D3ED49DEBF44D6534DAA6B266888A41AA5068A4FFD8FA884EF5EC4999D4",
+            README,
+        )
         self.assertNotIn("--share-extension", BUILD_SCRIPT)
         self.assertNotIn("--app-group-id", BUILD_SCRIPT)
         self.assertNotIn("AMProjShareExtension", BUILD_SCRIPT)
@@ -204,10 +211,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("-DAMPROJ_TELEMETRY=1", MAKEFILE)
         self.assertIn("#if AMPROJ_DEBUG || AMPROJ_TELEMETRY", SOURCE)
         self.assertIn("#elif AMPROJ_TELEMETRY", SOURCE)
-        self.assertIn("Loading v43-cloud", SOURCE)
+        self.assertIn("Loading v44-cloud", SOURCE)
         self.assertIn("#if AMPROJ_TELEMETRY", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("kAMDebugPluginVariant = @\"cloud\"", DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("kAMDebugDefaultBuildIdentifier = @\"v43-cloud\"", DEBUG_TRANSPORT_SOURCE)
+        self.assertIn("kAMDebugDefaultBuildIdentifier = @\"v44-cloud\"", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("(void)defaultMode", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("_discoveryEnabled = NO", DEBUG_TRANSPORT_SOURCE)
         self.assertIn("- (void)pollCommands", DEBUG_TRANSPORT_SOURCE)
@@ -387,6 +394,92 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("ShareProjectPackageVC", body)
         self.assertNotIn('containsString:@"Package"]', body)
+
+    def test_v44_project_package_action_uses_exact_862_option(self):
+        self.assertIn(
+            "static const uint8_t AMProjExportOptionProjectPackage = 7;", SOURCE
+        )
+        option = function_body(
+            "static BOOL amproj_shareExportOptionID",
+            "static NSArray* am_arr",
+        )
+        self.assertIn('amproj_instanceIvar(object, @"selectedExportOptID")', option)
+        self.assertIn("uint8_t raw = 0", option)
+        self.assertIn("const uint8_t *address", option)
+
+        share = function_body(
+            "static void hooked_shareNCOnTapExport",
+            "static BOOL amproj_isNativeImportFailureAlert",
+        )
+        self.assertIn("[NSThread isMainThread]", share)
+        self.assertIn(
+            "selectedExportOption == AMProjExportOptionProjectPackage", share
+        )
+        self.assertIn("if (!isProjectPackage", share)
+        self.assertIn("orig_shareNCOnTapExport(self, _cmd, sender)", share)
+        direct_call = (
+            "amproj_startDirectExport(shareController, nil, YES, nil, title);"
+        )
+        self.assertIn(direct_call, share)
+        project_path = share[share.index("NSString *title ="):share.index(direct_call)]
+        self.assertNotIn("orig_shareNCOnTapExport", project_path)
+
+        present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
+        self.assertIn('direct.native_package_presentation', present)
+        self.assertNotIn("amproj_startDirectExport", present)
+
+        share_install = function_body(
+            "static void amproj_installShareExportHook",
+            "#if AMPROJ_DEBUG",
+        )
+        self.assertIn('objc_getClass("_TtC12AlightMotion7ShareNC")', share_install)
+        self.assertIn('NSSelectorFromString(@"onTapExport:")', share_install)
+        self.assertIn(
+            'method, (IMP)hooked_shareNCOnTapExport, 3, @"ShareNC.onTapExport"',
+            share_install,
+        )
+        install = function_body(
+            "static void amproj_installExportHooks",
+            "static void amproj_removeBootstrapObservers",
+        )
+        self.assertIn("amproj_installShareExportHook();", install)
+
+    def test_v44_direct_share_contains_only_generated_amproj_file(self):
+        item_source = source_body(
+            SOURCE, "@implementation AMProjActivityItemSource", "@end"
+        )
+        self.assertEqual(item_source.count("return self.fileURL;"), 2)
+
+        output = function_body(
+            "static NSURL* amproj_createOutputURL",
+            "static void amproj_finishDirectFailure",
+        )
+        self.assertIn('stringByAppendingPathExtension:@"amproj"', output)
+
+        direct_share = function_body(
+            "static void amproj_presentDirectShare",
+            "static void amproj_writeDirectArchive",
+        )
+        self.assertIn("item.fileURL = fileURL", direct_share)
+        self.assertIn(
+            "initWithActivityItems:@[item] applicationActivities:nil", direct_share
+        )
+        self.assertNotIn("UIImage", direct_share)
+        self.assertNotIn(".png", direct_share.lower())
+        self.assertNotIn("cloud", direct_share.lower())
+        self.assertNotRegex(direct_share.lower(), r"https?://|qr(?:code)?")
+
+    def test_v44_direct_export_failure_cannot_fall_back_to_native_export(self):
+        failure = function_body(
+            "static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error) {",
+            "// MARK: - Local .amproj import bridge",
+        )
+        self.assertEqual(failure.count("[alert addAction:"), 2)
+        self.assertIn('actionWithTitle:@"\u91cd\u8bd5"', failure)
+        self.assertIn('actionWithTitle:@"\u53d6\u6d88"', failure)
+        self.assertNotIn("fallbackAction", failure)
+        self.assertNotIn("\u4f7f\u7528\u539f\u7248\u4e8c\u7ef4\u7801", failure)
+        self.assertNotIn("orig_shareNCOnTapExport", failure)
 
     def assert_capture_short_circuits_original(
         self, signature: str, next_signature: str, native_imp_type: str
@@ -1545,9 +1638,15 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("late Swift callback", BRIDGE_SOURCE)
         self.assertIn("amproj_nativeBridgePoisoned ||", BRIDGE_SOURCE)
 
-    def test_native_bridge_is_locked_to_verified_am_v1_binary(self):
-        self.assertIn("4b, 0x22, 0xd4, 0x3f", BRIDGE_SOURCE)
-        self.assertIn("AMProjNativeImportEntry = 0x100266ee8ULL", BRIDGE_SOURCE)
+    def test_native_bridge_is_locked_to_verified_6255_binary(self):
+        self.assertIn("0x01, 0xb7, 0x30, 0x17", BRIDGE_SOURCE)
+        self.assertIn("AMProjNativeImportEntry = 0x100604ac4ULL", BRIDGE_SOURCE)
+        self.assertIn("Alight Motion 6.2.55 (862)", BRIDGE_SOURCE)
+        self.assertNotIn("AMProjNSStringToSwiftStringStub", BRIDGE_SOURCE)
+        self.assertNotIn("AMProjSwiftBridgeReleaseStub", BRIDGE_SOURCE)
+        self.assertNotIn("0x101fb678cULL", BRIDGE_SOURCE)
+        self.assertNotIn("0x101fbc1bcULL", BRIDGE_SOURCE)
+        self.assertIn("if (!bridge || !releaseBridge || !entry)", BRIDGE_SOURCE)
         self.assertIn("expectedPrologue", BRIDGE_SOURCE)
         self.assertIn("LC_UUID", BRIDGE_SOURCE)
         self.assertIn("memcmp(entry, expectedPrologue", BRIDGE_SOURCE)
@@ -2180,7 +2279,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # v40 accepts a verified complete template when this AM build does not
         # create a project row directly.
         self.assertIn("amproj_completePackageTransaction", verified_branch)
-        self.assertIn('AMProj v43 · 4/4', SOURCE)
+        self.assertIn('AMProj v44 · 4/4', SOURCE)
         self.assertIn('amproj_completePackageAsTemplate', verification)
         self.assertNotIn('amproj_beginTemplatePromotion(', verification)
         self.assertNotIn('amproj_beginSwiftUITemplatePromotion(', verification)
@@ -2198,7 +2297,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertIn("AMProj v43 · 4/4", SOURCE)
+        self.assertIn("AMProj v44 · 4/4", SOURCE)
 
     def test_project_verifier_uses_real_uikit_lists_and_persistence_evidence(self):
         self.assertNotIn('@"pCollectionView"', SOURCE)
@@ -2258,7 +2357,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v43 \\u00b7 E40", present)
+        self.assertIn("AMProj v44 \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),

@@ -6,11 +6,13 @@ SDK  = $(shell xcrun --sdk iphoneos --show-sdk-path)
 CC   = $(shell xcrun --sdk iphoneos -f clang)
 CFLAGS = -arch arm64 -dynamiclib -isysroot $(SDK) \
          -miphoneos-version-min=14.0 -fobjc-arc -O2
+LOADER_CFLAGS = -arch arm64 -dynamiclib -isysroot $(SDK) \
+                -miphoneos-version-min=14.0 -O2
 LDLIBS = -framework Foundation -framework UIKit -framework QuartzCore \
          -framework CoreGraphics -framework Photos \
          -framework UniformTypeIdentifiers -lz
 
-all: AMProjExport.dylib AMProjExportCloud.dylib AMProjExportDebug.dylib
+all: AMProjExport.dylib AMProjExportCloud.dylib AMProjExportDebug.dylib AMMeowLoader.dylib
 
 AMProjExport.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S
 	$(CC) $(CFLAGS) -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S $(LDLIBS)
@@ -24,5 +26,9 @@ AMProjExportDebug.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m 
 	$(CC) $(CFLAGS) -DAMPROJ_DEBUG=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMDebugTransport.m $(LDLIBS)
 	@ls -la $@
 
+AMMeowLoader.dylib: AMMeowLoader.c
+	$(CC) $(LOADER_CFLAGS) -Wall -Wextra -Werror -o $@ $< -install_name @rpath/AMMeowLoader.dylib
+	@ls -la $@
+
 clean:
-	rm -f AMProjExport.dylib AMProjExportCloud.dylib AMProjExportDebug.dylib
+	rm -f AMProjExport.dylib AMProjExportCloud.dylib AMProjExportDebug.dylib AMMeowLoader.dylib

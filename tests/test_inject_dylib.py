@@ -284,16 +284,16 @@ class PlistTests(unittest.TestCase):
                 result["UTExportedTypeDeclarations"][0]["UTTypeTagSpecification"]
                 ["public.filename-extension"],
             )
-            self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], False)
+            self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], True)
             self.assertIs(result["UISupportsDocumentBrowser"], False)
 
-    def test_copy_in_flags_are_forced_false_when_previously_true(self):
+    def test_provider_access_flags_are_canonicalized(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             app = Path(temp_dir)
             with (app / "Info.plist").open("wb") as file:
                 plistlib.dump(
                     {
-                        "LSSupportsOpeningDocumentsInPlace": True,
+                        "LSSupportsOpeningDocumentsInPlace": "YES",
                         "UISupportsDocumentBrowser": "YES",
                     },
                     file,
@@ -302,7 +302,7 @@ class PlistTests(unittest.TestCase):
             self.assertTrue(inject_dylib.patch_info_plist(app))
             with (app / "Info.plist").open("rb") as file:
                 result = plistlib.load(file)
-            self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], False)
+            self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], True)
             self.assertIs(result["UISupportsDocumentBrowser"], False)
 
     def test_xml_document_type_is_added_without_exporting_system_uti(self):
@@ -715,7 +715,7 @@ class InjectionTests(unittest.TestCase):
             with (result_app / "Info.plist").open("rb") as file:
                 info = plistlib.load(file)
             self.assertEqual(info["CFBundleIdentifier"], "com.example.fixture")
-            self.assertIs(info["LSSupportsOpeningDocumentsInPlace"], False)
+            self.assertIs(info["LSSupportsOpeningDocumentsInPlace"], True)
             self.assertIs(info["UISupportsDocumentBrowser"], False)
             self.assertNotIn(inject_dylib.SHARE_APP_GROUP_INFO_KEY, info)
             self.assertIs(

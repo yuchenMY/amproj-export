@@ -466,14 +466,16 @@ def patch_info_plist(
                 xml_document_type[key] = value
                 changed = True
 
-    for key in (
-        "LSSupportsOpeningDocumentsInPlace",
-        "UISupportsDocumentBrowser",
-    ):
-        # These must be real plist Booleans.  Copy-in delivery is what makes
-        # provider-owned QQ/Files URLs readable without a security scope.
-        if plist.get(key) is not False or not isinstance(plist.get(key), bool):
-            plist[key] = False
+    document_flags = {
+        # Provider copy-in is unreliable during a cold launch on iOS 26. Allow
+        # Files/QQ to hand the original document over with a security scope; the
+        # runtime still copies it synchronously into the app-owned import cache.
+        "LSSupportsOpeningDocumentsInPlace": True,
+        "UISupportsDocumentBrowser": False,
+    }
+    for key, value in document_flags.items():
+        if plist.get(key) is not value or not isinstance(plist.get(key), bool):
+            plist[key] = value
             changed = True
 
     if enable_debug_network:
@@ -1263,12 +1265,15 @@ def _validate_patched_info_plist(
         raise RuntimeError(
             "Info.plist public.xml document type must be Editor with Alternate rank"
         )
-    for key in (
-        "LSSupportsOpeningDocumentsInPlace",
-        "UISupportsDocumentBrowser",
-    ):
-        if plist.get(key) is not False or not isinstance(plist.get(key), bool):
-            raise RuntimeError(f"Info.plist {key} must be a Boolean false")
+    expected_document_flags = {
+        "LSSupportsOpeningDocumentsInPlace": True,
+        "UISupportsDocumentBrowser": False,
+    }
+    for key, value in expected_document_flags.items():
+        if plist.get(key) is not value or not isinstance(plist.get(key), bool):
+            raise RuntimeError(
+                f"Info.plist {key} must be a Boolean {str(value).lower()}"
+            )
     if expected_app_group_id is not None:
         if plist.get(SHARE_APP_GROUP_INFO_KEY) != expected_app_group_id:
             raise RuntimeError(
@@ -1721,7 +1726,7 @@ def build_argument_parser():
     parser.add_argument(
         "--bundle-version",
         type=_bundle_version,
-        help="set CFBundleVersion to a positive integer, for example 738",
+        help="set CFBundleVersion to a positive integer, for example 862",
     )
     parser.add_argument(
         "--share-extension",

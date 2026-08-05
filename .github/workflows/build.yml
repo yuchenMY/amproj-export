@@ -1,7 +1,7 @@
 name: Build AMProjExport dylibs
 
 env:
-  AMPROJ_RELEASE_VERSION: '43'
+  AMPROJ_RELEASE_VERSION: '44'
 
 on:
   push:
@@ -58,6 +58,12 @@ jobs:
               }
               assert not missing, f"{path} missing symbols: {sorted(missing)}"
               print(f"verified {path}: arm64 MH_DYLIB, {info['ncmds']} load commands")
+          loader = verify_dylib_architecture("AMProjExport/AMMeowLoader.dylib")
+          symbols = subprocess.check_output(
+              ["nm", "-gU", "AMProjExport/AMMeowLoader.dylib"], text=True
+          )
+          assert "_AMMeowLoaderInit" not in symbols
+          print(f"verified AMMeowLoader.dylib: arm64 MH_DYLIB, {loader['ncmds']} load commands")
           PY
 
       - name: Test streaming project archive writer
@@ -111,6 +117,7 @@ jobs:
               Path("AMProjExport/AMProjExport.dylib"),
               Path("AMProjExport/AMProjExportCloud.dylib"),
               Path("AMProjExport/AMProjExportDebug.dylib"),
+              Path("AMProjExport/AMMeowLoader.dylib"),
           )
           metadata = {
               "plugin_version": os.environ["AMPROJ_RELEASE_VERSION"],
@@ -139,3 +146,4 @@ jobs:
             AMProjExport/AMProjExport.dylib
             AMProjExport/AMProjExportCloud.dylib
             AMProjExport/AMProjExportDebug.dylib
+            AMProjExport/AMMeowLoader.dylib

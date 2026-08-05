@@ -47,7 +47,7 @@ FOUNDATION_EXPORT void AMProjCallNativePackageImport(
     uintptr_t swiftStringWord1,
     // The adapter maps this argument to the native entry's explicit x2.
     id storageReference,
-    // The clean AM_v1 continuation unconditionally dismisses this
+    // The verified 6.2.55 continuation unconditionally dismisses this
     // AMProgressAlert after status 4; callers must pass a non-nil instance.
     id progressOwner,
     void *completionFunction,

@@ -40,7 +40,8 @@
 #import "AMProjImportArchive.h"
 #import "AMProjNativeImportBridge.h"
 
-static NSString *const kAMProjPluginVersion = @"43";
+static NSString *const kAMProjPluginVersion = @"44";
+static const uint8_t AMProjExportOptionProjectPackage = 7;
 
 #if AMPROJ_DEBUG || AMPROJ_TELEMETRY
 #import "AMDebugTransport.h"
@@ -123,6 +124,14 @@ static void amproj_debugEvent(NSString *name, NSDictionary *fields) {
     (void)name;
     (void)fields;
 #endif
+}
+
+// Keep the two user-visible entry points diagnosable even when the telemetry
+// backend is not configured.  These messages are intentionally limited to
+// class names, selectors, and file extensions; they never log project bytes.
+static void amproj_logCriticalEvent(NSString *name, NSDictionary *fields) {
+    NSLog(@"[AMProjExport] %@ %@", name ?: @"event", fields ?: @{});
+    amproj_debugEvent(name, fields);
 }
 
 static void amproj_flushDebugEvents(void) {
@@ -555,14 +564,11 @@ static Ivar amproj_instanceIvar(id object, NSString *name) {
     return class_getInstanceVariable([object class], name.UTF8String);
 }
 
-static BOOL amproj_swiftIntegerIvar(id object, NSString *name, NSInteger *value) {
-    if (![name isEqualToString:@"selectedRow"]) return NO;
+static BOOL amproj_shareExportOptionID(id object, uint8_t *value) {
     if (![NSStringFromClass([object class]) containsString:@"ShareVC"]) return NO;
-    Ivar ivar = amproj_instanceIvar(object, name);
+    Ivar ivar = amproj_instanceIvar(object, @"selectedExportOptID");
     if (!ivar) return NO;
-    const char *type = ivar_getTypeEncoding(ivar);
-    if (type && type[0] && type[0] != 'q' && type[0] != 'Q') return NO;
-    NSInteger raw = 0;
+    uint8_t raw = 0;
     const uint8_t *address = (const uint8_t *)(__bridge const void *)object + ivar_getOffset(ivar);
     memcpy(&raw, address, sizeof(raw));
     if (value) *value = raw;
@@ -1966,20 +1972,6 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
 static id (*orig_initWithItems)(id, SEL, NSArray *, NSArray *) = NULL;
 static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
 static void (*orig_shareNCOnTapExport)(id, SEL, id) = NULL;
-static BOOL amproj_bypassPackagePresentation = NO;
-static NSUInteger amproj_bypassPackageGeneration = 0;
-
-static void amproj_allowOriginalPackagePresentation(void) {
-    amproj_bypassPackagePresentation = YES;
-    NSUInteger generation = ++amproj_bypassPackageGeneration;
-    amproj_debugEvent(@"direct.original_bypass", @{@"enabled": @YES});
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * 60 * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), ^{
-        if (amproj_bypassPackageGeneration == generation) {
-            amproj_bypassPackagePresentation = NO;
-        }
-    });
-}
 
 @interface AMProjActivityItemSource : NSObject <UIActivityItemSource>
 @property(nonatomic, strong) NSURL *fileURL;
@@ -2019,7 +2011,6 @@ static void amproj_allowOriginalPackagePresentation(void) {
 @property(nonatomic, copy) NSString *mode;
 @property(nonatomic, strong) NSURL *outputURL;
 @property(nonatomic, copy) NSString *projectTitle;
-@property(nonatomic, copy) void (^fallbackAction)(void);
 @end
 
 @implementation AMProjDirectRequest
@@ -2371,128 +2362,155 @@ static void amproj_writeDirectArchive(AMProjDirectRequest *request, NSData *xmlD
                                       NSURL *XMLURL, NSDictionary *expected,
                                       NSString *xmlSource) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *error = nil;
-        AMProjXMLProbe *validated = nil;
-        amproj_setPersistentStage(@"xml_validate");
-        if (!amproj_validateXMLAgainstScene(xmlData, expected, &validated, &error)) {
-            amproj_finishDirectFailure(request, error);
-            return;
-        }
-        amproj_setPersistentStage(@"resource_rewrite");
-        NSDictionary *prepared = amproj_collectResourcesAndRewriteXML(xmlData, XMLURL, &error);
-        if (!prepared) {
-            amproj_finishDirectFailure(request, error);
-            return;
-        }
-        NSData *rewrittenXML = prepared[@"xml"];
-        NSDictionary<NSString *, NSURL *> *resources = prepared[@"resources"];
-        if (!amproj_validateXMLAgainstScene(rewrittenXML, expected, NULL, &error)) {
-            amproj_finishDirectFailure(request, error);
-            return;
-        }
-        NSString *title = [expected[@"title"] length] ? expected[@"title"] : validated.title;
-        NSURL *outputURL = amproj_createOutputURL(title, &error);
-        NSDictionary<NSString *, NSNumber *> *zipMetrics = nil;
-        amproj_setPersistentStage(@"zip_write");
-        if (!outputURL || !AMProjZIPWriteProjectArchive(
-                outputURL, rewrittenXML, resources, &zipMetrics, &error)) {
-            amproj_finishDirectFailure(request, error ?: amproj_directError(42, @"Unable to write .amproj archive"));
-            return;
-        }
-        NSNumber *fileSize = nil;
-        [outputURL getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
-        amproj_debugEvent(@"direct.archive_ready", @{
-            @"xml_source": xmlSource ?: @"unknown",
-            @"xml_bytes": @(rewrittenXML.length),
-            @"resource_count": @(resources.count),
-            @"archive_bytes": fileSize ?: @0,
-            @"crc_verified": zipMetrics[@"crc_verified"] ?: @NO,
-            @"manifest_verified": zipMetrics[@"manifest_verified"] ?: @NO,
-            @"entry_count": zipMetrics[@"entry_count"] ?: @0,
-            @"filename": outputURL.lastPathComponent ?: @""
-        });
+        @try {
+            NSError *error = nil;
+            AMProjXMLProbe *validated = nil;
+            amproj_setPersistentStage(@"xml_validate");
+            if (!amproj_validateXMLAgainstScene(xmlData, expected, &validated, &error)) {
+                amproj_finishDirectFailure(request, error ?: amproj_directError(30, @"Project XML validation failed"));
+                return;
+            }
+            amproj_setPersistentStage(@"resource_rewrite");
+            NSDictionary *prepared = amproj_collectResourcesAndRewriteXML(xmlData, XMLURL, &error);
+            if (!prepared) {
+                amproj_finishDirectFailure(request, error ?: amproj_directError(22, @"Unable to collect project resources"));
+                return;
+            }
+            NSData *rewrittenXML = prepared[@"xml"];
+            NSDictionary<NSString *, NSURL *> *resources = prepared[@"resources"];
+            if (!amproj_validateXMLAgainstScene(rewrittenXML, expected, NULL, &error)) {
+                amproj_finishDirectFailure(request, error ?: amproj_directError(31, @"Rewritten XML validation failed"));
+                return;
+            }
+            NSString *title = [expected[@"title"] length] ? expected[@"title"] : validated.title;
+            NSURL *outputURL = amproj_createOutputURL(title, &error);
+            NSDictionary<NSString *, NSNumber *> *zipMetrics = nil;
+            amproj_setPersistentStage(@"zip_write");
+            if (!outputURL || !AMProjZIPWriteProjectArchive(
+                    outputURL, rewrittenXML, resources, &zipMetrics, &error)) {
+                amproj_finishDirectFailure(request, error ?: amproj_directError(42, @"Unable to write .amproj archive"));
+                return;
+            }
+            NSNumber *fileSize = nil;
+            [outputURL getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+            amproj_logCriticalEvent(@"direct.archive_ready", @{
+                @"xml_source": xmlSource ?: @"unknown",
+                @"xml_bytes": @(rewrittenXML.length),
+                @"resource_count": @(resources.count),
+                @"archive_bytes": fileSize ?: @0,
+                @"crc_verified": zipMetrics[@"crc_verified"] ?: @NO,
+                @"manifest_verified": zipMetrics[@"manifest_verified"] ?: @NO,
+                @"entry_count": zipMetrics[@"entry_count"] ?: @0,
+                @"filename": outputURL.lastPathComponent ?: @""
+            });
 #if AMPROJ_DEBUG
-        if (amproj_currentTransaction && amproj_captureCurrentTransaction) {
-            [[AMDebugTransport shared] uploadArtifactData:rewrittenXML name:@"scene.xml"
-                                                 mimeType:@"application/xml"
-                                              transaction:amproj_currentTransaction];
-            if (fileSize.unsignedLongLongValue <= 32ULL * 1024ULL * 1024ULL) {
-                NSData *archiveData = [NSData dataWithContentsOfURL:outputURL
-                                                            options:NSDataReadingMappedIfSafe error:nil];
-                if (archiveData) {
-                    [[AMDebugTransport shared] uploadArtifactData:archiveData
-                                                             name:outputURL.lastPathComponent
-                                                         mimeType:@"application/x-amproj"
-                                                      transaction:amproj_currentTransaction];
+            if (amproj_currentTransaction && amproj_captureCurrentTransaction) {
+                [[AMDebugTransport shared] uploadArtifactData:rewrittenXML name:@"scene.xml"
+                                                     mimeType:@"application/xml"
+                                                  transaction:amproj_currentTransaction];
+                if (fileSize.unsignedLongLongValue <= 32ULL * 1024ULL * 1024ULL) {
+                    NSData *archiveData = [NSData dataWithContentsOfURL:outputURL
+                                                                options:NSDataReadingMappedIfSafe error:nil];
+                    if (archiveData) {
+                        [[AMDebugTransport shared] uploadArtifactData:archiveData
+                                                                 name:outputURL.lastPathComponent
+                                                             mimeType:@"application/x-amproj"
+                                                          transaction:amproj_currentTransaction];
+                    }
                 }
             }
-        }
 #endif
-        amproj_presentDirectShare(request, outputURL);
+            amproj_presentDirectShare(request, outputURL);
+        } @catch (NSException *exception) {
+            NSString *reason = exception.reason.length ? exception.reason : @"Unexpected export exception";
+            amproj_logCriticalEvent(@"direct.archive_exception", @{
+                @"name": exception.name ?: @"NSException",
+                @"reason": reason
+            });
+            amproj_finishDirectFailure(request, amproj_directError(44, reason));
+        }
     });
 }
 
 static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
     if (amproj_directRequest != request) return;
-    amproj_setPersistentStage(@"build_enter");
-    if ([request.mode isEqualToString:@"placeholder"]) {
-        NSDate *now = NSDate.date;
-        amproj_writeDirectArchive(request, amproj_placeholderXML(), nil,
-            @{@"title": @"AMProj_Placeholder", @"width": @1280, @"height": @720,
-              @"layers": @0, @"layers_known": @YES, @"save_started": now}, @"placeholder");
-        return;
-    }
-    NSDate *saveStarted = NSDate.date;
-    NSDictionary *expected = @{
-        @"title": request.projectTitle ?: @"",
-        @"width": @0,
-        @"height": @0,
-        @"layers": @0,
-        @"layers_known": @NO,
-        @"save_started": saveStarted
-    };
-    amproj_setPersistentStage(@"path_scan");
-    NSArray<NSURL *> *paths = amproj_collectPathCandidates(@[]);
-    amproj_debugEvent(@"direct.scene_native_only", @{
-        @"holder": @"not_accessed",
-        @"scene": @"not_accessed",
-        @"title": expected[@"title"],
-        @"layers": expected[@"layers"],
-        @"path_candidates": @(paths.count)
-    });
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        amproj_setPersistentStage(@"native_xml_scan");
-        NSDictionary *native = amproj_selectNativeXML(paths, expected);
-        if (native) {
-            amproj_setPersistentStage(@"native_xml_found");
-            AMProjXMLProbe *probe = native[@"probe"];
-            NSDictionary *validatedExpected = @{
-                @"title": probe.title ?: request.projectTitle ?: @"",
-                @"width": @(probe.width),
-                @"height": @(probe.height),
-                @"layers": @(probe.layerCount),
-                @"layers_known": @YES,
-                @"save_started": saveStarted
-            };
-            amproj_debugEvent(@"direct.native_xml", @{
-                @"found": @YES,
-                @"path": [native[@"url"] lastPathComponent] ?: @"",
-                @"score": native[@"score"] ?: @0
-            });
-            amproj_writeDirectArchive(request, native[@"data"], native[@"url"], validatedExpected, @"native");
+    @try {
+        amproj_setPersistentStage(@"build_enter");
+        if ([request.mode isEqualToString:@"placeholder"]) {
+            NSDate *now = NSDate.date;
+            amproj_writeDirectArchive(request, amproj_placeholderXML(), nil,
+                @{@"title": @"AMProj_Placeholder", @"width": @1280, @"height": @720,
+                  @"layers": @0, @"layers_known": @YES, @"save_started": now}, @"placeholder");
             return;
         }
-        amproj_debugEvent(@"direct.native_xml", @{@"found": @NO});
-        amproj_finishDirectFailure(request,
-            amproj_directError(51, @"Unable to locate Alight Motion's saved project XML; no incomplete fallback package was created"));
-    });
+        NSDate *saveStarted = NSDate.date;
+        NSDictionary *expected = @{
+            @"title": request.projectTitle ?: @"",
+            @"width": @0,
+            @"height": @0,
+            @"layers": @0,
+            @"layers_known": @NO,
+            @"save_started": saveStarted
+        };
+        amproj_setPersistentStage(@"path_scan");
+        NSArray<NSURL *> *paths = amproj_collectPathCandidates(@[]);
+        amproj_logCriticalEvent(@"direct.scene_native_only", @{
+            @"holder": @"not_accessed",
+            @"scene": @"not_accessed",
+            @"title": expected[@"title"],
+            @"layers": expected[@"layers"],
+            @"path_candidates": @(paths.count)
+        });
+
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            @try {
+                amproj_setPersistentStage(@"native_xml_scan");
+                NSDictionary *native = amproj_selectNativeXML(paths, expected);
+                if (native) {
+                    amproj_setPersistentStage(@"native_xml_found");
+                    AMProjXMLProbe *probe = native[@"probe"];
+                    NSDictionary *validatedExpected = @{
+                        @"title": probe.title ?: request.projectTitle ?: @"",
+                        @"width": @(probe.width),
+                        @"height": @(probe.height),
+                        @"layers": @(probe.layerCount),
+                        @"layers_known": @YES,
+                        @"save_started": saveStarted
+                    };
+                    amproj_logCriticalEvent(@"direct.native_xml", @{
+                        @"found": @YES,
+                        @"path": [native[@"url"] lastPathComponent] ?: @"",
+                        @"score": native[@"score"] ?: @0
+                    });
+                    amproj_writeDirectArchive(request, native[@"data"], native[@"url"], validatedExpected, @"native");
+                    return;
+                }
+                amproj_logCriticalEvent(@"direct.native_xml", @{@"found": @NO});
+                amproj_finishDirectFailure(request,
+                    amproj_directError(51, @"Unable to locate Alight Motion's saved project XML; no incomplete fallback package was created"));
+            } @catch (NSException *exception) {
+                NSString *reason = exception.reason.length ? exception.reason : @"Unexpected project scan exception";
+                amproj_logCriticalEvent(@"direct.scan_exception", @{
+                    @"name": exception.name ?: @"NSException",
+                    @"reason": reason
+                });
+                amproj_finishDirectFailure(request, amproj_directError(52, reason));
+            }
+        });
+    } @catch (NSException *exception) {
+        NSString *reason = exception.reason.length ? exception.reason : @"Unexpected export setup exception";
+        amproj_logCriticalEvent(@"direct.setup_exception", @{
+            @"name": exception.name ?: @"NSException",
+            @"reason": reason
+        });
+        amproj_finishDirectFailure(request, amproj_directError(53, reason));
+    }
 }
 
 static void amproj_startDirectExport(UIViewController *presenter,
                                      UIViewController *originalController,
                                      BOOL animated, void (^completion)(void),
-                                     NSString *projectTitle, void (^fallbackAction)(void)) {
+                                     NSString *projectTitle) {
     if (amproj_directRequest) {
         if (completion) completion();
         return;
@@ -2503,18 +2521,17 @@ static void amproj_startDirectExport(UIViewController *presenter,
     request.animated = animated;
     request.originalCompletion = completion;
     request.projectTitle = projectTitle;
-    request.fallbackAction = fallbackAction;
     request.mode = amproj_exportMode();
     request.progressAlert = [UIAlertController alertControllerWithTitle:@"正在生成 .amproj"
         message:@"正在读取项目与媒体文件，请稍候…" preferredStyle:UIAlertControllerStyleAlert];
     amproj_directRequest = request;
     amproj_setPersistentStage(@"progress_present");
     amproj_beginDirectFlow();
-    amproj_debugEvent(@"direct.intercept", @{
+    amproj_logCriticalEvent(@"direct.intercept", @{
         @"presenter": NSStringFromClass([presenter class]) ?: @"",
         @"controller": NSStringFromClass([originalController class]) ?: @"",
         @"holder": @"not_accessed",
-        @"source": fallbackAction ? @"share_export_button" : @"package_presentation",
+        @"source": @"share_export_button",
         @"mode": request.mode ?: @""
     });
     orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
@@ -2536,7 +2553,6 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
         BOOL animated = request.animated;
         void (^originalCompletion)(void) = request.originalCompletion;
         NSString *projectTitle = request.projectTitle;
-        void (^fallbackAction)(void) = request.fallbackAction;
         void (^showFailure)(void) = ^{
             amproj_directRequest = nil;
             amproj_finishDirectFlow(@"failed");
@@ -2547,16 +2563,7 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
             [alert addAction:[UIAlertAction actionWithTitle:@"重试" style:UIAlertActionStyleDefault
                 handler:^(__unused UIAlertAction *action) {
                     amproj_startDirectExport(presenter, originalController, animated, originalCompletion,
-                                             projectTitle, fallbackAction);
-                }]];
-            [alert addAction:[UIAlertAction actionWithTitle:@"使用原版二维码"
-                style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-                    if (fallbackAction) {
-                        fallbackAction();
-                    } else {
-                        orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
-                                       originalController, animated, originalCompletion);
-                    }
+                                             projectTitle);
                 }]];
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
             orig_presentVC(presenter, @selector(presentViewController:animated:completion:), alert, YES, nil);
@@ -2900,7 +2907,7 @@ static void amproj_failImportedProjectVerification(
         @"error": failureReason
     });
     NSString *visible = [NSString stringWithFormat:
-        @"AMProj v43 · 导入未完成：%@。缓存包已保留，可重试。",
+        @"AMProj v44 · 导入未完成：%@。缓存包已保留，可重试。",
         failureReason];
     amproj_showImportStatusForTransaction(visible, YES, transactionID);
     amproj_presentImportErrorOfferingPicker(visible, NO);
@@ -3619,10 +3626,10 @@ static NSString* amproj_visibleImportFileError(NSError *error) {
     }
     NSString *diagnostics = amproj_copyDiagnosticSummary(error);
     if (diagnostics.length) {
-        return [NSString stringWithFormat:@"AMProj v43 \u00b7 %@ (E%ld \u00b7 %@)",
+        return [NSString stringWithFormat:@"AMProj v44 \u00b7 %@ (E%ld \u00b7 %@)",
                                           message, (long)error.code, diagnostics];
     }
-    return [NSString stringWithFormat:@"AMProj v43 \u00b7 %@ (E%ld)",
+    return [NSString stringWithFormat:@"AMProj v44 \u00b7 %@ (E%ld)",
                                       message, (long)error.code];
 }
 
@@ -4400,8 +4407,8 @@ static UIViewController* amproj_topViewController(UIViewController *controller) 
     BOOL heldSecurityScope = [selectedURL startAccessingSecurityScopedResource];
     BOOL XML = [selectedURL.pathExtension.lowercaseString isEqualToString:@"xml"];
     amproj_showImportStatus(
-        XML ? @"AMProj v43 · 1/3 已选择 XML 文件"
-            : @"AMProj v43 · 1/4 已选择 .amproj 文件", NO);
+        XML ? @"AMProj v44 · 1/3 已选择 XML 文件"
+            : @"AMProj v44 · 1/4 已选择 .amproj 文件", NO);
     dispatch_async(amproj_importInboxQueue(), ^{
         BOOL prepared = NO;
         AMProjIncomingURLResult result = amproj_handleIncomingProjectURLSafely(
@@ -4594,7 +4601,7 @@ static BOOL amproj_pauseForNativeBridgeRestart(NSString *transactionID,
     if (amproj_nativeBridgeRestartNoticeShown) return YES;
     amproj_nativeBridgeRestartNoticeShown = YES;
     NSString *message =
-        @"AMProj v43 \u539f\u751f\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u5b8c\u5168\u5173\u95ed\u5e76\u91cd\u65b0\u6253\u5f00 Alight Motion \u540e\u518d\u91cd\u8bd5\u3002\u5df2\u4fdd\u7559\u5bfc\u5165\u7f13\u5b58\u5305\u3002";
+        @"AMProj v44 \u539f\u751f\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u5b8c\u5168\u5173\u95ed\u5e76\u91cd\u65b0\u6253\u5f00 Alight Motion \u540e\u518d\u91cd\u8bd5\u3002\u5df2\u4fdd\u7559\u5bfc\u5165\u7f13\u5b58\u5305\u3002";
     amproj_debugEvent(@"import.local_bridge_requires_restart", @{
         @"transaction_id": transactionID ?: @"",
         @"filename": name ?: @"project.amproj",
@@ -4653,7 +4660,7 @@ static void amproj_prepareCopiedXML(NSURL *XMLURL, NSURL *directoryURL,
                                              sourceSnapshot, nil, nil, message);
                 if (!silentErrors) {
                     amproj_showImportStatusForTransaction(
-                        [NSString stringWithFormat:@"AMProj v43 · XML 校验失败：%@", message],
+                        [NSString stringWithFormat:@"AMProj v44 · XML 校验失败：%@", message],
                         YES, transactionID);
                     amproj_presentXMLImportError(message, YES);
                 }
@@ -4700,7 +4707,7 @@ static void amproj_prepareCopiedXML(NSURL *XMLURL, NSURL *directoryURL,
                                              sourceSnapshot, nil, nil, message);
                 if (!silentErrors) {
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v43 · XML 本地导入准备失败：%@", message];
+                        @"AMProj v44 · XML 本地导入准备失败：%@", message];
                     amproj_showImportStatusForTransaction(
                         visible, YES, transactionID);
                     amproj_presentXMLImportError(visible, YES);
@@ -4725,7 +4732,7 @@ static void amproj_prepareCopiedXML(NSURL *XMLURL, NSURL *directoryURL,
                 @"route": @"xml_minimal_package_offline"
             });
             amproj_showImportStatusForTransaction(
-                @"AMProj v43 · 2/3 XML 校验通过，正在本地导入模板",
+                @"AMProj v44 · 2/3 XML 校验通过，正在本地导入模板",
                 NO, transactionID);
             // Keep the XML bytes unchanged. In particular, do not call
             // AMProjNormalizeProjectArchive: adding type="project" would route
@@ -4747,7 +4754,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
         @autoreleasepool {
             @try {
             amproj_showImportStatusForTransaction(
-                @"AMProj v43 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u9879\u76ee\u5305",
+                @"AMProj v44 \u00b7 2/4 \u5df2\u590d\u5236\uff0c\u6b63\u5728\u5b8c\u6574\u6821\u9a8c\u9879\u76ee\u5305",
                 NO, transactionID);
 
             NSDictionary *validationMetrics = nil;
@@ -4903,7 +4910,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                         ? preparationError.localizedDescription
                         : @"\u9879\u76ee\u5305\u5b8c\u6574\u6027\u6821\u9a8c\u6216\u89c4\u8303\u5316\u5931\u8d25";
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v43 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u6821\u9a8c\uff1a%@", detail];
+                        @"AMProj v44 \u00b7 \u9879\u76ee\u5305\u65e0\u6cd5\u6821\u9a8c\uff1a%@", detail];
                     amproj_showImportStatusForTransaction(visible, YES, transactionID);
                     amproj_presentImportError(visible);
                 }
@@ -4977,7 +4984,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
             if (preparedTransaction) preparedTransaction.packageIntegrityVerified = YES;
             amproj_storeImportProjectTitle(transactionID, projectTitle);
             amproj_showImportStatusForTransaction(
-                @"AMProj v43 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165",
+                @"AMProj v44 \u00b7 2/4 \u9879\u76ee\u5305\u5b8c\u6574\u6821\u9a8c\u901a\u8fc7\uff0c\u6b63\u5728\u542f\u52a8\u672c\u5730\u5bfc\u5165",
                 NO, transactionID);
             // Preparation is intentionally UI-free. The package enters the
             // shared import lane first; only the activated owner may switch
@@ -5002,7 +5009,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                 });
                 if (!silentErrors) {
                     NSString *visible = [NSString stringWithFormat:
-                        @"AMProj v43 · 项目包处理异常：%@", reason];
+                        @"AMProj v44 · 项目包处理异常：%@", reason];
                     amproj_showImportStatusForTransaction(visible, YES, transactionID);
                     amproj_presentImportError(visible);
                 }
@@ -5084,8 +5091,8 @@ static void amproj_activateNextPendingImport(void) {
         transactionID, AMProjImportTransactionWaitingForProjects);
     amproj_showImportStatusForTransaction(
         transaction.kind == AMProjImportKindXMLTemplate
-            ? @"AMProj v43 \u00b7 2/3 \u6b63\u5728\u51c6\u5907\u672c\u5730 XML \u6a21\u677f\u5bfc\u5165"
-            : @"AMProj v43 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d",
+            ? @"AMProj v44 \u00b7 2/3 \u6b63\u5728\u51c6\u5907\u672c\u5730 XML \u6a21\u677f\u5bfc\u5165"
+            : @"AMProj v44 \u00b7 2/4 \u6b63\u5728\u5bfc\u5165\u5230\u5e95\u90e8\u201c\u9879\u76ee\u201d",
         NO, transactionID);
     amproj_captureActivatedPackageBaselines(
         amproj_pendingImportURL, amproj_pendingImportName, transactionID);
@@ -6473,7 +6480,7 @@ static void amproj_failActivatedPackageBaseline(NSString *transactionID,
     ++amproj_pendingImportGeneration;
     amproj_releaseImportTransaction(transactionID, NO);
     amproj_showImportStatusForTransaction(
-        [NSString stringWithFormat:@"AMProj v43 · %@", message], YES, transactionID);
+        [NSString stringWithFormat:@"AMProj v44 · %@", message], YES, transactionID);
     amproj_presentImportErrorForKind(
         [NSString stringWithFormat:@"%@，缓存文件已保留，可重试。", message],
         failedKind, NO);
@@ -6799,7 +6806,7 @@ static void amproj_finishXMLTemplateImportInternal(NSString *transactionID,
         });
         amproj_releaseImportTransaction(transactionID, YES);
         amproj_showImportStatusForTransaction(
-            @"AMProj v43 · 3/3 XML 已导入“您的模板”", NO, transactionID);
+            @"AMProj v44 · 3/3 XML 已导入“您的模板”", NO, transactionID);
     } else {
         amproj_retryImportURL = transaction.archiveURL;
         amproj_retryImportName = [transaction.name copy];
@@ -6808,7 +6815,7 @@ static void amproj_finishXMLTemplateImportInternal(NSString *transactionID,
                                      source, nil, nil, errorText);
         amproj_releaseImportTransaction(transactionID, NO);
         NSString *visible = [NSString stringWithFormat:
-            @"AMProj v43 · XML 导入未完成：%@", errorText];
+            @"AMProj v44 · XML 导入未完成：%@", errorText];
         amproj_showImportStatusForTransaction(visible, YES, transactionID);
         if (presentError) amproj_presentXMLImportError(visible, YES);
     }
@@ -7982,7 +7989,7 @@ static BOOL amproj_completePackageWithUnresolvedDestination(
     amproj_importVisibleStageRank = 0;
     amproj_visibleStatusTransactionID = nil;
     amproj_showImportStatusForTransaction(
-        @"AMProj v43 \u00b7 4/4 \u9879\u76ee\u5305\u5df2\u5b8c\u6210\u5bfc\u5165\uff0c\u8bf7\u5728\u9879\u76ee\u6216\u201c\u60a8\u7684\u6a21\u677f\u201d\u4e2d\u67e5\u770b",
+        @"AMProj v44 \u00b7 4/4 \u9879\u76ee\u5305\u5df2\u5b8c\u6210\u5bfc\u5165\uff0c\u8bf7\u5728\u9879\u76ee\u6216\u201c\u60a8\u7684\u6a21\u677f\u201d\u4e2d\u67e5\u770b",
         NO, transactionID);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
@@ -8053,7 +8060,7 @@ static BOOL amproj_completePackageAsTemplate(NSString *transactionID,
     amproj_visibleStatusTransactionID = nil;
     amproj_selectMainTab(YES, transactionID);
     amproj_showImportStatusForTransaction(
-        @"AMProj v43 · 4/4 完整项目包已导入“您的模板”",
+        @"AMProj v44 · 4/4 完整项目包已导入“您的模板”",
         NO, transactionID);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
@@ -8141,8 +8148,8 @@ static BOOL amproj_completePackageTransaction(NSString *transactionID,
     amproj_visibleStatusTransactionID = nil;
     amproj_selectMainTab(NO, transactionID);
     amproj_showImportStatusForTransaction(
-        promoted ? @"AMProj v43 · 4/4 项目已生成，临时模板已清理"
-                 : @"AMProj v43 · 4/4 项目已生成并出现在底部“项目”",
+        promoted ? @"AMProj v44 · 4/4 项目已生成，临时模板已清理"
+                 : @"AMProj v44 · 4/4 项目已生成并出现在底部“项目”",
         NO, transactionID);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
@@ -8173,7 +8180,7 @@ static void amproj_failTemplatePromotion(NSString *transactionID,
     });
     amproj_releaseImportTransaction(transactionID, NO);
     NSString *visible = [NSString stringWithFormat:
-        @"AMProj v43 · 无法从临时模板创建项目：%@", message];
+        @"AMProj v44 · 无法从临时模板创建项目：%@", message];
     amproj_showImportStatusForTransaction(visible, YES, transactionID);
     amproj_presentImportErrorOfferingPicker(visible, NO);
     amproj_resumeQueuedImports(@"template_promotion_failed");
@@ -8204,7 +8211,7 @@ static void amproj_finishTemplateCleanupFailure(NSString *transactionID,
     amproj_releaseImportTransaction(transactionID, YES);
     amproj_selectMainTab(NO, transactionID);
     NSString *visible = [NSString stringWithFormat:
-        @"AMProj v43 · 项目已创建，但临时模板清理失败：%@", message];
+        @"AMProj v44 · 项目已创建，但临时模板清理失败：%@", message];
     amproj_showImportStatusForTransaction(visible, YES, transactionID);
     amproj_presentImportErrorOfferingPicker(visible, NO);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
@@ -8297,7 +8304,7 @@ static void amproj_pollPromotedProject(NSString *transactionID,
                 @"row_count": @(rowCount)
             });
             amproj_showImportStatusForTransaction(
-                @"AMProj v43 · 项目已生成，正在清理临时模板",
+                @"AMProj v44 · 项目已生成，正在清理临时模板",
                 NO, transactionID);
             if (transaction.templateProbeCapability ==
                     AMProjTemplateProbeCapabilitySwiftUIUnavailable) {
@@ -8343,7 +8350,7 @@ static void amproj_beginTemplatePromotion(NSString *transactionID,
                 @"title": amproj_transactionExpectedTitle(transaction, name)
             });
             amproj_showImportStatusForTransaction(
-                @"AMProj v43 · 已保存完整包，正在从临时模板创建项目",
+                @"AMProj v44 · 已保存完整包，正在从临时模板创建项目",
                 NO, transactionID);
         }
         if (transaction.templateSelectionSent) return;
@@ -8428,7 +8435,7 @@ static void amproj_beginTemplatePromotion(NSString *transactionID,
             return;
         }
         amproj_showImportStatusForTransaction(
-            @"AMProj v43 · 3/4 正在创建底部“项目”",
+            @"AMProj v44 · 3/4 正在创建底部“项目”",
             NO, transactionID);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
@@ -8461,7 +8468,7 @@ static void amproj_beginSwiftUITemplatePromotion(NSString *transactionID,
                 @"route": @"swiftui_accessibility"
             });
             amproj_showImportStatusForTransaction(
-                @"AMProj v43 · 检测到临时模板，正在创建底部“项目”",
+                @"AMProj v44 · 检测到临时模板，正在创建底部“项目”",
                 NO, transactionID);
         }
         if (transaction.templateSelectionSent) return;
@@ -8567,7 +8574,7 @@ static void amproj_beginSwiftUITemplatePromotion(NSString *transactionID,
             @"target": NSStringFromClass([target class]) ?: @""
         });
         amproj_showImportStatusForTransaction(
-            @"AMProj v43 · 3/4 正在创建底部“项目”",
+            @"AMProj v44 · 3/4 正在创建底部“项目”",
             NO, transactionID);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
@@ -9074,7 +9081,7 @@ static BOOL amproj_completeNativeXMLTemplateImport(
     amproj_visibleStatusTransactionID = nil;
     amproj_selectMainTab(YES, transactionID);
     amproj_showImportStatusForTransaction(
-        @"AMProj v43 · 3/3 XML 已离线导入“您的模板”",
+        @"AMProj v44 · 3/3 XML 已离线导入“您的模板”",
         NO, transactionID);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
@@ -9133,7 +9140,7 @@ static void amproj_failNativeXMLTemplateImport(
     amproj_importVisibleStageRank = 0;
     amproj_visibleStatusTransactionID = nil;
     NSString *visible = [NSString stringWithFormat:
-        @"AMProj v43 · XML 本地导入未完成：%@", message];
+        @"AMProj v44 · XML 本地导入未完成：%@", message];
     amproj_showImportStatusForTransaction(visible, YES, transactionID);
     amproj_presentXMLImportError(visible, YES);
     amproj_resumeQueuedImports(@"xml_native_template_failed");
@@ -9636,7 +9643,7 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
                     @"verifying_xml_template", activeTransaction.source,
                     nil, @4, nil);
                 amproj_showImportStatusForTransaction(
-                    @"AMProj v43 · 2/3 本地导入完成，正在确认模板条目",
+                    @"AMProj v44 · 2/3 本地导入完成，正在确认模板条目",
                     NO, transactionID);
                 amproj_verifyNativeXMLTemplateImport(
                     verificationGeneration,
@@ -9648,7 +9655,7 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
                                          amproj_importTransactionForID(transactionID).fingerprint,
                                          @"verifying_persistence", nil, nil, @4, nil);
             amproj_showImportStatusForTransaction(
-                @"AMProj v43 · 原生回调完成，正在确认项目或完整模板已经落库",
+                @"AMProj v44 · 原生回调完成，正在确认项目或完整模板已经落库",
                 NO, transactionID);
             amproj_scheduleImportPersistenceProbe(
                 transactionID, @"native_completion", ^(BOOL persistenceVerified) {
@@ -9696,8 +9703,8 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
                     : @"AM \u672c\u5730\u9879\u76ee\u5305\u5bfc\u5165\u5931\u8d25");
             NSString *visible = [NSString stringWithFormat:
                 failedKind == AMProjImportKindXMLTemplate
-                    ? @"AMProj v43 · 无法本地导入 XML：%@"
-                    : @"AMProj v43 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u9879\u76ee\u5305\uff1a%@",
+                    ? @"AMProj v44 · 无法本地导入 XML：%@"
+                    : @"AMProj v44 \u00b7 \u65e0\u6cd5\u5bfc\u5165\u9879\u76ee\u5305\uff1a%@",
                 detail];
             amproj_showImportStatusForTransaction(visible, YES, transactionID);
             if (![error.userInfo[@"AMProjNativeAlertPresented"] boolValue]) {
@@ -9902,8 +9909,8 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                        generation == amproj_activeNativeImportGeneration) {
                 amproj_showImportStatusForTransaction(
                     dispatchTransaction.kind == AMProjImportKindXMLTemplate
-                        ? @"AMProj v43 · 2/3 正在离线解包 XML 模板"
-                        : @"AMProj v43 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u9879\u76ee\u6216\u6a21\u677f",
+                        ? @"AMProj v44 · 2/3 正在离线解包 XML 模板"
+                        : @"AMProj v44 \u00b7 3/4 AM \u6b63\u5728\u89e3\u5305\u5e76\u5199\u5165\u9879\u76ee\u6216\u6a21\u677f",
                     NO, transactionID);
                 amproj_debugEvent(@"import.local_bridge_started", @{
                     @"success": @YES,
@@ -9938,7 +9945,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                 @"bridge_available": @NO
             });
             amproj_showImportStatusForTransaction(
-                @"AMProj v43 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea",
+                @"AMProj v44 \u00b7 AM \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u5c1a\u672a\u5c31\u7eea",
                 YES, transactionID);
             amproj_presentImportErrorOfferingPicker(
                 @"\u9879\u76ee\u5305\u5df2\u590d\u5236\u5e76\u6821\u9a8c\u901a\u8fc7\uff0c\u4f46 Alight Motion \u672c\u5730\u9879\u76ee\u5bfc\u5165\u5668\u672a\u80fd\u5c31\u7eea\u3002\u672c\u6b21\u6ca1\u6709\u56de\u9000\u5230\u4efb\u4f55\u4e0a\u4f20\u5165\u53e3\u3002",
@@ -10288,7 +10295,7 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
             });
             if (!silentErrors) {
                 amproj_showImportStatusForTransaction(
-                    @"AMProj v43 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25",
+                    @"AMProj v44 \u00b7 \u521b\u5efa\u5bfc\u5165\u7f13\u5b58\u5931\u8d25",
                     YES, transactionID);
                 amproj_presentImportErrorForKind(
                     @"无法创建导入缓存，请检查设备剩余空间后重试。",
@@ -10465,17 +10472,17 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
         });
         if (importKind == AMProjImportKindXMLTemplate) {
             amproj_showImportStatusForTransaction(
-                @"AMProj v43 · 1/3 已收到 XML 文件", NO, transactionID);
+                @"AMProj v44 · 1/3 已收到 XML 文件", NO, transactionID);
             amproj_prepareCopiedXML(
                 destination, directory, originalName, source, silentErrors, transactionID);
             if (prepared) *prepared = YES;
             return AMProjIncomingURLAccepted;
         }
         amproj_showImportStatusForTransaction(
-            @"AMProj v43 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587件",
+            @"AMProj v44 \u00b7 1/4 \u5df2\u6536\u5230 .amproj \u6587件",
             NO, transactionID);
         amproj_showImportStatusForTransaction(
-            @"AMProj v43 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305",
+            @"AMProj v44 \u00b7 2/4 \u5df2\u590d\u5236\u9879\u76ee\u5305",
             NO, transactionID);
         amproj_prepareCopiedArchive(
             destination, directory, originalName, source, silentErrors, transactionID);
@@ -11042,6 +11049,15 @@ static BOOL amproj_captureSystemProjectURL(NSURL *URL, NSString *source,
     if (heldSecurityScope) options[@"AMProjAlreadyScoped"] = @YES;
     AMProjImportKind importKind = amproj_importKindForURL(URL, options);
 
+    amproj_logCriticalEvent(@"import.capture", @{
+        @"source": source ?: @"system_callback",
+        @"extension": URL.pathExtension.lowercaseString ?: @"",
+        @"scheme": URL.scheme ?: @"",
+        @"inbox": @(stableInboxURL),
+        @"security_scope": @(heldSecurityScope),
+        @"kind": importKind == AMProjImportKindXMLTemplate ? @"xml" : @"amproj"
+    });
+
     NSString *sourceSnapshot = [source copy] ?: @"system_callback";
     NSDictionary *optionsSnapshot = [options copy];
     void (^capture)(void) = ^{
@@ -11094,6 +11110,11 @@ static BOOL amproj_captureSystemProjectURL(NSURL *URL, NSString *source,
 
 static BOOL hooked_applicationOpenURL(id self, SEL _cmd, UIApplication *application,
                                       NSURL *URL, NSDictionary *options) {
+    amproj_logCriticalEvent(@"import.open_url_callback", @{
+        @"delegate": NSStringFromClass([self class]) ?: @"",
+        @"extension": URL.pathExtension.lowercaseString ?: @"",
+        @"scheme": URL.scheme ?: @""
+    });
     if (amproj_handleImportCommandURL(URL, @"application_open_url_command")) return YES;
     if (amproj_captureSystemProjectURL(URL, @"application_open_url", options)) {
         return YES;
@@ -11609,6 +11630,11 @@ static BOOL hooked_applicationContinueActivity(id self, SEL _cmd, UIApplication 
                                                  id restorationHandler) {
     NSURL *URL = amproj_projectURLFromUserActivity(activity);
     NSDictionary *options = amproj_projectOptionsFromUserActivity(activity);
+    amproj_logCriticalEvent(@"import.activity_callback", @{
+        @"delegate": NSStringFromClass([self class]) ?: @"",
+        @"activity_type": activity.activityType ?: @"",
+        @"extension": URL.pathExtension.lowercaseString ?: @""
+    });
     if (amproj_handleImportCommandURL(URL, @"continue_user_activity_command")) return YES;
     if (amproj_captureSystemProjectURL(URL, @"continue_user_activity", options)) {
         return YES;
@@ -11635,6 +11661,10 @@ static BOOL hooked_applicationContinueActivity(id self, SEL _cmd, UIApplication 
 
 static BOOL hooked_applicationHandleOpenURL(id self, SEL _cmd,
                                              UIApplication *application, NSURL *URL) {
+    amproj_logCriticalEvent(@"import.handle_open_url_callback", @{
+        @"delegate": NSStringFromClass([self class]) ?: @"",
+        @"extension": URL.pathExtension.lowercaseString ?: @""
+    });
     if (amproj_handleImportCommandURL(URL, @"application_handle_open_url_command")) return YES;
     if (amproj_captureSystemProjectURL(URL, @"application_handle_open_url", nil)) {
         return YES;
@@ -11662,6 +11692,11 @@ static BOOL hooked_applicationHandleOpenURL(id self, SEL _cmd,
 static BOOL hooked_applicationLegacyOpenURL(id self, SEL _cmd, UIApplication *application,
                                             NSURL *URL, NSString *sourceApplication,
                                             id annotation) {
+    amproj_logCriticalEvent(@"import.legacy_open_url_callback", @{
+        @"delegate": NSStringFromClass([self class]) ?: @"",
+        @"extension": URL.pathExtension.lowercaseString ?: @"",
+        @"source_application": sourceApplication ?: @""
+    });
     NSDictionary *options = sourceApplication.length
         ? @{@"source_application": sourceApplication} : nil;
     if (amproj_handleImportCommandURL(URL, @"application_legacy_open_url_command")) return YES;
@@ -11690,6 +11725,10 @@ static BOOL hooked_applicationLegacyOpenURL(id self, SEL _cmd, UIApplication *ap
 
 static void hooked_sceneOpenURLContexts(id self, SEL _cmd, UIScene *scene,
                                         NSSet *URLContexts) {
+    amproj_logCriticalEvent(@"import.scene_callback", @{
+        @"delegate": NSStringFromClass([self class]) ?: @"",
+        @"context_count": @(URLContexts.count)
+    });
     IMP original = amproj_sceneOpenURLForwardDepth
         ? amproj_originalHookForReceiverSkippingExact(
               amproj_sceneOpenURLHooks,
@@ -11792,7 +11831,7 @@ static void hooked_projectsImportAlertViewDidLoad(id self, SEL _cmd) {
     });
     if (recognizedQueuedPackage) {
         amproj_showImportStatus(
-            @"AMProj v43 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165", NO);
+            @"AMProj v44 \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165", NO);
     }
 }
 
@@ -11810,7 +11849,7 @@ static void hooked_projectsImportAlertOnPressImport(id self, SEL _cmd, id sender
     });
     if (tracked) {
         amproj_showImportStatus(
-            @"AMProj v43 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u9879\u76ee\u5305", NO);
+            @"AMProj v44 \u00b7 AM \u6b63\u5728\u5bfc\u5165\u9879\u76ee\u5305", NO);
     }
     if (orig_projectsImportAlertOnPressImport) {
         orig_projectsImportAlertOnPressImport(self, _cmd, sender);
@@ -13572,30 +13611,45 @@ static NSString* amproj_currentProjectTitle(UIViewController *shareController) {
 }
 
 static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
+    // ShareNC is a UIKit action and should only be redirected from the main
+    // thread.  Calling the Swift navigation stack from a background callback
+    // is unsafe on 6.2.55 and can turn a harmless export tap into a crash.
+    if (![NSThread isMainThread]) {
+        if (orig_shareNCOnTapExport) orig_shareNCOnTapExport(self, _cmd, sender);
+        return;
+    }
     UIViewController *shareController = [self isKindOfClass:UIViewController.class] ? self : nil;
     UIViewController *contentController = [self isKindOfClass:UINavigationController.class] ?
         ((UINavigationController *)self).topViewController : nil;
-    NSInteger selectedRow = NSNotFound;
-    BOOL hasSelectedRow = amproj_swiftIntegerIvar(contentController, @"selectedRow", &selectedRow);
-    BOOL isProjectPackage = hasSelectedRow && selectedRow == 1;
+    if (!contentController && [self isKindOfClass:UIViewController.class]) {
+        contentController = (UIViewController *)self;
+    }
+    uint8_t selectedExportOption = UINT8_MAX;
+    BOOL hasSelectedExportOption =
+        amproj_shareExportOptionID(contentController, &selectedExportOption);
+    BOOL isProjectPackage = hasSelectedExportOption &&
+        selectedExportOption == AMProjExportOptionProjectPackage;
     NSString *mode = amproj_exportMode();
-    amproj_debugEvent(@"direct.export_button", @{
+    amproj_logCriticalEvent(@"direct.export_button", @{
         @"mode": mode ?: @"",
-        @"selected_row": hasSelectedRow ? @(selectedRow) : @(-1),
+        @"selected_export_option": hasSelectedExportOption ? @(selectedExportOption) : @(-1),
         @"package": @(isProjectPackage),
         @"controller": contentController ? NSStringFromClass(contentController.class) : @"",
         @"holder": @"not_accessed"
     });
-    if (!isProjectPackage || [mode isEqualToString:@"observe"] || !shareController) {
-        orig_shareNCOnTapExport(self, _cmd, sender);
+    if (!isProjectPackage || [mode isEqualToString:@"observe"] || !shareController ||
+        !orig_shareNCOnTapExport || !orig_presentVC) {
+        if (isProjectPackage && !orig_presentVC) {
+            amproj_logCriticalEvent(@"direct.export_unavailable", @{
+                @"reason": @"presentation_hook_missing",
+                @"controller": NSStringFromClass([shareController class]) ?: @""
+            });
+        }
+        if (orig_shareNCOnTapExport) orig_shareNCOnTapExport(self, _cmd, sender);
         return;
     }
     NSString *title = amproj_currentProjectTitle(shareController);
-    void (^fallbackAction)(void) = ^{
-        amproj_allowOriginalPackagePresentation();
-        orig_shareNCOnTapExport(self, _cmd, sender);
-    };
-    amproj_startDirectExport(shareController, nil, YES, nil, title, fallbackAction);
+    amproj_startDirectExport(shareController, nil, YES, nil, title);
 }
 
 static BOOL amproj_isNativeImportFailureAlert(UIViewController *controller,
@@ -13943,7 +13997,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             amproj_importDispatchCoolingDown = NO;
         }
         amproj_showImportStatus([NSString stringWithFormat:
-            @"AMProj v43 \u00b7 E40 \u00b7 %@", failureDescription], YES);
+            @"AMProj v44 \u00b7 E40 \u00b7 %@", failureDescription], YES);
         amproj_flushDebugEvents();
         if (!bridgeHandled) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
@@ -13954,17 +14008,15 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
 
     NSString *mode = amproj_exportMode();
-    if (amproj_bypassPackagePresentation && amproj_isSharePackageController(controller)) {
-        amproj_bypassPackagePresentation = NO;
-        amproj_debugEvent(@"direct.original_bypass", @{@"consumed": @YES});
-        orig_presentVC(self, _cmd, controller, animated, completion);
-        return;
-    }
-    if (amproj_isSharePackageController(controller) &&
-        ![mode isEqualToString:@"observe"]) {
-        amproj_startDirectExport(self, controller, animated, completion,
-                                 nil, nil);
-        return;
+    // ShareProjectPackageVC is a normal 6.2.55 navigation page, not an export
+    // action. Only the semantic ShareNC project-package action above may start
+    // direct .amproj generation; class-name presentation interception remains
+    // permanently disabled.
+    if (amproj_isSharePackageController(controller)) {
+        amproj_debugEvent(@"direct.native_package_presentation", @{
+            @"mode": mode ?: @"",
+            @"controller": NSStringFromClass(controller.class) ?: @""
+        });
     }
 
     BOOL isActivity = [controller isKindOfClass:[UIActivityViewController class]];
@@ -14583,6 +14635,55 @@ static BOOL amproj_installColdLaunchHook(void) {
     return willFinishInstalled && didFinishInstalled;
 }
 
+// Firebase and other SDKs may replace the concrete delegate with a proxy
+// subclass after the image constructor runs.  Keep the declared AppDelegate
+// hook above, but also hook that live proxy once UIApplication has a delegate.
+// This is limited to the two launch selectors and uses the same tracked
+// original table, so forwarding remains stable across repeated installs.
+static BOOL amproj_installRuntimeColdLaunchHook(void) {
+    id delegate = UIApplication.sharedApplication.delegate;
+    Class runtimeClass = delegate ? object_getClass(delegate) : Nil;
+    Class declaredClass = amproj_declaredAppDelegateClass();
+    if (!runtimeClass || runtimeClass == declaredClass) return NO;
+
+    SEL willFinishSelector = @selector(application:willFinishLaunchingWithOptions:);
+    SEL didFinishSelector = @selector(application:didFinishLaunchingWithOptions:);
+    if (!class_getInstanceMethod(runtimeClass, willFinishSelector)) {
+        struct objc_method_description description = protocol_getMethodDescription(
+            @protocol(UIApplicationDelegate), willFinishSelector, NO, YES);
+        class_addMethod(runtimeClass, willFinishSelector,
+                        (IMP)hooked_applicationWillFinish,
+                        description.types ?: "B32@0:8@16@24");
+    }
+    if (!class_getInstanceMethod(runtimeClass, didFinishSelector)) {
+        struct objc_method_description description = protocol_getMethodDescription(
+            @protocol(UIApplicationDelegate), didFinishSelector, NO, YES);
+        class_addMethod(runtimeClass, didFinishSelector,
+                        (IMP)hooked_applicationDidFinish,
+                        description.types ?: "B32@0:8@16@24");
+    }
+
+    BOOL willChanged = NO;
+    BOOL willInstalled = amproj_installTrackedHook(
+        runtimeClass, willFinishSelector, (IMP)hooked_applicationWillFinish, 4,
+        amproj_willFinishHooks,
+        sizeof(amproj_willFinishHooks) / sizeof(amproj_willFinishHooks[0]),
+        &willChanged);
+    BOOL didChanged = NO;
+    BOOL didInstalled = amproj_installTrackedHook(
+        runtimeClass, didFinishSelector, (IMP)hooked_applicationDidFinish, 4,
+        amproj_didFinishHooks,
+        sizeof(amproj_didFinishHooks) / sizeof(amproj_didFinishHooks[0]),
+        &didChanged);
+    amproj_logCriticalEvent(@"import.runtime_cold_launch_hook", @{
+        @"class": NSStringFromClass(runtimeClass) ?: @"",
+        @"will_finish": @(willInstalled),
+        @"did_finish": @(didInstalled),
+        @"changed": @(willChanged || didChanged)
+    });
+    return willInstalled || didInstalled;
+}
+
 static BOOL amproj_installDeclaredURLHooks(void) {
     Class cls = amproj_declaredAppDelegateClass();
     if (!cls) return NO;
@@ -14727,6 +14828,7 @@ static void amproj_installSceneImportHook(id sceneDelegate) {
 
 static void amproj_installImportHook(void) {
     (void)amproj_installColdLaunchHook();
+    (void)amproj_installRuntimeColdLaunchHook();
     (void)amproj_installDeclaredURLHooks();
     // NSXMLParser is used by AM's Swift importer on the same main-thread
     // transaction. A process-wide parser swizzle can change delegate timing
@@ -14783,6 +14885,14 @@ static void amproj_installImportHook(void) {
                 @"legacy_open_url": @(legacyInstalled)
             });
         }
+        amproj_logCriticalEvent(@"import.hook_state", @{
+            @"class": NSStringFromClass(cls) ?: @"",
+            @"runtime_delegate": @(cls == runtimeClass),
+            @"open_url": @(openInstalled),
+            @"continue_activity": @(activityInstalled),
+            @"handle_open_url": @(handleInstalled),
+            @"legacy_open_url": @(legacyInstalled)
+        });
     }
 
     // The legacy ProjectsImportAlert path is intentionally not installed.
@@ -14796,14 +14906,18 @@ static void amproj_installImportHook(void) {
 }
 
 static void amproj_installShareExportHook(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
+    static BOOL installed = NO;
+    static NSObject *lock = nil;
+    static dispatch_once_t lockOnce;
+    dispatch_once(&lockOnce, ^{ lock = [NSObject new]; });
+    @synchronized (lock) {
+        if (installed) return;
         Class shareClass = NSClassFromString(@"AlightMotion.ShareNC");
         if (!shareClass) shareClass = objc_getClass("_TtC12AlightMotion7ShareNC");
         SEL selector = NSSelectorFromString(@"onTapExport:");
         Method method = class_getInstanceMethod(shareClass, selector);
         if (!method) {
-            amproj_debugEvent(@"share_export.hook", @{
+            amproj_logCriticalEvent(@"share_export.hook", @{
                 @"installed": @NO,
                 @"class": shareClass ? NSStringFromClass(shareClass) : @"",
                 @"reason": shareClass ? @"selector_missing" : @"class_missing"
@@ -14812,12 +14926,17 @@ static void amproj_installShareExportHook(void) {
         }
         IMP previous = amproj_installMethodHook(
             method, (IMP)hooked_shareNCOnTapExport, 3, @"ShareNC.onTapExport");
-        if (previous) orig_shareNCOnTapExport = (void *)previous;
-        amproj_debugEvent(@"share_export.hook", @{
-            @"installed": @(previous != NULL),
+        if (previous) {
+            orig_shareNCOnTapExport = (void *)previous;
+            installed = YES;
+        } else if (method_getImplementation(method) == (IMP)hooked_shareNCOnTapExport) {
+            installed = orig_shareNCOnTapExport != NULL;
+        }
+        amproj_logCriticalEvent(@"share_export.hook", @{
+            @"installed": @(installed),
             @"class": NSStringFromClass(shareClass) ?: @""
         });
-    });
+    }
 }
 
 #if AMPROJ_DEBUG
@@ -14870,6 +14989,15 @@ static void amproj_installExportHooks(void) {
         NSLog(@"[AMProjExport] Installing export hooks after app launch");
         amproj_installPresentationHook();
         amproj_installShareExportHook();
+        // ShareNC is a Swift storyboard class and may not be registered when
+        // the first bootstrap callback fires. Retry after the scene has had a
+        // chance to load it; the hook itself is idempotent once installed.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ amproj_installShareExportHook(); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ amproj_installShareExportHook(); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ amproj_installShareExportHook(); });
 
         @try {
             Method method = class_getInstanceMethod(
@@ -15069,7 +15197,7 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                 if (phase.length && ![phase isEqualToString:@"completed"] &&
                     ![phase isEqualToString:@"failed"]) {
                     amproj_showImportStatus([NSString stringWithFormat:
-                        @"AMProj v43 · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
+                        @"AMProj v44 · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
                         interruptedStage], YES);
                 }
             }
@@ -15106,11 +15234,11 @@ __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
 #if AMPROJ_DEBUG
-        NSLog(@"[AMProjExport] ===== Loading v43-debug =====");
+        NSLog(@"[AMProjExport] ===== Loading v44-debug =====");
 #elif AMPROJ_TELEMETRY
-        NSLog(@"[AMProjExport] ===== Loading v43-cloud =====");
+        NSLog(@"[AMProjExport] ===== Loading v44-cloud =====");
 #else
-        NSLog(@"[AMProjExport] ===== Loading v43 =====");
+        NSLog(@"[AMProjExport] ===== Loading v44 =====");
 #endif
 
         // ObjC classes are registered before image constructors. Installing only
