@@ -97,6 +97,8 @@ static dispatch_queue_t amproj_importInboxQueue(void);
 static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID);
 static void amproj_installImportHook(void);
 static Class amproj_declaredAppDelegateClass(void);
+static void amproj_installShareExportHook(void);
+static void amproj_installNavigationExportHook(void);
 static NSString* amproj_importedFontFilename(NSString *reference);
 static NSDictionary* amproj_captureImportPersistenceSnapshot(void);
 static void amproj_storeImportProjectTitle(NSString *transactionID,
@@ -565,11 +567,14 @@ static Ivar amproj_instanceIvar(id object, NSString *name) {
 }
 
 static BOOL amproj_shareExportOptionID(id object, uint8_t *value) {
-    if (![NSStringFromClass([object class]) containsString:@"ShareVC"]) return NO;
+    if (!object) return NO;
     Ivar ivar = amproj_instanceIvar(object, @"selectedExportOptID");
     if (!ivar) return NO;
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    size_t instanceSize = class_getInstanceSize([object class]);
+    if (offset < 0 || (size_t)offset + sizeof(uint8_t) > instanceSize) return NO;
     uint8_t raw = 0;
-    const uint8_t *address = (const uint8_t *)(__bridge const void *)object + ivar_getOffset(ivar);
+    const uint8_t *address = (const uint8_t *)(__bridge const void *)object + offset;
     memcpy(&raw, address, sizeof(raw));
     if (value) *value = raw;
     return YES;
@@ -1972,6 +1977,7 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
 static id (*orig_initWithItems)(id, SEL, NSArray *, NSArray *) = NULL;
 static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
 static void (*orig_shareNCOnTapExport)(id, SEL, id) = NULL;
+static void (*orig_navigationPush)(id, SEL, UIViewController *, BOOL) = NULL;
 
 @interface AMProjActivityItemSource : NSObject <UIActivityItemSource>
 @property(nonatomic, strong) NSURL *fileURL;
@@ -2586,6 +2592,10 @@ typedef BOOL (*AMProjApplicationContinueActivityIMP)(id, SEL, UIApplication *,
 typedef BOOL (*AMProjApplicationHandleOpenURLIMP)(id, SEL, UIApplication *, NSURL *);
 typedef BOOL (*AMProjApplicationLegacyOpenURLIMP)(id, SEL, UIApplication *, NSURL *,
                                                   NSString *, id);
+typedef UISceneConfiguration *(*AMProjApplicationConfigurationForConnectingIMP)(
+    id, SEL, UIApplication *, UISceneSession *, UISceneConnectionOptions *);
+typedef void (*AMProjSceneWillConnectIMP)(id, SEL, UIScene *, UISceneSession *,
+                                          UISceneConnectionOptions *);
 typedef void (*AMProjSceneOpenURLContextsIMP)(id, SEL, UIScene *, NSSet *);
 
 @interface AMProjImportPickerDelegate : NSObject <UIDocumentPickerDelegate>
@@ -2603,6 +2613,8 @@ static AMProjTrackedHook amproj_didFinishHooks[12] = {0};
 static AMProjTrackedHook amproj_continueActivityHooks[12] = {0};
 static AMProjTrackedHook amproj_handleOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_legacyOpenURLHooks[12] = {0};
+static AMProjTrackedHook amproj_configurationHooks[12] = {0};
+static AMProjTrackedHook amproj_sceneWillConnectHooks[12] = {0};
 static AMProjTrackedHook amproj_sceneOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateStartHooks[8] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateEndHooks[8] = {0};
@@ -2862,6 +2874,8 @@ static __thread NSUInteger amproj_activityForwardDepth = 0;
 static __thread NSUInteger amproj_willFinishForwardDepth = 0;
 static __thread NSUInteger amproj_didFinishForwardDepth = 0;
 static __thread NSUInteger amproj_legacyOpenURLForwardDepth = 0;
+static __thread NSUInteger amproj_configurationForwardDepth = 0;
+static __thread NSUInteger amproj_sceneWillConnectForwardDepth = 0;
 static __thread NSUInteger amproj_sceneOpenURLForwardDepth = 0;
 
 static void amproj_tryDispatchPendingImport(NSUInteger generation);
@@ -11723,6 +11737,111 @@ static BOOL hooked_applicationLegacyOpenURL(id self, SEL _cmd, UIApplication *ap
     return nativeHandled;
 }
 
+// Scene-based cold launches deliver the document before any scene delegate
+// `openURLContexts:` callback.  Stage those security-scoped URLs immediately
+// while the provider grant is still valid; activation will run the normal
+// serial import queue later.  This deliberately does not call the importer
+// from the configuration callback or alter UIKit's immutable connection
+// options.
+static void amproj_recordSceneConnectionCandidates(
+    UISceneConnectionOptions *connectionOptions, NSString *source) {
+    if (!connectionOptions) return;
+    NSUInteger URLCount = 0;
+    NSUInteger activityCount = 0;
+    for (UIOpenURLContext *context in connectionOptions.URLContexts) {
+        if (![context isKindOfClass:UIOpenURLContext.class] || !context.URL) continue;
+        NSMutableDictionary *options = [NSMutableDictionary dictionary];
+        UISceneOpenURLOptions *sceneOptions = context.options;
+        options[UIApplicationOpenURLOptionsOpenInPlaceKey] =
+            @(sceneOptions.openInPlace);
+        if (sceneOptions.sourceApplication.length) {
+            options[UIApplicationOpenURLOptionsSourceApplicationKey] =
+                sceneOptions.sourceApplication;
+        }
+        NSUInteger before = 0;
+        @synchronized (amproj_importDedupeLock()) {
+            before = amproj_deferredLaunchImportCandidates.count;
+        }
+        amproj_recordDeferredLaunchCandidate(
+            context.URL, [source stringByAppendingString:@"_url"], options);
+        @synchronized (amproj_importDedupeLock()) {
+            if (amproj_deferredLaunchImportCandidates.count != before) URLCount++;
+        }
+    }
+    for (NSUserActivity *activity in connectionOptions.userActivities) {
+        NSURL *URL = amproj_projectURLFromUserActivity(activity);
+        if (!URL) continue;
+        activityCount++;
+        amproj_recordDeferredLaunchCandidate(
+            URL, [source stringByAppendingString:@"_activity"],
+            amproj_projectOptionsFromUserActivity(activity));
+    }
+    amproj_logCriticalEvent(@"import.scene_connection_candidates", @{
+        @"source": source ?: @"",
+        @"url_count": @(URLCount),
+        @"activity_count": @(activityCount),
+        @"received_url_contexts": @(connectionOptions.URLContexts.count),
+        @"received_user_activities": @(connectionOptions.userActivities.count)
+    });
+}
+
+static UISceneConfiguration *hooked_applicationConfigurationForConnecting(
+    id self, SEL _cmd, UIApplication *application, UISceneSession *session,
+    UISceneConnectionOptions *connectionOptions) {
+    amproj_recordSceneConnectionCandidates(
+        connectionOptions, @"application_configuration_for_connecting");
+    IMP original = amproj_configurationForwardDepth
+        ? amproj_originalHookForReceiverSkippingExact(
+              amproj_configurationHooks,
+              sizeof(amproj_configurationHooks) /
+                  sizeof(amproj_configurationHooks[0]), self)
+        : amproj_originalHookForReceiver(
+              amproj_configurationHooks,
+              sizeof(amproj_configurationHooks) /
+                  sizeof(amproj_configurationHooks[0]), self);
+    UISceneConfiguration *configuration = nil;
+    if (original && original != (IMP)hooked_applicationConfigurationForConnecting) {
+        amproj_configurationForwardDepth += 1;
+        @try {
+            configuration = ((AMProjApplicationConfigurationForConnectingIMP)original)(
+                self, _cmd, application, session, connectionOptions);
+        } @finally {
+            amproj_configurationForwardDepth -= 1;
+        }
+    }
+    amproj_debugEvent(@"import.scene_configuration_forward", @{
+        @"delegate": NSStringFromClass([self class]) ?: @"",
+        @"has_original": @(original != NULL),
+        @"returned_configuration": @(configuration != nil)
+    });
+    return configuration;
+}
+
+static void hooked_sceneWillConnectToSession(
+    id self, SEL _cmd, UIScene *scene, UISceneSession *session,
+    UISceneConnectionOptions *connectionOptions) {
+    amproj_recordSceneConnectionCandidates(
+        connectionOptions, @"scene_will_connect");
+    IMP original = amproj_sceneWillConnectForwardDepth
+        ? amproj_originalHookForReceiverSkippingExact(
+              amproj_sceneWillConnectHooks,
+              sizeof(amproj_sceneWillConnectHooks) /
+                  sizeof(amproj_sceneWillConnectHooks[0]), self)
+        : amproj_originalHookForReceiver(
+              amproj_sceneWillConnectHooks,
+              sizeof(amproj_sceneWillConnectHooks) /
+                  sizeof(amproj_sceneWillConnectHooks[0]), self);
+    if (original && original != (IMP)hooked_sceneWillConnectToSession) {
+        amproj_sceneWillConnectForwardDepth += 1;
+        @try {
+            ((AMProjSceneWillConnectIMP)original)(
+                self, _cmd, scene, session, connectionOptions);
+        } @finally {
+            amproj_sceneWillConnectForwardDepth -= 1;
+        }
+    }
+}
+
 static void hooked_sceneOpenURLContexts(id self, SEL _cmd, UIScene *scene,
                                         NSSet *URLContexts) {
     amproj_logCriticalEvent(@"import.scene_callback", @{
@@ -13627,6 +13746,10 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
     uint8_t selectedExportOption = UINT8_MAX;
     BOOL hasSelectedExportOption =
         amproj_shareExportOptionID(contentController, &selectedExportOption);
+    if (!hasSelectedExportOption && contentController != self) {
+        hasSelectedExportOption =
+            amproj_shareExportOptionID(self, &selectedExportOption);
+    }
     BOOL isProjectPackage = hasSelectedExportOption &&
         selectedExportOption == AMProjExportOptionProjectPackage;
     NSString *mode = amproj_exportMode();
@@ -13650,6 +13773,28 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
     }
     NSString *title = amproj_currentProjectTitle(shareController);
     amproj_startDirectExport(shareController, nil, YES, nil, title);
+}
+
+static void hooked_navigationPush(id self, SEL _cmd,
+                                  UIViewController *viewController,
+                                  BOOL animated) {
+    if (orig_navigationPush) {
+        orig_navigationPush(self, _cmd, viewController, animated);
+    }
+    // Swift storyboard classes are often registered while the destination is
+    // being pushed.  Install after the original push, then retry on the main
+    // queue once UIKit has finished constructing the destination hierarchy.
+    @try {
+        amproj_installShareExportHook();
+    } @catch (NSException *exception) {
+        amproj_logCriticalEvent(@"share_export.install_exception", @{
+            @"name": exception.name ?: @"NSException",
+            @"reason": exception.reason ?: @""
+        });
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        amproj_installShareExportHook();
+    });
 }
 
 static BOOL amproj_isNativeImportFailureAlert(UIViewController *controller,
@@ -13834,6 +13979,10 @@ static AMProjXMLImportAlertResult amproj_XMLImportAlertResult(
 
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
+    // A ShareNC instance can be loaded only when its page is first presented.
+    // Retry here before inspecting the presentation so the export action is
+    // intercepted even when startup-time class scans ran too early.
+    amproj_installShareExportHook();
     NSString *startupPresentationReason = nil;
     AMProjStartupPresentationDecision startupDecision =
         amproj_startupPaywallPresentationDecision(
@@ -14620,16 +14769,26 @@ static BOOL amproj_installColdLaunchHook(void) {
         (IMP)hooked_applicationDidFinish, 4, amproj_didFinishHooks,
         sizeof(amproj_didFinishHooks) / sizeof(amproj_didFinishHooks[0]),
         &didFinishChanged);
-    if (willFinishAdded || willFinishChanged || didFinishChanged) {
+    BOOL configurationChanged = NO;
+    BOOL configurationInstalled = amproj_installTrackedHook(
+        cls, @selector(application:configurationForConnectingSceneSession:options:),
+        (IMP)hooked_applicationConfigurationForConnecting, 5,
+        amproj_configurationHooks,
+        sizeof(amproj_configurationHooks) / sizeof(amproj_configurationHooks[0]),
+        &configurationChanged);
+    if (willFinishAdded || willFinishChanged || didFinishChanged ||
+        configurationChanged) {
         amproj_debugEvent(@"import.cold_launch_hook", @{
             @"class": NSStringFromClass(cls) ?: @"",
             @"will_finish": @(willFinishInstalled),
             @"will_finish_added": @(willFinishAdded),
-            @"did_finish": @(didFinishInstalled)
+            @"did_finish": @(didFinishInstalled),
+            @"scene_configuration": @(configurationInstalled)
         });
-        NSLog(@"[AMProjExport] Cold-launch hooks willFinish=%@ didFinish=%@ on %@",
+        NSLog(@"[AMProjExport] Cold-launch hooks willFinish=%@ didFinish=%@ sceneConfiguration=%@ on %@",
               willFinishInstalled ? @"installed" : @"failed",
               didFinishInstalled ? @"installed" : @"failed",
+              configurationInstalled ? @"installed" : @"missing",
               NSStringFromClass(cls));
     }
     return willFinishInstalled && didFinishInstalled;
@@ -14675,13 +14834,22 @@ static BOOL amproj_installRuntimeColdLaunchHook(void) {
         amproj_didFinishHooks,
         sizeof(amproj_didFinishHooks) / sizeof(amproj_didFinishHooks[0]),
         &didChanged);
+    BOOL configurationChanged = NO;
+    BOOL configurationInstalled = amproj_installTrackedHook(
+        runtimeClass,
+        @selector(application:configurationForConnectingSceneSession:options:),
+        (IMP)hooked_applicationConfigurationForConnecting, 5,
+        amproj_configurationHooks,
+        sizeof(amproj_configurationHooks) / sizeof(amproj_configurationHooks[0]),
+        &configurationChanged);
     amproj_logCriticalEvent(@"import.runtime_cold_launch_hook", @{
         @"class": NSStringFromClass(runtimeClass) ?: @"",
         @"will_finish": @(willInstalled),
         @"did_finish": @(didInstalled),
-        @"changed": @(willChanged || didChanged)
+        @"scene_configuration": @(configurationInstalled),
+        @"changed": @(willChanged || didChanged || configurationChanged)
     });
-    return willInstalled || didInstalled;
+    return willInstalled || didInstalled || configurationInstalled;
 }
 
 static BOOL amproj_installDeclaredURLHooks(void) {
@@ -14811,6 +14979,15 @@ static void amproj_installProjectsImportAlertHook(void) {
 static void amproj_installSceneImportHook(id sceneDelegate) {
     if (!sceneDelegate) return;
     Class cls = object_getClass(sceneDelegate);
+    SEL willConnectSelector =
+        @selector(scene:willConnectToSession:options:);
+    BOOL willConnectChanged = NO;
+    BOOL willConnectInstalled = amproj_installTrackedHook(
+        cls, willConnectSelector, (IMP)hooked_sceneWillConnectToSession, 5,
+        amproj_sceneWillConnectHooks,
+        sizeof(amproj_sceneWillConnectHooks) /
+            sizeof(amproj_sceneWillConnectHooks[0]),
+        &willConnectChanged);
     SEL selector = NSSelectorFromString(@"scene:openURLContexts:");
     BOOL changed = NO;
     BOOL installed = amproj_installTrackedHook(
@@ -14818,8 +14995,9 @@ static void amproj_installSceneImportHook(id sceneDelegate) {
         amproj_sceneOpenURLHooks,
         sizeof(amproj_sceneOpenURLHooks) / sizeof(amproj_sceneOpenURLHooks[0]),
         &changed);
-    if (changed) {
+    if (willConnectChanged || changed) {
         amproj_debugEvent(@"import.scene_hook", @{
+            @"will_connect_installed": @(willConnectInstalled),
             @"installed": @(installed),
             @"class": NSStringFromClass(cls) ?: @""
         });
@@ -14961,6 +15139,33 @@ static Class amproj_findPackageControllerClass(void) {
 }
 #endif
 
+static void amproj_installNavigationExportHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        @try {
+            Method method = class_getInstanceMethod(
+                [UINavigationController class],
+                @selector(pushViewController:animated:));
+            if (!method) return;
+            IMP previous = amproj_installMethodHook(
+                method, (IMP)hooked_navigationPush, 4,
+                @"UINavigationController.pushViewController");
+            if (previous) {
+                orig_navigationPush = (void *)previous;
+                amproj_logCriticalEvent(@"share_export.navigation_hook", @{
+                    @"installed": @YES
+                });
+            }
+        } @catch (NSException *exception) {
+            amproj_logCriticalEvent(@"share_export.navigation_hook", @{
+                @"installed": @NO,
+                @"name": exception.name ?: @"NSException",
+                @"reason": exception.reason ?: @""
+            });
+        }
+    });
+}
+
 static void amproj_installPresentationHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -14988,6 +15193,7 @@ static void amproj_installExportHooks(void) {
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing export hooks after app launch");
         amproj_installPresentationHook();
+        amproj_installNavigationExportHook();
         amproj_installShareExportHook();
         // ShareNC is a Swift storyboard class and may not be registered when
         // the first bootstrap callback fires. Retry after the scene has had a

@@ -2030,6 +2030,62 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("if (passthroughContexts.count &&", body)
         self.assertNotIn("amproj_stageForwardedProjectURL", body)
 
+    def test_scene_cold_launch_captures_connection_options_before_native(self):
+        recorder = function_body(
+            "static void amproj_recordSceneConnectionCandidates",
+            "static UISceneConfiguration *hooked_applicationConfigurationForConnecting",
+        )
+        self.assertIn("connectionOptions.URLContexts", recorder)
+        self.assertIn("amproj_recordDeferredLaunchCandidate", recorder)
+        self.assertIn("connectionOptions.userActivities", recorder)
+        self.assertNotIn("amproj_captureSystemProjectURL", recorder)
+
+        configuration = function_body(
+            "static UISceneConfiguration *hooked_applicationConfigurationForConnecting",
+            "static void hooked_sceneWillConnectToSession",
+        )
+        self.assertIn("amproj_recordSceneConnectionCandidates", configuration)
+        self.assertIn("AMProjApplicationConfigurationForConnectingIMP", configuration)
+        self.assertIn("return configuration", configuration)
+
+        installer = function_body(
+            "static BOOL amproj_installColdLaunchHook",
+            "static BOOL amproj_installDeclaredURLHooks",
+        )
+        self.assertIn(
+            "application:configurationForConnectingSceneSession:options:",
+            installer,
+        )
+        self.assertIn("amproj_configurationHooks", installer)
+
+    def test_export_hook_retries_after_navigation_and_accepts_share_host_subclass(self):
+        option = function_body(
+            "static BOOL amproj_shareExportOptionID",
+            "static NSArray* am_arr",
+        )
+        self.assertIn('@"selectedExportOptID"', option)
+        self.assertIn("class_getInstanceSize", option)
+
+        navigation = function_body(
+            "static void hooked_navigationPush",
+            "static BOOL amproj_isNativeImportFailureAlert",
+        )
+        self.assertIn("orig_navigationPush", navigation)
+        self.assertIn("amproj_installShareExportHook", navigation)
+
+        installer = function_body(
+            "static void amproj_installNavigationExportHook",
+            "static void amproj_installPresentationHook",
+        )
+        self.assertIn("UINavigationController.pushViewController", installer)
+        self.assertIn("hooked_navigationPush", installer)
+
+        present = function_body(
+            "static void hooked_presentVC",
+            "#if AMPROJ_DEBUG",
+        )
+        self.assertIn("amproj_installShareExportHook();", present)
+
     def test_cold_launch_successful_stage_replaces_prior_failed_candidate(self):
         body = function_body(
             "static void amproj_recordDeferredLaunchCandidate",
