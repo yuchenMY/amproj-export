@@ -39,6 +39,7 @@ EXPECTED_CLOUD_RUNTIME_MARKER = b"[AMProjExport] ===== Loading v44-cloud ====="
 EXPECTED_CLOUD_STABILITY_MARKER = (
     b"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback"
 )
+CLOUD_LOAD_COMPACT = "@rpath/AMProjExportCloud.dylib"
 EXPECTED_CLOUD_CONTRACT_FUNCTIONS = {
     "_AMProjV44ReleaseNativeActivityFallbackEnabled": bytes.fromhex(
         "00008052c0035fd6"
@@ -50,8 +51,10 @@ EXPECTED_CLOUD_CONTRACT_FUNCTIONS = {
 
 LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
+LC_RPATH = 0x8000001C
 N_TYPE = 0x0E
 N_SECT = 0x0E
+FRAMEWORKS_RPATH = "@executable_path/Frameworks"
 
 APP_ROOT = handoff.APP_ROOT
 INFO_PLIST = handoff.INFO_PLIST
@@ -261,9 +264,40 @@ def prepare_output_info(data):
 def _custom_loads(data, label):
     uuids, dylibs = handoff._uuid_and_dylib_commands(data, label)
     enhancer = [item for item in dylibs if item["name"] == handoff.AMENHANCER_LOAD]
-    cloud = [item for item in dylibs if item["name"] == handoff.CLOUD_LOAD]
+    cloud = [
+        item
+        for item in dylibs
+        if item["name"] in {handoff.CLOUD_LOAD, CLOUD_LOAD_COMPACT}
+    ]
     loader = [item for item in dylibs if item["name"] == handoff.LOADCONTROL_LOAD]
     return uuids, enhancer, cloud, loader
+
+
+def _rpaths(data, label):
+    macho = handoff._thin_macho(data, label)
+    endian, commands = stable._macho_load_commands(macho)
+    result = []
+    for command, offset, size in commands:
+        if command != LC_RPATH:
+            continue
+        if size < 12:
+            raise RuntimeError(f"{label} has a truncated LC_RPATH command")
+        path_offset = struct.unpack_from(endian + "I", macho, offset + 8)[0]
+        if path_offset < 12 or path_offset >= size:
+            raise RuntimeError(f"{label} LC_RPATH path is out of bounds")
+        raw_path = macho[offset + path_offset : offset + size]
+        terminator = raw_path.find(b"\0")
+        if terminator < 0:
+            raise RuntimeError(f"{label} LC_RPATH path is not terminated")
+        result.append(raw_path[:terminator].decode("utf-8", errors="strict"))
+    return result
+
+
+def _require_frameworks_rpath(data, label):
+    if FRAMEWORKS_RPATH not in _rpaths(data, label):
+        raise RuntimeError(
+            f"{label} compact Cloud load requires LC_RPATH {FRAMEWORKS_RPATH}"
+        )
 
 
 def verify_input_main(data):
@@ -280,8 +314,15 @@ def verify_input_main(data):
         raise RuntimeError("source main changed the AmEnhancer load")
     if cloud:
         raise RuntimeError("source main unexpectedly already loads Cloud")
-    if len(loader) != 1 or loader[0]["command"] != handoff.LC_LOAD_DYLIB:
-        raise RuntimeError("source main must strongly load one LoadControl dylib")
+    if len(loader) != 1 or loader[0]["command"] not in {
+        handoff.LC_LOAD_DYLIB,
+        handoff.LC_LOAD_WEAK_DYLIB,
+    }:
+        raise RuntimeError("source main must load one LoadControl dylib")
+    full_replacement = handoff.CLOUD_LOAD.encode("utf-8") + b"\0"
+    capacity = loader[0]["size"] - loader[0]["name_offset"]
+    if len(full_replacement) > capacity:
+        _require_frameworks_rpath(data, "source main executable")
     return loader[0]
 
 
@@ -295,6 +336,8 @@ def _verify_output_main_structure(data):
         raise RuntimeError("main must strongly load one AMProjExportCloud dylib")
     if loader:
         raise RuntimeError("direct-Cloud main must not load LoadControl")
+    if cloud[0]["name"] == CLOUD_LOAD_COMPACT:
+        _require_frameworks_rpath(data, "direct-Cloud main")
     return cloud[0]
 
 
@@ -333,12 +376,19 @@ def patch_main_direct_cloud(data):
         except RuntimeError:
             raise input_error
         return data
-    replacement = handoff.CLOUD_LOAD.encode("utf-8") + b"\0"
     capacity = target["size"] - target["name_offset"]
+    full_replacement = handoff.CLOUD_LOAD.encode("utf-8") + b"\0"
+    compact_replacement = CLOUD_LOAD_COMPACT.encode("utf-8") + b"\0"
+    replacement = (
+        full_replacement if len(full_replacement) <= capacity
+        else compact_replacement
+    )
     if len(replacement) > capacity:
         raise RuntimeError("Cloud path does not fit the existing loader command")
 
     patched = bytearray(data)
+    command_start = target["offset"]
+    struct.pack_into("<I", patched, command_start, handoff.LC_LOAD_DYLIB)
     name_start = target["offset"] + target["name_offset"]
     name_end = target["offset"] + target["size"]
     patched[name_start:name_end] = replacement + bytes(capacity - len(replacement))
@@ -347,8 +397,13 @@ def patch_main_direct_cloud(data):
         for index, (before, after) in enumerate(zip(data, patched))
         if before != after
     }
-    if not changed or not changed <= set(range(name_start, name_end)):
-        raise RuntimeError("direct-Cloud patch changed bytes outside the dylib path")
+    allowed = set(range(command_start, command_start + 4)) | set(
+        range(name_start, name_end)
+    )
+    if not changed or not changed <= allowed:
+        raise RuntimeError(
+            "direct-Cloud patch changed bytes outside the command type and dylib path"
+        )
 
     # LCSign recognizes the existing non-empty signature command and replaces
     # its blob.  A zero-sized placeholder is silently skipped by LCSign.

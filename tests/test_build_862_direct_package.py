@@ -107,7 +107,22 @@ class DirectCloud862Tests(unittest.TestCase):
             + bytes(size - 24 - len(encoded))
         )
 
-    def fixture_main(self):
+    def rpath_command(self, path):
+        encoded = path.encode("utf-8") + b"\0"
+        size = (12 + len(encoded) + 7) & ~7
+        return (
+            struct.pack("<III", direct.LC_RPATH, size, 12)
+            + encoded
+            + bytes(size - 12 - len(encoded))
+        )
+
+    def fixture_main(
+        self,
+        loader_command=None,
+        loader_command_size=80,
+        include_frameworks_rpath=False,
+    ):
+        loader_command = loader_command or direct.handoff.LC_LOAD_DYLIB
         commands = [
             struct.pack(
                 "<II16s",
@@ -121,11 +136,13 @@ class DirectCloud862Tests(unittest.TestCase):
                 72,
             ),
             self.dylib_command(
-                direct.handoff.LC_LOAD_DYLIB,
+                loader_command,
                 direct.handoff.LOADCONTROL_LOAD,
-                80,
+                loader_command_size,
             ),
         ]
+        if include_frameworks_rpath:
+            commands.append(self.rpath_command(direct.FRAMEWORKS_RPATH))
         signature_offset = 32 + sum(map(len, commands)) + 16
         commands.append(
             struct.pack(
@@ -192,6 +209,59 @@ class DirectCloud862Tests(unittest.TestCase):
         self.assertEqual(result, bytes(raw))
         cloud = direct._verify_output_main_structure(result)
         self.assertEqual(cloud["command"], direct.handoff.LC_LOAD_DYLIB)
+        self.assertEqual(cloud["name"], direct.handoff.CLOUD_LOAD)
+
+    def test_main_patch_upgrades_compact_weak_loader_to_strong_rpath_cloud(self):
+        source = self.fixture_main(
+            loader_command=direct.handoff.LC_LOAD_WEAK_DYLIB,
+            loader_command_size=72,
+            include_frameworks_rpath=True,
+        )
+        target = direct.verify_input_main(source)
+        self.assertEqual(target["command"], direct.handoff.LC_LOAD_WEAK_DYLIB)
+
+        result = direct.patch_main_direct_cloud(source)
+        cloud = direct._verify_output_main_structure(result)
+
+        self.assertEqual(cloud["command"], direct.handoff.LC_LOAD_DYLIB)
+        self.assertEqual(cloud["name"], direct.CLOUD_LOAD_COMPACT)
+        command_start = target["offset"]
+        name_start = command_start + target["name_offset"]
+        name_end = command_start + target["size"]
+        changed = {
+            index
+            for index, (before, after) in enumerate(zip(source, result))
+            if before != after
+        }
+        allowed = set(range(command_start, command_start + 4)) | set(
+            range(name_start, name_end)
+        )
+        self.assertTrue(changed)
+        self.assertLessEqual(changed, allowed)
+
+    def test_compact_cloud_rejects_main_without_frameworks_rpath(self):
+        source = self.fixture_main(
+            loader_command=direct.handoff.LC_LOAD_WEAK_DYLIB,
+            loader_command_size=72,
+        )
+        with self.assertRaisesRegex(RuntimeError, "compact Cloud load requires"):
+            direct.verify_input_main(source)
+        _uuids, _enhancer, _cloud, loaders = direct._custom_loads(
+            source, "fixture main"
+        )
+        target = loaders[0]
+        result = bytearray(source)
+        struct.pack_into(
+            "<I", result, target["offset"], direct.handoff.LC_LOAD_DYLIB
+        )
+        replacement = direct.CLOUD_LOAD_COMPACT.encode("utf-8") + b"\0"
+        name_start = target["offset"] + target["name_offset"]
+        name_end = target["offset"] + target["size"]
+        result[name_start:name_end] = replacement + bytes(
+            name_end - name_start - len(replacement)
+        )
+        with self.assertRaisesRegex(RuntimeError, "compact Cloud load requires"):
+            direct._verify_output_main_structure(bytes(result))
 
     def test_output_info_changes_identity_and_restores_copy_in_contract(self):
         source = plistlib.loads(self.fixture_info())
