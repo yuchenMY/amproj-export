@@ -404,8 +404,13 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static NSArray* am_arr",
         )
         self.assertIn('amproj_instanceIvar(object, @"selectedExportOptID")', option)
+        self.assertIn(
+            "AMProjShareVCSelectedExportOptionOffset = 0x120", SOURCE
+        )
+        self.assertIn('isEqualToString:@"AlightMotion.ShareVC"', option)
         self.assertIn("uint8_t raw = 0", option)
         self.assertIn("const uint8_t *address", option)
+        self.assertIn("amproj_shareExportOptionControllerRecursive", option)
 
         share = function_body(
             "static void hooked_shareNCOnTapExport",
@@ -415,6 +420,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn(
             "selectedExportOption == AMProjExportOptionProjectPackage", share
         )
+        self.assertIn("amproj_shareExportOptionController(", share)
         self.assertIn("if (!isProjectPackage", share)
         self.assertIn("orig_shareNCOnTapExport(self, _cmd, sender)", share)
         direct_call = (
@@ -1930,6 +1936,25 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             warm,
         )
         self.assertNotIn("application_will_finish", warm)
+
+    def test_runtime_delegate_binding_and_pre_handoff_reinstall_url_hooks(self):
+        delegate_hook = function_body(
+            "static void hooked_applicationSetDelegate",
+            "static NSDictionary* amproj_nativeParserElementSnapshot",
+        )
+        self.assertIn("orig_applicationSetDelegate(application, _cmd, delegate)", delegate_hook)
+        self.assertIn("amproj_installImportHook();", delegate_hook)
+        self.assertIn("strongApplication.delegate == strongDelegate", delegate_hook)
+        self.assertIn('@"UIApplication.setDelegate"', delegate_hook)
+
+        constructor = SOURCE[SOURCE.index("static void AMProjExportInit(void)") :]
+        delegate_install = constructor.index("amproj_installApplicationDelegateHook();")
+        cold_install = constructor.index("amproj_installColdLaunchHook();")
+        self.assertLess(delegate_install, cold_install)
+        self.assertIn("UIApplicationWillResignActiveNotification", constructor)
+        will_resign = constructor.index("UIApplicationWillResignActiveNotification")
+        scene_deactivate = constructor.index("UISceneWillDeactivateNotification")
+        self.assertIn("amproj_installImportHook();", constructor[will_resign:scene_deactivate])
 
     def test_user_activity_type_reaches_every_xml_recognition_stage(self):
         activity_options = function_body(

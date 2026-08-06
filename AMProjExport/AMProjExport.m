@@ -42,6 +42,7 @@
 
 static NSString *const kAMProjPluginVersion = @"44";
 static const uint8_t AMProjExportOptionProjectPackage = 7;
+static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
 
 #if AMPROJ_DEBUG || AMPROJ_TELEMETRY
 #import "AMDebugTransport.h"
@@ -97,6 +98,7 @@ static dispatch_queue_t amproj_importInboxQueue(void);
 static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID);
 static void amproj_installImportHook(void);
 static Class amproj_declaredAppDelegateClass(void);
+static void amproj_installApplicationDelegateHook(void);
 static void amproj_installShareExportHook(void);
 static void amproj_installNavigationExportHook(void);
 static NSString* amproj_importedFontFilename(NSString *reference);
@@ -569,8 +571,17 @@ static Ivar amproj_instanceIvar(id object, NSString *name) {
 static BOOL amproj_shareExportOptionID(id object, uint8_t *value) {
     if (!object) return NO;
     Ivar ivar = amproj_instanceIvar(object, @"selectedExportOptID");
-    if (!ivar) return NO;
-    ptrdiff_t offset = ivar_getOffset(ivar);
+    ptrdiff_t offset = ivar ? ivar_getOffset(ivar) : -1;
+    if (!ivar) {
+        for (Class cls = [object class]; cls; cls = class_getSuperclass(cls)) {
+            NSString *className = NSStringFromClass(cls);
+            if ([className isEqualToString:@"AlightMotion.ShareVC"] ||
+                [className isEqualToString:@"_TtC12AlightMotion7ShareVC"]) {
+                offset = AMProjShareVCSelectedExportOptionOffset;
+                break;
+            }
+        }
+    }
     size_t instanceSize = class_getInstanceSize([object class]);
     if (offset < 0 || (size_t)offset + sizeof(uint8_t) > instanceSize) return NO;
     uint8_t raw = 0;
@@ -578,6 +589,47 @@ static BOOL amproj_shareExportOptionID(id object, uint8_t *value) {
     memcpy(&raw, address, sizeof(raw));
     if (value) *value = raw;
     return YES;
+}
+
+static UIViewController* amproj_shareExportOptionControllerRecursive(
+    UIViewController *controller, NSUInteger depth, NSMutableSet<NSValue *> *visited,
+    uint8_t *value) {
+    if (!controller || depth > 10) return nil;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+
+    uint8_t candidate = UINT8_MAX;
+    if (amproj_shareExportOptionID(controller, &candidate)) {
+        if (value) *value = candidate;
+        return controller;
+    }
+
+    if ([controller isKindOfClass:UINavigationController.class]) {
+        UINavigationController *navigation = (UINavigationController *)controller;
+        UIViewController *found = amproj_shareExportOptionControllerRecursive(
+            navigation.visibleViewController, depth + 1, visited, value);
+        if (found) return found;
+        for (UIViewController *candidateController in
+             navigation.viewControllers.reverseObjectEnumerator) {
+            found = amproj_shareExportOptionControllerRecursive(
+                candidateController, depth + 1, visited, value);
+            if (found) return found;
+        }
+    }
+    for (UIViewController *child in controller.childViewControllers) {
+        UIViewController *found = amproj_shareExportOptionControllerRecursive(
+            child, depth + 1, visited, value);
+        if (found) return found;
+    }
+    return amproj_shareExportOptionControllerRecursive(
+        controller.presentedViewController, depth + 1, visited, value);
+}
+
+static UIViewController* amproj_shareExportOptionController(
+    UIViewController *controller, uint8_t *value) {
+    return amproj_shareExportOptionControllerRecursive(
+        controller, 0, [NSMutableSet set], value);
 }
 
 static NSArray* am_arr(id obj, NSString *key) {
@@ -2592,6 +2644,8 @@ typedef BOOL (*AMProjApplicationContinueActivityIMP)(id, SEL, UIApplication *,
 typedef BOOL (*AMProjApplicationHandleOpenURLIMP)(id, SEL, UIApplication *, NSURL *);
 typedef BOOL (*AMProjApplicationLegacyOpenURLIMP)(id, SEL, UIApplication *, NSURL *,
                                                   NSString *, id);
+typedef void (*AMProjApplicationSetDelegateIMP)(UIApplication *, SEL,
+                                                 id<UIApplicationDelegate>);
 typedef UISceneConfiguration *(*AMProjApplicationConfigurationForConnectingIMP)(
     id, SEL, UIApplication *, UISceneSession *, UISceneConnectionOptions *);
 typedef void (*AMProjSceneWillConnectIMP)(id, SEL, UIScene *, UISceneSession *,
@@ -2618,6 +2672,7 @@ static AMProjTrackedHook amproj_sceneWillConnectHooks[12] = {0};
 static AMProjTrackedHook amproj_sceneOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateStartHooks[8] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateEndHooks[8] = {0};
+static AMProjApplicationSetDelegateIMP orig_applicationSetDelegate = NULL;
 static IMP amproj_nativeAppDelegateOpenURLIMP = NULL;
 static BOOL (*orig_nativeXMLParserParse)(NSXMLParser *, SEL) = NULL;
 static char amproj_nativeXMLParserAttemptKey;
@@ -13738,18 +13793,10 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
         return;
     }
     UIViewController *shareController = [self isKindOfClass:UIViewController.class] ? self : nil;
-    UIViewController *contentController = [self isKindOfClass:UINavigationController.class] ?
-        ((UINavigationController *)self).topViewController : nil;
-    if (!contentController && [self isKindOfClass:UIViewController.class]) {
-        contentController = (UIViewController *)self;
-    }
     uint8_t selectedExportOption = UINT8_MAX;
-    BOOL hasSelectedExportOption =
-        amproj_shareExportOptionID(contentController, &selectedExportOption);
-    if (!hasSelectedExportOption && contentController != self) {
-        hasSelectedExportOption =
-            amproj_shareExportOptionID(self, &selectedExportOption);
-    }
+    UIViewController *contentController = amproj_shareExportOptionController(
+        shareController, &selectedExportOption);
+    BOOL hasSelectedExportOption = contentController != nil;
     BOOL isProjectPackage = hasSelectedExportOption &&
         selectedExportOption == AMProjExportOptionProjectPackage;
     NSString *mode = amproj_exportMode();
@@ -14336,7 +14383,9 @@ static NSURLSessionDataTask* hooked_dataTaskWithRequest(id self, SEL _cmd, NSURL
 static id amproj_willLaunchObserver = nil;
 static id amproj_didLaunchObserver = nil;
 static id amproj_didBecomeActiveObserver = nil;
+static id amproj_willResignActiveObserver = nil;
 static id amproj_sceneWillConnectObserver = nil;
+static id amproj_sceneWillDeactivateObserver = nil;
 
 static IMP amproj_installMethodHook(Method method, IMP replacement,
                                     unsigned int expectedArguments, NSString *name) {
@@ -14406,6 +14455,42 @@ static BOOL amproj_installTrackedHook(Class cls, SEL selector, IMP replacement,
     }
     if (changed) *changed = YES;
     return class_getMethodImplementation(cls, selector) == replacement;
+}
+
+static void hooked_applicationSetDelegate(UIApplication *application, SEL _cmd,
+                                          id<UIApplicationDelegate> delegate) {
+    if (orig_applicationSetDelegate) {
+        orig_applicationSetDelegate(application, _cmd, delegate);
+    }
+    if (!delegate) return;
+
+    // Install against the concrete delegate immediately after UIKit binds it.
+    // A second main-queue pass catches proxy subclasses installed in the same
+    // startup turn without delaying launch-option capture.
+    amproj_installImportHook();
+    __weak UIApplication *weakApplication = application;
+    __weak id<UIApplicationDelegate> weakDelegate = delegate;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIApplication *strongApplication = weakApplication;
+        id<UIApplicationDelegate> strongDelegate = weakDelegate;
+        if (strongApplication.delegate == strongDelegate) {
+            amproj_installImportHook();
+        }
+    });
+}
+
+static void amproj_installApplicationDelegateHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Method method = class_getInstanceMethod(
+            [UIApplication class], @selector(setDelegate:));
+        IMP previous = amproj_installMethodHook(
+            method, (IMP)hooked_applicationSetDelegate, 3,
+            @"UIApplication.setDelegate");
+        if (previous) {
+            orig_applicationSetDelegate = (AMProjApplicationSetDelegateIMP)previous;
+        }
+    });
 }
 
 static NSDictionary* amproj_nativeParserElementSnapshot(
@@ -15451,7 +15536,8 @@ static void AMProjExportInit(void) {
         // this AppDelegate hook here avoids touching UIApplication or UIKit UI.
         // The didFinish hook synchronously stages cold-launch documents while
         // their grant is valid. Validation, unpacking, native import and UI wait
-        // until activation; constructors still do not touch UIApplication/UI.
+        // until activation; constructors still do not instantiate UIApplication/UI.
+        amproj_installApplicationDelegateHook();
         (void)amproj_installColdLaunchHook();
         (void)amproj_installDeclaredURLHooks();
 
@@ -15500,6 +15586,16 @@ static void AMProjExportInit(void) {
                 amproj_resumeQueuedImports(@"did_become_active");
             }
         }];
+        amproj_willResignActiveObserver = [center
+            addObserverForName:UIApplicationWillResignActiveNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(__unused NSNotification *notification) {
+            // QQ/Files returns through openURL before the next didBecomeActive.
+            // Reinstall here so late Firebase/AppDelegate swizzles cannot own
+            // that callback window.
+            amproj_installImportHook();
+        }];
         if (@available(iOS 13.0, *)) {
             amproj_sceneWillConnectObserver = [center
                 addObserverForName:@"UISceneWillConnectNotification"
@@ -15509,6 +15605,13 @@ static void AMProjExportInit(void) {
                 UIScene *scene = [notification.object isKindOfClass:UIScene.class]
                     ? notification.object : nil;
                 amproj_installSceneImportHook(scene.delegate);
+            }];
+            amproj_sceneWillDeactivateObserver = [center
+                addObserverForName:UISceneWillDeactivateNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(__unused NSNotification *notification) {
+                amproj_installImportHook();
             }];
         }
 
