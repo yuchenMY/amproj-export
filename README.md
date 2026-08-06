@@ -36,6 +36,11 @@ Alight Motion 6.2.55 (862) 的底部“模板”是在线模板商城；本地�
 `.amproj` 直接走已验证的本地 `PackageImporter`，不请求上传接口，不依赖加速器、VPN、
 Wi-Fi 或调试后端。XML 路由不扫描素材，也不提示缺少媒体。
 
+AM 内“上传 XML”打开的系统文件选择器也接入同一条离线路由。插件只接管恰好一个
+`.xml` 的选择结果，并把原选择器按取消状态正常收口，避免 AM 继续启动在线上传和账号
+校验；取消、非 XML、多个文件以及其他 delegate 回调仍原样交回 Alight Motion。插件自己
+用于 QQ/文件导入兜底的选择器不会被二次接管。
+
 XML 成功必须同时具备完整包校验、`storage status 4` 返回、原生 completion、临时包已消费，
 并确认本事务后的 Documents/Library 持久化变化。若 AM 对“原始 XML + 空 manifest”显示
 `Missing Media` 但同时明确说明包已导入，v44 仅在当前事务确认为单独 XML 时隐藏该提示，
@@ -51,6 +56,7 @@ completion、持久化变化和临时包消费全部成立时报告中性完成�
 ### XML 文件
 
 - QQ/文件 App 的“用其他应用打开 → Alight Motion”可以直接接收 `.xml`。
+- AM 内“上传 XML”选择一个 `.xml` 后直接进入同一条本地导入链，不访问上传服务，也不需要加速器或账号校验。
 - XML 只包含项目结构和 Alight Motion 内置对象，因此只验证 UTF-8、XML 语法和 `<scene>` 根节点，不检查也不提示媒体缺失。
 - XML 的原始字节会封装为 `<UUID>.xml + 空 manifest.txt`，再由底部“项目”宿主中的本地 `PackageImporter` 离线导入；不访问底部在线模板商城。
 

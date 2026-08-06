@@ -2660,6 +2660,10 @@ typedef void (*AMProjSceneOpenURLContextsIMP)(id, SEL, UIScene *, NSSet *);
 @interface AMProjImportPickerDelegate : NSObject <UIDocumentPickerDelegate>
 @end
 
+@interface AMProjNativeXMLPickerProxy : NSObject <UIDocumentPickerDelegate>
+@property(nonatomic, strong) id<UIDocumentPickerDelegate> originalDelegate;
+@end
+
 typedef struct {
     __unsafe_unretained Class cls;
     IMP original;
@@ -2685,6 +2689,7 @@ static char amproj_nativeXMLParserLastElementKey;
 static char amproj_nativeXMLParserElementStackKey;
 static char amproj_nativeXMLParserSemanticErrorKey;
 static char amproj_nativeXMLParserErrorCountKey;
+static char amproj_nativeXMLPickerProxyKey;
 static NSURL *amproj_pendingImportURL = nil;
 static NSString *amproj_pendingImportName = nil;
 static NSString *amproj_pendingImportTransactionID = nil;
@@ -4516,6 +4521,175 @@ static UIViewController* amproj_topViewController(UIViewController *controller) 
 }
 
 @end
+
+static NSURL *amproj_singleNativePickerXMLURL(NSArray<NSURL *> *URLs) {
+    if (URLs.count != 1 || ![URLs.firstObject isKindOfClass:NSURL.class]) {
+        return nil;
+    }
+    NSURL *URL = URLs.firstObject;
+    return URL.isFileURL &&
+        [URL.pathExtension.lowercaseString isEqualToString:@"xml"] ? URL : nil;
+}
+
+static BOOL amproj_routeNativePickerXML(UIDocumentPickerViewController *picker,
+                                        NSArray<NSURL *> *URLs,
+                                        NSString *selectorName) {
+    NSURL *selectedURL = [amproj_singleNativePickerXMLURL(URLs) copy];
+    if (!selectedURL) return NO;
+
+    NSString *originalName = selectedURL.lastPathComponent.length
+        ? selectedURL.lastPathComponent : @"project.xml";
+    BOOL heldSecurityScope = [selectedURL startAccessingSecurityScopedResource];
+    amproj_showImportStatus(@"AMProj v44 · 1/3 已从上传 XML 选择文件", NO);
+    amproj_logCriticalEvent(@"import.native_xml_picker_intercepted", @{
+        @"picker": NSStringFromClass(picker.class) ?: @"",
+        @"delegate_selector": selectorName ?: @"",
+        @"filename": originalName,
+        @"security_scope": @(heldSecurityScope),
+        @"route": @"xml_minimal_package_offline"
+    });
+
+    dispatch_async(amproj_importInboxQueue(), ^{
+        @autoreleasepool {
+            BOOL prepared = NO;
+            AMProjIncomingURLResult result =
+                amproj_handleIncomingProjectURLSafely(
+                    selectedURL, @"native_xml_picker_local", @{
+                        @"AMProjBackgroundWorker": @YES,
+                        @"AMProjDirectStage": @YES,
+                        @"AMProjExplicitRetry": @YES,
+                        @"AMProjAlreadyScoped": @(heldSecurityScope),
+                        @"AMProjOriginalFilename": originalName,
+                        @"AMProjDeclaredType": @"public.xml"
+                    }, &prepared);
+            if (heldSecurityScope) {
+                [selectedURL stopAccessingSecurityScopedResource];
+            }
+            amproj_debugEvent(@"import.native_xml_picker_result", @{
+                @"result": @(result),
+                @"prepared": @(prepared),
+                @"filename": originalName,
+                @"online_delegate_called": @NO
+            });
+            if (result == AMProjIncomingURLNotRecognized) {
+                amproj_presentXMLImportError(
+                    @"选择的文件不是可识别的 Alight Motion XML 项目。", YES);
+            }
+        }
+    });
+    return YES;
+}
+
+static id<UIDocumentPickerDelegate> amproj_restoreNativeXMLPickerDelegate(
+    AMProjNativeXMLPickerProxy *proxy,
+    UIDocumentPickerViewController *picker) {
+    id<UIDocumentPickerDelegate> original = proxy.originalDelegate;
+    proxy.originalDelegate = nil;
+    if (picker.delegate == proxy) picker.delegate = original;
+    objc_setAssociatedObject(picker, &amproj_nativeXMLPickerProxyKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return original;
+}
+
+static void amproj_finishOriginalPickerAsCancelled(
+    id<UIDocumentPickerDelegate> original,
+    UIDocumentPickerViewController *picker) {
+    SEL selector = @selector(documentPickerWasCancelled:);
+    if ([original respondsToSelector:selector]) {
+        ((void (*)(id, SEL, id))(void *)objc_msgSend)(
+            original, selector, picker);
+    }
+}
+
+@implementation AMProjNativeXMLPickerProxy
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+    didPickDocumentsAtURLs:(NSArray<NSURL *> *)URLs {
+    if (amproj_routeNativePickerXML(
+            controller, URLs,
+            NSStringFromSelector(@selector(documentPicker:didPickDocumentsAtURLs:)))) {
+        id<UIDocumentPickerDelegate> original =
+            amproj_restoreNativeXMLPickerDelegate(self, controller);
+        amproj_finishOriginalPickerAsCancelled(original, controller);
+        return;
+    }
+    id<UIDocumentPickerDelegate> original =
+        amproj_restoreNativeXMLPickerDelegate(self, controller);
+    SEL multipleSelector = @selector(documentPicker:didPickDocumentsAtURLs:);
+    SEL singleSelector = @selector(documentPicker:didPickDocumentAtURL:);
+    if ([original respondsToSelector:multipleSelector]) {
+        ((void (*)(id, SEL, id, id))(void *)objc_msgSend)(
+            original, multipleSelector, controller, URLs);
+    } else if (URLs.count == 1 && [original respondsToSelector:singleSelector]) {
+        ((void (*)(id, SEL, id, id))(void *)objc_msgSend)(
+            original, singleSelector, controller, URLs.firstObject);
+    }
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+    didPickDocumentAtURL:(NSURL *)URL {
+    NSArray<NSURL *> *URLs = URL ? @[URL] : @[];
+    if (amproj_routeNativePickerXML(
+            controller, URLs,
+            NSStringFromSelector(@selector(documentPicker:didPickDocumentAtURL:)))) {
+        id<UIDocumentPickerDelegate> original =
+            amproj_restoreNativeXMLPickerDelegate(self, controller);
+        amproj_finishOriginalPickerAsCancelled(original, controller);
+        return;
+    }
+    id<UIDocumentPickerDelegate> original =
+        amproj_restoreNativeXMLPickerDelegate(self, controller);
+    SEL singleSelector = @selector(documentPicker:didPickDocumentAtURL:);
+    SEL multipleSelector = @selector(documentPicker:didPickDocumentsAtURLs:);
+    if ([original respondsToSelector:singleSelector]) {
+        ((void (*)(id, SEL, id, id))(void *)objc_msgSend)(
+            original, singleSelector, controller, URL);
+    } else if ([original respondsToSelector:multipleSelector]) {
+        ((void (*)(id, SEL, id, id))(void *)objc_msgSend)(
+            original, multipleSelector, controller, URLs);
+    }
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    id<UIDocumentPickerDelegate> original =
+        amproj_restoreNativeXMLPickerDelegate(self, controller);
+    amproj_finishOriginalPickerAsCancelled(original, controller);
+}
+
+- (BOOL)respondsToSelector:(SEL)selector {
+    return [super respondsToSelector:selector] ||
+        [self.originalDelegate respondsToSelector:selector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)selector {
+    id target = self.originalDelegate;
+    return [target respondsToSelector:selector]
+        ? target : [super forwardingTargetForSelector:selector];
+}
+
+@end
+
+static void amproj_attachNativeXMLPickerProxy(UIViewController *controller) {
+    if (![controller isKindOfClass:UIDocumentPickerViewController.class]) return;
+    UIDocumentPickerViewController *picker =
+        (UIDocumentPickerViewController *)controller;
+    id<UIDocumentPickerDelegate> delegate = picker.delegate;
+    if (!delegate ||
+        [delegate isKindOfClass:AMProjImportPickerDelegate.class] ||
+        [delegate isKindOfClass:AMProjNativeXMLPickerProxy.class]) {
+        return;
+    }
+
+    AMProjNativeXMLPickerProxy *proxy = [AMProjNativeXMLPickerProxy new];
+    proxy.originalDelegate = delegate;
+    objc_setAssociatedObject(picker, &amproj_nativeXMLPickerProxyKey, proxy,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    picker.delegate = proxy;
+    amproj_debugEvent(@"import.native_xml_picker_proxy_attached", @{
+        @"picker": NSStringFromClass(picker.class) ?: @"",
+        @"delegate": NSStringFromClass([delegate class]) ?: @""
+    });
+}
 
 static void amproj_presentImportDocumentPickerAttempt(NSUInteger attempt) {
     UIViewController *presenter = amproj_topViewController(
@@ -13947,6 +14121,10 @@ static AMProjXMLImportAlertResult amproj_XMLImportAlertResult(
 
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
+    // Native SwiftUI/UIKit "Upload XML" pickers keep their original delegate
+    // for every non-XML path. A selected XML is redirected before AM can start
+    // its online upload/accelerator flow.
+    amproj_attachNativeXMLPickerProxy(controller);
     // A ShareNC instance can be loaded only when its page is first presented.
     // Retry here before inspecting the presentation so the export action is
     // intercepted even when startup-time class scans ran too early.

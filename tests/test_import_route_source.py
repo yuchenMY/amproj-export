@@ -606,6 +606,54 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             re.compile(r"\bAMProjNormalizeProjectArchive\s*\(", re.DOTALL),
         )
 
+    def test_native_upload_xml_picker_redirects_to_the_offline_import_lane(self):
+        proxy = SOURCE[
+            SOURCE.index("static NSURL *amproj_singleNativePickerXMLURL") :
+            SOURCE.index("static void amproj_presentImportDocumentPickerAttempt")
+        ]
+        self.assertIn("URLs.count != 1", proxy)
+        self.assertIn('isEqualToString:@"xml"', proxy)
+        self.assertIn('@"native_xml_picker_local"', proxy)
+        self.assertIn('@"AMProjDirectStage": @YES', proxy)
+        self.assertIn('@"AMProjDeclaredType": @"public.xml"', proxy)
+        self.assertIn('@"online_delegate_called": @NO', proxy)
+        self.assertIn("startAccessingSecurityScopedResource", proxy)
+        self.assertIn("stopAccessingSecurityScopedResource", proxy)
+        self.assertIn("amproj_handleIncomingProjectURLSafely", proxy)
+
+        present = function_body(
+            "static void hooked_presentVC",
+            "#if AMPROJ_DEBUG",
+        )
+        self.assertLess(
+            present.index("amproj_attachNativeXMLPickerProxy(controller)"),
+            present.index("orig_presentVC("),
+        )
+
+    def test_native_xml_picker_proxy_preserves_every_non_xml_delegate_path(self):
+        proxy = SOURCE[
+            SOURCE.index("@implementation AMProjNativeXMLPickerProxy") :
+            SOURCE.index("static void amproj_presentImportDocumentPickerAttempt")
+        ]
+        self.assertEqual(proxy.count("amproj_routeNativePickerXML("), 2)
+        self.assertIn("amproj_restoreNativeXMLPickerDelegate", proxy)
+        self.assertIn("documentPickerWasCancelled", proxy)
+        self.assertEqual(
+            proxy.count("amproj_finishOriginalPickerAsCancelled("),
+            3,
+        )
+        self.assertIn("forwardingTargetForSelector", proxy)
+        self.assertIn("original, multipleSelector, controller, URLs", proxy)
+        self.assertIn("original, singleSelector, controller, URL", proxy)
+        self.assertIn(
+            "[delegate isKindOfClass:AMProjImportPickerDelegate.class]",
+            proxy,
+        )
+        self.assertIn(
+            "objc_setAssociatedObject(picker, &amproj_nativeXMLPickerProxyKey, proxy",
+            proxy,
+        )
+
     def test_v44_xml_uses_projects_host_and_native_persistence_evidence(self):
         complete = function_body(
             "static BOOL amproj_completeNativeXMLTemplateImport",
