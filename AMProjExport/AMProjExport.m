@@ -41,8 +41,13 @@
 #import "AMProjNativeImportBridge.h"
 
 static NSString *const kAMProjPluginVersion = @"44";
+static NSString *const kAMProjCloudStabilityContract =
+    @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
 static const uint8_t AMProjExportOptionProjectPackage = 7;
 static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
+
+extern BOOL AMProjV44ReleaseNativeActivityFallbackEnabled(void);
+extern BOOL AMProjV44IsDirectProjectPackageOption(uint8_t selectedExportOption);
 
 #if AMPROJ_DEBUG || AMPROJ_TELEMETRY
 #import "AMDebugTransport.h"
@@ -12202,14 +12207,18 @@ static id hooked_initWithItems(id self, SEL _cmd, NSArray *activityItems,
         return orig_initWithItems(self, _cmd, activityItems, applicationActivities);
     }
     NSArray<NSString*> *controllerClasses = amproj_controllerClassChain();
+#if AMPROJ_DEBUG
     BOOL isPackageExport = amproj_hasSupportedItem(activityItems) &&
         (amproj_hasPackageController(controllerClasses) ||
-#if AMPROJ_DEBUG
          atomic_load(&amproj_packageFlowActive)
-#else
-         amproj_packageFlowActive
-#endif
         );
+#else
+    // Release builds export only from the semantic ShareNC action.  Treating
+    // an arbitrary activity sheet under ShareProjectPackageVC as an export
+    // re-enters AM's native image/package flow and was the source of the old
+    // crash-prone fallback path.
+    BOOL isPackageExport = AMProjV44ReleaseNativeActivityFallbackEnabled();
+#endif
     NSString *mode = amproj_exportMode();
 
 #if AMPROJ_DEBUG
@@ -13798,7 +13807,7 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
         shareController, &selectedExportOption);
     BOOL hasSelectedExportOption = contentController != nil;
     BOOL isProjectPackage = hasSelectedExportOption &&
-        selectedExportOption == AMProjExportOptionProjectPackage;
+        AMProjV44IsDirectProjectPackageOption(selectedExportOption);
     NSString *mode = amproj_exportMode();
     amproj_logCriticalEvent(@"direct.export_button", @{
         @"mode": mode ?: @"",
@@ -15531,6 +15540,7 @@ static void AMProjExportInit(void) {
 #else
         NSLog(@"[AMProjExport] ===== Loading v44 =====");
 #endif
+        NSLog(@"%@", kAMProjCloudStabilityContract);
 
         // ObjC classes are registered before image constructors. Installing only
         // this AppDelegate hook here avoids touching UIApplication or UIKit UI.

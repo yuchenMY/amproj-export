@@ -14,6 +14,9 @@ BRIDGE_HEADER = (ROOT / "AMProjExport" / "AMProjNativeImportBridge.h").read_text
 BRIDGE_ASSEMBLY = (ROOT / "AMProjExport" / "AMProjNativeImportBridge.S").read_text(
     encoding="utf-8"
 )
+STABILITY_ASSEMBLY = (
+    ROOT / "AMProjExport" / "AMProjStabilityContract.S"
+).read_text(encoding="utf-8")
 MAKEFILE = (ROOT / "AMProjExport" / "Makefile").read_text(encoding="utf-8")
 DEBUG_TRANSPORT_SOURCE = (
     ROOT / "AMProjExport" / "AMDebugTransport.m"
@@ -395,6 +398,44 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("ShareProjectPackageVC", body)
         self.assertNotIn('containsString:@"Package"]', body)
 
+    def test_release_cloud_disables_native_activity_sheet_export_fallback(self):
+        body = function_body(
+            "static id hooked_initWithItems",
+            "static BOOL amproj_isIPAFireWelcome",
+        )
+        self.assertIn("#if AMPROJ_DEBUG", body)
+        self.assertIn(
+            "BOOL isPackageExport = AMProjV44ReleaseNativeActivityFallbackEnabled();",
+            body,
+        )
+        release_branch = body[body.index("#else") : body.index("#endif")]
+        self.assertNotIn("amproj_hasPackageController", release_branch)
+        self.assertNotIn("amproj_hasSupportedItem", release_branch)
+        self.assertIn("kAMProjCloudStabilityContract", SOURCE)
+        self.assertIn(
+            "v44-stable:semantic-option-7,no-native-activity-fallback", SOURCE
+        )
+
+    def test_v44_stability_contract_assembly_is_exact(self):
+        instructions = [
+            line.strip()
+            for line in STABILITY_ASSEMBLY.splitlines()
+            if line.strip() and not line.strip().startswith(".")
+        ]
+        self.assertEqual(
+            instructions,
+            [
+                "_AMProjV44ReleaseNativeActivityFallbackEnabled:",
+                "mov w0, #0",
+                "ret",
+                "_AMProjV44IsDirectProjectPackageOption:",
+                "cmp w0, #7",
+                "cset w0, eq",
+                "ret",
+            ],
+        )
+        self.assertEqual(MAKEFILE.count("AMProjStabilityContract.S"), 6)
+
     def test_v44_project_package_action_uses_exact_862_option(self):
         self.assertIn(
             "static const uint8_t AMProjExportOptionProjectPackage = 7;", SOURCE
@@ -418,7 +459,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("[NSThread isMainThread]", share)
         self.assertIn(
-            "selectedExportOption == AMProjExportOptionProjectPackage", share
+            "AMProjV44IsDirectProjectPackageOption(selectedExportOption)", share
         )
         self.assertIn("amproj_shareExportOptionController(", share)
         self.assertIn("if (!isProjectPackage", share)

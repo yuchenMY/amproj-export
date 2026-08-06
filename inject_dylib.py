@@ -467,10 +467,9 @@ def patch_info_plist(
                 changed = True
 
     document_flags = {
-        # Provider copy-in is unreliable during a cold launch on iOS 26. Allow
-        # Files/QQ to hand the original document over with a security scope; the
-        # runtime still copies it synchronously into the app-owned import cache.
-        "LSSupportsOpeningDocumentsInPlace": True,
+        # Match the v40/v42 contract: let Launch Services copy QQ/Files inputs
+        # into Documents/Inbox before invoking the app delegate.
+        "LSSupportsOpeningDocumentsInPlace": False,
         "UISupportsDocumentBrowser": False,
     }
     for key, value in document_flags.items():
@@ -1266,7 +1265,7 @@ def _validate_patched_info_plist(
             "Info.plist public.xml document type must be Editor with Alternate rank"
         )
     expected_document_flags = {
-        "LSSupportsOpeningDocumentsInPlace": True,
+        "LSSupportsOpeningDocumentsInPlace": False,
         "UISupportsDocumentBrowser": False,
     }
     for key, value in expected_document_flags.items():

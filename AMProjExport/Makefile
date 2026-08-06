@@ -14,16 +14,16 @@ LDLIBS = -framework Foundation -framework UIKit -framework QuartzCore \
 
 all: AMProjExport.dylib AMProjExportCloud.dylib AMProjExportDebug.dylib AMMeowLoader.dylib
 
-AMProjExport.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S
-	$(CC) $(CFLAGS) -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S $(LDLIBS)
+AMProjExport.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S
+	$(CC) $(CFLAGS) -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S $(LDLIBS)
 	@ls -la $@
 
-AMProjExportCloud.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMDebugTransport.m AMDebugTransport.h
-	$(CC) $(CFLAGS) -DAMPROJ_TELEMETRY=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMDebugTransport.m $(LDLIBS)
+AMProjExportCloud.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m AMDebugTransport.h
+	$(CC) $(CFLAGS) -DAMPROJ_TELEMETRY=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m $(LDLIBS)
 	@ls -la $@
 
-AMProjExportDebug.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMDebugTransport.m AMDebugTransport.h
-	$(CC) $(CFLAGS) -DAMPROJ_DEBUG=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMDebugTransport.m $(LDLIBS)
+AMProjExportDebug.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m AMDebugTransport.h
+	$(CC) $(CFLAGS) -DAMPROJ_DEBUG=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m $(LDLIBS)
 	@ls -la $@
 
 AMMeowLoader.dylib: AMMeowLoader.c

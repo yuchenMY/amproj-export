@@ -265,10 +265,10 @@ class Stable862PackageTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "preimage mismatch"):
                     stable.patch_stability_hotfixes(bytes(data))
 
-    def test_info_plist_is_locked_to_6255_and_uses_provider_scope(self):
+    def test_info_plist_is_locked_to_6255_and_uses_inbox_copy_in(self):
         source = self.fixture_info_plist()
         result = plistlib.loads(stable.patch_info_plist(source))
-        self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], True)
+        self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], False)
         self.assertIs(result["UISupportsDocumentBrowser"], False)
 
     def test_info_plist_rejects_another_build(self):

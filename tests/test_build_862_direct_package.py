@@ -8,6 +8,95 @@ import build_862_direct_package as direct
 
 
 class DirectCloud862Tests(unittest.TestCase):
+    def fixture_cloud(self, fallback_code=None, option_code=None):
+        functions = direct.EXPECTED_CLOUD_CONTRACT_FUNCTIONS
+        fallback_name = "_AMProjV44ReleaseNativeActivityFallbackEnabled"
+        option_name = "_AMProjV44IsDirectProjectPackageOption"
+        fallback_code = fallback_code or functions[fallback_name]
+        option_code = option_code or functions[option_name]
+        text = fallback_code + option_code
+        text_offset = 32 + 152 + 24
+        text_address = 0x100000000 + text_offset
+        strings = b"\0" + fallback_name.encode() + b"\0" + option_name.encode() + b"\0"
+        fallback_string = 1
+        option_string = fallback_string + len(fallback_name) + 1
+        symbol_offset = text_offset + len(text)
+        string_offset = symbol_offset + 32
+        segment = struct.pack(
+            "<II16sQQQQIIII",
+            direct.LC_SEGMENT_64,
+            152,
+            b"__TEXT" + bytes(10),
+            0x100000000,
+            string_offset + len(strings),
+            0,
+            string_offset + len(strings),
+            7,
+            5,
+            1,
+            0,
+        )
+        section = struct.pack(
+            "<16s16sQQIIIIIIII",
+            b"__text" + bytes(10),
+            b"__TEXT" + bytes(10),
+            text_address,
+            len(text),
+            text_offset,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        symtab = struct.pack(
+            "<IIIIII",
+            direct.LC_SYMTAB,
+            24,
+            symbol_offset,
+            2,
+            string_offset,
+            len(strings),
+        )
+        header = struct.pack(
+            "<IIIIIIII",
+            0xFEEDFACF,
+            0x0100000C,
+            0,
+            0x6,
+            2,
+            len(segment + section + symtab),
+            0,
+            0,
+        )
+        symbols = b"".join(
+            (
+                struct.pack("<IBBHQ", fallback_string, 0x0F, 1, 0, text_address),
+                struct.pack(
+                    "<IBBHQ",
+                    option_string,
+                    0x0F,
+                    1,
+                    0,
+                    text_address + len(fallback_code),
+                ),
+            )
+        )
+        return (
+            header
+            + segment
+            + section
+            + symtab
+            + text
+            + symbols
+            + strings
+            + direct.EXPECTED_CLOUD_RUNTIME_MARKER
+            + b"\0"
+            + direct.EXPECTED_CLOUD_STABILITY_MARKER
+        )
+
     def dylib_command(self, command, name, size):
         encoded = name.encode("utf-8") + b"\0"
         if 24 + len(encoded) > size:
@@ -104,16 +193,16 @@ class DirectCloud862Tests(unittest.TestCase):
         cloud = direct._verify_output_main_structure(result)
         self.assertEqual(cloud["command"], direct.handoff.LC_LOAD_DYLIB)
 
-    def test_output_info_changes_only_identity_contract(self):
+    def test_output_info_changes_identity_and_restores_copy_in_contract(self):
         source = plistlib.loads(self.fixture_info())
         result = plistlib.loads(direct.prepare_output_info(self.fixture_info()))
         self.assertEqual(result["CFBundleDisplayName"], "猫鹤AM")
         self.assertEqual(result["CFBundleName"], "猫鹤AM")
         self.assertEqual(result["CFBundleIdentifier"], "com.ayakameow.am")
+        self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], False)
         for key in (
             "CFBundleDocumentTypes",
             "UTExportedTypeDeclarations",
-            "LSSupportsOpeningDocumentsInPlace",
             "UISupportsDocumentBrowser",
         ):
             self.assertEqual(result[key], source[key])
@@ -135,6 +224,25 @@ class DirectCloud862Tests(unittest.TestCase):
                 b"prefix [AMProjExport] ===== Loading v44-cloud ===== suffix"
             )
         )
+
+    def test_cloud_stability_contract_rejects_marker_only_v44(self):
+        marker_only = (
+            direct.EXPECTED_CLOUD_RUNTIME_MARKER
+            + b"\0"
+            + direct.EXPECTED_CLOUD_STABILITY_MARKER
+        )
+        with self.assertRaisesRegex(RuntimeError, "thin arm64 MH_DYLIB"):
+            direct.prepare_cloud(marker_only)
+
+    def test_cloud_stability_contract_rejects_old_code_with_both_markers(self):
+        old_fallback = bytes.fromhex("20008052c0035fd6")
+        cloud = self.fixture_cloud(fallback_code=old_fallback)
+        with self.assertRaisesRegex(RuntimeError, "unexpected arm64 semantics"):
+            direct.verify_cloud_stability_contract(cloud)
+
+    def test_cloud_stability_contract_accepts_current_cloud(self):
+        cloud = self.fixture_cloud()
+        self.assertTrue(direct.verify_cloud_stability_contract(cloud))
 
 
 if __name__ == "__main__":

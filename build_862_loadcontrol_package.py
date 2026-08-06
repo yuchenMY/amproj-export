@@ -674,7 +674,7 @@ def verify_info_plist(data):
         "CFBundleIdentifier": EXPECTED_OUTPUT_BUNDLE_IDENTIFIER,
         "CFBundleShortVersionString": "6.2.55",
         "CFBundleVersion": "862",
-        "LSSupportsOpeningDocumentsInPlace": True,
+        "LSSupportsOpeningDocumentsInPlace": False,
         "UISupportsDocumentBrowser": False,
     }
     for key, expected in expected_scalars.items():
@@ -692,8 +692,12 @@ def verify_info_plist(data):
 
 def _prepare_output_info_plist(data):
     """Retain the base registration contract while applying the requested identity."""
-    stable.verify_info_plist_contract(data)
     plist = plistlib.loads(data)
+    plist["LSSupportsOpeningDocumentsInPlace"] = False
+    plist["UISupportsDocumentBrowser"] = False
+    stable.verify_info_plist_contract(
+        plistlib.dumps(plist, fmt=plistlib.FMT_BINARY, sort_keys=False)
+    )
     plist["CFBundleDisplayName"] = EXPECTED_OUTPUT_DISPLAY_NAME
     plist["CFBundleName"] = EXPECTED_OUTPUT_DISPLAY_NAME
     plist["CFBundleIdentifier"] = EXPECTED_OUTPUT_BUNDLE_IDENTIFIER
@@ -916,7 +920,6 @@ def build_loadcontrol_package(base_path, cloud_source_ipa, loadcontrol_path, out
             if LOADCONTROL_PATH in names:
                 raise RuntimeError("user base unexpectedly already contains LoadControl")
             base_info = base.read(INFO_PLIST)
-            stable.verify_info_plist_contract(base_info)
             info = _prepare_output_info_plist(base_info)
             main = _prepare_for_recursive_signing(
                 patch_main_loader(base.read(MAIN_EXECUTABLE)),

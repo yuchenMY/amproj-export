@@ -35,12 +35,16 @@ jobs:
         run: |
           python3 - <<'PY'
           import subprocess
+          from pathlib import Path
 
+          from build_862_direct_package import verify_cloud_stability_contract
           from inject_dylib import verify_dylib_architecture
 
           required_symbols = {
               "_AMProjCallNativePackageImport",
               "_AMProjInstallNativePackageImportBridge",
+              "_AMProjV44IsDirectProjectPackageOption",
+              "_AMProjV44ReleaseNativeActivityFallbackEnabled",
           }
           for path in (
               "AMProjExport/AMProjExport.dylib",
@@ -61,6 +65,10 @@ jobs:
               }
               assert not missing, f"{path} missing symbols: {sorted(missing)}"
               print(f"verified {path}: arm64 MH_DYLIB, {info['ncmds']} load commands")
+          verify_cloud_stability_contract(
+              Path("AMProjExport/AMProjExportCloud.dylib").read_bytes()
+          )
+          print("verified AMProjExportCloud.dylib: v44 stability contract")
           loader = verify_dylib_architecture("AMProjExport/AMMeowLoader.dylib")
           symbols = subprocess.check_output(
               ["nm", "-gU", "AMProjExport/AMMeowLoader.dylib"], text=True

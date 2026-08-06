@@ -146,7 +146,7 @@ class OwnBaseLoadControl862Tests(unittest.TestCase):
             result["CFBundleDocumentTypes"],
             loadcontrol.stable.EXPECTED_DOCUMENT_TYPES,
         )
-        self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], True)
+        self.assertIs(result["LSSupportsOpeningDocumentsInPlace"], False)
 
     def test_signing_filter_handles_nested_and_case_variants(self):
         self.assertTrue(

@@ -264,7 +264,7 @@ def patch_info_plist(data):
         raise RuntimeError("input app is not build 862")
     if plist.get("CFBundleIdentifier") != "com.alightcreative.motion":
         raise RuntimeError("input app bundle identifier is unexpected")
-    plist["LSSupportsOpeningDocumentsInPlace"] = True
+    plist["LSSupportsOpeningDocumentsInPlace"] = False
     plist["UISupportsDocumentBrowser"] = False
     result = plistlib.dumps(plist, fmt=plistlib.FMT_BINARY, sort_keys=False)
     verify_info_plist_contract(result)
@@ -280,7 +280,7 @@ def verify_info_plist_contract(data):
         "CFBundleIdentifier": "com.alightcreative.motion",
         "CFBundleShortVersionString": "6.2.55",
         "CFBundleVersion": "862",
-        "LSSupportsOpeningDocumentsInPlace": True,
+        "LSSupportsOpeningDocumentsInPlace": False,
         "UISupportsDocumentBrowser": False,
     }
     for key, expected in expected_scalars.items():
