@@ -39,6 +39,7 @@ EXPECTED_CLOUD_RUNTIME_MARKER = b"[AMProjExport] ===== Loading v44-cloud ====="
 EXPECTED_CLOUD_STABILITY_MARKER = (
     b"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback"
 )
+CLOUD_LOAD_LCSIGN = "@executable_path/Frameworks/AMProjExport.dylib"
 CLOUD_LOAD_COMPACT = "@rpath/AMProjExportCloud.dylib"
 EXPECTED_CLOUD_CONTRACT_FUNCTIONS = {
     "_AMProjV44ReleaseNativeActivityFallbackEnabled": bytes.fromhex(
@@ -60,6 +61,8 @@ APP_ROOT = handoff.APP_ROOT
 INFO_PLIST = handoff.INFO_PLIST
 MAIN_EXECUTABLE = handoff.MAIN_EXECUTABLE
 CLOUD_PATH = handoff.CLOUD_PATH
+CLOUD_PATH_LCSIGN = f"{APP_ROOT}Frameworks/AMProjExport.dylib"
+CLOUD_MEMBER_PATHS = frozenset({CLOUD_PATH, CLOUD_PATH_LCSIGN})
 LOADCONTROL_PATH = handoff.LOADCONTROL_PATH
 AMENHANCER_PATH = handoff.AMENHANCER_PATH
 CYDIA_SUBSTRATE_PATH = handoff.CYDIA_SUBSTRATE_PATH
@@ -267,7 +270,11 @@ def _custom_loads(data, label):
     cloud = [
         item
         for item in dylibs
-        if item["name"] in {handoff.CLOUD_LOAD, CLOUD_LOAD_COMPACT}
+        if item["name"] in {
+            handoff.CLOUD_LOAD,
+            CLOUD_LOAD_LCSIGN,
+            CLOUD_LOAD_COMPACT,
+        }
     ]
     loader = [item for item in dylibs if item["name"] == handoff.LOADCONTROL_LOAD]
     return uuids, enhancer, cloud, loader
@@ -300,6 +307,14 @@ def _require_frameworks_rpath(data, label):
         )
 
 
+def _cloud_member_path(load_name):
+    if load_name == CLOUD_LOAD_LCSIGN:
+        return CLOUD_PATH_LCSIGN
+    if load_name in {handoff.CLOUD_LOAD, CLOUD_LOAD_COMPACT}:
+        return CLOUD_PATH
+    raise RuntimeError(f"unsupported Cloud load path: {load_name}")
+
+
 def verify_input_main(data):
     actual_hash = sha256_bytes(data)
     if EXPECTED_INPUT_MAIN_SHA256 and actual_hash != EXPECTED_INPUT_MAIN_SHA256:
@@ -320,8 +335,9 @@ def verify_input_main(data):
     }:
         raise RuntimeError("source main must load one LoadControl dylib")
     full_replacement = handoff.CLOUD_LOAD.encode("utf-8") + b"\0"
+    lcsign_replacement = CLOUD_LOAD_LCSIGN.encode("utf-8") + b"\0"
     capacity = loader[0]["size"] - loader[0]["name_offset"]
-    if len(full_replacement) > capacity:
+    if len(full_replacement) > capacity and len(lcsign_replacement) > capacity:
         _require_frameworks_rpath(data, "source main executable")
     return loader[0]
 
@@ -378,9 +394,11 @@ def patch_main_direct_cloud(data):
         return data
     capacity = target["size"] - target["name_offset"]
     full_replacement = handoff.CLOUD_LOAD.encode("utf-8") + b"\0"
+    lcsign_replacement = CLOUD_LOAD_LCSIGN.encode("utf-8") + b"\0"
     compact_replacement = CLOUD_LOAD_COMPACT.encode("utf-8") + b"\0"
     replacement = (
         full_replacement if len(full_replacement) <= capacity
+        else lcsign_replacement if len(lcsign_replacement) <= capacity
         else compact_replacement
     )
     if len(replacement) > capacity:
@@ -458,6 +476,8 @@ def _copy_zip_info(info):
 
 def verify_resign_ready_ipa(source_path, output_path, info, main, cloud):
     verify_cloud_runtime_version(cloud)
+    cloud_load = _verify_output_main_structure(main)
+    output_cloud_path = _cloud_member_path(cloud_load["name"])
     with zipfile.ZipFile(source_path, "r") as source, zipfile.ZipFile(
         output_path, "r"
     ) as output:
@@ -473,8 +493,9 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud):
             for name in source_names
             if not handoff._is_stale_signing_entry(name)
             and name != LOADCONTROL_PATH
+            and name not in CLOUD_MEMBER_PATHS
         }
-        expected_names.add(CLOUD_PATH)
+        expected_names.add(output_cloud_path)
         if set(output_names) != expected_names:
             raise RuntimeError("output IPA member set changed unexpectedly")
         if LOADCONTROL_PATH in output_names:
@@ -485,7 +506,15 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud):
         if output.read(MAIN_EXECUTABLE) != main:
             raise RuntimeError("output main differs from direct-Cloud main")
         verify_resign_ready_main(main)
-        if output.read(CLOUD_PATH) != cloud:
+        if output_names.count(output_cloud_path) != 1:
+            raise RuntimeError("output IPA must contain one active Cloud member")
+        if any(
+            path in output_names
+            for path in CLOUD_MEMBER_PATHS
+            if path != output_cloud_path
+        ):
+            raise RuntimeError("output IPA contains a stale Cloud member")
+        if output.read(output_cloud_path) != cloud:
             raise RuntimeError("output Cloud differs from prepared Cloud")
         try:
             handoff._code_signature_fields(cloud, "AMProjExportCloud.dylib")
@@ -497,7 +526,12 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud):
                 "resign-ready Cloud must not contain an empty signature command"
             )
 
-        changed = {INFO_PLIST, MAIN_EXECUTABLE, CLOUD_PATH, LOADCONTROL_PATH}
+        changed = {
+            INFO_PLIST,
+            MAIN_EXECUTABLE,
+            LOADCONTROL_PATH,
+            *CLOUD_MEMBER_PATHS,
+        }
         for name in expected_names - changed:
             source_info = source.getinfo(name)
             if source_info.is_dir():
@@ -510,6 +544,7 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud):
         "entry_count": len(output_names),
         "main_sha256": sha256_bytes(main),
         "cloud_sha256": sha256_bytes(cloud),
+        "cloud_member": output_cloud_path,
         "loadcontrol_removed": True,
     }
 
@@ -542,22 +577,31 @@ def build_direct_package(source_path, output_path, cloud_path=None):
         )
         if any(names.count(path) != 1 for path in required):
             raise RuntimeError("source IPA has an unexpected app layout")
-        has_cloud = names.count(CLOUD_PATH) == 1
+        source_cloud_paths = [
+            path for path in CLOUD_MEMBER_PATHS if names.count(path) == 1
+        ]
+        has_cloud = len(source_cloud_paths) == 1
         has_loadcontrol = names.count(LOADCONTROL_PATH) == 1
         if not has_cloud and not has_loadcontrol:
             raise RuntimeError("source IPA must contain Cloud or LoadControl")
-        if names.count(CLOUD_PATH) > 1 or names.count(LOADCONTROL_PATH) > 1:
+        if (
+            len(source_cloud_paths) > 1
+            or any(names.count(path) > 1 for path in CLOUD_MEMBER_PATHS)
+            or names.count(LOADCONTROL_PATH) > 1
+        ):
             raise RuntimeError("source IPA contains duplicate loader members")
         info = prepare_output_info(source.read(INFO_PLIST))
         main = patch_main_direct_cloud(source.read(MAIN_EXECUTABLE))
         cloud_source = Path(cloud_path).resolve().read_bytes() if cloud_path else (
-            source.read(CLOUD_PATH) if has_cloud else None
+            source.read(source_cloud_paths[0]) if has_cloud else None
         )
         if cloud_source is None:
             raise RuntimeError(
                 "a freshly built v44 AMProjExportCloud.dylib is required when the source has only LoadControl"
             )
         cloud = prepare_cloud(cloud_source)
+        cloud_load = _verify_output_main_structure(main)
+        output_cloud_path = _cloud_member_path(cloud_load["name"])
         if EXPECTED_AMENHANCER_SHA256 and sha256_bytes(source.read(AMENHANCER_PATH)) != EXPECTED_AMENHANCER_SHA256:
             raise RuntimeError("source AmEnhancer changed")
         if (
@@ -585,16 +629,17 @@ def build_direct_package(source_path, output_path, cloud_path=None):
                     payload = info
                 elif name == MAIN_EXECUTABLE:
                     payload = main
-                elif name == CLOUD_PATH:
-                    payload = cloud
+                elif name in CLOUD_MEMBER_PATHS:
+                    continue
                 output.writestr(_copy_zip_info(zip_info), payload)
-            if CLOUD_PATH not in names:
-                output.writestr(
-                    _copy_zip_info(
-                        zipfile.ZipInfo(CLOUD_PATH, date_time=(1980, 1, 1, 0, 0, 0))
-                    ),
-                    cloud,
-                )
+            output.writestr(
+                _copy_zip_info(
+                    zipfile.ZipInfo(
+                        output_cloud_path, date_time=(1980, 1, 1, 0, 0, 0)
+                    )
+                ),
+                cloud,
+            )
 
         verification = verify_resign_ready_ipa(
             source_path, candidate, info=info, main=main, cloud=cloud

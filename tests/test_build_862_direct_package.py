@@ -211,11 +211,10 @@ class DirectCloud862Tests(unittest.TestCase):
         self.assertEqual(cloud["command"], direct.handoff.LC_LOAD_DYLIB)
         self.assertEqual(cloud["name"], direct.handoff.CLOUD_LOAD)
 
-    def test_main_patch_upgrades_compact_weak_loader_to_strong_rpath_cloud(self):
+    def test_main_patch_upgrades_compact_weak_loader_to_lcsign_visible_cloud(self):
         source = self.fixture_main(
             loader_command=direct.handoff.LC_LOAD_WEAK_DYLIB,
             loader_command_size=72,
-            include_frameworks_rpath=True,
         )
         target = direct.verify_input_main(source)
         self.assertEqual(target["command"], direct.handoff.LC_LOAD_WEAK_DYLIB)
@@ -224,7 +223,14 @@ class DirectCloud862Tests(unittest.TestCase):
         cloud = direct._verify_output_main_structure(result)
 
         self.assertEqual(cloud["command"], direct.handoff.LC_LOAD_DYLIB)
-        self.assertEqual(cloud["name"], direct.CLOUD_LOAD_COMPACT)
+        self.assertEqual(cloud["name"], direct.CLOUD_LOAD_LCSIGN)
+        self.assertEqual(
+            direct._cloud_member_path(cloud["name"]), direct.CLOUD_PATH_LCSIGN
+        )
+        self.assertEqual(
+            direct.CLOUD_PATH_LCSIGN,
+            "Payload/AlightMotion.app/Frameworks/AMProjExport.dylib",
+        )
         command_start = target["offset"]
         name_start = command_start + target["name_offset"]
         name_end = command_start + target["size"]
@@ -239,13 +245,11 @@ class DirectCloud862Tests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertLessEqual(changed, allowed)
 
-    def test_compact_cloud_rejects_main_without_frameworks_rpath(self):
+    def test_compact_rpath_cloud_rejects_main_without_frameworks_rpath(self):
         source = self.fixture_main(
             loader_command=direct.handoff.LC_LOAD_WEAK_DYLIB,
             loader_command_size=72,
         )
-        with self.assertRaisesRegex(RuntimeError, "compact Cloud load requires"):
-            direct.verify_input_main(source)
         _uuids, _enhancer, _cloud, loaders = direct._custom_loads(
             source, "fixture main"
         )
