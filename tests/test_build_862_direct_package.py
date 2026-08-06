@@ -8,6 +8,19 @@ import build_862_direct_package as direct
 
 
 class DirectCloud862Tests(unittest.TestCase):
+    def fixture_amenhancer(self):
+        marker_offset = direct.AMENHANCER_MARKER_FUNCTION_OFFSET
+        size = marker_offset + len(direct.AMENHANCER_MARKER_FUNCTION_PREIMAGE) + 64
+        source = bytearray(b"\xa5" * size)
+        context_offset = 0x100
+        context = direct.AMENHANCER_STATUS_LABEL_CONTEXT
+        source[context_offset : context_offset + len(context)] = context
+        source[
+            marker_offset : marker_offset
+            + len(direct.AMENHANCER_MARKER_FUNCTION_PREIMAGE)
+        ] = direct.AMENHANCER_MARKER_FUNCTION_PREIMAGE
+        return bytes(source), context_offset
+
     def fixture_cloud(self, fallback_code=None, option_code=None):
         functions = direct.EXPECTED_CLOUD_CONTRACT_FUNCTIONS
         fallback_name = "_AMProjV44ReleaseNativeActivityFallbackEnabled"
@@ -299,38 +312,47 @@ class DirectCloud862Tests(unittest.TestCase):
             )
         )
 
-    def test_amenhancer_patch_removes_only_the_visible_v59_label(self):
-        prefix = b"header-data\0"
-        suffix = b"tail-data"
-        source = prefix + direct.AMENHANCER_STATUS_LABEL_CONTEXT + suffix
+    def test_amenhancer_patch_disables_the_complete_v59_marker_view(self):
+        source, context_offset = self.fixture_amenhancer()
 
         result = direct.prepare_amenhancer(source)
 
-        label_start = len(prefix) + len(b"nil\0")
+        label_start = context_offset + len(b"nil\0")
+        marker_start = direct.AMENHANCER_MARKER_FUNCTION_OFFSET
         changed = {
             index
             for index, (before, after) in enumerate(zip(source, result))
             if before != after
         }
         self.assertTrue(changed)
-        self.assertLessEqual(
-            changed,
-            set(
-                range(
-                    label_start,
-                    label_start + len(direct.AMENHANCER_STATUS_LABEL),
-                )
-            ),
+        allowed = set(
+            range(label_start, label_start + len(direct.AMENHANCER_STATUS_LABEL))
         )
+        allowed.update(range(marker_start, marker_start + len(direct.ARM64_RET)))
+        self.assertLessEqual(changed, allowed)
         self.assertNotIn(direct.AMENHANCER_STATUS_LABEL, result)
         self.assertIn(b"[AmEnhancer] marker added\n", result)
+        self.assertEqual(
+            result[marker_start : marker_start + len(direct.ARM64_RET)],
+            direct.ARM64_RET,
+        )
 
     def test_amenhancer_patch_rejects_unknown_or_duplicate_preimage(self):
         with self.assertRaisesRegex(RuntimeError, "context changed"):
             direct.prepare_amenhancer(b"prefix AM v59 OK suffix")
+        source, _context_offset = self.fixture_amenhancer()
         with self.assertRaisesRegex(RuntimeError, "context changed"):
             direct.prepare_amenhancer(
-                direct.AMENHANCER_STATUS_LABEL_CONTEXT * 2
+                source + direct.AMENHANCER_STATUS_LABEL_CONTEXT
+            )
+        marker_offset = direct.AMENHANCER_MARKER_FUNCTION_OFFSET
+        changed_marker = bytearray(source)
+        changed_marker[marker_offset] ^= 0x01
+        with self.assertRaisesRegex(RuntimeError, "marker function changed"):
+            direct.prepare_amenhancer(bytes(changed_marker))
+        with self.assertRaisesRegex(RuntimeError, "marker function is not unique"):
+            direct.prepare_amenhancer(
+                source + direct.AMENHANCER_MARKER_FUNCTION_PREIMAGE
             )
 
     def test_cloud_stability_contract_rejects_marker_only_v44(self):

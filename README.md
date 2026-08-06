@@ -97,12 +97,14 @@ completion、持久化变化和临时包消费全部成立时报告中性完成�
 - Debug 版默认不安装全局 `NSXMLParser` 诊断 swizzle，避免它干扰 Alight Motion 的 Swift 项目解析。
 - XML 引用的媒体缺失时立即拒绝导入并保留缓存包，避免 AM 原生 importer 生成不完整的假项目。
 
-本轮 ABI 修复还原了 `6.2.55 (862)` 底包的真实调用约定：原生入口的显式 `x2` 是
-`StorageReference`（入口会对它调用 `writeToFile:`），显式 `x3` 是
-`AMProgressAlert`，隐藏 Swift `x20` 是弱持有的项目页控制器。v25 从主包
-`AMProgressAlert.storyboardc` 创建真实的进度控制器并在事务期间强持有；它不主动展示，
-但必须作为非空 `x3` 传入，因为 AM 在 status 4 后会无条件向它发送 dismiss。
-复制任务完成时同时发出 Firebase 的进度终态 `2` 和成功终态 `4`，失败仍发出 `5`。
+本轮 ABI 修复还原了 `6.2.55 (862)` 底包的真实本地导入链：旧入口
+`0x1002647c0` 的参数是 Swift Firebase `StorageReference`，不能用 Objective-C 对象伪造，
+否则会在 `2/4` 后进入 Swift value-witness 调用并直接崩溃。v44 不再调用这个下载入口；
+它先把已验证项目包复制到私有临时目录，再把真实的 Swift `Foundation.URL`、
+`PackageImporter`、项目页控制器和 `AMProgressAlert` 传给本地 continuation
+`0x10026596c`，由底包自己的 `0x100308bc4` 解析并写入项目。进度控制器从主包
+`AMProgressAlert.storyboardc` 创建并强持有到原生 completion。兼容状态 `2/4`、`3/4`
+和失败状态仍由桥接层按原事务顺序报告，但不再伪装或调用 Firebase 下载任务。
 
 因此，`2/4` 或 `3/4` 停住、闪退的旧 v20-v30 包不要继续重复安装；请使用 v44 构建。v44 会在私有工作副本中补齐完整 `.amproj` 所需的 iOS 媒体 SHA-1，再把 XML 与全部图片、音频、视频和字体作为一个完整项目包交给 AM；原生直接生成项目时保留项目结果，观察到模板增量时保留已验证的完整模板，目标暂不可见时只报告中性完成结果，不再强制自动转换。
 

@@ -1414,9 +1414,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             cleanup,
         )
 
-    def test_native_observer_exceptions_are_contained(self):
-        self.assertGreaterEqual(BRIDGE_SOURCE.count('storage_observer_exception'), 2)
-        self.assertGreaterEqual(BRIDGE_SOURCE.count('@catch (NSException *exception)'), 4)
+    def test_native_local_continuation_exceptions_are_contained(self):
+        self.assertIn("The native local project importer raised an exception", BRIDGE_SOURCE)
+        self.assertIn("AMProjPoisonNativeBridge()", BRIDGE_SOURCE)
+        self.assertGreaterEqual(BRIDGE_SOURCE.count('@catch (NSException *exception)'), 3)
 
     def test_native_package_bridge_has_explicit_full_project_contract(self):
         bridge = function_body(
@@ -1430,23 +1431,18 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("4/4", bridge)
         self.assertIn("\\u9879\\u76ee", bridge)
 
-    def test_native_bridge_uses_complete_package_and_firebase_task_contract(self):
-        self.assertIn("AMProjLocalStorageReference", BRIDGE_SOURCE)
-        self.assertIn("AMProjLocalStorageTask", BRIDGE_SOURCE)
-        self.assertIn("typedef NSString *AMProjLocalStorageHandle", BRIDGE_SOURCE)
-        self.assertIn(
-            "NSMutableDictionary<AMProjLocalStorageHandle, NSDictionary *> *observers",
-            BRIDGE_SOURCE,
-        )
-        self.assertNotIn("typedef int64_t AMProjLocalStorageHandle", BRIDGE_SOURCE)
-        self.assertIn("writeToFile:", BRIDGE_SOURCE)
-        self.assertIn("observeStatus:", BRIDGE_SOURCE)
-        self.assertIn("removeObserverWithHandle:", BRIDGE_SOURCE)
-        self.assertIn("removeAllObserversForStatus:", BRIDGE_SOURCE)
-        self.assertIn("copyItemAtURL:sourceURL toURL:destinationURL", BRIDGE_SOURCE)
-        self.assertIn("status == 2 || status == 4", BRIDGE_SOURCE)
-        self.assertIn("status == 5", BRIDGE_SOURCE)
-        self.assertIn("progress.completedUnitCount = 1", BRIDGE_SOURCE)
+    def test_native_bridge_uses_complete_package_and_skips_firebase_download(self):
+        self.assertNotIn("AMProjLocalStorageReference", BRIDGE_SOURCE)
+        self.assertNotIn("AMProjLocalStorageTask", BRIDGE_SOURCE)
+        self.assertNotIn("writeToFile:", BRIDGE_SOURCE)
+        self.assertNotIn("observeStatus:", BRIDGE_SOURCE)
+        self.assertIn("amproj_local_import_%@", BRIDGE_SOURCE)
+        self.assertIn("copyItemAtURL:packageURL", BRIDGE_SOURCE)
+        self.assertIn("AMProjBridgeNSURLToSwiftURL", BRIDGE_SOURCE)
+        self.assertIn("AMProjCallNativeLocalImportContinuation", BRIDGE_SOURCE)
+        self.assertIn("AMProjEmitStorageStatus(2, NO", BRIDGE_SOURCE)
+        self.assertIn("AMProjEmitStorageStatus(4, NO", BRIDGE_SOURCE)
+        self.assertIn("AMProjEmitStorageStatus(5, NO", BRIDGE_SOURCE)
         self.assertIn("QOS_CLASS_USER_INITIATED", BRIDGE_SOURCE)
         self.assertNotIn("AMProjExtractProjectArchive", BRIDGE_SOURCE)
         self.assertNotIn("nativeXMLURL", BRIDGE_SOURCE)
@@ -1504,15 +1500,18 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("presentedViewController", owner_guard)
 
     def test_native_bridge_creates_and_retains_progress_owner(self):
-        call_start = BRIDGE_SOURCE.index("AMProjCallNativePackageImportBody(")
+        call_start = BRIDGE_SOURCE.index("AMProjCallNativeLocalImportContinuation(")
         call_end = BRIDGE_SOURCE.index("NULL);", call_start) + len("NULL);")
         call = BRIDGE_SOURCE[call_start:call_end]
-        self.assertIn("weakOwnerContext,", call)
-        self.assertIn("reference,", call)
+        self.assertIn("localContinuation,", call)
+        self.assertIn("nil,", call)
+        self.assertIn("owner,", call)
         self.assertIn("progressOwner,", call)
+        self.assertIn("swiftCleanupURL,", call)
+        self.assertIn("packageImporter,", call)
         self.assertIn("swiftName.word0,", call)
         self.assertIn("swiftName.word1,", call)
-        self.assertIn("packageImporter,", call)
+        self.assertIn("swiftPackageURL,", call)
         self.assertIn("AMProjNativeImportCompletionThunk", call)
         self.assertIn("NULL);", call)
         self.assertIn('storyboardWithName:@"AMProgressAlert"', BRIDGE_SOURCE)
@@ -1522,64 +1521,54 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('progress_owner_created', BRIDGE_SOURCE)
         self.assertIn('progress_owner_class', BRIDGE_SOURCE)
         self.assertIn('progress_owner_presented', BRIDGE_SOURCE)
-        self.assertNotIn("reference,\n            nil,", call)
-        self.assertIn("weakInit((uint8_t *)weakOwnerContext + 0x10, owner)", BRIDGE_SOURCE)
-        self.assertIn("weakDestroy((uint8_t *)weakOwnerContext + 0x10)", BRIDGE_SOURCE)
-        self.assertIn("writeToFile:", BRIDGE_SOURCE)
         self.assertIn("id progressOwner", BRIDGE_HEADER)
         self.assertNotIn("id _Nullable progressOwner", BRIDGE_HEADER)
 
-    def test_copy_failure_flows_through_the_native_status_handler(self):
-        finish = BRIDGE_SOURCE[BRIDGE_SOURCE.index("- (void)finishTransferWithError") :
-                              BRIDGE_SOURCE.index("- (instancetype)initWithSourceURL", BRIDGE_SOURCE.index("- (void)finishTransferWithError"))]
-        self.assertIn("if (self.transferFinished) return", finish)
-        self.assertIn("self.transferError = error", finish)
-        self.assertIn('observer[@"status"]', finish)
-        self.assertIn("snapshot])", finish)
-        self.assertIn("dispatch_get_main_queue()", finish)
-        self.assertIn("error", BRIDGE_SOURCE[BRIDGE_SOURCE.index("if (![manager copyItemAtURL") :])
-        self.assertNotIn("AMProjNativePackageImportBridgeFinishFailure", finish)
+    def test_copy_failure_reports_status_five_before_finishing(self):
+        start = BRIDGE_SOURCE.index("if (copyError) {")
+        end = BRIDGE_SOURCE.index("AMProjNSStringToSwiftStringFn", start)
+        failure = BRIDGE_SOURCE[start:end]
+        self.assertIn("AMProjEmitStorageStatus(5, NO", failure)
+        self.assertIn("AMProjEmitStorageStatus(5, YES", failure)
+        self.assertIn("AMProjFinishNativeBridge(NO, copyError)", failure)
+        self.assertLess(
+            failure.index("AMProjEmitStorageStatus(5, YES"),
+            failure.index("AMProjFinishNativeBridge(NO, copyError)"),
+        )
 
-    def test_native_storage_success_notifies_progress_and_success_observers(self):
-        finish_start = BRIDGE_SOURCE.index("- (void)finishTransferWithError")
-        finish_end = BRIDGE_SOURCE.index(
-            "- (instancetype)initWithSourceURL", finish_start
+    def test_native_local_success_preserves_status_two_and_four_order(self):
+        start = BRIDGE_SOURCE.index("AMProjEmitStorageStatus(2, NO")
+        end = BRIDGE_SOURCE.index("@catch (NSException *exception)", start)
+        success = BRIDGE_SOURCE[start:end]
+        markers = (
+            "AMProjEmitStorageStatus(2, NO",
+            "AMProjEmitStorageStatus(2, YES",
+            "AMProjEmitStorageStatus(4, NO",
+            "AMProjCallNativeLocalImportContinuation(",
+            "AMProjEmitStorageStatus(4, YES",
         )
-        finish = BRIDGE_SOURCE[finish_start:finish_end]
-        observe_start = BRIDGE_SOURCE.rindex(
-            "- (AMProjLocalStorageHandle)observeStatus"
-        )
-        observe_end = BRIDGE_SOURCE.index(
-            "- (void)removeObserverWithHandle", observe_start
-        )
-        observe = BRIDGE_SOURCE[observe_start:observe_end]
-        self.assertIn("@[@5]", finish)
-        self.assertIn("@[@2, @4]", finish)
-        self.assertIn("terminalStatuses", finish)
-        self.assertIn("sortedArrayUsingSelector", finish)
-        self.assertIn(
-            "self.transferError == nil && (status == 2 || status == 4)",
-            observe,
-        )
-        self.assertIn("self.progress.completedUnitCount = 1", finish)
+        positions = [success.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions))
 
-    def test_native_storage_handles_are_string_objects_and_directly_removable(self):
-        observe_start = BRIDGE_SOURCE.rindex("- (AMProjLocalStorageHandle)observeStatus")
-        observe = BRIDGE_SOURCE[observe_start :
-                               BRIDGE_SOURCE.index("- (void)removeObserverWithHandle", observe_start)]
-        self.assertIn("if (!handler) return nil", observe)
-        self.assertIn("AMProjLocalStorageHandle handle = nil", observe)
-        self.assertIn('[NSString stringWithFormat:@"amproj-%020llu"', observe)
-        self.assertIn("self.observers[handle]", observe)
-        self.assertIn("return handle", observe)
-        self.assertNotIn("@(handle)", observe)
-        remove_start = BRIDGE_SOURCE.rindex("- (void)removeObserverWithHandle")
-        remove = BRIDGE_SOURCE[remove_start :
-                              BRIDGE_SOURCE.index("@end", remove_start)]
-        self.assertIn("(AMProjLocalStorageHandle)handle", remove)
-        self.assertIn("removeObjectForKey:handle", remove)
-        self.assertNotIn("removeObjectForKey:@(handle)", remove)
-        self.assertNotIn("int64_t", BRIDGE_SOURCE)
+    def test_swift_url_values_use_runtime_layout_and_balanced_destroy(self):
+        create = source_body(
+            BRIDGE_SOURCE,
+            "static BOOL AMProjCreateSwiftURLValue",
+            "static void AMProjDestroySwiftURLValue",
+        )
+        destroy = source_body(
+            BRIDGE_SOURCE,
+            "static void AMProjDestroySwiftURLValue",
+            "static BOOL AMProjStartNativePackageImport",
+        )
+        self.assertIn("valueWitnesses + 0x40", create)
+        self.assertIn("valueWitnesses + 0x48", create)
+        self.assertIn("valueWitnesses + 0x50", create)
+        self.assertIn("posix_memalign", create)
+        self.assertIn("AMProjBridgeNSURLToSwiftURL", create)
+        self.assertIn("valueWitnesses + 0x08", destroy)
+        self.assertIn("destroy(value, metadata)", destroy)
+        self.assertIn("free(value)", destroy)
 
     def test_native_bridge_events_are_thread_safe_and_main_thread_delivered(self):
         self.assertIn("AMProjNativePackageImportEventHandler", BRIDGE_HEADER)
@@ -1596,34 +1585,13 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "native_entry_start",
             "native_entry_return",
             "storage_write_start",
-            "storage_observer_registered",
             "native_completion",
         ):
             self.assertIn(f'@"{event}"', BRIDGE_SOURCE)
         self.assertIn("AMProjStorageStatusReturnedEventName", BRIDGE_SOURCE)
         self.assertIn('stringByAppendingString:@"_returned"', BRIDGE_SOURCE)
-
-        finish_start = BRIDGE_SOURCE.index("- (void)finishTransferWithError")
-        finish_end = BRIDGE_SOURCE.index(
-            "- (instancetype)initWithSourceURL", finish_start
-        )
-        callback = BRIDGE_SOURCE[finish_start:finish_end]
-        self.assertLess(
-            callback.index("handler([self snapshot])"),
-            callback.index("[self emitStatusReturnedEvent:status]"),
-        )
-
-        observe_start = BRIDGE_SOURCE.rindex(
-            "- (AMProjLocalStorageHandle)observeStatus"
-        )
-        observe_end = BRIDGE_SOURCE.index(
-            "- (void)removeObserverWithHandle", observe_start
-        )
-        observe = BRIDGE_SOURCE[observe_start:observe_end]
-        self.assertLess(
-            observe.index("callback(terminalSnapshot ?: [self snapshot])"),
-            observe.index("[self emitStatusReturnedEvent:status]"),
-        )
+        self.assertIn("AMProjEmitStorageStatus", BRIDGE_SOURCE)
+        self.assertNotIn("storage_observer_registered", BRIDGE_SOURCE)
         self.assertIn("amproj_nativeBridgeFinishPending", BRIDGE_SOURCE)
 
     def test_native_events_are_persisted_for_offline_crash_diagnosis(self):
@@ -1703,7 +1671,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
     def test_native_bridge_is_locked_to_verified_6255_binary(self):
         self.assertIn("0x01, 0xb7, 0x30, 0x17", BRIDGE_SOURCE)
-        self.assertIn("AMProjNativeImportBody = 0x1002647c0ULL", BRIDGE_SOURCE)
+        self.assertIn(
+            "AMProjNativeLocalImportContinuation = 0x10026596cULL",
+            BRIDGE_SOURCE,
+        )
         self.assertIn(
             "AMProjPackageImporterMetadataAccessor = 0x100310768ULL",
             BRIDGE_SOURCE,
@@ -1715,29 +1686,36 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn("AMProjSwiftBridgeReleaseStub", BRIDGE_SOURCE)
         self.assertNotIn("0x101fb678cULL", BRIDGE_SOURCE)
         self.assertNotIn("0x101fbc1bcULL", BRIDGE_SOURCE)
-        self.assertIn("!weakDestroy || !metadataAccessor", BRIDGE_SOURCE)
-        self.assertIn("expectedImportBody", BRIDGE_SOURCE)
+        self.assertIn("expectedLocalContinuation", BRIDGE_SOURCE)
         self.assertIn("expectedMetadataAccessor", BRIDGE_SOURCE)
         self.assertIn("LC_UUID", BRIDGE_SOURCE)
-        self.assertIn("memcmp(body, expectedImportBody", BRIDGE_SOURCE)
+        self.assertIn("memcmp(localContinuation, expectedLocalContinuation", BRIDGE_SOURCE)
         self.assertIn("memcmp(metadataAccessor, expectedMetadataAccessor", BRIDGE_SOURCE)
-        self.assertIn("metadataAccessor(0)", BRIDGE_SOURCE)
         self.assertIn("allocObject(packageImporterMetadata, 0x10, 0x7)", BRIDGE_SOURCE)
         self.assertIn("dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)", BRIDGE_SOURCE)
 
-    def test_arm64_shim_maps_all_eight_explicit_continuation_arguments(self):
-        self.assertIn("_AMProjCallNativePackageImportBody", BRIDGE_ASSEMBLY)
+    def test_arm64_shims_bridge_url_and_map_ten_continuation_arguments(self):
+        self.assertIn("_AMProjBridgeNSURLToSwiftURL", BRIDGE_ASSEMBLY)
+        self.assertIn("mov x8, x1", BRIDGE_ASSEMBLY)
+        self.assertIn("br x9", BRIDGE_ASSEMBLY)
+        self.assertIn("_AMProjCallNativeLocalImportContinuation", BRIDGE_ASSEMBLY)
         self.assertIn("ldr x11, [x29, #16]", BRIDGE_ASSEMBLY)
+        self.assertIn("ldr x12, [x29, #24]", BRIDGE_ASSEMBLY)
+        self.assertIn("ldr x13, [x29, #32]", BRIDGE_ASSEMBLY)
         self.assertIn("mov x0, x1", BRIDGE_ASSEMBLY)
         self.assertIn("mov x5, x6", BRIDGE_ASSEMBLY)
         self.assertIn("mov x6, x7", BRIDGE_ASSEMBLY)
         self.assertIn("mov x7, x11", BRIDGE_ASSEMBLY)
+        self.assertIn("stp x12, x13, [sp, #-16]!", BRIDGE_ASSEMBLY)
         self.assertIn("blr x10", BRIDGE_ASSEMBLY)
-        self.assertNotIn("mov x20, x7", BRIDGE_ASSEMBLY)
+        self.assertIn("add sp, sp, #16", BRIDGE_ASSEMBLY)
         self.assertIn(".cfi_startproc", BRIDGE_ASSEMBLY)
         self.assertIn(".cfi_endproc", BRIDGE_ASSEMBLY)
         self.assertIn("AMProjNativeImportBridge.S", MAKEFILE)
         self.assertEqual(MAKEFILE.count("AMProjNativeImportBridge.S"), 6)
+        self.assertIn('"_AMProjBridgeNSURLToSwiftURL"', WORKFLOW)
+        self.assertIn('"_AMProjCallNativeLocalImportContinuation"', WORKFLOW)
+        self.assertNotIn('"_AMProjCallNativePackageImportBody"', WORKFLOW)
 
     def test_bridge_registers_after_launch_and_finishes_only_from_native_result(self):
         bootstrap = function_body(

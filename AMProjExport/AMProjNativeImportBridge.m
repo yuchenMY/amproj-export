@@ -13,7 +13,7 @@ static NSString *const AMProjNativeBridgeErrorDomain =
 static const uintptr_t AMProjMainPreferredBase = 0x100000000ULL;
 // Alight Motion 6.2.55 (build 862) only.  These addresses are part of the
 // verified base package contract and must change together with its UUID.
-static const uintptr_t AMProjNativeImportBody = 0x1002647c0ULL;
+static const uintptr_t AMProjNativeLocalImportContinuation = 0x10026596cULL;
 static const uintptr_t AMProjPackageImporterMetadataAccessor = 0x100310768ULL;
 
 typedef struct {
@@ -22,59 +22,14 @@ typedef struct {
 } AMProjSwiftString;
 
 typedef AMProjSwiftString (*AMProjNSStringToSwiftStringFn)(NSString *value);
-typedef void (*AMProjSwiftBridgeRetainFn)(uintptr_t value);
 typedef void (*AMProjSwiftBridgeReleaseFn)(uintptr_t value);
 typedef const void *(*AMProjSwiftMetadataAccessorFn)(uintptr_t request);
 typedef void *(*AMProjSwiftAllocObjectFn)(const void *metadata,
                                           size_t requiredSize,
                                           size_t requiredAlignmentMask);
 typedef void (*AMProjSwiftReleaseFn)(void *object);
-typedef void (*AMProjSwiftUnknownObjectWeakInitFn)(void *storage, id value);
-typedef void (*AMProjSwiftUnknownObjectWeakDestroyFn)(void *storage);
-
-@interface AMProjLocalStorageSnapshot : NSObject
-@property(nonatomic, strong) id task;
-@property(nonatomic, strong) id reference;
-@property(nonatomic, strong) NSProgress *progress;
-@property(nonatomic, strong) NSError *error;
-@end
-
-@implementation AMProjLocalStorageSnapshot
-@end
-
-// This AM build retains each observeStatus:handler: result as an Objective-C
-// object. Match Firebase's object handle contract instead of returning an
-// integer that would be interpreted as an invalid object pointer.
-typedef NSString *AMProjLocalStorageHandle;
-
-@interface AMProjLocalStorageTask : NSObject
-@property(nonatomic, strong) NSURL *sourceURL;
-@property(nonatomic, strong) NSURL *destinationURL;
-@property(nonatomic, strong) NSError *transferError;
-@property(nonatomic, strong) id reference;
-@property(nonatomic, strong) NSProgress *progress;
-@property(nonatomic, strong) NSMutableDictionary<AMProjLocalStorageHandle, NSDictionary *> *observers;
-@property(nonatomic) NSUInteger bridgeGeneration;
-@property(nonatomic) NSUInteger nextHandleIdentifier;
-@property(nonatomic) BOOL transferFinished;
-- (instancetype)initWithSourceURL:(NSURL *)sourceURL
-                   destinationURL:(NSURL *)destinationURL
-                         reference:(id)reference
-                  bridgeGeneration:(NSUInteger)bridgeGeneration;
-- (AMProjLocalStorageHandle)observeStatus:(NSInteger)status
-                                  handler:(void (^)(id snapshot))handler;
-- (void)removeObserverWithHandle:(AMProjLocalStorageHandle)handle;
-- (void)removeAllObserversForStatus:(NSInteger)status;
-- (void)removeAllObservers;
-@end
-
-@interface AMProjLocalStorageReference : NSObject
-@property(nonatomic, strong) NSURL *sourceURL;
-@property(nonatomic) NSUInteger bridgeGeneration;
-- (instancetype)initWithSourceURL:(NSURL *)sourceURL
-                  bridgeGeneration:(NSUInteger)bridgeGeneration;
-- (id)writeToFile:(NSURL *)destinationURL;
-@end
+typedef void (*AMProjSwiftValueDestroyFn)(void *value,
+                                          const void *metadata);
 
 static NSObject *AMProjNativeBridgeLock(void) {
     static NSObject *lock;
@@ -243,6 +198,25 @@ static NSString *AMProjStorageStatusReturnedEventName(NSInteger status) {
     return event.length ? [event stringByAppendingString:@"_returned"] : nil;
 }
 
+static void AMProjEmitStorageStatus(NSInteger status, BOOL returned,
+                                    NSUInteger generation, NSURL *sourceURL,
+                                    NSURL *destinationURL, NSError *error) {
+    NSString *event = returned
+        ? AMProjStorageStatusReturnedEventName(status)
+        : AMProjStorageStatusEventName(status);
+    if (!event.length) return;
+    AMProjEmitNativeBridgeEvent(event, @{
+        @"generation": @(generation),
+        @"status": @(status),
+        @"source_path": sourceURL.path ?: @"",
+        @"destination_path": destinationURL.path ?: @"",
+        @"success": @(error == nil),
+        @"error_domain": error.domain ?: @"",
+        @"error_code": @(error.code),
+        @"error": error.localizedDescription ?: @""
+    });
+}
+
 static UIViewController *AMProjCreateProgressOwner(NSError **error) {
     if (!NSThread.isMainThread) {
         if (error) *error = AMProjNativeBridgeError(
@@ -279,270 +253,6 @@ static UIViewController *AMProjCreateProgressOwner(NSError **error) {
     }
 }
 
-@implementation AMProjLocalStorageTask
-
-- (void)emitStatusEvent:(NSInteger)status {
-    NSString *event = AMProjStorageStatusEventName(status);
-    if (!event) return;
-    AMProjEmitNativeBridgeEvent(event, @{
-        @"generation": @(self.bridgeGeneration),
-        @"status": @(status),
-        @"source_path": self.sourceURL.path ?: @"",
-        @"destination_path": self.destinationURL.path ?: @"",
-        @"success": @(self.transferError == nil),
-        @"error_domain": self.transferError.domain ?: @"",
-        @"error_code": @(self.transferError.code),
-        @"error": self.transferError.localizedDescription ?: @""
-    });
-}
-
-- (void)emitStatusReturnedEvent:(NSInteger)status {
-    NSString *event = AMProjStorageStatusReturnedEventName(status);
-    if (!event) return;
-    AMProjEmitNativeBridgeEvent(event, @{
-        @"generation": @(self.bridgeGeneration),
-        @"status": @(status),
-        @"source_path": self.sourceURL.path ?: @"",
-        @"destination_path": self.destinationURL.path ?: @"",
-        @"success": @(self.transferError == nil),
-        @"error_domain": self.transferError.domain ?: @"",
-        @"error_code": @(self.transferError.code),
-        @"error": self.transferError.localizedDescription ?: @""
-    });
-}
-
-- (AMProjLocalStorageSnapshot *)snapshot {
-    AMProjLocalStorageSnapshot *snapshot = [AMProjLocalStorageSnapshot new];
-    snapshot.error = self.transferError;
-    snapshot.task = self;
-    snapshot.reference = self.reference;
-    snapshot.progress = self.progress;
-    return snapshot;
-}
-
-- (void)finishTransferWithError:(NSError *)error {
-    NSArray<NSDictionary *> *callbacks = nil;
-    @synchronized (self) {
-        if (self.transferFinished) return;
-        self.transferError = error;
-        self.transferFinished = YES;
-        self.progress.completedUnitCount = 1;
-        NSMutableArray<NSDictionary *> *matching = [NSMutableArray array];
-        // PackageImporter observes Firebase's progress status (2), failure
-        // status (5), and success status (4). A completed Firebase task emits
-        // one final progress snapshot with fractionCompleted == 1. Keep the
-        // success order deterministic: progress first, then completion.
-        NSArray<NSNumber *> *terminalStatuses = error ? @[@5] : @[@2, @4];
-        NSArray<AMProjLocalStorageHandle> *handles = [self.observers.allKeys
-            sortedArrayUsingSelector:@selector(compare:)];
-        for (NSNumber *wanted in terminalStatuses) {
-            for (AMProjLocalStorageHandle handle in handles) {
-                NSDictionary *observer = self.observers[handle];
-                if ([observer[@"status"] integerValue] == wanted.integerValue) {
-                    [matching addObject:observer];
-                }
-            }
-        }
-        [self.observers removeAllObjects];
-        callbacks = [matching copy];
-    }
-    NSLog(@"[AMProjExport] Native import storage finished success=%d callbacks=%lu progress=1",
-          error == nil, (unsigned long)callbacks.count);
-    void (^invokeCallbacks)(void) = ^{
-        NSError *observerError = nil;
-        for (NSDictionary *observer in callbacks) {
-            void (^handler)(id) = observer[@"handler"];
-            if (!handler) continue;
-            NSLog(@"[AMProjExport] Native import storage callback status=%ld",
-                   [observer[@"status"] integerValue]);
-            NSInteger status = [observer[@"status"] integerValue];
-            [self emitStatusEvent:status];
-            @try {
-                handler([self snapshot]);
-            } @catch (NSException *exception) {
-                NSLog(@"[AMProjExport] Native import storage observer raised: %@",
-                      exception.reason ?: @"unknown exception");
-                AMProjEmitNativeBridgeEvent(@"storage_observer_exception", @{
-                    @"generation": @(self.bridgeGeneration),
-                    @"status": @(status),
-                    @"exception": exception.name ?: @"",
-                    @"reason": exception.reason ?: @""
-                });
-                observerError = AMProjNativeBridgeError(
-                    111,
-                    exception.reason ?: @"The native storage observer raised an exception",
-                    @{ @"status": @(status),
-                       @"exception": exception.name ?: @"" });
-            }
-            [self emitStatusReturnedEvent:status];
-            if (observerError) break;
-        }
-        if (observerError) {
-            AMProjPoisonNativeBridge();
-            AMProjFinishNativeBridge(NO, observerError);
-        }
-    };
-    if ([NSThread isMainThread]) invokeCallbacks();
-    else dispatch_async(dispatch_get_main_queue(), invokeCallbacks);
-}
-
-- (instancetype)initWithSourceURL:(NSURL *)sourceURL
-                   destinationURL:(NSURL *)destinationURL
-                         reference:(id)reference
-                  bridgeGeneration:(NSUInteger)bridgeGeneration {
-    self = [super init];
-    if (!self) return nil;
-    _sourceURL = sourceURL;
-    _destinationURL = destinationURL;
-    _reference = reference;
-    _bridgeGeneration = bridgeGeneration;
-    _progress = [NSProgress progressWithTotalUnitCount:1];
-    _observers = [NSMutableDictionary dictionary];
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSFileManager *manager = NSFileManager.defaultManager;
-        NSError *error = nil;
-        NSURL *directoryURL = [destinationURL URLByDeletingLastPathComponent];
-        if (![manager createDirectoryAtURL:directoryURL
-               withIntermediateDirectories:YES attributes:nil error:&error]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self finishTransferWithError:error];
-            });
-            return;
-        }
-        if ([manager fileExistsAtPath:destinationURL.path] &&
-            ![manager removeItemAtURL:destinationURL error:&error]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self finishTransferWithError:error];
-            });
-            return;
-        }
-        if (![manager copyItemAtURL:sourceURL toURL:destinationURL error:&error]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self finishTransferWithError:error];
-            });
-            return;
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self finishTransferWithError:nil];
-        });
-    });
-    return self;
-}
-
-- (AMProjLocalStorageHandle)observeStatus:(NSInteger)status
-                                  handler:(void (^)(id snapshot))handler {
-    if (!handler) return nil;
-
-    AMProjLocalStorageHandle handle = nil;
-    BOOL notifyTerminal = NO;
-    AMProjLocalStorageSnapshot *terminalSnapshot = nil;
-    @synchronized (self) {
-        handle = [NSString stringWithFormat:@"amproj-%020llu",
-                  (unsigned long long)++self.nextHandleIdentifier];
-        notifyTerminal = self.transferFinished &&
-            ((self.transferError == nil && (status == 2 || status == 4)) ||
-             (status == 5 && self.transferError != nil));
-        if (notifyTerminal) {
-            terminalSnapshot = [self snapshot];
-        } else {
-            self.observers[handle] = @{
-                @"status": @(status),
-                @"handler": [handler copy]
-            };
-        }
-    }
-    NSLog(@"[AMProjExport] Native import storage observer status=%ld terminal=%d",
-          (long)status, notifyTerminal);
-    AMProjEmitNativeBridgeEvent(@"storage_observer_registered", @{
-        @"generation": @(self.bridgeGeneration),
-        @"status": @(status),
-        @"handle": handle ?: @"",
-        @"handle_class": handle ? NSStringFromClass(handle.class) : @"",
-        @"terminal": @(notifyTerminal)
-    });
-    if (notifyTerminal) {
-        void (^callback)(id) = [handler copy];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self emitStatusEvent:status];
-            @try {
-                callback(terminalSnapshot ?: [self snapshot]);
-            } @catch (NSException *exception) {
-                NSLog(@"[AMProjExport] Native import terminal observer raised: %@",
-                      exception.reason ?: @"unknown exception");
-                AMProjEmitNativeBridgeEvent(@"storage_observer_exception", @{
-                    @"generation": @(self.bridgeGeneration),
-                    @"status": @(status),
-                    @"exception": exception.name ?: @"",
-                    @"reason": exception.reason ?: @""
-                });
-                AMProjPoisonNativeBridge();
-                AMProjFinishNativeBridge(NO, AMProjNativeBridgeError(
-                    111,
-                    exception.reason ?: @"The native terminal observer raised an exception",
-                    @{ @"status": @(status),
-                       @"exception": exception.name ?: @"" }));
-            }
-            [self emitStatusReturnedEvent:status];
-        });
-    }
-    return handle;
-}
-
-- (void)removeObserverWithHandle:(AMProjLocalStorageHandle)handle {
-    if (!handle) return;
-    @synchronized (self) {
-        [self.observers removeObjectForKey:handle];
-    }
-}
-
-- (void)removeAllObserversForStatus:(NSInteger)status {
-    @synchronized (self) {
-        NSMutableArray<AMProjLocalStorageHandle> *handles = [NSMutableArray array];
-        for (AMProjLocalStorageHandle handle in self.observers) {
-            if ([self.observers[handle][@"status"] integerValue] == status) {
-                [handles addObject:handle];
-            }
-        }
-        [self.observers removeObjectsForKeys:handles];
-    }
-}
-
-- (void)removeAllObservers {
-    @synchronized (self) {
-        [self.observers removeAllObjects];
-    }
-}
-
-@end
-
-@implementation AMProjLocalStorageReference
-
-- (instancetype)initWithSourceURL:(NSURL *)sourceURL
-                  bridgeGeneration:(NSUInteger)bridgeGeneration {
-    self = [super init];
-    if (self) {
-        _sourceURL = sourceURL;
-        _bridgeGeneration = bridgeGeneration;
-    }
-    return self;
-}
-
-- (id)writeToFile:(NSURL *)destinationURL {
-    AMProjEmitNativeBridgeEvent(@"storage_write_start", @{
-        @"generation": @(self.bridgeGeneration),
-        @"source_path": self.sourceURL.path ?: @"",
-        @"destination_path": destinationURL.path ?: @""
-    });
-    return [[AMProjLocalStorageTask alloc] initWithSourceURL:self.sourceURL
-                                             destinationURL:destinationURL
-                                                   reference:self
-                                            bridgeGeneration:self.bridgeGeneration];
-}
-
-@end
-
-
 static const struct mach_header_64 *AMProjMainHeader(void) {
     const struct mach_header *header = _dyld_get_image_header(0);
     if (!header || header->magic != MH_MAGIC_64) return NULL;
@@ -554,13 +264,11 @@ static BOOL AMProjMainExecutableMatches(NSError **error) {
         0x01, 0xb7, 0x30, 0x17, 0x1a, 0x6e, 0x3b, 0x17,
         0x8f, 0x59, 0xc2, 0x74, 0x62, 0xde, 0xa5, 0x63,
     };
-    static const uint8_t expectedImportBody[48] = {
+    static const uint8_t expectedLocalContinuation[32] = {
         0xfc, 0x6f, 0xba, 0xa9, 0xfa, 0x67, 0x01, 0xa9,
         0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9,
         0xf4, 0x4f, 0x04, 0xa9, 0xfd, 0x7b, 0x05, 0xa9,
-        0xfd, 0x43, 0x01, 0x91, 0xff, 0x43, 0x03, 0xd1,
-        0xfb, 0x03, 0x07, 0xaa, 0xa6, 0x97, 0x31, 0xa9,
-        0xa3, 0x93, 0x35, 0xa9, 0xa2, 0x83, 0x16, 0xf8,
+        0xfd, 0x43, 0x01, 0x91, 0xff, 0x03, 0x05, 0xd1,
     };
     static const uint8_t expectedMetadataAccessor[32] = {
         0xfd, 0x7b, 0xbf, 0xa9, 0xfd, 0x03, 0x00, 0x91,
@@ -598,11 +306,12 @@ static BOOL AMProjMainExecutableMatches(NSError **error) {
     }
 
     uintptr_t runtimeBase = (uintptr_t)header;
-    const void *body = (const void *)(runtimeBase +
-        (AMProjNativeImportBody - AMProjMainPreferredBase));
+    const void *localContinuation = (const void *)(runtimeBase +
+        (AMProjNativeLocalImportContinuation - AMProjMainPreferredBase));
     const void *metadataAccessor = (const void *)(runtimeBase +
         (AMProjPackageImporterMetadataAccessor - AMProjMainPreferredBase));
-    if (memcmp(body, expectedImportBody, sizeof(expectedImportBody)) != 0 ||
+    if (memcmp(localContinuation, expectedLocalContinuation,
+               sizeof(expectedLocalContinuation)) != 0 ||
         memcmp(metadataAccessor, expectedMetadataAccessor,
                sizeof(expectedMetadataAccessor)) != 0) {
         if (error) *error = AMProjNativeBridgeError(
@@ -902,6 +611,52 @@ static void AMProjNativeImportCompletionThunk(void *result) {
     NSLog(@"[AMProjExport] Native import completion accepted success=%d", success);
 }
 
+static BOOL AMProjCreateSwiftURLValue(
+    NSURL *url, void *bridgeFunction, const void *metadata,
+    void **valueOut, NSError **error) {
+    if (!url || !bridgeFunction || !metadata || !valueOut) return NO;
+
+    const uint8_t *valueWitnesses = *(const uint8_t *const *)(
+        (const uint8_t *)metadata - sizeof(void *));
+    if (!valueWitnesses) return NO;
+
+    size_t size = 0;
+    size_t stride = 0;
+    uint32_t flags = 0;
+    memcpy(&size, valueWitnesses + 0x40, sizeof(size));
+    memcpy(&stride, valueWitnesses + 0x48, sizeof(stride));
+    memcpy(&flags, valueWitnesses + 0x50, sizeof(flags));
+    size_t alignment = (flags & 0xffU) + 1U;
+    if (alignment < sizeof(void *)) alignment = sizeof(void *);
+    if (!size || stride < size || stride > 4096 ||
+        (alignment & (alignment - 1)) != 0 || alignment > 4096) {
+        if (error) *error = AMProjNativeBridgeError(
+            101, @"The Swift URL value layout is unsupported", nil);
+        return NO;
+    }
+
+    void *storage = NULL;
+    if (posix_memalign(&storage, alignment, stride) != 0 || !storage) {
+        if (error) *error = AMProjNativeBridgeError(
+            101, @"The Swift URL value could not be allocated", nil);
+        return NO;
+    }
+    memset(storage, 0, stride);
+    AMProjBridgeNSURLToSwiftURL(bridgeFunction, storage, url);
+    *valueOut = storage;
+    return YES;
+}
+
+static void AMProjDestroySwiftURLValue(void *value, const void *metadata) {
+    if (!value || !metadata) return;
+    const uint8_t *valueWitnesses = *(const uint8_t *const *)(
+        (const uint8_t *)metadata - sizeof(void *));
+    AMProjSwiftValueDestroyFn destroy = valueWitnesses
+        ? *(AMProjSwiftValueDestroyFn const *)(valueWitnesses + 0x08) : NULL;
+    if (destroy) destroy(value, metadata);
+    free(value);
+}
+
 static BOOL AMProjStartNativePackageImport(
     NSURL *packageURL,
     NSString *originalName,
@@ -941,6 +696,14 @@ static BOOL AMProjStartNativePackageImport(
         return NO;
     }
 
+    NSError *progressOwnerError = nil;
+    UIViewController *progressOwner = AMProjCreateProgressOwner(&progressOwnerError);
+    if (!progressOwner) {
+        if (error) *error = progressOwnerError ?: AMProjNativeBridgeError(
+            110, @"The Alight Motion progress controller is unavailable", nil);
+        return NO;
+    }
+
     NSUInteger generation = 0;
     @synchronized (AMProjNativeBridgeLock()) {
         if (amproj_nativeBridgePoisoned) {
@@ -957,6 +720,7 @@ static BOOL AMProjStartNativePackageImport(
         }
         amproj_nativeBridgeCompletion = [completion copy];
         amproj_nativeBridgeFilename = [originalName copy] ?: packageURL.lastPathComponent;
+        amproj_nativeBridgeProgressOwner = progressOwner;
         generation = ++amproj_nativeBridgeGeneration;
     }
 
@@ -964,135 +728,172 @@ static BOOL AMProjStartNativePackageImport(
     if (!projectName.length) projectName = packageURL.lastPathComponent.stringByDeletingPathExtension;
     if (!projectName.length) projectName = @"Imported Project";
 
-    AMProjNSStringToSwiftStringFn bridge =
-        (AMProjNSStringToSwiftStringFn)dlsym(
-            RTLD_DEFAULT,
-            "$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ");
-    AMProjSwiftBridgeRetainFn retainBridge =
-        (AMProjSwiftBridgeRetainFn)dlsym(RTLD_DEFAULT, "swift_bridgeObjectRetain");
-    AMProjSwiftBridgeReleaseFn releaseBridge =
-        (AMProjSwiftBridgeReleaseFn)dlsym(RTLD_DEFAULT, "swift_bridgeObjectRelease");
-    AMProjSwiftAllocObjectFn allocObject =
-        (AMProjSwiftAllocObjectFn)dlsym(RTLD_DEFAULT, "swift_allocObject");
-    AMProjSwiftReleaseFn swiftRelease =
-        (AMProjSwiftReleaseFn)dlsym(RTLD_DEFAULT, "swift_release");
-    AMProjSwiftUnknownObjectWeakInitFn weakInit =
-        (AMProjSwiftUnknownObjectWeakInitFn)dlsym(
-            RTLD_DEFAULT, "swift_unknownObjectWeakInit");
-    AMProjSwiftUnknownObjectWeakDestroyFn weakDestroy =
-        (AMProjSwiftUnknownObjectWeakDestroyFn)dlsym(
-            RTLD_DEFAULT, "swift_unknownObjectWeakDestroy");
-    AMProjSwiftMetadataAccessorFn metadataAccessor =
-        (AMProjSwiftMetadataAccessorFn)AMProjMainAddress(
-            AMProjPackageImporterMetadataAccessor);
-    void *importBody = AMProjMainAddress(AMProjNativeImportBody);
-    if (!bridge || !retainBridge || !releaseBridge || !allocObject ||
-        !swiftRelease || !weakInit || !weakDestroy || !metadataAccessor ||
-        !importBody) {
-        NSError *runtimeError = AMProjNativeBridgeError(
-            101, @"The Swift project importer runtime is unavailable", nil);
-        AMProjFinishNativeBridge(NO, runtimeError);
-        if (error) *error = runtimeError;
-        return NO;
-    }
-
-    AMProjSwiftString swiftName = bridge(projectName);
-    AMProjLocalStorageReference *reference =
-        [[AMProjLocalStorageReference alloc] initWithSourceURL:packageURL
-                                              bridgeGeneration:generation];
-    NSError *progressOwnerError = nil;
-    UIViewController *progressOwner = AMProjCreateProgressOwner(&progressOwnerError);
-    if (!progressOwner) {
-        NSError *resolvedError = progressOwnerError ?: AMProjNativeBridgeError(
-            110, @"The Alight Motion progress controller is unavailable", nil);
-        AMProjFinishNativeBridge(NO, resolvedError);
-        if (error) *error = resolvedError;
-        releaseBridge(swiftName.word1);
-        return NO;
-    }
-
-    const void *packageImporterMetadata = metadataAccessor(0);
-    void *packageImporter = packageImporterMetadata
-        ? allocObject(packageImporterMetadata, 0x10, 0x7) : NULL;
-    // The verified continuation only accesses a Swift weak slot at +0x10.
-    // A private 0x18-byte context avoids depending on an internal heap-object
-    // metadata address while preserving the exact weak-reference ABI.
-    void *weakOwnerContext = calloc(1, 0x18);
-    if (!packageImporter || !weakOwnerContext) {
-        if (packageImporter) swiftRelease(packageImporter);
-        free(weakOwnerContext);
-        NSError *runtimeError = AMProjNativeBridgeError(
-            101, @"The Swift project importer could not be created", nil);
-        AMProjFinishNativeBridge(NO, runtimeError);
-        if (error) *error = runtimeError;
-        releaseBridge(swiftName.word1);
-        return NO;
-    }
-    weakInit((uint8_t *)weakOwnerContext + 0x10, owner);
-
-    @synchronized (AMProjNativeBridgeLock()) {
-        // The completion/timeout path takes ownership of this reference and
-        // clears it exactly once, so status callbacks cannot outlive the
-        // progress controller object.
-        amproj_nativeBridgeProgressOwner = progressOwner;
-    }
-    NSLog(@"[AMProjExport] Native import entry begin owner=%@ package=%@",
-          NSStringFromClass(owner.class), packageURL.lastPathComponent);
-    AMProjEmitNativeBridgeEvent(@"native_entry_start", @{
+    NSURL *temporaryDirectoryURL = [[NSURL fileURLWithPath:NSTemporaryDirectory()
+                                                isDirectory:YES]
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"amproj_local_import_%@", NSUUID.UUID.UUIDString]
+                         isDirectory:YES];
+    NSURL *localPackageURL = [temporaryDirectoryURL
+        URLByAppendingPathComponent:@"project.amproj" isDirectory:NO];
+    AMProjEmitNativeBridgeEvent(@"storage_write_start", @{
         @"generation": @(generation),
-        @"filename": originalName ?: packageURL.lastPathComponent ?: @"project.amproj",
-        @"package_path": packageURL.path ?: @"",
-        @"owner_class": NSStringFromClass(owner.class) ?: @"",
-        @"progress_owner_class": NSStringFromClass(progressOwner.class) ?: @"",
-        @"progress_owner_presented":
-            @(progressOwner.presentingViewController != nil),
-        @"owner_window_active":
-            @(owner.viewIfLoaded.window.windowScene.activationState ==
-              UISceneActivationStateForegroundActive)
+        @"source_path": packageURL.path ?: @"",
+        @"destination_path": localPackageURL.path ?: @""
     });
-    // The old 6.2.2 wrapper was removed by the 6.2.55 compiler. Its direct
-    // continuation survives with the same eight-register ABI. Match the
-    // original global-queue ownership: retain the Swift string until the body
-    // has copied it into its status callbacks, then release our call-local
-    // PackageImporter and weak context.
-    retainBridge(swiftName.word1);
+
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        @try {
-            AMProjCallNativePackageImportBody(
-                importBody,
-                weakOwnerContext,
-                reference,
-                progressOwner,
-                swiftName.word0,
-                swiftName.word1,
-                packageImporter,
-                (void *)&AMProjNativeImportCompletionThunk,
-                NULL);
-            NSLog(@"[AMProjExport] Native import entry returned");
-            AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
-                @"generation": @(generation),
-                @"returned": @YES
-            });
-        } @catch (NSException *exception) {
-            NSError *runtimeError = AMProjNativeBridgeError(
-                109,
-                exception.reason ?: @"The native project importer raised an exception",
-                nil);
-            AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
-                @"generation": @(generation),
-                @"returned": @NO,
-                @"exception": exception.reason ?: @"unknown exception"
-            });
-            AMProjPoisonNativeBridge();
-            AMProjFinishNativeBridge(NO, runtimeError);
-        } @finally {
-            weakDestroy((uint8_t *)weakOwnerContext + 0x10);
-            free(weakOwnerContext);
-            releaseBridge(swiftName.word1);
-            swiftRelease(packageImporter);
+        NSFileManager *manager = NSFileManager.defaultManager;
+        NSError *copyError = nil;
+        if (![manager createDirectoryAtURL:temporaryDirectoryURL
+               withIntermediateDirectories:YES attributes:nil error:&copyError] ||
+            ![manager copyItemAtURL:packageURL
+                              toURL:localPackageURL error:&copyError]) {
+            [manager removeItemAtURL:temporaryDirectoryURL error:nil];
         }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL stillActive = NO;
+            @synchronized (AMProjNativeBridgeLock()) {
+                stillActive = amproj_nativeBridgeCompletion != nil &&
+                    generation == amproj_nativeBridgeGeneration;
+            }
+            if (!stillActive) {
+                [manager removeItemAtURL:temporaryDirectoryURL error:nil];
+                return;
+            }
+            if (copyError) {
+                AMProjEmitStorageStatus(5, NO, generation, packageURL,
+                                        localPackageURL, copyError);
+                AMProjEmitStorageStatus(5, YES, generation, packageURL,
+                                        localPackageURL, copyError);
+                AMProjFinishNativeBridge(NO, copyError);
+                return;
+            }
+
+            AMProjNSStringToSwiftStringFn stringBridge =
+                (AMProjNSStringToSwiftStringFn)dlsym(
+                    RTLD_DEFAULT,
+                    "$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ");
+            void *urlBridge = dlsym(
+                RTLD_DEFAULT,
+                "$s10Foundation3URLV36_unconditionallyBridgeFromObjectiveCyACSo5NSURLCSgFZ");
+            AMProjSwiftMetadataAccessorFn urlMetadataAccessor =
+                (AMProjSwiftMetadataAccessorFn)dlsym(
+                    RTLD_DEFAULT, "$s10Foundation3URLVMa");
+            AMProjSwiftBridgeReleaseFn releaseBridge =
+                (AMProjSwiftBridgeReleaseFn)dlsym(
+                    RTLD_DEFAULT, "swift_bridgeObjectRelease");
+            AMProjSwiftAllocObjectFn allocObject =
+                (AMProjSwiftAllocObjectFn)dlsym(
+                    RTLD_DEFAULT, "swift_allocObject");
+            AMProjSwiftReleaseFn swiftRelease =
+                (AMProjSwiftReleaseFn)dlsym(RTLD_DEFAULT, "swift_release");
+            AMProjSwiftMetadataAccessorFn importerMetadataAccessor =
+                (AMProjSwiftMetadataAccessorFn)AMProjMainAddress(
+                    AMProjPackageImporterMetadataAccessor);
+            void *localContinuation = AMProjMainAddress(
+                AMProjNativeLocalImportContinuation);
+            const void *urlMetadata = urlMetadataAccessor
+                ? urlMetadataAccessor(0) : NULL;
+            const void *packageImporterMetadata = importerMetadataAccessor
+                ? importerMetadataAccessor(0) : NULL;
+            void *packageImporter = packageImporterMetadata && allocObject
+                ? allocObject(packageImporterMetadata, 0x10, 0x7) : NULL;
+            if (!stringBridge || !urlBridge || !urlMetadata ||
+                !releaseBridge || !swiftRelease || !packageImporter ||
+                !localContinuation) {
+                if (packageImporter && swiftRelease) swiftRelease(packageImporter);
+                [manager removeItemAtURL:temporaryDirectoryURL error:nil];
+                NSError *runtimeError = AMProjNativeBridgeError(
+                    101, @"The Swift local project importer runtime is unavailable", nil);
+                AMProjFinishNativeBridge(NO, runtimeError);
+                return;
+            }
+
+            AMProjSwiftString swiftName = stringBridge(projectName);
+            void *swiftCleanupURL = NULL;
+            void *swiftPackageURL = NULL;
+            NSError *bridgeError = nil;
+            BOOL cleanupReady = AMProjCreateSwiftURLValue(
+                temporaryDirectoryURL, urlBridge, urlMetadata,
+                &swiftCleanupURL, &bridgeError);
+            BOOL packageReady = cleanupReady && AMProjCreateSwiftURLValue(
+                localPackageURL, urlBridge, urlMetadata,
+                &swiftPackageURL, &bridgeError);
+            if (!packageReady) {
+                AMProjDestroySwiftURLValue(swiftCleanupURL, urlMetadata);
+                AMProjDestroySwiftURLValue(swiftPackageURL, urlMetadata);
+                releaseBridge(swiftName.word1);
+                swiftRelease(packageImporter);
+                [manager removeItemAtURL:temporaryDirectoryURL error:nil];
+                AMProjFinishNativeBridge(NO, bridgeError ?: AMProjNativeBridgeError(
+                    101, @"The local project URL could not be bridged to Swift", nil));
+                return;
+            }
+
+            AMProjEmitStorageStatus(2, NO, generation, packageURL,
+                                    localPackageURL, nil);
+            AMProjEmitStorageStatus(2, YES, generation, packageURL,
+                                    localPackageURL, nil);
+            AMProjEmitStorageStatus(4, NO, generation, packageURL,
+                                    localPackageURL, nil);
+            NSLog(@"[AMProjExport] Native local import entry begin owner=%@ package=%@",
+                  NSStringFromClass(owner.class), packageURL.lastPathComponent);
+            AMProjEmitNativeBridgeEvent(@"native_entry_start", @{
+                @"generation": @(generation),
+                @"filename": originalName ?: packageURL.lastPathComponent ?: @"project.amproj",
+                @"package_path": localPackageURL.path ?: @"",
+                @"owner_class": NSStringFromClass(owner.class) ?: @"",
+                @"progress_owner_class": NSStringFromClass(progressOwner.class) ?: @"",
+                @"progress_owner_presented":
+                    @(progressOwner.presentingViewController != nil),
+                @"owner_window_active":
+                    @(owner.viewIfLoaded.window.windowScene.activationState ==
+                      UISceneActivationStateForegroundActive)
+            });
+            @try {
+                AMProjCallNativeLocalImportContinuation(
+                    localContinuation,
+                    nil,
+                    owner,
+                    progressOwner,
+                    swiftCleanupURL,
+                    packageImporter,
+                    swiftName.word0,
+                    swiftName.word1,
+                    swiftPackageURL,
+                    (void *)&AMProjNativeImportCompletionThunk,
+                    NULL);
+                AMProjEmitStorageStatus(4, YES, generation, packageURL,
+                                        localPackageURL, nil);
+                NSLog(@"[AMProjExport] Native local import entry returned");
+                AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
+                    @"generation": @(generation),
+                    @"returned": @YES
+                });
+            } @catch (NSException *exception) {
+                NSError *runtimeError = AMProjNativeBridgeError(
+                    109,
+                    exception.reason ?: @"The native local project importer raised an exception",
+                    nil);
+                AMProjEmitStorageStatus(4, YES, generation, packageURL,
+                                        localPackageURL, nil);
+                AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
+                    @"generation": @(generation),
+                    @"returned": @NO,
+                    @"exception": exception.reason ?: @"unknown exception"
+                });
+                [manager removeItemAtURL:temporaryDirectoryURL error:nil];
+                AMProjPoisonNativeBridge();
+                AMProjFinishNativeBridge(NO, runtimeError);
+            } @finally {
+                AMProjDestroySwiftURLValue(swiftCleanupURL, urlMetadata);
+                AMProjDestroySwiftURLValue(swiftPackageURL, urlMetadata);
+                releaseBridge(swiftName.word1);
+                swiftRelease(packageImporter);
+            }
+        });
     });
-    releaseBridge(swiftName.word1);
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{

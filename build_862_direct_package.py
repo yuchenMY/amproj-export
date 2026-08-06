@@ -43,6 +43,11 @@ AMENHANCER_STATUS_LABEL = b"AM v59 OK"
 AMENHANCER_STATUS_LABEL_CONTEXT = (
     b"nil\0" + AMENHANCER_STATUS_LABEL + b"\0[AmEnhancer] marker added\n\0"
 )
+AMENHANCER_MARKER_FUNCTION_OFFSET = 0x9C54
+AMENHANCER_MARKER_FUNCTION_PREIMAGE = bytes.fromhex(
+    "fc6fbea9fd7b01a9fd430091ffc30cd1"
+)
+ARM64_RET = bytes.fromhex("c0035fd6")
 CLOUD_LOAD_LCSIGN = "@executable_path/Frameworks/AMProjExport.dylib"
 CLOUD_LOAD_COMPACT = "@rpath/AMProjExportCloud.dylib"
 EXPECTED_CLOUD_CONTRACT_FUNCTIONS = {
@@ -78,11 +83,19 @@ def sha256_bytes(data):
 
 
 def prepare_amenhancer(data):
-    """Remove only the visible v59 status label from the verified dylib."""
+    """Disable the verified v59 marker view while preserving other hooks."""
     if data.count(AMENHANCER_STATUS_LABEL_CONTEXT) != 1:
         raise RuntimeError("AmEnhancer v59 status label context changed")
     if data.count(AMENHANCER_STATUS_LABEL) != 1:
         raise RuntimeError("AmEnhancer must contain exactly one v59 status label")
+    marker_start = AMENHANCER_MARKER_FUNCTION_OFFSET
+    marker_end = marker_start + len(AMENHANCER_MARKER_FUNCTION_PREIMAGE)
+    if marker_end > len(data):
+        raise RuntimeError("AmEnhancer v59 marker function is missing")
+    if data[marker_start:marker_end] != AMENHANCER_MARKER_FUNCTION_PREIMAGE:
+        raise RuntimeError("AmEnhancer v59 marker function changed")
+    if data.count(AMENHANCER_MARKER_FUNCTION_PREIMAGE) != 1:
+        raise RuntimeError("AmEnhancer v59 marker function is not unique")
 
     context_start = data.index(AMENHANCER_STATUS_LABEL_CONTEXT)
     label_start = context_start + len(b"nil\0")
@@ -90,16 +103,20 @@ def prepare_amenhancer(data):
     result[label_start : label_start + len(AMENHANCER_STATUS_LABEL)] = bytes(
         len(AMENHANCER_STATUS_LABEL)
     )
+    result[marker_start : marker_start + len(ARM64_RET)] = ARM64_RET
     changed = {
         index
         for index, (before, after) in enumerate(zip(data, result))
         if before != after
     }
     allowed = set(range(label_start, label_start + len(AMENHANCER_STATUS_LABEL)))
+    allowed.update(range(marker_start, marker_start + len(ARM64_RET)))
     if not changed or not changed <= allowed:
-        raise RuntimeError("AmEnhancer status label patch changed unexpected bytes")
+        raise RuntimeError("AmEnhancer marker view patch changed unexpected bytes")
     if AMENHANCER_STATUS_LABEL in result:
         raise RuntimeError("AmEnhancer v59 status label remains after patch")
+    if result[marker_start : marker_start + len(ARM64_RET)] != ARM64_RET:
+        raise RuntimeError("AmEnhancer v59 marker function remains active")
     return bytes(result)
 
 

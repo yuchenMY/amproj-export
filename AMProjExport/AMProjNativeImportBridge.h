@@ -41,16 +41,21 @@ FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeIsBusy(void);
 // deliberately requires a process restart before accepting another package.
 FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeRequiresRestart(void);
 
-FOUNDATION_EXPORT void AMProjCallNativePackageImportBody(
+FOUNDATION_EXPORT void AMProjBridgeNSURLToSwiftURL(
     void *function,
-    // The 6.2.55 continuation reads the presentation owner from a Swift weak
-    // slot at offset 0x10. The bridge owns this context for the call.
-    void *weakOwnerContext,
-    id storageReference,
+    void *resultBuffer,
+    NSURL *url);
+
+FOUNDATION_EXPORT void AMProjCallNativeLocalImportContinuation(
+    void *function,
+    id _Nullable storageSnapshot,
+    id owner,
     id progressOwner,
+    void *cleanupURL,
+    void *packageImporter,
     uintptr_t swiftStringWord0,
     uintptr_t swiftStringWord1,
-    void *packageImporter,
+    void *packageURL,
     void *completionFunction,
     void * _Nullable completionContext);
 
