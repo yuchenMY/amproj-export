@@ -27,44 +27,41 @@ project.amproj
 
 ## v44 XML/AMProj 本地双路由导入
 
-Alight Motion 6.2.6 的 `TemplatesListVC` 使用 SwiftUI 承载内容，模板页的“上传”按钮
-不能可靠地从 UIKit/accessibility 树中调用。更重要的是，已确认
-`TemplatesListVC documentPicker:didPickDocumentsAtURLs:` 会进入 AM 的在线 XML 上传流程，
-网络不可用时会一直等待。v44 不再调用该 delegate。
+Alight Motion 6.2.55 (862) 的底部“模板”是在线模板商城；本地“您的模板”和“上传 XML”
+都属于底部“项目”宿主。导入状态机不得把在线 `TemplatesListVC` 当作本地模板列表，也不得
+用它作为启动 `PackageImporter` 的前置条件。v44 的 QQ/文件导入只选择底部“项目”。
 
 对于单独的 `.xml`，插件只验证 UTF-8、XML 语法和 `<scene>` 根节点，然后以**原始字节**
 在私有工作目录封装为本地最小项目包：`<UUID>.xml` 加一个空的 `manifest.txt`。这个临时
 `.amproj` 直接走已验证的本地 `PackageImporter`，不请求上传接口，不依赖加速器、VPN、
 Wi-Fi 或调试后端。XML 路由不扫描素材，也不提示缺少媒体。
 
-XML 成功必须具备 `storage status 4` 与原生成功证据。正常路径要求 completion 和本次标题的
-精确模板 UI 增量；若 AM 对“原始 XML + 空 manifest”显示 `Missing Media` 但同时明确说明
-包已导入，v44 仅在当前事务确认为单独 XML 时隐藏该提示，并把它作为原生
-成功证据继续确认模板结果。Documents/Library 元数据、SQLite/WAL、HTTP storage 或诊断
-JSON 的变化均不能单独或组合冒充 XML 导入成功；失败、超时或无法归因时保留缓存供重试。
+XML 成功必须同时具备完整包校验、`storage status 4` 返回、原生 completion、临时包已消费，
+并确认本事务后的 Documents/Library 持久化变化。若 AM 对“原始 XML + 空 manifest”显示
+`Missing Media` 但同时明确说明包已导入，v44 仅在当前事务确认为单独 XML 时隐藏该提示，
+并把它作为持久化结果暂不可枚举时的附加原生证据。单独的数据库时间戳、HTTP storage 或
+诊断 JSON 不能冒充成功；失败、超时或无法归因时保留缓存供重试。
 完整 `.amproj` 不使用该豁免，任何 `Missing Media` 仍按真实导入失败处理。
 
-完整 `.amproj` 路径不变：继续通过本地 `PackageImporter`，保留 ZIP、manifest、全部资源和
-原有的项目/模板终态验证。若 AM 直接生成底部项目则保留项目结果；若能观察到 UIKit 身份或
-SwiftUI 标题增量则确认模板结果。若 UI 暂时不可枚举，但完整包预检、storage status 4、原生
-completion、持久化变化和临时包消费全部成功，则只报告导入已完成、目标位置待用户查看，
-不再把尚未观察到的项目误报为模板，也不执行不稳定的 UI 自动晋升或删除。
+完整 `.amproj` 继续通过本地 `PackageImporter`，保留 ZIP、manifest 和全部资源。若 AM 直接
+生成底部项目，则用项目标题/列表增量与持久化证据确认；否则在完整包预检、status 4、原生
+completion、持久化变化和临时包消费全部成立时报告中性完成，请用户到“项目”或“您的模板”
+查看。整个活跃路径不访问底部在线模板商城，也不执行 UI 自动晋升或删除。
 
 ### XML 文件
 
 - QQ/文件 App 的“用其他应用打开 → Alight Motion”可以直接接收 `.xml`。
 - XML 只包含项目结构和 Alight Motion 内置对象，因此只验证 UTF-8、XML 语法和 `<scene>` 根节点，不检查也不提示媒体缺失。
-- XML 的原始字节会封装为 `<UUID>.xml + 空 manifest.txt`，再由本地 `PackageImporter` 离线导入；不调用 `TemplatesListVC` 的联网上传 delegate，最终出现在“您的模板”，不会自动创建底部“项目”。
+- XML 的原始字节会封装为 `<UUID>.xml + 空 manifest.txt`，再由底部“项目”宿主中的本地 `PackageImporter` 离线导入；不访问底部在线模板商城。
 
 ### 完整 `.amproj` 文件
 
 - `.amproj` 继续执行 ZIP32、CRC、manifest SHA-1、媒体 `sig`、XML 和全部图片/视频/音频/字体校验。
-- iOS 原生 PackageImporter 若直接产生底部项目，插件会连续确认项目标题、项目列表变化、持久化变化及模板基线，然后显示项目成功。
-- 若原生流程只产生模板，必须使用 UIKit 身份或 SwiftUI 标题增量正向确认，随后显示 `4/4 完整项目包已导入“您的模板”`。
+- iOS 原生 PackageImporter 若直接产生底部项目，插件会确认项目标题、项目列表变化和持久化变化后显示项目成功。
 - 页面暂时不可枚举时，只有“完整包预检 + status 4 + completion + 持久化变化 + 临时包已消费”五项原生终态证据同时成立，才显示中性结果 `4/4 项目包已完成导入，请在项目或“您的模板”中查看`；该结果不声明目标类型，也不强制切换页面。
 - 模板终态不再自动打开、晋升或删除，避免误选同名模板、重复生成项目或因 SwiftUI UI 自动化失败而显示假错误。
 - ZIP、manifest、媒体或原生导入真实失败时仍会停止并保留缓存；不会通过隐藏错误把不完整包冒充成功。
-- 云端事件用 `import.package_template_verified` 记录正向模板证据；目标仍不可枚举但五项强终态成立时记录 `import.package_destination_unresolved`。
+- 目标不可枚举但五项强终态成立时记录 `import.package_destination_unresolved`。
 
 ## v31 iOS 媒体映射与完整导入（v44 保留）
 
@@ -111,15 +108,15 @@ completion、持久化变化和临时包消费全部成功，则只报告导入�
 
 稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。系统 URL 回调收到 `.xml` 或 `.amproj` 后，插件会在 File Provider 授权仍有效的同一个回调内同步复制到主 App 的 `Library/Application Support/AMProjImports/<UUID>/`；只有主 App 自己的 `Documents/Inbox` 文件才转入后台串行处理。v44 对非 Scene 冷启动执行三窗口接管：构造器先给真实 AppDelegate 安装公开的 `application:willFinishLaunchingWithOptions:` 回调，在 `didFinish` 之前同步暂存到 `Launch-<UUID>`；`didFinish` 保留第二次暂存机会；App 激活后只处理仍未暂存的候选。两个启动回调转发前都会从副本中移除已识别的项目 URL，避免 AM 原生 XML 页面抢先接管，原始字典和其他启动参数不变。冷启动复制失败后的显式重试会先释放本事务的临时去重 tombstone，真实的第二次失败不再被误报为已接受，并会提供文件选择器兜底。校验、解包和原生导入仍延后到 App 激活；导入成功后会清理对应 `Launch-<UUID>` 目录，失败时保留副本供重试。
 
-复制完成后的处理全部在本地执行：XML 仅做结构校验，并将原始字节封装为 `<UUID>.xml + 空 manifest.txt` 后交给本地 `PackageImporter`；不会调用 `TemplatesListVC` 的联网文档回调。XML 正常以 `storage status 4`、原生 completion 和精确模板 UI 增量确认成功；当且仅当 AM 自己显示 `Missing Media` 且明确写出 `has been imported anyway` 时，v44 会静默该非致命提示，并以这条原生确认作为 SwiftUI 列表不可枚举时的回退证据。数据库/WAL 或其他通用持久化文件变化不参与 XML 判定。`.amproj` 逐项解压验证 ZIP32、local header、CRC、XML、manifest SHA-1 和路径安全，再核对所有 `amproj:` 素材引用。缺少任一图片、音频、视频或字体时，会在进入原生 `PackageImporter` 前停止并保留缓存包；资源齐全但缺 iOS 媒体 `sig` 时，重建包含全部资源的兼容工作包。原生导入直接产生项目时确认项目落库；若只产生模板，则以模板 UI 增量确认。五项强终态成立但目标 UI 暂不可见时，以不声明项目或模板的中性终态完成，不再依赖模板卡片自动转换。
+复制完成后的处理全部在本地执行：XML 仅做结构校验，并将原始字节封装为 `<UUID>.xml + 空 manifest.txt` 后交给本地 `PackageImporter`；不会访问底部在线模板商城。XML 以 `storage status 4`、原生 completion、临时包消费和持久化变化确认成功；当且仅当 AM 自己显示 `Missing Media` 且明确写出 `has been imported anyway` 时，v44 才静默该非致命提示。`.amproj` 逐项解压验证 ZIP32、local header、CRC、XML、manifest SHA-1 和路径安全，再核对所有 `amproj:` 素材引用。缺少任一图片、音频、视频或字体时，会在进入原生 `PackageImporter` 前停止并保留缓存包；资源齐全但缺 iOS 媒体 `sig` 时，重建包含全部资源的兼容工作包。原生导入直接产生项目时确认项目落库；五项强终态成立但目标 UI 暂不可见时，以不声明项目或模板的中性终态完成。
 
-正常状态顺序为：`1/4 收到文件 -> 2/4 完整校验并保持原包 -> 3/4 正在解包并写入项目或模板 -> 原生回调完成后验证落库 -> 4/4`。项目行证据优先；模板成功必须有模板 UI 增量。完整包预检、status 4、原生 completion、临时包消费和持久化证据同时成立只能证明原生导入已完成，不能单独证明目标是模板。五项强终态成立后保留 3 次 UI 刷新探测，仍不可枚举时以中性终态立即完成当前事务并恢复下一包，不再等待 30 次探测或要求重启 App。
+正常状态顺序为：`1/4 收到文件 -> 2/4 完整校验并保持原包 -> 3/4 正在解包并写入项目或模板 -> 原生回调完成后验证落库 -> 4/4`。项目行证据优先；完整包预检、status 4、原生 completion、临时包消费和持久化证据只能证明原生导入已完成，不能单独声明目标是模板。目标暂不可枚举时以中性终态完成当前事务并恢复下一包。
 
-稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。本轮稳定包只使用主 App 的文档 URL/文件选择器链路，不嵌入 Share Extension，不读取 App Group。Share Extension 仍保留为独立实验组件，不属于本轮安装包。唯一兼容基线是 Alight Motion `6.2.55 (862)`；注入时保持 `CFBundleVersion=862`，并强制 `LSSupportsOpeningDocumentsInPlace=true`、`UISupportsDocumentBrowser=false`：让 File Provider 在冷启动时交付带安全作用域的原文件，插件仍只在回调内读取并同步复制到自己的私有缓存，不会原地修改来源文件。
+稳定入口是 QQ/文件 App 的“用其他应用打开 -> Alight Motion”。本轮稳定包只使用主 App 的文档 URL/文件选择器链路，不嵌入 Share Extension，不读取 App Group。Share Extension 仍保留为独立实验组件，不属于本轮安装包。唯一兼容基线是 Alight Motion `6.2.55 (862)`；注入时保持 `CFBundleVersion=862`，并强制 `LSSupportsOpeningDocumentsInPlace=false`、`UISupportsDocumentBrowser=false`，让系统先 copy-in 到主 App，再由插件同步复制到私有缓存。
 
 整个导入链不依赖 Wi-Fi、5G、VPN、网络或调试后端。Cloud/Debug 后端不可达时只会缺少诊断日志。
 
-`6.2.55 (862)` 稳定包的导出只在 `_TtC12AlightMotion7ShareNC` 的 `onTapExport:` 精确 hook 中生效。hook 从 `ShareVC.selectedExportOptID` 读取 `uint8_t` 枚举，不依赖动态行号；仅值为 `7`（项目包）时启动植入的 `.amproj` 直出链，其他导出选项仍交回 Alight Motion。该路径不进入原生 `ShareProjectPackageVC`，不生成或分享图片、PNG、二维码或云链接，系统分享表只收到生成的 `.amproj` 文件 URL。生成失败只提供“重试”或“取消”，不会回退原生项目包导出；XML / `.amproj` 导入链保持不变。
+`6.2.55 (862)` 稳定包优先在 `_TtC12AlightMotion7ShareNC` 的 `onTapExport:` 精确 hook 中读取 `ShareVC.selectedExportOptID`；仅值为 `7`（项目包）时启动植入的 `.amproj` 直出链。若该 Swift 状态未暴露，代码只在 AM 即将呈现精确的 `ShareProjectPackageVC` 时进行第二道接管，避免回落到会闪退的原生项目包流程。其他视频、图片、GIF、WebP 与 XML 导出仍交回 Alight Motion。系统分享表只收到生成的 `.amproj` 文件 URL；生成失败只提供“重试”或“取消”。
 
 ## GitHub Actions 构建
 

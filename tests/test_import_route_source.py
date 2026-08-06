@@ -393,10 +393,21 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_package_flow_predicate_is_narrow(self):
         body = function_body(
             "static BOOL amproj_isPackageControllerName",
-            "static BOOL amproj_isSharePackageControllerRecursive",
+            "static BOOL amproj_isSharePackageController",
         )
         self.assertIn("ShareProjectPackageVC", body)
+        self.assertIn('hasSuffix:@"ShareProjectPackageVC"', body)
         self.assertNotIn('containsString:@"Package"]', body)
+
+        presented = function_body(
+            "static BOOL amproj_isSharePackageController",
+            "static BOOL amproj_hasPackageController",
+        )
+        self.assertIn("UINavigationController.class", presented)
+        self.assertIn("visibleViewController", presented)
+        self.assertNotIn("childViewControllers", presented)
+        self.assertNotIn("presentedViewController", presented)
+        self.assertNotIn("Recursive", presented)
 
     def test_release_cloud_disables_native_activity_sheet_export_fallback(self):
         body = function_body(
@@ -473,7 +484,24 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
         present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
         self.assertIn('direct.native_package_presentation', present)
-        self.assertNotIn("amproj_startDirectExport", present)
+        fallback = present[present.index("if (amproj_isSharePackageController") :]
+        self.assertIn('direct_export_fallback', fallback)
+        self.assertIn("amproj_startDirectExport", fallback)
+        self.assertIn("return;", fallback)
+        package_predicate = function_body(
+            "static BOOL amproj_isPackageControllerName",
+            "static BOOL amproj_isSharePackageController",
+        )
+        self.assertIn('hasSuffix:@"ShareProjectPackageVC"', package_predicate)
+        self.assertNotIn('containsString:@"Package"', package_predicate)
+
+        presentation_predicate = function_body(
+            "static BOOL amproj_isSharePackageController",
+            "static BOOL amproj_hasPackageController",
+        )
+        self.assertIn("visibleViewController", presentation_predicate)
+        self.assertNotIn("childViewControllers", presentation_predicate)
+        self.assertNotIn("presentedViewController", presentation_predicate)
 
         share_install = function_body(
             "static void amproj_installShareExportHook",
@@ -578,7 +606,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             re.compile(r"\bAMProjNormalizeProjectArchive\s*\(", re.DOTALL),
         )
 
-    def test_v40_xml_uses_a_native_template_verifier_without_persistence_probe(self):
+    def test_v44_xml_uses_projects_host_and_native_persistence_evidence(self):
         complete = function_body(
             "static BOOL amproj_completeNativeXMLTemplateImport",
             "static void amproj_failNativeXMLTemplateImport",
@@ -587,30 +615,42 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "transaction.packageIntegrityVerified",
             "transaction.nativeTerminalStatus4Returned",
             "transaction.nativeCompletionSucceeded",
-            "UIConfirmed",
+            "transaction.nativeTemporaryConsumed",
+            "persistenceConfirmed",
         ):
             self.assertIn(gate, complete)
         self.assertIn('"import.xml_template_verified"', complete)
-        self.assertIn('"persistence_delta_used": @NO', complete)
+        self.assertIn('"persistence_delta_used": @YES', complete)
+        self.assertIn('"host": @"projects"', complete)
+        self.assertIn("amproj_selectMainTab(NO, transactionID)", complete)
+        self.assertNotIn("amproj_selectMainTab(YES, transactionID)", complete)
 
         verifier = function_body(
             "static void amproj_verifyNativeXMLTemplateImport",
             "static void amproj_verifyImportedProjectRow",
         )
-        self.assertIn("amproj_newTemplateCandidateForTransaction", verifier)
-        self.assertIn("amproj_visibleTemplateViewTitleCount", verifier)
-        self.assertIn("UIKitTemplateAdded", verifier)
-        self.assertIn("SwiftUITemplateAdded", verifier)
+        self.assertIn("amproj_selectMainTab(NO, transactionID)", verifier)
+        self.assertIn("amproj_visibleProjectsControllers", verifier)
         self.assertIn("transaction.xmlImportedAnywayWarningObserved", verifier)
-        self.assertIn("BOOL importConfirmed = templateAdded || importedAnywayConfirmed", verifier)
+        self.assertIn("BOOL importConfirmed = temporaryConsumed", verifier)
         self.assertIn("importConfirmed && nativeTerminalReady", verifier)
         self.assertIn('"native_imported_anyway_warning"', verifier)
-        self.assertNotIn("templateAdded && nativeTerminalReady", verifier)
         self.assertIn("amproj_completeNativeXMLTemplateImport", verifier)
         self.assertNotIn("amproj_verifyImportedProjectRow(", verifier)
-        self.assertNotIn("amproj_scheduleImportPersistenceProbe(", verifier)
+        self.assertIn("amproj_scheduleImportPersistenceProbe(", verifier)
         self.assertNotIn("amproj_probeXMLPersistence(", verifier)
         self.assertNotIn("amproj_importPersistenceDelta(", verifier)
+        self.assertNotIn("amproj_selectMainTab(YES", verifier)
+        self.assertNotIn("amproj_visibleTemplatesControllers", verifier)
+
+        persistence = function_body(
+            "static void amproj_scheduleImportPersistenceProbe",
+            "static void amproj_captureTemplatePromotionPersistenceBaseline",
+        )
+        accepted = persistence.index("if (accepted) {")
+        verified = persistence.index("if (acceptedVerified)", accepted)
+        self.assertIn("transaction.nativeTemporaryConsumed", persistence[accepted:verified])
+        self.assertLess(accepted, verified)
 
         finish = function_body(
             "static void amproj_finishNativePackageImport",
@@ -619,7 +659,6 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("activeTransaction.kind == AMProjImportKindXMLTemplate", finish)
         self.assertIn("amproj_verifyNativeXMLTemplateImport(", finish)
         self.assertIn("if (transaction.kind == AMProjImportKindPackage)", SOURCE)
-        self.assertIn('"import.xml_persistence_probe_skipped"', SOURCE)
 
     def test_v40_xml_missing_media_warning_is_only_a_verified_xml_success(self):
         helper = function_body(
@@ -644,7 +683,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_failNativeXMLTemplateImport",
         )
         self.assertIn("transaction.xmlImportedAnywayWarningObserved", complete)
-        self.assertIn("(!UIConfirmed && !nativeWarningConfirmed)", complete)
+        self.assertIn("(!persistenceConfirmed && !nativeWarningConfirmed)", complete)
         self.assertIn('"native_imported_anyway_warning"', complete)
 
         verifier = function_body(
@@ -652,9 +691,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_verifyImportedProjectRow",
         )
         self.assertIn("BOOL importedAnywayConfirmed", verifier)
-        self.assertIn("BOOL importConfirmed = templateAdded || importedAnywayConfirmed", verifier)
+        self.assertIn("BOOL importConfirmed = temporaryConsumed", verifier)
         self.assertIn("if (importConfirmed && nativeTerminalReady)", verifier)
-        self.assertIn('? @"native_imported_anyway_warning"', verifier)
+        self.assertIn(': @"native_imported_anyway_warning"', verifier)
 
     def test_v40_xml_missing_media_completion_is_one_shot_in_both_orders(self):
         forced_first = NativeXMLMissingMediaRaceModel()
@@ -757,64 +796,47 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("transaction.templatePersistenceVerified", project_completion)
         self.assertIn("transaction.templateCleanupVerified", project_completion)
 
-    def test_v40_swiftui_template_host_does_not_block_native_dispatch(self):
-        self.assertIn("AMProjTemplateProbeCapabilityUnknown", SOURCE)
-        self.assertIn("AMProjTemplateProbeCapabilityUIKitReady", SOURCE)
-        self.assertIn("AMProjTemplateProbeCapabilitySwiftUIUnavailable", SOURCE)
-        probe = function_body(
-            "static BOOL amproj_prepareVisibleTemplateProbe",
-            "static NSDictionary *amproj_newTemplateCandidateForTransaction",
-        )
-        self.assertIn("templateProbeStableCycles < 12", probe)
-        self.assertIn("controller.viewIfLoaded.window", probe)
-        self.assertIn("AMProjTemplateProbeCapabilityUIKitReady", probe)
-        self.assertIn("AMProjTemplateProbeCapabilitySwiftUIUnavailable", probe)
-
+    def test_v44_projects_host_is_the_only_native_dispatch_prerequisite(self):
         capture = function_body(
             "static void amproj_captureActivatedPackageBaselinesAttempt",
             "static void amproj_captureActivatedPackageBaselines(",
         )
-        self.assertIn('import.template_baseline_unavailable', capture)
-        self.assertIn("amproj_selectMainTab(YES, transactionID)", capture)
-        self.assertIn("amproj_prepareVisibleTemplateProbe", capture)
-        self.assertLess(
-            capture.index("amproj_selectMainTab(YES, transactionID)"),
-            capture.index("amproj_prepareVisibleTemplateProbe"),
-        )
-        self.assertNotIn('模板列表数据源未就绪', capture)
-        self.assertNotIn('模板列表未就绪', capture)
+        self.assertIn("amproj_selectMainTab(NO, transactionID)", capture)
+        self.assertIn("amproj_visibleProjectsControllers", capture)
+        self.assertIn("amproj_captureActivatedPersistenceBaseline", capture)
+        self.assertNotIn("amproj_selectMainTab(YES, transactionID)", capture)
+        self.assertNotIn("amproj_prepareVisibleTemplateProbe", capture)
+        self.assertNotIn("templateProbeCapability", capture)
 
         dispatch = function_body(
             "static void amproj_tryDispatchPendingImport",
             "static void amproj_queuePreparedImport",
         )
-        self.assertIn("BOOL templateProbeReady", dispatch)
-        self.assertIn("AMProjTemplateProbeCapabilityUIKitReady", dispatch)
-        self.assertIn("AMProjTemplateProbeCapabilitySwiftUIUnavailable", dispatch)
-        self.assertIn("laneOwner.templateBaselineCaptured", dispatch)
-        self.assertNotIn("!laneOwner.templateBaselineListReady", dispatch)
+        self.assertIn("projectUIOwnerReady", dispatch)
+        self.assertIn("laneOwner.persistenceBaselineCaptured", dispatch)
+        self.assertIn("laneOwner.projectTitleBaselineCaptured", dispatch)
+        self.assertNotIn("templateProbeReady", dispatch)
+        self.assertNotIn("laneOwner.templateBaselineCaptured", dispatch)
 
         resume = function_body(
             "static void amproj_resumeQueuedImports",
             "static BOOL amproj_isImportCommandURL",
         )
-        self.assertIn("BOOL templateProbeReady", resume)
-        self.assertIn("owner.templateBaselineCaptured", resume)
-        self.assertNotIn("!owner.templateBaselineListReady", resume)
+        self.assertIn("owner.persistenceBaselineCaptured", resume)
+        self.assertIn("owner.projectTitleBaselineCaptured", resume)
+        self.assertNotIn("templateProbeReady", resume)
+        self.assertNotIn("owner.templateBaselineCaptured", resume)
 
         xml_begin = function_body(
             "static void amproj_beginXMLTemplateImport",
             "static BOOL amproj_persistencePathIsPluginOwned",
         )
-        self.assertNotIn("if (!transaction.templateBaselineListReady)", xml_begin)
-        self.assertIn("amproj_prepareVisibleTemplateProbe", xml_begin)
-        self.assertIn("amproj_captureXMLPersistenceBaseline", xml_begin)
-        self.assertNotIn("amproj_activateXMLUploadView", xml_begin)
-        self.assertNotIn("import.xml_native_picker_requested", xml_begin)
-        self.assertIn("nativePicker.delegate", xml_begin)
-        self.assertIn("owner, multipleSelector, nativePicker, @[URL]", xml_begin)
-        self.assertIn('route": @"templates_direct_delegate"', xml_begin)
         self.assertIn("initForOpeningContentTypes", xml_begin)
+        self.assertIn("amproj_selectMainTab(NO, transactionID)", xml_begin)
+        self.assertIn("amproj_visibleProjectsControllers", xml_begin)
+        self.assertNotIn("amproj_selectMainTab(YES", xml_begin)
+        self.assertNotIn("amproj_visibleTemplatesControllers", xml_begin)
+        self.assertNotIn("amproj_prepareVisibleTemplateProbe", xml_begin)
         self.assertLess(
             xml_begin.index("amproj_captureXMLPersistenceBaseline"),
             xml_begin.index("owner, multipleSelector, nativePicker, @[URL]"),
@@ -824,12 +846,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_verifyXMLTemplateImport",
             "static void amproj_beginXMLTemplateImport",
         )
-        self.assertIn("import.xml_template_verified_without_list_probe", xml_verify)
-        self.assertIn("amproj_visibleTemplateViewTitleCount", xml_verify)
-        self.assertIn("swiftui_title_added", xml_verify)
-        self.assertNotIn("amproj_scheduleImportPersistenceProbe", xml_verify)
+        self.assertIn("amproj_selectMainTab(NO, transactionID)", xml_verify)
+        self.assertIn("amproj_visibleProjectsControllers", xml_verify)
+        self.assertIn("transaction.nativeCompletionSucceeded", xml_verify)
+        self.assertIn("transaction.persistenceVerified", xml_verify)
+        self.assertIn("amproj_probeXMLPersistence", xml_verify)
+        self.assertNotIn("amproj_visibleTemplate", xml_verify)
+        self.assertNotIn("amproj_newTemplateCandidateForTransaction", xml_verify)
+        self.assertNotIn("amproj_selectMainTab(YES", xml_verify)
         self.assertIn("attempt >= 60", xml_verify)
-        self.assertIn("缓存文件已保留", xml_verify)
+        self.assertIn("cached file retained", xml_verify)
 
         alert = function_body(
             "static AMProjXMLImportAlertResult amproj_XMLImportAlertResult",
@@ -846,12 +872,14 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             present.index("AMProjXMLImportAlertResult XMLAlertResult") :
             present.index("NSString *nativeFailureTitle")
         ]
-        self.assertIn("amproj_finishXMLTemplateImport(transactionID, YES", xml_branch)
+        self.assertIn("transaction.nativeCompletionSucceeded = YES", xml_branch)
+        self.assertIn("amproj_waitForXMLPickerDismissal", xml_branch)
+        self.assertNotIn("amproj_finishXMLTemplateImport(transactionID, YES", xml_branch)
         self.assertIn("amproj_finishXMLTemplateImportAfterPicker", xml_branch)
         self.assertIn("NO, 0);", xml_branch)
         self.assertLess(
             xml_branch.index("orig_presentVC(self, _cmd, controller, animated, completion)"),
-            xml_branch.index("amproj_finishXMLTemplateImport(transactionID, YES"),
+            xml_branch.index("transaction.nativeCompletionSucceeded = YES"),
         )
 
     def test_v40_routes_are_serial_and_template_cleanup_is_identity_safe(self):
@@ -952,24 +980,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             resume.index("amproj_xmlTemplatePendingQueue.count"),
         )
 
-    def test_v40_direct_project_requires_exact_template_absence(self):
-        model = TemplateAbsenceModel()
-        for _ in range(5):
-            model.observe(True)
-        self.assertFalse(model.stable)
-        model.observe(False)
-        self.assertEqual(model.exact_cycles, 0)
-        for _ in range(6):
-            model.observe(True)
-        self.assertTrue(model.stable)
-        model.final_check(False)
-        self.assertFalse(model.verified)
-        self.assertFalse(model.stable)
-        for _ in range(6):
-            model.observe(True)
-        model.final_check(True)
-        self.assertTrue(model.verified)
-
+    def test_v44_direct_project_completes_without_online_template_absence(self):
         verifier = function_body(
             "static void amproj_verifyImportedProjectRow",
             "static void amproj_finishNativePackageImport",
@@ -978,54 +989,37 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static BOOL amproj_completePackageTransaction",
             "static void amproj_failTemplatePromotion",
         )
-        self.assertIn("templateBaselineStillExact", verifier)
-        self.assertIn("templateAbsenceVerified = YES", verifier)
-        self.assertIn("templateAbsenceExactCycles += 1", verifier)
-        self.assertIn("templateAbsenceExactCycles = 0", verifier)
-        self.assertIn("templateAbsenceExactCycles >= 6", verifier)
-        self.assertIn("templateAbsenceFinalCheckPending", verifier)
-        unavailable_start = verifier.index(
-            "AMProjTemplateProbeCapabilitySwiftUIUnavailable"
+        verified = verifier.index("if (verified)")
+        direct_completion = verifier.index(
+            "amproj_completePackageTransaction(", verified
         )
-        exact_probe_start = verifier.index(
-            "probeTransaction.persistenceVerified && attempt >= 2",
-            unavailable_start,
+        package_only = verifier.index(
+            "if (probeTransaction.kind == AMProjImportKindPackage) {",
+            direct_completion,
         )
-        unavailable_route = verifier[unavailable_start:exact_probe_start]
-        self.assertIn("amproj_visibleTemplateViewTitleCount", unavailable_route)
-        self.assertIn("amproj_completePackageAsTemplate", unavailable_route)
-        self.assertIn("templateAbsenceVerified = YES", unavailable_route)
-        self.assertNotIn("templateAbsenceProbeUnavailableAccepted", unavailable_route)
-        verified_assignment = verifier.index("templateAbsenceVerified = YES")
-        self.assertLess(
-            verified_assignment,
-            verifier.index("amproj_completePackageTransaction", verified_assignment),
+        legacy_template_code = verifier.index(
+            "probeTransaction.templateProbeCapability", package_only
         )
-        self.assertIn("transaction.templateAbsenceVerified", completion)
-        self.assertIn("transaction.templateAbsenceExactCycles >= 6", completion)
-        self.assertIn("amproj_templateBaselineStillExact", completion)
-        self.assertIn("amproj_visibleTemplateViewTitleCount", completion)
-        self.assertNotIn("templateAbsenceProbeUnavailableAccepted", completion)
-        self.assertLess(
-            completion.index("amproj_templateBaselineStillExact"),
-            completion.index("BOOL routeGateSatisfied"),
-        )
-        self.assertIn("transaction.templateCleanupVerified", completion)
+        package_route = verifier[package_only:legacy_template_code]
+        self.assertLess(verified, direct_completion)
+        self.assertIn("amproj_selectMainTab(NO, transactionID)", package_route)
+        self.assertIn("amproj_scheduleImportPersistenceProbe", package_route)
+        self.assertIn("return;", package_route)
+        self.assertNotIn("amproj_selectMainTab(YES", package_route)
+        self.assertNotIn("amproj_visibleTemplatesControllers", package_route)
 
-        template_completion = function_body(
-            "static BOOL amproj_completePackageAsTemplate",
-            "static BOOL amproj_completePackageTransaction",
-        )
-        self.assertIn("transaction.persistenceVerified", template_completion)
-        self.assertIn("amproj_newTemplateCandidateForTransaction", template_completion)
-        self.assertIn("amproj_visibleTemplateViewTitleCount", template_completion)
-        self.assertIn("transaction.templateAddedStableCycles >= 3", template_completion)
-        self.assertIn('import.package_template_verified', template_completion)
-        self.assertIn('route": @"template_final"', template_completion)
-        self.assertNotIn('template_native_terminal_fallback', template_completion)
-        self.assertNotIn("nativeTerminalFallback", template_completion)
-        self.assertIn("amproj_releaseImportTransaction(transactionID, YES)", template_completion)
-        self.assertNotIn("amproj_presentImportError", template_completion)
+        for gate in (
+            "transaction.directProjectVerified",
+            "transaction.packageIntegrityVerified",
+            "transaction.nativeTerminalStatus4Returned",
+            "transaction.nativeCompletionSucceeded",
+            "transaction.nativeTemporaryConsumed",
+            "transaction.persistenceVerified",
+        ):
+            self.assertIn(gate, completion)
+        self.assertNotIn("templateAbsenceVerified", completion)
+        self.assertNotIn("amproj_templateBaselineStillExact", completion)
+        self.assertNotIn("amproj_visibleTemplateViewTitleCount", completion)
 
     def test_v40_xml_bypasses_unreachable_swiftui_upload_button(self):
         picker_flow = function_body(
@@ -1038,7 +1032,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("respondsToSelector:multipleSelector", picker_flow)
         self.assertIn("nativePicker.delegate = (id<UIDocumentPickerDelegate>)owner", picker_flow)
         self.assertIn("owner, multipleSelector, nativePicker, @[URL]", picker_flow)
-        self.assertIn('route\": @\"templates_direct_delegate\"', picker_flow)
+        self.assertIn('route\": @\"projects_direct_delegate\"', picker_flow)
+        self.assertIn("amproj_selectMainTab(NO, transactionID)", picker_flow)
+        self.assertIn("amproj_visibleProjectsControllers", picker_flow)
+        self.assertNotIn("amproj_selectMainTab(YES", picker_flow)
+        self.assertNotIn("amproj_visibleTemplatesControllers", picker_flow)
+        self.assertNotIn("amproj_prepareVisibleTemplateProbe", picker_flow)
 
     def test_v40_xml_failures_use_xml_specific_alert_title(self):
         alert = function_body(
@@ -1255,6 +1254,14 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("pickerVisible && attempt < 40", picker_finish)
         self.assertIn("finalSuccess = success && pickerClosed", picker_finish)
 
+        finish_internal = function_body(
+            "static void amproj_finishXMLTemplateImportInternal",
+            "static void amproj_finishXMLTemplateImportAfterPicker",
+        )
+        self.assertIn("transaction.nativeCompletionSucceeded", finish_internal)
+        self.assertIn("transaction.persistenceVerified", finish_internal)
+        self.assertIn("requestedSuccess && !success", finish_internal)
+
         alert = function_body(
             "static AMProjXMLImportAlertResult amproj_XMLImportAlertResult",
             "static void hooked_presentVC",
@@ -1291,7 +1298,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("return NO", completion)
         self.assertIn("return YES", completion)
         self.assertNotIn("templateAbsenceProbeUnavailableAccepted", completion)
-        self.assertIn("SwiftUITemplateAbsence", completion)
+        self.assertIn("BOOL directProjectReady", completion)
+        self.assertIn("transaction.directProjectVerified", completion)
+        self.assertIn("transaction.nativeTerminalStatus4Returned", completion)
+        self.assertNotIn("SwiftUITemplateAbsence", completion)
 
         swiftui_promotion = function_body(
             "static void amproj_beginSwiftUITemplatePromotion",
