@@ -299,6 +299,40 @@ class DirectCloud862Tests(unittest.TestCase):
             )
         )
 
+    def test_amenhancer_patch_removes_only_the_visible_v59_label(self):
+        prefix = b"header-data\0"
+        suffix = b"tail-data"
+        source = prefix + direct.AMENHANCER_STATUS_LABEL_CONTEXT + suffix
+
+        result = direct.prepare_amenhancer(source)
+
+        label_start = len(prefix) + len(b"nil\0")
+        changed = {
+            index
+            for index, (before, after) in enumerate(zip(source, result))
+            if before != after
+        }
+        self.assertTrue(changed)
+        self.assertLessEqual(
+            changed,
+            set(
+                range(
+                    label_start,
+                    label_start + len(direct.AMENHANCER_STATUS_LABEL),
+                )
+            ),
+        )
+        self.assertNotIn(direct.AMENHANCER_STATUS_LABEL, result)
+        self.assertIn(b"[AmEnhancer] marker added\n", result)
+
+    def test_amenhancer_patch_rejects_unknown_or_duplicate_preimage(self):
+        with self.assertRaisesRegex(RuntimeError, "context changed"):
+            direct.prepare_amenhancer(b"prefix AM v59 OK suffix")
+        with self.assertRaisesRegex(RuntimeError, "context changed"):
+            direct.prepare_amenhancer(
+                direct.AMENHANCER_STATUS_LABEL_CONTEXT * 2
+            )
+
     def test_cloud_stability_contract_rejects_marker_only_v44(self):
         marker_only = (
             direct.EXPECTED_CLOUD_RUNTIME_MARKER

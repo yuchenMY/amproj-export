@@ -41,7 +41,7 @@ jobs:
           from inject_dylib import verify_dylib_architecture
 
           required_symbols = {
-              "_AMProjCallNativePackageImport",
+              "_AMProjCallNativePackageImportBody",
               "_AMProjInstallNativePackageImportBridge",
               "_AMProjV44IsDirectProjectPackageOption",
               "_AMProjV44ReleaseNativeActivityFallbackEnabled",

@@ -41,18 +41,17 @@ FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeIsBusy(void);
 // deliberately requires a process restart before accepting another package.
 FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeRequiresRestart(void);
 
-FOUNDATION_EXPORT void AMProjCallNativePackageImport(
+FOUNDATION_EXPORT void AMProjCallNativePackageImportBody(
     void *function,
+    // The 6.2.55 continuation reads the presentation owner from a Swift weak
+    // slot at offset 0x10. The bridge owns this context for the call.
+    void *weakOwnerContext,
+    id storageReference,
+    id progressOwner,
     uintptr_t swiftStringWord0,
     uintptr_t swiftStringWord1,
-    // The adapter maps this argument to the native entry's explicit x2.
-    id storageReference,
-    // The verified 6.2.55 continuation unconditionally dismisses this
-    // AMProgressAlert after status 4; callers must pass a non-nil instance.
-    id progressOwner,
+    void *packageImporter,
     void *completionFunction,
-    void * _Nullable completionContext,
-    // The adapter maps this final argument to Swift's hidden x20 context.
-    id presentationOwner);
+    void * _Nullable completionContext);
 
 NS_ASSUME_NONNULL_END

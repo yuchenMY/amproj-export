@@ -39,6 +39,10 @@ EXPECTED_CLOUD_RUNTIME_MARKER = b"[AMProjExport] ===== Loading v44-cloud ====="
 EXPECTED_CLOUD_STABILITY_MARKER = (
     b"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback"
 )
+AMENHANCER_STATUS_LABEL = b"AM v59 OK"
+AMENHANCER_STATUS_LABEL_CONTEXT = (
+    b"nil\0" + AMENHANCER_STATUS_LABEL + b"\0[AmEnhancer] marker added\n\0"
+)
 CLOUD_LOAD_LCSIGN = "@executable_path/Frameworks/AMProjExport.dylib"
 CLOUD_LOAD_COMPACT = "@rpath/AMProjExportCloud.dylib"
 EXPECTED_CLOUD_CONTRACT_FUNCTIONS = {
@@ -71,6 +75,32 @@ EMBEDDED_PROFILE = handoff.EMBEDDED_PROFILE
 
 def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def prepare_amenhancer(data):
+    """Remove only the visible v59 status label from the verified dylib."""
+    if data.count(AMENHANCER_STATUS_LABEL_CONTEXT) != 1:
+        raise RuntimeError("AmEnhancer v59 status label context changed")
+    if data.count(AMENHANCER_STATUS_LABEL) != 1:
+        raise RuntimeError("AmEnhancer must contain exactly one v59 status label")
+
+    context_start = data.index(AMENHANCER_STATUS_LABEL_CONTEXT)
+    label_start = context_start + len(b"nil\0")
+    result = bytearray(data)
+    result[label_start : label_start + len(AMENHANCER_STATUS_LABEL)] = bytes(
+        len(AMENHANCER_STATUS_LABEL)
+    )
+    changed = {
+        index
+        for index, (before, after) in enumerate(zip(data, result))
+        if before != after
+    }
+    allowed = set(range(label_start, label_start + len(AMENHANCER_STATUS_LABEL)))
+    if not changed or not changed <= allowed:
+        raise RuntimeError("AmEnhancer status label patch changed unexpected bytes")
+    if AMENHANCER_STATUS_LABEL in result:
+        raise RuntimeError("AmEnhancer v59 status label remains after patch")
+    return bytes(result)
 
 
 def verify_cloud_runtime_version(data):
@@ -474,7 +504,7 @@ def _copy_zip_info(info):
     return clone
 
 
-def verify_resign_ready_ipa(source_path, output_path, info, main, cloud):
+def verify_resign_ready_ipa(source_path, output_path, info, main, cloud, enhancer):
     verify_cloud_runtime_version(cloud)
     cloud_load = _verify_output_main_structure(main)
     output_cloud_path = _cloud_member_path(cloud_load["name"])
@@ -506,6 +536,10 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud):
         if output.read(MAIN_EXECUTABLE) != main:
             raise RuntimeError("output main differs from direct-Cloud main")
         verify_resign_ready_main(main)
+        if output.read(AMENHANCER_PATH) != enhancer:
+            raise RuntimeError("output AmEnhancer differs from the label-only patch")
+        if AMENHANCER_STATUS_LABEL in enhancer:
+            raise RuntimeError("output AmEnhancer still contains the v59 status label")
         if output_names.count(output_cloud_path) != 1:
             raise RuntimeError("output IPA must contain one active Cloud member")
         if any(
@@ -529,6 +563,7 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud):
         changed = {
             INFO_PLIST,
             MAIN_EXECUTABLE,
+            AMENHANCER_PATH,
             LOADCONTROL_PATH,
             *CLOUD_MEMBER_PATHS,
         }
@@ -544,7 +579,9 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud):
         "entry_count": len(output_names),
         "main_sha256": sha256_bytes(main),
         "cloud_sha256": sha256_bytes(cloud),
+        "amenhancer_sha256": sha256_bytes(enhancer),
         "cloud_member": output_cloud_path,
+        "v59_status_label_removed": True,
         "loadcontrol_removed": True,
     }
 
@@ -602,8 +639,10 @@ def build_direct_package(source_path, output_path, cloud_path=None):
         cloud = prepare_cloud(cloud_source)
         cloud_load = _verify_output_main_structure(main)
         output_cloud_path = _cloud_member_path(cloud_load["name"])
-        if EXPECTED_AMENHANCER_SHA256 and sha256_bytes(source.read(AMENHANCER_PATH)) != EXPECTED_AMENHANCER_SHA256:
+        source_amenhancer = source.read(AMENHANCER_PATH)
+        if EXPECTED_AMENHANCER_SHA256 and sha256_bytes(source_amenhancer) != EXPECTED_AMENHANCER_SHA256:
             raise RuntimeError("source AmEnhancer changed")
+        enhancer = prepare_amenhancer(source_amenhancer)
         if (
             EXPECTED_CYDIA_SUBSTRATE_SHA256
             and
@@ -629,6 +668,8 @@ def build_direct_package(source_path, output_path, cloud_path=None):
                     payload = info
                 elif name == MAIN_EXECUTABLE:
                     payload = main
+                elif name == AMENHANCER_PATH:
+                    payload = enhancer
                 elif name in CLOUD_MEMBER_PATHS:
                     continue
                 output.writestr(_copy_zip_info(zip_info), payload)
@@ -642,7 +683,12 @@ def build_direct_package(source_path, output_path, cloud_path=None):
             )
 
         verification = verify_resign_ready_ipa(
-            source_path, candidate, info=info, main=main, cloud=cloud
+            source_path,
+            candidate,
+            info=info,
+            main=main,
+            cloud=cloud,
+            enhancer=enhancer,
         )
         os.replace(candidate, output_path)
 

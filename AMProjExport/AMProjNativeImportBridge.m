@@ -4,6 +4,7 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <stdlib.h>
 #import <string.h>
 
 static NSString *const AMProjNativeBridgeErrorDomain =
@@ -12,7 +13,8 @@ static NSString *const AMProjNativeBridgeErrorDomain =
 static const uintptr_t AMProjMainPreferredBase = 0x100000000ULL;
 // Alight Motion 6.2.55 (build 862) only.  These addresses are part of the
 // verified base package contract and must change together with its UUID.
-static const uintptr_t AMProjNativeImportEntry = 0x100604ac4ULL;
+static const uintptr_t AMProjNativeImportBody = 0x1002647c0ULL;
+static const uintptr_t AMProjPackageImporterMetadataAccessor = 0x100310768ULL;
 
 typedef struct {
     uintptr_t word0;
@@ -20,7 +22,15 @@ typedef struct {
 } AMProjSwiftString;
 
 typedef AMProjSwiftString (*AMProjNSStringToSwiftStringFn)(NSString *value);
+typedef void (*AMProjSwiftBridgeRetainFn)(uintptr_t value);
 typedef void (*AMProjSwiftBridgeReleaseFn)(uintptr_t value);
+typedef const void *(*AMProjSwiftMetadataAccessorFn)(uintptr_t request);
+typedef void *(*AMProjSwiftAllocObjectFn)(const void *metadata,
+                                          size_t requiredSize,
+                                          size_t requiredAlignmentMask);
+typedef void (*AMProjSwiftReleaseFn)(void *object);
+typedef void (*AMProjSwiftUnknownObjectWeakInitFn)(void *storage, id value);
+typedef void (*AMProjSwiftUnknownObjectWeakDestroyFn)(void *storage);
 
 @interface AMProjLocalStorageSnapshot : NSObject
 @property(nonatomic, strong) id task;
@@ -544,9 +554,19 @@ static BOOL AMProjMainExecutableMatches(NSError **error) {
         0x01, 0xb7, 0x30, 0x17, 0x1a, 0x6e, 0x3b, 0x17,
         0x8f, 0x59, 0xc2, 0x74, 0x62, 0xde, 0xa5, 0x63,
     };
-    static const uint8_t expectedPrologue[16] = {
+    static const uint8_t expectedImportBody[48] = {
         0xfc, 0x6f, 0xba, 0xa9, 0xfa, 0x67, 0x01, 0xa9,
         0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9,
+        0xf4, 0x4f, 0x04, 0xa9, 0xfd, 0x7b, 0x05, 0xa9,
+        0xfd, 0x43, 0x01, 0x91, 0xff, 0x43, 0x03, 0xd1,
+        0xfb, 0x03, 0x07, 0xaa, 0xa6, 0x97, 0x31, 0xa9,
+        0xa3, 0x93, 0x35, 0xa9, 0xa2, 0x83, 0x16, 0xf8,
+    };
+    static const uint8_t expectedMetadataAccessor[32] = {
+        0xfd, 0x7b, 0xbf, 0xa9, 0xfd, 0x03, 0x00, 0x91,
+        0x20, 0x76, 0x01, 0x90, 0x00, 0xe0, 0x11, 0x91,
+        0x9b, 0x9d, 0x86, 0x94, 0x01, 0x00, 0x80, 0xd2,
+        0xfd, 0x7b, 0xc1, 0xa8, 0xc0, 0x03, 0x5f, 0xd6,
     };
 
     const struct mach_header_64 *header = AMProjMainHeader();
@@ -578,11 +598,15 @@ static BOOL AMProjMainExecutableMatches(NSError **error) {
     }
 
     uintptr_t runtimeBase = (uintptr_t)header;
-    const void *entry = (const void *)(runtimeBase +
-        (AMProjNativeImportEntry - AMProjMainPreferredBase));
-    if (memcmp(entry, expectedPrologue, sizeof(expectedPrologue)) != 0) {
+    const void *body = (const void *)(runtimeBase +
+        (AMProjNativeImportBody - AMProjMainPreferredBase));
+    const void *metadataAccessor = (const void *)(runtimeBase +
+        (AMProjPackageImporterMetadataAccessor - AMProjMainPreferredBase));
+    if (memcmp(body, expectedImportBody, sizeof(expectedImportBody)) != 0 ||
+        memcmp(metadataAccessor, expectedMetadataAccessor,
+               sizeof(expectedMetadataAccessor)) != 0) {
         if (error) *error = AMProjNativeBridgeError(
-            100, @"The Alight Motion importer entry does not match the verified build", nil);
+            100, @"The Alight Motion importer continuation does not match the verified build", nil);
         return NO;
     }
     return YES;
@@ -871,8 +895,11 @@ static BOOL AMProjSelectProjectsTab(UIViewController *projects) {
 
 static void AMProjNativeImportCompletionThunk(void *result) {
     NSLog(@"[AMProjExport] Native import completion enter result=%p", result);
-    if (!AMProjFinishNativeBridge(YES, nil)) return;
-    NSLog(@"[AMProjExport] Native import completion accepted");
+    BOOL success = result != NULL;
+    NSError *error = success ? nil : AMProjNativeBridgeError(
+        111, @"Alight Motion returned no imported project", nil);
+    if (!AMProjFinishNativeBridge(success, error)) return;
+    NSLog(@"[AMProjExport] Native import completion accepted success=%d", success);
 }
 
 static BOOL AMProjStartNativePackageImport(
@@ -941,10 +968,27 @@ static BOOL AMProjStartNativePackageImport(
         (AMProjNSStringToSwiftStringFn)dlsym(
             RTLD_DEFAULT,
             "$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ");
+    AMProjSwiftBridgeRetainFn retainBridge =
+        (AMProjSwiftBridgeRetainFn)dlsym(RTLD_DEFAULT, "swift_bridgeObjectRetain");
     AMProjSwiftBridgeReleaseFn releaseBridge =
         (AMProjSwiftBridgeReleaseFn)dlsym(RTLD_DEFAULT, "swift_bridgeObjectRelease");
-    void *entry = AMProjMainAddress(AMProjNativeImportEntry);
-    if (!bridge || !releaseBridge || !entry) {
+    AMProjSwiftAllocObjectFn allocObject =
+        (AMProjSwiftAllocObjectFn)dlsym(RTLD_DEFAULT, "swift_allocObject");
+    AMProjSwiftReleaseFn swiftRelease =
+        (AMProjSwiftReleaseFn)dlsym(RTLD_DEFAULT, "swift_release");
+    AMProjSwiftUnknownObjectWeakInitFn weakInit =
+        (AMProjSwiftUnknownObjectWeakInitFn)dlsym(
+            RTLD_DEFAULT, "swift_unknownObjectWeakInit");
+    AMProjSwiftUnknownObjectWeakDestroyFn weakDestroy =
+        (AMProjSwiftUnknownObjectWeakDestroyFn)dlsym(
+            RTLD_DEFAULT, "swift_unknownObjectWeakDestroy");
+    AMProjSwiftMetadataAccessorFn metadataAccessor =
+        (AMProjSwiftMetadataAccessorFn)AMProjMainAddress(
+            AMProjPackageImporterMetadataAccessor);
+    void *importBody = AMProjMainAddress(AMProjNativeImportBody);
+    if (!bridge || !retainBridge || !releaseBridge || !allocObject ||
+        !swiftRelease || !weakInit || !weakDestroy || !metadataAccessor ||
+        !importBody) {
         NSError *runtimeError = AMProjNativeBridgeError(
             101, @"The Swift project importer runtime is unavailable", nil);
         AMProjFinishNativeBridge(NO, runtimeError);
@@ -966,6 +1010,26 @@ static BOOL AMProjStartNativePackageImport(
         releaseBridge(swiftName.word1);
         return NO;
     }
+
+    const void *packageImporterMetadata = metadataAccessor(0);
+    void *packageImporter = packageImporterMetadata
+        ? allocObject(packageImporterMetadata, 0x10, 0x7) : NULL;
+    // The verified continuation only accesses a Swift weak slot at +0x10.
+    // A private 0x18-byte context avoids depending on an internal heap-object
+    // metadata address while preserving the exact weak-reference ABI.
+    void *weakOwnerContext = calloc(1, 0x18);
+    if (!packageImporter || !weakOwnerContext) {
+        if (packageImporter) swiftRelease(packageImporter);
+        free(weakOwnerContext);
+        NSError *runtimeError = AMProjNativeBridgeError(
+            101, @"The Swift project importer could not be created", nil);
+        AMProjFinishNativeBridge(NO, runtimeError);
+        if (error) *error = runtimeError;
+        releaseBridge(swiftName.word1);
+        return NO;
+    }
+    weakInit((uint8_t *)weakOwnerContext + 0x10, owner);
+
     @synchronized (AMProjNativeBridgeLock()) {
         // The completion/timeout path takes ownership of this reference and
         // clears it exactly once, so status callbacks cannot outlive the
@@ -986,41 +1050,47 @@ static BOOL AMProjStartNativePackageImport(
             @(owner.viewIfLoaded.window.windowScene.activationState ==
               UISceneActivationStateForegroundActive)
     });
-    @try {
-        // The verified Swift entry uses the arm64 Swift closure convention:
-        // its explicit x2 argument is the storage reference (the entry calls
-        // writeToFile: on it), x3 is the AMProgressAlert owner, and the hidden
-        // x20 context is the weak presentation owner.  The clean binary's
-        // status-4 continuation unconditionally dismisses x3; nil reaches a
-        // deliberate trap, so keep the storyboard controller alive until the
-        // native completion callback.
-        AMProjCallNativePackageImport(
-            entry,
-            swiftName.word0,
-            swiftName.word1,
-            reference,
-            progressOwner,
-            (void *)&AMProjNativeImportCompletionThunk,
-            NULL,
-            owner);
-    } @catch (NSException *exception) {
-        NSError *runtimeError = AMProjNativeBridgeError(
-            109, exception.reason ?: @"The native project importer raised an exception", nil);
-        AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
-            @"generation": @(generation),
-            @"returned": @NO,
-            @"exception": exception.reason ?: @"unknown exception"
-        });
-        AMProjPoisonNativeBridge();
-        AMProjFinishNativeBridge(NO, runtimeError);
-        releaseBridge(swiftName.word1);
-        if (error) *error = runtimeError;
-        return NO;
-    }
-    NSLog(@"[AMProjExport] Native import entry returned");
-    AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
-        @"generation": @(generation),
-        @"returned": @YES
+    // The old 6.2.2 wrapper was removed by the 6.2.55 compiler. Its direct
+    // continuation survives with the same eight-register ABI. Match the
+    // original global-queue ownership: retain the Swift string until the body
+    // has copied it into its status callbacks, then release our call-local
+    // PackageImporter and weak context.
+    retainBridge(swiftName.word1);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @try {
+            AMProjCallNativePackageImportBody(
+                importBody,
+                weakOwnerContext,
+                reference,
+                progressOwner,
+                swiftName.word0,
+                swiftName.word1,
+                packageImporter,
+                (void *)&AMProjNativeImportCompletionThunk,
+                NULL);
+            NSLog(@"[AMProjExport] Native import entry returned");
+            AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
+                @"generation": @(generation),
+                @"returned": @YES
+            });
+        } @catch (NSException *exception) {
+            NSError *runtimeError = AMProjNativeBridgeError(
+                109,
+                exception.reason ?: @"The native project importer raised an exception",
+                nil);
+            AMProjEmitNativeBridgeEvent(@"native_entry_return", @{
+                @"generation": @(generation),
+                @"returned": @NO,
+                @"exception": exception.reason ?: @"unknown exception"
+            });
+            AMProjPoisonNativeBridge();
+            AMProjFinishNativeBridge(NO, runtimeError);
+        } @finally {
+            weakDestroy((uint8_t *)weakOwnerContext + 0x10);
+            free(weakOwnerContext);
+            releaseBridge(swiftName.word1);
+            swiftRelease(packageImporter);
+        }
     });
     releaseBridge(swiftName.word1);
 

@@ -1504,13 +1504,17 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("presentedViewController", owner_guard)
 
     def test_native_bridge_creates_and_retains_progress_owner(self):
-        call_start = BRIDGE_SOURCE.index("AMProjCallNativePackageImport(")
-        call_end = BRIDGE_SOURCE.index("releaseBridge(swiftName.word1)", call_start)
+        call_start = BRIDGE_SOURCE.index("AMProjCallNativePackageImportBody(")
+        call_end = BRIDGE_SOURCE.index("NULL);", call_start) + len("NULL);")
         call = BRIDGE_SOURCE[call_start:call_end]
+        self.assertIn("weakOwnerContext,", call)
         self.assertIn("reference,", call)
         self.assertIn("progressOwner,", call)
-        self.assertIn("NULL,", call)
-        self.assertIn("owner);", call)
+        self.assertIn("swiftName.word0,", call)
+        self.assertIn("swiftName.word1,", call)
+        self.assertIn("packageImporter,", call)
+        self.assertIn("AMProjNativeImportCompletionThunk", call)
+        self.assertIn("NULL);", call)
         self.assertIn('storyboardWithName:@"AMProgressAlert"', BRIDGE_SOURCE)
         self.assertIn('hasSuffix:@"AMProgressAlert"', BRIDGE_SOURCE)
         self.assertIn("amproj_nativeBridgeProgressOwner = progressOwner", BRIDGE_SOURCE)
@@ -1519,10 +1523,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('progress_owner_class', BRIDGE_SOURCE)
         self.assertIn('progress_owner_presented', BRIDGE_SOURCE)
         self.assertNotIn("reference,\n            nil,", call)
-        self.assertIn("explicit x2", BRIDGE_SOURCE)
-        self.assertIn("x20 context", BRIDGE_SOURCE)
+        self.assertIn("weakInit((uint8_t *)weakOwnerContext + 0x10, owner)", BRIDGE_SOURCE)
+        self.assertIn("weakDestroy((uint8_t *)weakOwnerContext + 0x10)", BRIDGE_SOURCE)
         self.assertIn("writeToFile:", BRIDGE_SOURCE)
-        self.assertIn("requires a non-null AMProgressAlert", BRIDGE_ASSEMBLY)
         self.assertIn("id progressOwner", BRIDGE_HEADER)
         self.assertNotIn("id _Nullable progressOwner", BRIDGE_HEADER)
 
@@ -1665,7 +1668,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void AMProjNativeImportCompletionThunk",
             "static BOOL AMProjStartNativePackageImport",
         )
-        self.assertIn("AMProjFinishNativeBridge(YES, nil)", completion)
+        self.assertIn("BOOL success = result != NULL", completion)
+        self.assertIn("Alight Motion returned no imported project", completion)
+        self.assertIn("AMProjFinishNativeBridge(success, error)", completion)
+        self.assertNotIn("AMProjFinishNativeBridge(YES, nil)", completion)
         self.assertNotIn("AMProjRefreshProjectsController", completion)
         self.assertNotIn("reloadData", completion)
         self.assertNotIn("AMProjRefreshProjectsController", BRIDGE_SOURCE)
@@ -1697,26 +1703,38 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
     def test_native_bridge_is_locked_to_verified_6255_binary(self):
         self.assertIn("0x01, 0xb7, 0x30, 0x17", BRIDGE_SOURCE)
-        self.assertIn("AMProjNativeImportEntry = 0x100604ac4ULL", BRIDGE_SOURCE)
+        self.assertIn("AMProjNativeImportBody = 0x1002647c0ULL", BRIDGE_SOURCE)
+        self.assertIn(
+            "AMProjPackageImporterMetadataAccessor = 0x100310768ULL",
+            BRIDGE_SOURCE,
+        )
+        self.assertNotIn("0x100604ac4", BRIDGE_SOURCE)
+        self.assertNotIn("AMProjNativeImportEntry", BRIDGE_SOURCE)
         self.assertIn("Alight Motion 6.2.55 (862)", BRIDGE_SOURCE)
         self.assertNotIn("AMProjNSStringToSwiftStringStub", BRIDGE_SOURCE)
         self.assertNotIn("AMProjSwiftBridgeReleaseStub", BRIDGE_SOURCE)
         self.assertNotIn("0x101fb678cULL", BRIDGE_SOURCE)
         self.assertNotIn("0x101fbc1bcULL", BRIDGE_SOURCE)
-        self.assertIn("if (!bridge || !releaseBridge || !entry)", BRIDGE_SOURCE)
-        self.assertIn("expectedPrologue", BRIDGE_SOURCE)
+        self.assertIn("!weakDestroy || !metadataAccessor", BRIDGE_SOURCE)
+        self.assertIn("expectedImportBody", BRIDGE_SOURCE)
+        self.assertIn("expectedMetadataAccessor", BRIDGE_SOURCE)
         self.assertIn("LC_UUID", BRIDGE_SOURCE)
-        self.assertIn("memcmp(entry, expectedPrologue", BRIDGE_SOURCE)
+        self.assertIn("memcmp(body, expectedImportBody", BRIDGE_SOURCE)
+        self.assertIn("memcmp(metadataAccessor, expectedMetadataAccessor", BRIDGE_SOURCE)
+        self.assertIn("metadataAccessor(0)", BRIDGE_SOURCE)
+        self.assertIn("allocObject(packageImporterMetadata, 0x10, 0x7)", BRIDGE_SOURCE)
+        self.assertIn("dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)", BRIDGE_SOURCE)
 
-    def test_arm64_shim_sets_hidden_owner_without_corrupting_callee_saved_state(self):
-        self.assertIn("_AMProjCallNativePackageImport", BRIDGE_ASSEMBLY)
-        self.assertIn("str x20, [sp, #16]", BRIDGE_ASSEMBLY)
-        self.assertIn("presentation owner in hidden Swift x20", BRIDGE_ASSEMBLY)
-        self.assertIn("mov x20, x7", BRIDGE_ASSEMBLY)
-        self.assertIn("blr x9", BRIDGE_ASSEMBLY)
-        self.assertIn("ldr x20, [sp, #16]", BRIDGE_ASSEMBLY)
+    def test_arm64_shim_maps_all_eight_explicit_continuation_arguments(self):
+        self.assertIn("_AMProjCallNativePackageImportBody", BRIDGE_ASSEMBLY)
+        self.assertIn("ldr x11, [x29, #16]", BRIDGE_ASSEMBLY)
+        self.assertIn("mov x0, x1", BRIDGE_ASSEMBLY)
+        self.assertIn("mov x5, x6", BRIDGE_ASSEMBLY)
+        self.assertIn("mov x6, x7", BRIDGE_ASSEMBLY)
+        self.assertIn("mov x7, x11", BRIDGE_ASSEMBLY)
+        self.assertIn("blr x10", BRIDGE_ASSEMBLY)
+        self.assertNotIn("mov x20, x7", BRIDGE_ASSEMBLY)
         self.assertIn(".cfi_startproc", BRIDGE_ASSEMBLY)
-        self.assertIn(".cfi_offset x20, -16", BRIDGE_ASSEMBLY)
         self.assertIn(".cfi_endproc", BRIDGE_ASSEMBLY)
         self.assertIn("AMProjNativeImportBridge.S", MAKEFILE)
         self.assertEqual(MAKEFILE.count("AMProjNativeImportBridge.S"), 6)
@@ -1729,7 +1747,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("AMProjInstallNativePackageImportBridge()", bootstrap)
         self.assertIn("AMProjRegisterNativePackageImportStarter", BRIDGE_HEADER)
         self.assertIn("AMProjNativeImportCompletionThunk", BRIDGE_SOURCE)
-        self.assertIn("AMProjFinishNativeBridge(YES, nil)", BRIDGE_SOURCE)
+        self.assertIn("AMProjFinishNativeBridge(success, error)", BRIDGE_SOURCE)
         self.assertIn("300 * NSEC_PER_SEC", BRIDGE_SOURCE)
 
     def test_native_failure_alert_completes_active_bridge_without_double_reset(self):
