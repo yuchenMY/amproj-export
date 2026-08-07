@@ -458,10 +458,29 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertEqual(MAKEFILE.count("AMProjStabilityContract.S"), 6)
 
     def test_v44_project_package_uses_exact_6255_controller_boundary(self):
-        self.assertNotIn("selectedExportOptID", SOURCE)
-        self.assertNotIn("AMProjShareVCSelectedExportOptionOffset", SOURCE)
-        self.assertNotIn("hooked_shareNCOnTapExport", SOURCE)
-        self.assertNotIn("amproj_installShareExportHook", SOURCE)
+        self.assertIn("selectedExportOptID", SOURCE)
+        self.assertIn("AMProjShareVCSelectedExportOptionOffset = 0x120", SOURCE)
+        self.assertIn("hooked_shareNCOnTapExport", SOURCE)
+        self.assertIn("amproj_installShareExportHook", SOURCE)
+
+        option_reader = function_body(
+            "static BOOL amproj_readShareExportOption",
+            "static UIViewController* amproj_shareVCRecursive",
+        )
+        self.assertIn('isEqualToString:@"862"', option_reader)
+        self.assertIn("class_getInstanceVariable", option_reader)
+        self.assertIn("class_getInstanceSize", option_reader)
+        self.assertIn("AMProjShareVCSelectedExportOptionOffset", option_reader)
+
+        action = function_body(
+            "static void hooked_shareNCOnTapExport",
+            "static void hooked_navigationPush",
+        )
+        self.assertIn("AMProjV44IsDirectProjectPackageOption", action)
+        self.assertIn("amproj_startDirectExport", action)
+        self.assertIn("orig_shareNCOnTapExport", action)
+        self.assertNotIn("amproj_viewVisibleText", action)
+        self.assertNotIn("senderLooksLikeProjectPackage", action)
 
         present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
         self.assertIn('direct.native_package_presentation', present)
@@ -490,6 +509,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("amproj_installNavigationExportHook();", install)
         self.assertIn("amproj_installPresentationHook();", install)
+        self.assertIn("amproj_installShareExportHook();", install)
 
     def test_v44_direct_share_contains_only_generated_amproj_file(self):
         item_source = source_body(
@@ -2093,29 +2113,32 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("amproj_configurationHooks", installer)
 
-    def test_export_hooks_use_exact_controller_without_private_share_hook(self):
+    def test_export_hooks_use_exact_controller_and_semantic_share_action(self):
         navigation = function_body(
             "static void hooked_navigationPush",
             "static BOOL amproj_isNativeImportFailureAlert",
         )
         self.assertIn("orig_navigationPush", navigation)
         self.assertIn("amproj_isSharePackageController(viewController)", navigation)
-        self.assertNotIn("selectedExportOptID", navigation)
-        self.assertNotIn("amproj_installShareExportHook", navigation)
+        self.assertIn("amproj_isShareExportHostController(viewController)", navigation)
+        self.assertIn("amproj_installShareExportHook", navigation)
 
         installer = function_body(
-            "static void amproj_installNavigationExportHook",
-            "static void amproj_installPresentationHook",
+            "static void amproj_installShareExportHook",
+            "#if AMPROJ_DEBUG",
         )
-        self.assertIn("UINavigationController.pushViewController", installer)
-        self.assertIn("hooked_navigationPush", installer)
+        self.assertIn('@"AlightMotion.ShareNC"', installer)
+        self.assertIn('objc_getClass("_TtC12AlightMotion7ShareNC")', installer)
+        self.assertIn('@"onTapExport:"', installer)
+        self.assertIn("hooked_shareNCOnTapExport", installer)
 
         present = function_body(
             "static void hooked_presentVC",
             "#if AMPROJ_DEBUG",
         )
         self.assertIn("amproj_isSharePackageController(controller)", present)
-        self.assertNotIn("amproj_installShareExportHook", present)
+        self.assertIn("amproj_isShareExportHostController(controller)", present)
+        self.assertIn("amproj_installShareExportHook", present)
 
     def test_navigation_fallback_intercepts_project_package_before_native_push(self):
         navigation = function_body(

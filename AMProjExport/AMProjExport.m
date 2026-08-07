@@ -43,8 +43,10 @@
 static NSString *const kAMProjPluginVersion = @"44";
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
+static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
 
 extern BOOL AMProjV44ReleaseNativeActivityFallbackEnabled(void);
+extern BOOL AMProjV44IsDirectProjectPackageOption(uint8_t selectedExportOption);
 
 #if AMPROJ_DEBUG || AMPROJ_TELEMETRY
 #import "AMDebugTransport.h"
@@ -101,6 +103,7 @@ static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID)
 static void amproj_installImportHook(void);
 static Class amproj_declaredAppDelegateClass(void);
 static void amproj_installApplicationDelegateHook(void);
+static void amproj_installShareExportHook(void);
 static void amproj_installNavigationExportHook(void);
 static NSString* amproj_importedFontFilename(NSString *reference);
 static NSDictionary* amproj_captureImportPersistenceSnapshot(void);
@@ -1973,6 +1976,7 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
 
 static id (*orig_initWithItems)(id, SEL, NSArray *, NSArray *) = NULL;
 static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
+static void (*orig_shareNCOnTapExport)(id, SEL, id) = NULL;
 static void (*orig_navigationPush)(id, SEL, UIViewController *, BOOL) = NULL;
 
 @interface AMProjActivityItemSource : NSObject <UIActivityItemSource>
@@ -13849,6 +13853,128 @@ static NSString* amproj_currentProjectTitle(UIViewController *shareController) {
     return amproj_projectTitleRecursive(amproj_keyWindow().rootViewController, 0, visited);
 }
 
+static BOOL amproj_isExactShareVCClass(Class cls) {
+    for (Class current = cls; current; current = class_getSuperclass(current)) {
+        NSString *name = NSStringFromClass(current);
+        if ([name isEqualToString:@"AlightMotion.ShareVC"] ||
+            [name isEqualToString:@"_TtC12AlightMotion7ShareVC"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL amproj_readShareExportOption(id object, uint8_t *value) {
+    if (!object || !amproj_isExactShareVCClass([object class])) return NO;
+    NSString *bundleVersion = NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"];
+    if (![bundleVersion isKindOfClass:NSString.class] ||
+        ![bundleVersion isEqualToString:@"862"]) return NO;
+
+    Ivar ivar = class_getInstanceVariable([object class], "selectedExportOptID");
+    ptrdiff_t offset = ivar ? ivar_getOffset(ivar)
+                            : AMProjShareVCSelectedExportOptionOffset;
+    size_t instanceSize = class_getInstanceSize([object class]);
+    if (offset < 0 || (size_t)offset + sizeof(uint8_t) > instanceSize) return NO;
+
+    uint8_t raw = 0;
+    const uint8_t *address =
+        (const uint8_t *)(__bridge const void *)object + offset;
+    memcpy(&raw, address, sizeof(raw));
+    if (value) *value = raw;
+    return YES;
+}
+
+static UIViewController* amproj_shareVCRecursive(
+    UIViewController *controller, NSUInteger depth,
+    NSMutableSet<NSValue *> *visited, uint8_t *selectedExportOption) {
+    if (!controller || depth > 10) return nil;
+    NSValue *identity =
+        [NSValue valueWithPointer:(__bridge const void *)controller];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+
+    if (amproj_readShareExportOption(controller, selectedExportOption)) {
+        return controller;
+    }
+    if ([controller isKindOfClass:UINavigationController.class]) {
+        UINavigationController *navigation =
+            (UINavigationController *)controller;
+        UIViewController *found = amproj_shareVCRecursive(
+            navigation.visibleViewController,
+            depth + 1, visited, selectedExportOption);
+        if (found) return found;
+        for (UIViewController *stackController in
+             navigation.viewControllers.reverseObjectEnumerator) {
+            found = amproj_shareVCRecursive(
+                stackController, depth + 1, visited, selectedExportOption);
+            if (found) return found;
+        }
+    }
+    for (UIViewController *child in controller.childViewControllers) {
+        UIViewController *found = amproj_shareVCRecursive(
+            child, depth + 1, visited, selectedExportOption);
+        if (found) return found;
+    }
+    return amproj_shareVCRecursive(
+        controller.presentedViewController, depth + 1, visited,
+        selectedExportOption);
+}
+
+static BOOL amproj_isShareExportHostController(UIViewController *controller) {
+    if (!controller) return NO;
+    UIViewController *candidate = controller;
+    if ([candidate isKindOfClass:UINavigationController.class]) {
+        candidate = ((UINavigationController *)candidate).visibleViewController;
+    }
+    NSString *name = NSStringFromClass(candidate.class);
+    return [name isEqualToString:@"AlightMotion.ShareNC"] ||
+        [name isEqualToString:@"_TtC12AlightMotion7ShareNC"] ||
+        [name isEqualToString:@"AlightMotion.ShareVC"] ||
+        [name isEqualToString:@"_TtC12AlightMotion7ShareVC"];
+}
+
+static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
+    if (![NSThread isMainThread]) {
+        if (orig_shareNCOnTapExport) orig_shareNCOnTapExport(self, _cmd, sender);
+        return;
+    }
+
+    UIViewController *shareController =
+        [self isKindOfClass:UIViewController.class] ? self : nil;
+    uint8_t selectedExportOption = UINT8_MAX;
+    UIViewController *shareVC = nil;
+    @try {
+        shareVC = amproj_shareVCRecursive(
+            shareController, 0, [NSMutableSet set], &selectedExportOption);
+    } @catch (NSException *exception) {
+        amproj_logCriticalEvent(@"direct.export_option_exception", @{
+            @"name": exception.name ?: @"NSException",
+            @"reason": exception.reason ?: @""
+        });
+    }
+
+    BOOL isProjectPackage = shareVC &&
+        AMProjV44IsDirectProjectPackageOption(selectedExportOption);
+    NSString *mode = amproj_exportMode();
+    amproj_logCriticalEvent(@"direct.export_button", @{
+        @"mode": mode ?: @"",
+        @"selected_export_option": shareVC ? @(selectedExportOption) : @(-1),
+        @"package": @(isProjectPackage),
+        @"controller": shareVC ? NSStringFromClass(shareVC.class) : @""
+    });
+
+    if (!isProjectPackage || [mode isEqualToString:@"observe"] ||
+        !shareController || !orig_presentVC) {
+        if (orig_shareNCOnTapExport) orig_shareNCOnTapExport(self, _cmd, sender);
+        return;
+    }
+
+    NSString *title = amproj_currentProjectTitle(shareController);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        amproj_startDirectExport(shareController, nil, YES, nil, title);
+    });
+}
+
 static void hooked_navigationPush(id self, SEL _cmd,
                                   UIViewController *viewController,
                                   BOOL animated) {
@@ -13879,6 +14005,12 @@ static void hooked_navigationPush(id self, SEL _cmd,
 
     if (orig_navigationPush) {
         orig_navigationPush(self, _cmd, viewController, animated);
+    }
+    if (amproj_isShareExportHostController(viewController)) {
+        amproj_installShareExportHook();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            amproj_installShareExportHook();
+        });
     }
 }
 
@@ -14094,6 +14226,9 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     if (![NSThread isMainThread] || !controller || !orig_presentVC) {
         amproj_forwardPresentation(self, _cmd, controller, animated, completion);
         return;
+    }
+    if (amproj_isShareExportHostController(controller)) {
+        amproj_installShareExportHook();
     }
     // Ordinary confirmations, including project/template deletion, must not
     // enter any startup, export, or private-controller inspection. Managed
@@ -15269,6 +15404,44 @@ static void amproj_installImportHook(void) {
     }
 }
 
+static void amproj_installShareExportHook(void) {
+    static BOOL installed = NO;
+    static NSObject *lock = nil;
+    static dispatch_once_t lockOnce;
+    dispatch_once(&lockOnce, ^{ lock = [NSObject new]; });
+
+    @synchronized (lock) {
+        if (installed) return;
+        Class shareClass = NSClassFromString(@"AlightMotion.ShareNC");
+        if (!shareClass) shareClass = objc_getClass("_TtC12AlightMotion7ShareNC");
+        SEL selector = NSSelectorFromString(@"onTapExport:");
+        Method method = class_getInstanceMethod(shareClass, selector);
+        if (!method) {
+            amproj_logCriticalEvent(@"share_export.hook", @{
+                @"installed": @NO,
+                @"class": shareClass ? NSStringFromClass(shareClass) : @"",
+                @"reason": shareClass ? @"selector_missing" : @"class_missing"
+            });
+            return;
+        }
+
+        IMP previous = amproj_installMethodHook(
+            method, (IMP)hooked_shareNCOnTapExport, 3,
+            @"ShareNC.onTapExport");
+        if (previous) {
+            orig_shareNCOnTapExport = (void *)previous;
+            installed = YES;
+        } else if (method_getImplementation(method) ==
+                   (IMP)hooked_shareNCOnTapExport) {
+            installed = orig_shareNCOnTapExport != NULL;
+        }
+        amproj_logCriticalEvent(@"share_export.hook", @{
+            @"installed": @(installed),
+            @"class": NSStringFromClass(shareClass) ?: @""
+        });
+    }
+}
+
 #if AMPROJ_DEBUG
 static Class amproj_findPackageControllerClass(void) {
     int count = objc_getClassList(NULL, 0);
@@ -15346,6 +15519,17 @@ static void amproj_installExportHooks(void) {
         NSLog(@"[AMProjExport] Installing export hooks after app launch");
         amproj_installPresentationHook();
         amproj_installNavigationExportHook();
+        amproj_installShareExportHook();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     500 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            amproj_installShareExportHook();
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     2 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            amproj_installShareExportHook();
+        });
 
         @try {
             Method method = class_getInstanceMethod(
