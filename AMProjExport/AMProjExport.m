@@ -2610,10 +2610,20 @@ static void amproj_startDirectExport(UIViewController *presenter,
         @"source": @"share_export_button",
         @"mode": request.mode ?: @""
     });
-    orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
-                   request.progressAlert, YES, ^{
-        dispatch_async(dispatch_get_main_queue(), ^{ amproj_buildDirectPackage(request); });
-    });
+    if (!presenter || !orig_presentVC) {
+        amproj_finishDirectFailure(request,
+            amproj_directError(54, @"Export presenter is unavailable"));
+        return;
+    }
+    @try {
+        orig_presentVC(presenter, @selector(presentViewController:animated:completion:),
+                       request.progressAlert, YES, ^{
+            dispatch_async(dispatch_get_main_queue(), ^{ amproj_buildDirectPackage(request); });
+        });
+    } @catch (NSException *exception) {
+        amproj_finishDirectFailure(request,
+            amproj_directError(55, exception.reason ?: @"Unable to present export progress"));
+    }
 }
 
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error) {
@@ -13941,10 +13951,10 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
     UIViewController *contentController = amproj_shareExportOptionController(
         shareController, &selectedExportOption);
     BOOL hasSelectedExportOption = contentController != nil;
-    BOOL isProjectPackage = (hasSelectedExportOption &&
-        AMProjV44IsDirectProjectPackageOption(selectedExportOption)) ||
-        (!hasSelectedExportOption &&
-         amproj_exportSenderLooksLikeProjectPackage(sender));
+    BOOL exactProjectPackageOption = hasSelectedExportOption &&
+        AMProjV44IsDirectProjectPackageOption(selectedExportOption);
+    BOOL isProjectPackage = exactProjectPackageOption ||
+        amproj_exportSenderLooksLikeProjectPackage(sender);
     NSString *mode = amproj_exportMode();
     amproj_logCriticalEvent(@"direct.export_button", @{
         @"mode": mode ?: @"",
