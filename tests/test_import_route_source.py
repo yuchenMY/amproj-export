@@ -381,11 +381,20 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_markStartupPaywallOuterPresented", present)
         self.assertIn("presentation_completion", present)
         self.assertIn("dispatch_async(dispatch_get_main_queue(), completion)", present)
+        native_alert = present.index("!amproj_hasPluginManagedImportAlertContext()")
+        native_original = present.index(
+            "orig_presentVC(self, _cmd, controller, animated, completion)",
+            native_alert,
+        )
         decision = present.index("amproj_startupPaywallPresentationDecision")
-        original = present.index("orig_presentVC(self, _cmd, controller, animated, completion)")
+        original = present.rindex(
+            "orig_presentVC(self, _cmd, controller, animated, completion)"
+        )
         tracked_original = present.index(
             "orig_presentVC(self, _cmd, controller, animated, trackedCompletion)"
         )
+        self.assertLess(native_alert, native_original)
+        self.assertLess(native_original, decision)
         self.assertLess(decision, tracked_original)
         self.assertLess(tracked_original, original)
         self.assertNotIn("amproj_scheduleLatePaywallLoadingBypass", SOURCE)
@@ -448,42 +457,11 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertEqual(MAKEFILE.count("AMProjStabilityContract.S"), 6)
 
-    def test_v44_project_package_action_uses_exact_862_option(self):
-        self.assertIn(
-            "static const uint8_t AMProjExportOptionProjectPackage = 7;", SOURCE
-        )
-        option = function_body(
-            "static BOOL amproj_shareExportOptionID",
-            "static NSArray* am_arr",
-        )
-        self.assertIn('amproj_instanceIvar(object, @"selectedExportOptID")', option)
-        self.assertIn(
-            "AMProjShareVCSelectedExportOptionOffset = 0x120", SOURCE
-        )
-        self.assertIn('isEqualToString:@"AlightMotion.ShareVC"', option)
-        self.assertIn("uint8_t raw = 0", option)
-        self.assertIn("const uint8_t *address", option)
-        self.assertIn("amproj_shareExportOptionControllerRecursive", option)
-
-        share = function_body(
-            "static void hooked_shareNCOnTapExport",
-            "static BOOL amproj_isNativeImportFailureAlert",
-        )
-        self.assertIn("[NSThread isMainThread]", share)
-        self.assertIn(
-            "AMProjV44IsDirectProjectPackageOption(selectedExportOption)", share
-        )
-        self.assertIn("amproj_shareExportOptionController(", share)
-        self.assertIn("amproj_exportSenderLooksLikeProjectPackage(sender)", share)
-        self.assertIn("dispatch_async(dispatch_get_main_queue()", share)
-        self.assertIn("if (!isProjectPackage", share)
-        self.assertIn("orig_shareNCOnTapExport(self, _cmd, sender)", share)
-        direct_call = (
-            "amproj_startDirectExport(shareController, nil, YES, nil, title);"
-        )
-        self.assertIn(direct_call, share)
-        project_path = share[share.index("NSString *title ="):share.index(direct_call)]
-        self.assertNotIn("orig_shareNCOnTapExport", project_path)
+    def test_v44_project_package_uses_exact_6255_controller_boundary(self):
+        self.assertNotIn("selectedExportOptID", SOURCE)
+        self.assertNotIn("AMProjShareVCSelectedExportOptionOffset", SOURCE)
+        self.assertNotIn("hooked_shareNCOnTapExport", SOURCE)
+        self.assertNotIn("amproj_installShareExportHook", SOURCE)
 
         present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
         self.assertIn('direct.native_package_presentation', present)
@@ -506,21 +484,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn("childViewControllers", presentation_predicate)
         self.assertNotIn("presentedViewController", presentation_predicate)
 
-        share_install = function_body(
-            "static void amproj_installShareExportHook",
-            "#if AMPROJ_DEBUG",
-        )
-        self.assertIn('objc_getClass("_TtC12AlightMotion7ShareNC")', share_install)
-        self.assertIn('NSSelectorFromString(@"onTapExport:")', share_install)
-        self.assertIn(
-            'method, (IMP)hooked_shareNCOnTapExport, 3, @"ShareNC.onTapExport"',
-            share_install,
-        )
         install = function_body(
             "static void amproj_installExportHooks",
             "static void amproj_removeBootstrapObservers",
         )
-        self.assertIn("amproj_installShareExportHook();", install)
+        self.assertIn("amproj_installNavigationExportHook();", install)
+        self.assertIn("amproj_installPresentationHook();", install)
 
     def test_v44_direct_share_contains_only_generated_amproj_file(self):
         item_source = source_body(
@@ -628,9 +597,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_presentVC",
             "#if AMPROJ_DEBUG",
         )
+        picker_attach = present.index("amproj_attachNativeXMLPickerProxy(controller)")
         self.assertLess(
-            present.index("amproj_attachNativeXMLPickerProxy(controller)"),
-            present.index("orig_presentVC("),
+            picker_attach,
+            present.index("orig_presentVC(", picker_attach),
         )
 
     def test_native_xml_picker_proxy_preserves_every_non_xml_delegate_path(self):
@@ -1380,11 +1350,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
     def test_v44_manual_deletion_stays_outside_plugin_hooks(self):
         present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
-        guard = present[present.index("AMProjStartupPresentationDecision startupDecision") :]
-        guard = guard[:guard.index("if (amproj_isIPAFireWelcome")]
+        guard = present[:present.index("UIDocumentPickerViewController.class")]
         self.assertIn("UIAlertController.class", guard)
         self.assertIn("amproj_hasPluginManagedImportAlertContext", guard)
         self.assertIn("orig_presentVC(self, _cmd, controller, animated, completion)", guard)
+        self.assertNotIn("amproj_startupPaywallPresentationDecision", guard)
+        self.assertNotIn("amproj_isSharePackageController", guard)
 
         view_load = function_body(
             "static void hooked_projectsImportAlertViewDidLoad",
@@ -2122,20 +2093,15 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("amproj_configurationHooks", installer)
 
-    def test_export_hook_retries_after_navigation_and_accepts_share_host_subclass(self):
-        option = function_body(
-            "static BOOL amproj_shareExportOptionID",
-            "static NSArray* am_arr",
-        )
-        self.assertIn('@"selectedExportOptID"', option)
-        self.assertIn("class_getInstanceSize", option)
-
+    def test_export_hooks_use_exact_controller_without_private_share_hook(self):
         navigation = function_body(
             "static void hooked_navigationPush",
             "static BOOL amproj_isNativeImportFailureAlert",
         )
         self.assertIn("orig_navigationPush", navigation)
-        self.assertIn("amproj_installShareExportHook", navigation)
+        self.assertIn("amproj_isSharePackageController(viewController)", navigation)
+        self.assertNotIn("selectedExportOptID", navigation)
+        self.assertNotIn("amproj_installShareExportHook", navigation)
 
         installer = function_body(
             "static void amproj_installNavigationExportHook",
@@ -2148,7 +2114,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_presentVC",
             "#if AMPROJ_DEBUG",
         )
-        self.assertIn("amproj_installShareExportHook();", present)
+        self.assertIn("amproj_isSharePackageController(controller)", present)
+        self.assertNotIn("amproj_installShareExportHook", present)
 
     def test_navigation_fallback_intercepts_project_package_before_native_push(self):
         navigation = function_body(
@@ -2161,7 +2128,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertLess(package_check, direct_export)
         self.assertLess(direct_export, original_push)
         self.assertIn('@"direct.native_package_navigation"', navigation)
-        self.assertIn('![mode isEqualToString:@"observe"]', navigation)
+        self.assertIn('if ([mode isEqualToString:@"observe"])', navigation)
         self.assertIn("return;", navigation[direct_export:original_push])
         self.assertIn("orig_navigationPush(self, _cmd, viewController, animated)", navigation)
 

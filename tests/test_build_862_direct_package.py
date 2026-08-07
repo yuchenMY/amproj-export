@@ -19,6 +19,10 @@ class DirectCloud862Tests(unittest.TestCase):
             marker_offset : marker_offset
             + len(direct.AMENHANCER_MARKER_FUNCTION_PREIMAGE)
         ] = direct.AMENHANCER_MARKER_FUNCTION_PREIMAGE
+        for _name, offset, preimage, _replacement in (
+            direct.AMENHANCER_UI_HOOK_INSTALL_PATCHES
+        ):
+            source[offset : offset + len(preimage)] = preimage
         return bytes(source), context_offset
 
     def fixture_cloud(self, fallback_code=None, option_code=None):
@@ -329,6 +333,11 @@ class DirectCloud862Tests(unittest.TestCase):
             range(label_start, label_start + len(direct.AMENHANCER_STATUS_LABEL))
         )
         allowed.update(range(marker_start, marker_start + len(direct.ARM64_RET)))
+        for _name, offset, preimage, replacement in (
+            direct.AMENHANCER_UI_HOOK_INSTALL_PATCHES
+        ):
+            allowed.update(range(offset, offset + len(preimage)))
+            self.assertEqual(result[offset : offset + len(replacement)], replacement)
         self.assertLessEqual(changed, allowed)
         self.assertNotIn(direct.AMENHANCER_STATUS_LABEL, result)
         self.assertIn(b"[AmEnhancer] marker added\n", result)
@@ -336,6 +345,35 @@ class DirectCloud862Tests(unittest.TestCase):
             result[marker_start : marker_start + len(direct.ARM64_RET)],
             direct.ARM64_RET,
         )
+
+    def test_amenhancer_patch_accepts_only_its_exact_prior_output(self):
+        source, _context_offset = self.fixture_amenhancer()
+        patched = direct.prepare_amenhancer(source)
+
+        self.assertEqual(direct.prepare_amenhancer(patched), patched)
+
+        changed_context = bytearray(patched)
+        context_offset = patched.index(
+            direct.AMENHANCER_PATCHED_STATUS_LABEL_CONTEXT
+        )
+        changed_context[context_offset + len(b"nil\0")] = ord("X")
+        with self.assertRaisesRegex(RuntimeError, "context changed"):
+            direct.prepare_amenhancer(bytes(changed_context))
+
+        marker_offset = direct.AMENHANCER_MARKER_FUNCTION_OFFSET
+        changed_marker = bytearray(patched)
+        changed_marker[marker_offset] ^= 0x01
+        with self.assertRaisesRegex(RuntimeError, "function patch changed"):
+            direct.prepare_amenhancer(bytes(changed_marker))
+
+        for hook_name, offset, _preimage, _replacement in (
+            direct.AMENHANCER_UI_HOOK_INSTALL_PATCHES
+        ):
+            changed_hook = bytearray(patched)
+            changed_hook[offset] ^= 0x01
+            with self.subTest(hook=hook_name):
+                with self.assertRaisesRegex(RuntimeError, "registration changed"):
+                    direct.prepare_amenhancer(bytes(changed_hook))
 
     def test_amenhancer_patch_rejects_unknown_or_duplicate_preimage(self):
         with self.assertRaisesRegex(RuntimeError, "context changed"):

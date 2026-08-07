@@ -43,11 +43,36 @@ AMENHANCER_STATUS_LABEL = b"AM v59 OK"
 AMENHANCER_STATUS_LABEL_CONTEXT = (
     b"nil\0" + AMENHANCER_STATUS_LABEL + b"\0[AmEnhancer] marker added\n\0"
 )
+AMENHANCER_PATCHED_STATUS_LABEL_CONTEXT = (
+    b"nil\0"
+    + bytes(len(AMENHANCER_STATUS_LABEL))
+    + b"\0[AmEnhancer] marker added\n\0"
+)
 AMENHANCER_MARKER_FUNCTION_OFFSET = 0x9C54
 AMENHANCER_MARKER_FUNCTION_PREIMAGE = bytes.fromhex(
     "fc6fbea9fd7b01a9fd430091ffc30cd1"
 )
 ARM64_RET = bytes.fromhex("c0035fd6")
+AMENHANCER_UI_HOOK_INSTALL_PATCHES = (
+    (
+        "UIAlertController factory",
+        0x4E08,
+        bytes.fromhex("400000b0"),
+        bytes.fromhex("1d000014"),
+    ),
+    (
+        "UIView didMoveToWindow",
+        0x4E7C,
+        bytes.fromhex("400000b0"),
+        bytes.fromhex("1d000014"),
+    ),
+    (
+        "UIViewController presentation",
+        0x4EF0,
+        bytes.fromhex("400000b0"),
+        bytes.fromhex("1d000014"),
+    ),
+)
 CLOUD_LOAD_LCSIGN = "@executable_path/Frameworks/AMProjExport.dylib"
 CLOUD_LOAD_COMPACT = "@rpath/AMProjExportCloud.dylib"
 EXPECTED_CLOUD_CONTRACT_FUNCTIONS = {
@@ -83,40 +108,76 @@ def sha256_bytes(data):
 
 
 def prepare_amenhancer(data):
-    """Disable the verified v59 marker view while preserving other hooks."""
-    if data.count(AMENHANCER_STATUS_LABEL_CONTEXT) != 1:
-        raise RuntimeError("AmEnhancer v59 status label context changed")
-    if data.count(AMENHANCER_STATUS_LABEL) != 1:
-        raise RuntimeError("AmEnhancer must contain exactly one v59 status label")
+    """Disable the v59 marker and prevent its global UIKit hooks."""
     marker_start = AMENHANCER_MARKER_FUNCTION_OFFSET
     marker_end = marker_start + len(AMENHANCER_MARKER_FUNCTION_PREIMAGE)
-    if marker_end > len(data):
-        raise RuntimeError("AmEnhancer v59 marker function is missing")
-    if data[marker_start:marker_end] != AMENHANCER_MARKER_FUNCTION_PREIMAGE:
-        raise RuntimeError("AmEnhancer v59 marker function changed")
-    if data.count(AMENHANCER_MARKER_FUNCTION_PREIMAGE) != 1:
-        raise RuntimeError("AmEnhancer v59 marker function is not unique")
-
-    context_start = data.index(AMENHANCER_STATUS_LABEL_CONTEXT)
-    label_start = context_start + len(b"nil\0")
-    result = bytearray(data)
-    result[label_start : label_start + len(AMENHANCER_STATUS_LABEL)] = bytes(
-        len(AMENHANCER_STATUS_LABEL)
+    patched_marker = (
+        ARM64_RET
+        + AMENHANCER_MARKER_FUNCTION_PREIMAGE[len(ARM64_RET) :]
     )
-    result[marker_start : marker_start + len(ARM64_RET)] = ARM64_RET
+    result = bytearray(data)
+    allowed = set()
+
+    # A prior resign-ready package is the preferred input for a Cloud-only
+    # update. Accept its marker patch, then still prevent the UIKit hook
+    # registrations added after that package was produced.
+    if data.count(AMENHANCER_PATCHED_STATUS_LABEL_CONTEXT) == 1:
+        if marker_end > len(data):
+            raise RuntimeError("AmEnhancer v59 marker function is missing")
+        if AMENHANCER_STATUS_LABEL in data:
+            raise RuntimeError("AmEnhancer v59 status label patch is inconsistent")
+        if data[marker_start:marker_end] != patched_marker:
+            raise RuntimeError("AmEnhancer v59 marker function patch changed")
+        if data.count(patched_marker) != 1:
+            raise RuntimeError("AmEnhancer patched marker function is not unique")
+    else:
+        if data.count(AMENHANCER_STATUS_LABEL_CONTEXT) != 1:
+            raise RuntimeError("AmEnhancer v59 status label context changed")
+        if data.count(AMENHANCER_STATUS_LABEL) != 1:
+            raise RuntimeError("AmEnhancer must contain exactly one v59 status label")
+        if marker_end > len(data):
+            raise RuntimeError("AmEnhancer v59 marker function is missing")
+        if data[marker_start:marker_end] != AMENHANCER_MARKER_FUNCTION_PREIMAGE:
+            raise RuntimeError("AmEnhancer v59 marker function changed")
+        if data.count(AMENHANCER_MARKER_FUNCTION_PREIMAGE) != 1:
+            raise RuntimeError("AmEnhancer v59 marker function is not unique")
+
+        context_start = data.index(AMENHANCER_STATUS_LABEL_CONTEXT)
+        label_start = context_start + len(b"nil\0")
+        result[label_start : label_start + len(AMENHANCER_STATUS_LABEL)] = bytes(
+            len(AMENHANCER_STATUS_LABEL)
+        )
+        result[marker_start : marker_start + len(ARM64_RET)] = ARM64_RET
+        allowed.update(
+            range(label_start, label_start + len(AMENHANCER_STATUS_LABEL))
+        )
+        allowed.update(range(marker_start, marker_start + len(ARM64_RET)))
+
+    for hook_name, offset, preimage, replacement in AMENHANCER_UI_HOOK_INSTALL_PATCHES:
+        end = offset + len(preimage)
+        if end > len(data):
+            raise RuntimeError(f"AmEnhancer {hook_name} registration is missing")
+        current = data[offset:end]
+        if current == preimage:
+            result[offset:end] = replacement
+        elif current != replacement:
+            raise RuntimeError(f"AmEnhancer {hook_name} registration changed")
+        allowed.update(range(offset, end))
+
     changed = {
         index
         for index, (before, after) in enumerate(zip(data, result))
         if before != after
     }
-    allowed = set(range(label_start, label_start + len(AMENHANCER_STATUS_LABEL)))
-    allowed.update(range(marker_start, marker_start + len(ARM64_RET)))
-    if not changed or not changed <= allowed:
-        raise RuntimeError("AmEnhancer marker view patch changed unexpected bytes")
+    if not changed <= allowed:
+        raise RuntimeError("AmEnhancer patch changed unexpected bytes")
     if AMENHANCER_STATUS_LABEL in result:
         raise RuntimeError("AmEnhancer v59 status label remains after patch")
     if result[marker_start : marker_start + len(ARM64_RET)] != ARM64_RET:
         raise RuntimeError("AmEnhancer v59 marker function remains active")
+    for hook_name, offset, _preimage, replacement in AMENHANCER_UI_HOOK_INSTALL_PATCHES:
+        if result[offset : offset + len(replacement)] != replacement:
+            raise RuntimeError(f"AmEnhancer {hook_name} registration remains active")
     return bytes(result)
 
 
