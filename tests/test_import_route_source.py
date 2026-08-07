@@ -170,7 +170,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_release_version_metadata_is_consistent(self):
         self.assertIn('kAMProjPluginVersion = @"44";', SOURCE)
         self.assertIn('kAMDebugPluginVersion = @"44";', DEBUG_TRANSPORT_SOURCE)
-        self.assertIn("AMProj v44", SOURCE)
+        self.assertNotIn("AMProj v44", SOURCE)
+        self.assertIn("AMProj ·", SOURCE)
         self.assertNotIn("AMProj v31", SOURCE)
         self.assertNotIn("AMProj v29", SOURCE)
         self.assertNotIn("AMProj v28", SOURCE)
@@ -2206,6 +2207,32 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn("amproj_installShareExportHook();", present)
 
+    def test_navigation_fallback_intercepts_project_package_before_native_push(self):
+        navigation = function_body(
+            "static void hooked_navigationPush",
+            "static BOOL amproj_isNativeImportFailureAlert",
+        )
+        package_check = navigation.index("amproj_isSharePackageController(viewController)")
+        direct_export = navigation.index("amproj_startDirectExport", package_check)
+        original_push = navigation.index("orig_navigationPush", direct_export)
+        self.assertLess(package_check, direct_export)
+        self.assertLess(direct_export, original_push)
+        self.assertIn('@"direct.native_package_navigation"', navigation)
+        self.assertIn('![mode isEqualToString:@"observe"]', navigation)
+        self.assertIn("return;", navigation[direct_export:original_push])
+        self.assertIn("orig_navigationPush(self, _cmd, viewController, animated)", navigation)
+
+    def test_media_browser_demo_preferences_are_reset_without_touching_other_presets(self):
+        reset = function_body(
+            "static void amproj_restorePhotoAlbumMode",
+            "static void amproj_flushDebugEvents",
+        )
+        for key in ("demo_mode_enabled", "DemoMode", "user_demo_mode"):
+            self.assertIn('@"' + key + '"', reset)
+        self.assertIn("[defaults setBool:NO forKey:key]", reset)
+        self.assertNotIn('@"user_mode"', reset)
+        self.assertEqual(SOURCE.count("amproj_restorePhotoAlbumMode();"), 2)
+
     def test_cold_launch_successful_stage_replaces_prior_failed_candidate(self):
         body = function_body(
             "static void amproj_recordDeferredLaunchCandidate",
@@ -2455,7 +2482,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # v40 accepts a verified complete template when this AM build does not
         # create a project row directly.
         self.assertIn("amproj_completePackageTransaction", verified_branch)
-        self.assertIn('AMProj v44 · 4/4', SOURCE)
+        self.assertIn('AMProj · 4/4', SOURCE)
         self.assertIn('amproj_completePackageAsTemplate', verification)
         self.assertNotIn('amproj_beginTemplatePromotion(', verification)
         self.assertNotIn('amproj_beginSwiftUITemplatePromotion(', verification)
@@ -2473,7 +2500,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_projectsImportAlertViewDidLoad",
             "static void hooked_projectsImportAlertOnPressImport",
         ))
-        self.assertIn("AMProj v44 · 4/4", SOURCE)
+        self.assertIn("AMProj · 4/4", SOURCE)
 
     def test_project_verifier_uses_real_uikit_lists_and_persistence_evidence(self):
         self.assertNotIn('@"pCollectionView"', SOURCE)
@@ -2533,7 +2560,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("amproj_visibleNativeParserSummary", present)
         self.assertIn("amproj_endNativeImportObservation", present)
         self.assertIn("amproj_flushDebugEvents", present)
-        self.assertIn("AMProj v44 \\u00b7 E40", present)
+        self.assertIn("AMProj \\u00b7 E40", present)
         self.assertLess(
             present.index('amproj_debugEvent(@"import.native_failure_alert"'),
             present.index("amproj_endNativeImportObservation"),
