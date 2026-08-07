@@ -8346,6 +8346,12 @@ static BOOL amproj_completePackageTransaction(NSString *transactionID,
     return YES;
 }
 
+// AM 6.2.55 has a new SwiftUI template surface. The old v40-era flow below
+// attempted to press "use template" and then delete the temporary template
+// through accessibility. It is intentionally excluded from every stable
+// dylib: successful imports now finish as native templates, and all project
+// and template deletion remains exclusively owned by AM.
+#if 0
 static void amproj_failTemplatePromotion(NSString *transactionID,
                                          NSString *name,
                                          NSString *reason) {
@@ -9209,6 +9215,7 @@ static void amproj_cleanupPromotedTemplate(NSString *transactionID,
         });
     });
 }
+#endif
 
 static BOOL amproj_completeNativeXMLTemplateImport(
     NSString *transactionID, NSString *name, NSString *evidence,
@@ -12102,57 +12109,61 @@ static void hooked_projectsImportAlertViewDidLoad(id self, SEL _cmd) {
         orig_projectsImportAlertViewDidLoad(self, _cmd);
     }
     BOOL recognizedQueuedPackage = amproj_waitingForNativeImportAlert;
+    if (!recognizedQueuedPackage) return;
     NSString *name = amproj_nativeImportRecognitionName ?: @"project.amproj";
     amproj_nativeImportAlertActive = YES;
-    if (recognizedQueuedPackage) {
-        objc_setAssociatedObject(self, &amproj_trackedProjectsImportAlertKey, @YES,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        amproj_waitingForNativeImportAlert = NO;
-        amproj_nativeImportRecognitionName = nil;
-        ++amproj_nativeImportRecognitionGeneration;
-    }
+    objc_setAssociatedObject(self, &amproj_trackedProjectsImportAlertKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    amproj_waitingForNativeImportAlert = NO;
+    amproj_nativeImportRecognitionName = nil;
+    ++amproj_nativeImportRecognitionGeneration;
     amproj_debugEvent(@"import.native_alert", @{
-        @"phase": recognizedQueuedPackage ? @"recognized" : @"unrelated",
+        @"phase": @"recognized",
         @"class": NSStringFromClass([self class]) ?: @"",
-        @"filename": recognizedQueuedPackage ? name : @""
+        @"filename": name
     });
-    if (recognizedQueuedPackage) {
-        amproj_showImportStatus(
-            @"AMProj \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165", NO);
-    }
+    amproj_showImportStatus(
+        @"AMProj \u00b7 AM \u5df2\u8bc6\u522b\u9879\u76ee\u5305\uff0c\u8bf7\u786e\u8ba4\u5bfc\u5165", NO);
 }
 
 static void hooked_projectsImportAlertOnPressImport(id self, SEL _cmd, id sender) {
     BOOL tracked = amproj_isTrackedProjectsImportAlert(self);
-    if (tracked) {
-        amproj_setNativeImportObservationPhase(@"commit");
-        objc_setAssociatedObject(self, &amproj_projectsImportActionKey, @"import",
-                                 OBJC_ASSOCIATION_COPY_NONATOMIC);
+    if (!tracked) {
+        if (orig_projectsImportAlertOnPressImport) {
+            orig_projectsImportAlertOnPressImport(self, _cmd, sender);
+        }
+        return;
     }
+    amproj_setNativeImportObservationPhase(@"commit");
+    objc_setAssociatedObject(self, &amproj_projectsImportActionKey, @"import",
+                             OBJC_ASSOCIATION_COPY_NONATOMIC);
     amproj_debugEvent(@"import.native_alert", @{
         @"phase": @"import_pressed",
         @"class": NSStringFromClass([self class]) ?: @"",
-        @"tracked": @(tracked)
+        @"tracked": @YES
     });
-    if (tracked) {
-        amproj_showImportStatus(
-            @"AMProj \u00b7 AM \u6b63\u5728\u5bfc\u5165\u9879\u76ee\u5305", NO);
-    }
+    amproj_showImportStatus(
+        @"AMProj \u00b7 AM \u6b63\u5728\u5bfc\u5165\u9879\u76ee\u5305", NO);
     if (orig_projectsImportAlertOnPressImport) {
         orig_projectsImportAlertOnPressImport(self, _cmd, sender);
     }
 }
 
 static void hooked_projectsImportAlertOnPressCancel(id self, SEL _cmd, id sender) {
-    if (amproj_isTrackedProjectsImportAlert(self)) {
-        amproj_endNativeImportObservation();
-        objc_setAssociatedObject(self, &amproj_projectsImportActionKey, @"cancel",
-                                 OBJC_ASSOCIATION_COPY_NONATOMIC);
+    BOOL tracked = amproj_isTrackedProjectsImportAlert(self);
+    if (!tracked) {
+        if (orig_projectsImportAlertOnPressCancel) {
+            orig_projectsImportAlertOnPressCancel(self, _cmd, sender);
+        }
+        return;
     }
+    amproj_endNativeImportObservation();
+    objc_setAssociatedObject(self, &amproj_projectsImportActionKey, @"cancel",
+                             OBJC_ASSOCIATION_COPY_NONATOMIC);
     amproj_debugEvent(@"import.native_alert", @{
         @"phase": @"cancel_pressed",
         @"class": NSStringFromClass([self class]) ?: @"",
-        @"tracked": @(amproj_isTrackedProjectsImportAlert(self))
+        @"tracked": @YES
     });
     if (orig_projectsImportAlertOnPressCancel) {
         orig_projectsImportAlertOnPressCancel(self, _cmd, sender);
@@ -12164,22 +12175,21 @@ static void hooked_projectsImportAlertViewDidDisappear(id self, SEL _cmd,
     if (orig_projectsImportAlertViewDidDisappear) {
         orig_projectsImportAlertViewDidDisappear(self, _cmd, animated);
     }
-    amproj_nativeImportAlertActive = NO;
     BOOL tracked = amproj_isTrackedProjectsImportAlert(self);
+    if (!tracked) return;
+    amproj_nativeImportAlertActive = NO;
     amproj_debugEvent(@"import.native_alert", @{
         @"phase": @"disappeared",
         @"class": NSStringFromClass([self class]) ?: @"",
-        @"tracked": @(tracked)
+        @"tracked": @YES
     });
-    if (tracked) {
-        objc_setAssociatedObject(self, &amproj_trackedProjectsImportAlertKey, nil,
-                                 OBJC_ASSOCIATION_ASSIGN);
-    }
+    objc_setAssociatedObject(self, &amproj_trackedProjectsImportAlertKey, nil,
+                             OBJC_ASSOCIATION_ASSIGN);
     NSString *action = objc_getAssociatedObject(self, &amproj_projectsImportActionKey);
     objc_setAssociatedObject(self, &amproj_projectsImportActionKey, nil,
                              OBJC_ASSOCIATION_ASSIGN);
-    if (!tracked || ![action isEqualToString:@"import"]) {
-        if (tracked && amproj_nativeImportObservationActive) {
+    if (![action isEqualToString:@"import"]) {
+        if (amproj_nativeImportObservationActive) {
             amproj_endNativeImportObservation();
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
@@ -14152,6 +14162,26 @@ static AMProjXMLImportAlertResult amproj_XMLImportAlertResult(
                    : AMProjXMLImportAlertSuccess;
 }
 
+// Deleting an existing project or template is never part of an import
+// transaction. Keep ordinary confirmation alerts entirely on AM's native
+// path; only the exact, active import contexts below may be observed.
+static BOOL amproj_hasPluginManagedImportAlertContext(void) {
+    AMProjImportTransaction *nativeTransaction =
+        amproj_importTransactionForID(amproj_activeNativeImportTransactionID);
+    if (amproj_nativeImportObservationActive && nativeTransaction &&
+        nativeTransaction.state == AMProjImportTransactionNativeActive) {
+        return YES;
+    }
+
+    AMProjImportTransaction *xmlTransaction =
+        amproj_importTransactionForID(amproj_xmlTemplateImportTransactionID);
+    return amproj_xmlTemplateImportActive && xmlTransaction &&
+        xmlTransaction.kind == AMProjImportKindXMLTemplate &&
+        xmlTransaction.state == AMProjImportTransactionNativeActive &&
+        xmlTransaction.xmlTemplatePickerDelegateInvoked &&
+        xmlTransaction.xmlTemplateDispatchStarted;
+}
+
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
     // Native SwiftUI/UIKit "Upload XML" pickers keep their original delegate
@@ -14190,6 +14220,13 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                        dispatch_get_main_queue(), ^{
             amproj_reconcileStartupPaywall(generation, @"presentation_probe");
         });
+        return;
+    }
+    if ([controller isKindOfClass:UIAlertController.class] &&
+        !amproj_hasPluginManagedImportAlertContext()) {
+        if (orig_presentVC) {
+            orig_presentVC(self, _cmd, controller, animated, completion);
+        }
         return;
     }
     if (amproj_isIPAFireWelcome(controller)) {

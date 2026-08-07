@@ -959,27 +959,13 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("baselineKeys containsObject:key", candidate)
         self.assertIn("added.count == 1", candidate)
 
-        cleanup = function_body(
-            "static void amproj_cleanupPromotedTemplate",
-            "static void amproj_verifyImportedProjectRow",
-        )
-        self.assertIn("templateSelectedStableKey", cleanup)
-        self.assertIn("targetGone && rowCountRestored", cleanup)
-        self.assertIn("selectedMatches.count > 1", cleanup)
-        self.assertIn("selectedMatches.firstObject", cleanup)
-        self.assertNotIn("sameIndexPath", cleanup)
-        self.assertNotIn("candidates.firstObject", cleanup)
-        self.assertNotIn("amproj_findVisibleDeleteControl", cleanup)
-
-        promotion = function_body(
-            "static void amproj_pollPromotedProject",
-            "static void amproj_beginTemplatePromotion",
-        )
-        self.assertNotIn("if (attempt >= 4)", promotion)
-        self.assertIn("if (transaction.templatePersistenceVerified && attempt >= 8)", promotion)
-        self.assertIn("amproj_unwindTemplatePresentation", promotion)
-        self.assertIn("templatePersistenceVerified", promotion)
-        self.assertIn("amproj_scheduleTemplatePromotionPersistenceProbe", promotion)
+        # Stable builds retain native template imports but deliberately do not
+        # automate SwiftUI "create project" or delete-template controls.
+        disabled = SOURCE[SOURCE.index("#if 0\nstatic void amproj_failTemplatePromotion") :
+                          SOURCE.index("#endif\n\nstatic BOOL amproj_completeNativeXMLTemplateImport")]
+        self.assertIn("amproj_cleanupPromotedTemplate", disabled)
+        self.assertIn("amproj_cleanupSwiftUIPromotedTemplate", disabled)
+        self.assertIn("amproj_unwindTemplatePresentation", disabled)
 
     def test_v40_import_lane_interleavings_do_not_deadlock(self):
         lane = ImportLaneModel()
@@ -1352,33 +1338,6 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("transaction.nativeTerminalStatus4Returned", completion)
         self.assertNotIn("SwiftUITemplateAbsence", completion)
 
-        swiftui_promotion = function_body(
-            "static void amproj_beginSwiftUITemplatePromotion",
-            "static id amproj_findSwiftUIAction",
-        )
-        self.assertIn("baselineCount != 0 || currentCount != 1", swiftui_promotion)
-        self.assertIn("amproj_uniqueActivatableTemplateTitleObject", swiftui_promotion)
-        self.assertIn("amproj_pollPromotedProject", swiftui_promotion)
-        swiftui_cleanup = function_body(
-            "static void amproj_cleanupSwiftUIPromotedTemplate",
-            "static void amproj_cleanupPromotedTemplate",
-        )
-        self.assertIn("templateCleanupVerified = YES", swiftui_cleanup)
-        self.assertIn("templateCleanupAbsenceCycles += 1", swiftui_cleanup)
-        self.assertIn("templateCleanupAbsenceCycles < 6", swiftui_cleanup)
-        self.assertIn("templateDeleteActionSent", swiftui_cleanup)
-        self.assertIn("amproj_completePackageTransaction", swiftui_cleanup)
-        self.assertIn("amproj_finishTemplateCleanupFailure", swiftui_cleanup)
-        scoped_action = function_body(
-            "static id amproj_findSwiftUIAction",
-            "static void amproj_cleanupSwiftUIPromotedTemplate",
-        )
-        self.assertIn("amproj_boundSwiftUITemplateActionOwner", scoped_action)
-        self.assertIn("amproj_boundSwiftUIConfirmationOwner", scoped_action)
-        self.assertIn("confirmationController", scoped_action)
-        self.assertNotIn("amproj_templateScopedActionOwner", scoped_action)
-        self.assertNotIn("amproj_foregroundApplicationWindows", scoped_action)
-
         verifier = function_body(
             "static void amproj_verifyImportedProjectRow",
             "static void amproj_finishNativePackageImport",
@@ -1417,50 +1376,32 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             verifier.count("amproj_failImportedProjectVerification"), 4
         )
 
-    def test_v40_swiftui_delete_owners_require_new_title_bound_presentations(self):
-        action_owner = function_body(
-            "static UIViewController *amproj_boundSwiftUITemplateActionOwner",
-            "static UIViewController *amproj_boundSwiftUIConfirmationOwner",
-        )
-        self.assertIn("templateCardActivationBaselineTop", action_owner)
-        self.assertIn("templateCardActivationBaselinePresented", action_owner)
-        self.assertIn("top == base", action_owner)
-        self.assertIn("top == baselineTop", action_owner)
-        self.assertIn("top.viewIfLoaded.window != window", action_owner)
-        self.assertIn("presented !=", action_owner)
-        self.assertIn("amproj_controllerContainsExactTemplateTitle(top, title)", action_owner)
-        self.assertNotIn("sameNavigation || directPresentation", action_owner)
+    def test_v44_manual_deletion_stays_outside_plugin_hooks(self):
+        present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
+        guard = present[present.index("AMProjStartupPresentationDecision startupDecision") :]
+        guard = guard[:guard.index("if (amproj_isIPAFireWelcome")]
+        self.assertIn("UIAlertController.class", guard)
+        self.assertIn("amproj_hasPluginManagedImportAlertContext", guard)
+        self.assertIn("orig_presentVC(self, _cmd, controller, animated, completion)", guard)
 
-        confirmation_owner = function_body(
-            "static UIViewController *amproj_boundSwiftUIConfirmationOwner",
-            "static BOOL amproj_activateTemplateCreationAction",
+        view_load = function_body(
+            "static void hooked_projectsImportAlertViewDidLoad",
+            "static void hooked_projectsImportAlertOnPressImport",
         )
-        self.assertIn("templateDeleteActivationBaselineTop", confirmation_owner)
-        self.assertIn("templateDeleteActivationBaselinePresented", confirmation_owner)
-        self.assertIn("if (!presented ||", confirmation_owner)
-        self.assertIn("presented ==", confirmation_owner)
-        self.assertIn("owner == actionOwner", confirmation_owner)
-        self.assertIn("owner.viewIfLoaded.window != window", confirmation_owner)
-        self.assertIn(
-            "amproj_controllerContainsExactTemplateTitle(owner, title)",
-            confirmation_owner,
+        self.assertIn("if (!recognizedQueuedPackage) return;", view_load)
+        self.assertLess(
+            view_load.index("if (!recognizedQueuedPackage) return;"),
+            view_load.index("amproj_nativeImportAlertActive = YES"),
         )
 
-        cleanup = function_body(
-            "static void amproj_cleanupSwiftUIPromotedTemplate",
-            "static void amproj_cleanupPromotedTemplate",
+        disappeared = function_body(
+            "static void hooked_projectsImportAlertViewDidDisappear",
+            "static UIWindow* amproj_keyWindow",
         )
+        self.assertIn("if (!tracked) return;", disappeared)
         self.assertLess(
-            cleanup.index("templateCardActivationBaselineTop = baselineTop"),
-            cleanup.index("amproj_activateView(target)"),
-        )
-        self.assertLess(
-            cleanup.index("templateDeleteActivationBaselineTop ="),
-            cleanup.index("amproj_activateView(deleteAction)"),
-        )
-        self.assertNotIn(
-            "transaction.templateActionOwner ?: amproj_templateScopedActionOwner",
-            cleanup,
+            disappeared.index("if (!tracked) return;"),
+            disappeared.index("amproj_nativeImportAlertActive = NO"),
         )
 
     def test_native_local_continuation_exceptions_are_contained(self):
