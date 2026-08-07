@@ -13112,6 +13112,15 @@ static void amproj_scanVisiblePaywall(NSString *source) {
 }
 
 static void amproj_schedulePaywallScan(UIViewController *candidate, NSString *source) {
+#if !AMPROJ_DEBUG
+    // The recursive release scan can walk and activate arbitrary SwiftUI
+    // controls.  On 6.2.55 that includes project/template delete surfaces;
+    // keep this diagnostic/recovery behavior Debug-only so stable builds do
+    // not mutate unrelated native screens.
+    (void)candidate;
+    (void)source;
+    return;
+#else
     NSString *sourceCopy = [source copy] ?: @"unknown";
     __weak UIViewController *weakCandidate = candidate;
     NSArray<NSNumber *> *delays = @[
@@ -13129,6 +13138,7 @@ static void amproj_schedulePaywallScan(UIViewController *candidate, NSString *so
             }
         });
     }
+#endif
 }
 
 // MARK: - Startup paywall recovery
@@ -13902,6 +13912,22 @@ static NSString* amproj_currentProjectTitle(UIViewController *shareController) {
     return amproj_projectTitleRecursive(amproj_keyWindow().rootViewController, 0, visited);
 }
 
+static BOOL amproj_exportSenderLooksLikeProjectPackage(id sender) {
+    UIView *view = [sender isKindOfClass:UIView.class] ? sender : nil;
+    NSUInteger depth = 0;
+    while (view && depth++ < 8) {
+        NSString *text = amproj_viewVisibleText(view).lowercaseString ?: @"";
+        if ([text containsString:@"exportprojectpackage"] ||
+            [text containsString:@"project package"] ||
+            [text containsString:@"amproj"] ||
+            [text containsString:@"项目包"]) {
+            return YES;
+        }
+        view = view.superview;
+    }
+    return NO;
+}
+
 static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
     // ShareNC is a UIKit action and should only be redirected from the main
     // thread.  Calling the Swift navigation stack from a background callback
@@ -13915,8 +13941,10 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
     UIViewController *contentController = amproj_shareExportOptionController(
         shareController, &selectedExportOption);
     BOOL hasSelectedExportOption = contentController != nil;
-    BOOL isProjectPackage = hasSelectedExportOption &&
-        AMProjV44IsDirectProjectPackageOption(selectedExportOption);
+    BOOL isProjectPackage = (hasSelectedExportOption &&
+        AMProjV44IsDirectProjectPackageOption(selectedExportOption)) ||
+        (!hasSelectedExportOption &&
+         amproj_exportSenderLooksLikeProjectPackage(sender));
     NSString *mode = amproj_exportMode();
     amproj_logCriticalEvent(@"direct.export_button", @{
         @"mode": mode ?: @"",
@@ -13937,7 +13965,9 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
         return;
     }
     NSString *title = amproj_currentProjectTitle(shareController);
-    amproj_startDirectExport(shareController, nil, YES, nil, title);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        amproj_startDirectExport(shareController, nil, YES, nil, title);
+    });
 }
 
 static void hooked_navigationPush(id self, SEL _cmd,
@@ -13957,9 +13987,10 @@ static void hooked_navigationPush(id self, SEL _cmd,
             @"controller": NSStringFromClass(viewController.class) ?: @"",
             @"action": @"direct_export_fallback"
         });
-        amproj_startDirectExport(
-            presenter, viewController, animated, nil,
-            amproj_currentProjectTitle(presenter));
+        NSString *title = amproj_currentProjectTitle(presenter);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            amproj_startDirectExport(presenter, viewController, animated, nil, title);
+        });
         return;
     }
 
@@ -14392,8 +14423,11 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             [self isKindOfClass:UIViewController.class] && orig_presentVC) {
             UIViewController *presenter = (UIViewController *)self;
             NSString *title = amproj_currentProjectTitle(presenter);
-            amproj_startDirectExport(
-                presenter, controller, animated, completion, title);
+            void (^originalCompletion)(void) = [completion copy];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                amproj_startDirectExport(
+                    presenter, controller, animated, originalCompletion, title);
+            });
             return;
         }
     }

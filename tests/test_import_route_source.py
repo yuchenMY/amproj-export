@@ -474,6 +474,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "AMProjV44IsDirectProjectPackageOption(selectedExportOption)", share
         )
         self.assertIn("amproj_shareExportOptionController(", share)
+        self.assertIn("amproj_exportSenderLooksLikeProjectPackage(sender)", share)
+        self.assertIn("dispatch_async(dispatch_get_main_queue()", share)
         self.assertIn("if (!isProjectPackage", share)
         self.assertIn("orig_shareNCOnTapExport(self, _cmd, sender)", share)
         direct_call = (
@@ -2162,6 +2164,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('![mode isEqualToString:@"observe"]', navigation)
         self.assertIn("return;", navigation[direct_export:original_push])
         self.assertIn("orig_navigationPush(self, _cmd, viewController, animated)", navigation)
+
+    def test_v44_cloud_does_not_scan_or_activate_unrelated_paywall_controls(self):
+        scan = function_body(
+            "static void amproj_schedulePaywallScan",
+            "// MARK: - Startup paywall recovery",
+        )
+        self.assertIn("#if !AMPROJ_DEBUG", scan)
+        self.assertIn("return;", scan)
+        self.assertIn("#else", scan)
+        self.assertIn("amproj_dismissDetectedPaywallFrom", scan)
 
     def test_media_browser_demo_preferences_are_reset_without_touching_other_presets(self):
         reset = function_body(
