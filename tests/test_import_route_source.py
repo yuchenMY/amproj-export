@@ -598,20 +598,55 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             re.compile(r"\bAMProjNormalizeProjectArchive\s*\(", re.DOTALL),
         )
 
-    def test_native_upload_xml_picker_redirects_to_the_offline_import_lane(self):
+    def test_native_upload_project_picker_accepts_xml_and_amproj_offline(self):
         proxy = SOURCE[
-            SOURCE.index("static NSURL *amproj_singleNativePickerXMLURL") :
+            SOURCE.index("static NSArray<UTType *> *amproj_expandNativeProjectContentTypes") :
             SOURCE.index("static void amproj_presentImportDocumentPickerAttempt")
         ]
         self.assertIn("URLs.count != 1", proxy)
         self.assertIn('isEqualToString:@"xml"', proxy)
+        self.assertIn('isEqualToString:@"amproj"', proxy)
         self.assertIn('@"native_xml_picker_local"', proxy)
+        self.assertIn('@"native_package_picker_local"', proxy)
         self.assertIn('@"AMProjDirectStage": @YES', proxy)
-        self.assertIn('@"AMProjDeclaredType": @"public.xml"', proxy)
+        self.assertIn('@"AMProjDeclaredType": XML ? @"public.xml" : AMProjUTI', proxy)
         self.assertIn('@"online_delegate_called": @NO', proxy)
         self.assertIn("startAccessingSecurityScopedResource", proxy)
         self.assertIn("stopAccessingSecurityScopedResource", proxy)
         self.assertIn("amproj_handleIncomingProjectURLSafely", proxy)
+        self.assertIn("amproj_expandNativeProjectContentTypes", proxy)
+        self.assertIn("amproj_expandNativeProjectDocumentTypes", proxy)
+        self.assertIn('isEqualToString:@"public.xml"', proxy)
+        self.assertIn("[expanded addObject:projectType]", proxy)
+        self.assertIn("[expanded addObject:AMProjUTI]", proxy)
+
+        modern_expansion = function_body(
+            "static NSArray<UTType *> *amproj_expandNativeProjectContentTypes",
+            "static NSArray<NSString *> *amproj_expandNativeProjectDocumentTypes",
+        )
+        self.assertIn("if (!includesXML) return contentTypes;", modern_expansion)
+        self.assertNotIn("public.zip-archive", modern_expansion)
+        self.assertNotIn("UTTypeData", modern_expansion)
+        legacy_expansion = function_body(
+            "static NSArray<NSString *> *amproj_expandNativeProjectDocumentTypes",
+            "static id hooked_documentPickerModernInit",
+        )
+        self.assertIn("if (!includesXML ||", legacy_expansion)
+        self.assertIn("return documentTypes;", legacy_expansion)
+
+        installer = function_body(
+            "static void amproj_installNativeProjectPickerHook",
+            "static void amproj_installImportHook",
+        )
+        self.assertIn("initForOpeningContentTypes:asCopy:", installer)
+        self.assertIn("hooked_documentPickerModernInit", installer)
+        self.assertIn("initWithDocumentTypes:inMode:", installer)
+        self.assertIn("hooked_documentPickerLegacyInit", installer)
+        import_install = function_body(
+            "static void amproj_installImportHook",
+            "static void amproj_installShareExportHook",
+        )
+        self.assertIn("amproj_installNativeProjectPickerHook();", import_install)
 
         present = function_body(
             "static void hooked_presentVC",
@@ -623,12 +658,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             present.index("orig_presentVC(", picker_attach),
         )
 
-    def test_native_xml_picker_proxy_preserves_every_non_xml_delegate_path(self):
+    def test_native_project_picker_proxy_preserves_every_other_delegate_path(self):
         proxy = SOURCE[
             SOURCE.index("@implementation AMProjNativeXMLPickerProxy") :
             SOURCE.index("static void amproj_presentImportDocumentPickerAttempt")
         ]
-        self.assertEqual(proxy.count("amproj_routeNativePickerXML("), 2)
+        self.assertEqual(proxy.count("amproj_routeNativeProjectPicker("), 2)
         self.assertIn("amproj_restoreNativeXMLPickerDelegate", proxy)
         self.assertIn("documentPickerWasCancelled", proxy)
         self.assertEqual(

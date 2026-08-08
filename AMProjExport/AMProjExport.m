@@ -101,6 +101,7 @@ static void amproj_presentImportDocumentPicker(void);
 static dispatch_queue_t amproj_importInboxQueue(void);
 static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID);
 static void amproj_installImportHook(void);
+static void amproj_installNativeProjectPickerHook(void);
 static Class amproj_declaredAppDelegateClass(void);
 static void amproj_installApplicationDelegateHook(void);
 static void amproj_installShareExportHook(void);
@@ -2610,6 +2611,10 @@ typedef UISceneConfiguration *(*AMProjApplicationConfigurationForConnectingIMP)(
 typedef void (*AMProjSceneWillConnectIMP)(id, SEL, UIScene *, UISceneSession *,
                                           UISceneConnectionOptions *);
 typedef void (*AMProjSceneOpenURLContextsIMP)(id, SEL, UIScene *, NSSet *);
+typedef id (*AMProjDocumentPickerModernInitIMP)(
+    id, SEL, NSArray<UTType *> *, BOOL);
+typedef id (*AMProjDocumentPickerLegacyInitIMP)(
+    id, SEL, NSArray<NSString *> *, UIDocumentPickerMode);
 
 @interface AMProjImportPickerDelegate : NSObject <UIDocumentPickerDelegate>
 @end
@@ -2636,6 +2641,8 @@ static AMProjTrackedHook amproj_sceneOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateStartHooks[8] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateEndHooks[8] = {0};
 static AMProjApplicationSetDelegateIMP orig_applicationSetDelegate = NULL;
+static AMProjDocumentPickerModernInitIMP orig_documentPickerModernInit = NULL;
+static AMProjDocumentPickerLegacyInitIMP orig_documentPickerLegacyInit = NULL;
 static IMP amproj_nativeAppDelegateOpenURLIMP = NULL;
 static BOOL (*orig_nativeXMLParserParse)(NSXMLParser *, SEL) = NULL;
 static char amproj_nativeXMLParserAttemptKey;
@@ -4476,31 +4483,112 @@ static UIViewController* amproj_topViewController(UIViewController *controller) 
 
 @end
 
-static NSURL *amproj_singleNativePickerXMLURL(NSArray<NSURL *> *URLs) {
+static NSArray<UTType *> *amproj_expandNativeProjectContentTypes(
+    NSArray<UTType *> *contentTypes) {
+    BOOL includesXML = NO;
+    NSMutableSet<NSString *> *identifiers = [NSMutableSet set];
+    for (id value in contentTypes) {
+        if (![value isKindOfClass:UTType.class]) continue;
+        NSString *identifier = ((UTType *)value).identifier.lowercaseString;
+        if (identifier.length) [identifiers addObject:identifier];
+        if ([identifier isEqualToString:@"public.xml"]) includesXML = YES;
+    }
+    if (!includesXML) return contentTypes;
+
+    NSMutableArray<UTType *> *expanded =
+        [contentTypes mutableCopy] ?: [NSMutableArray array];
+    UTType *projectType = [UTType typeWithIdentifier:AMProjUTI];
+    NSString *projectIdentifier = projectType.identifier.lowercaseString;
+    if (projectType && projectIdentifier.length &&
+        ![identifiers containsObject:projectIdentifier]) {
+        [expanded addObject:projectType];
+    }
+    return expanded;
+}
+
+static NSArray<NSString *> *amproj_expandNativeProjectDocumentTypes(
+    NSArray<NSString *> *documentTypes) {
+    BOOL includesXML = NO;
+    NSMutableSet<NSString *> *identifiers = [NSMutableSet set];
+    for (id value in documentTypes) {
+        if (![value isKindOfClass:NSString.class]) continue;
+        NSString *identifier = [(NSString *)value lowercaseString];
+        if (identifier.length) [identifiers addObject:identifier];
+        if ([identifier isEqualToString:@"public.xml"]) includesXML = YES;
+    }
+    if (!includesXML || [identifiers containsObject:AMProjUTI.lowercaseString]) {
+        return documentTypes;
+    }
+    NSMutableArray<NSString *> *expanded =
+        [documentTypes mutableCopy] ?: [NSMutableArray array];
+    [expanded addObject:AMProjUTI];
+    return expanded;
+}
+
+static id hooked_documentPickerModernInit(
+    id self, SEL _cmd, NSArray<UTType *> *contentTypes, BOOL asCopy) {
+    NSArray<UTType *> *expanded =
+        amproj_expandNativeProjectContentTypes(contentTypes);
+    return orig_documentPickerModernInit
+        ? orig_documentPickerModernInit(self, _cmd, expanded, asCopy) : nil;
+}
+
+static id hooked_documentPickerLegacyInit(
+    id self, SEL _cmd, NSArray<NSString *> *documentTypes,
+    UIDocumentPickerMode mode) {
+    NSArray<NSString *> *expanded =
+        amproj_expandNativeProjectDocumentTypes(documentTypes);
+    return orig_documentPickerLegacyInit
+        ? orig_documentPickerLegacyInit(self, _cmd, expanded, mode) : nil;
+}
+
+static NSURL *amproj_singleNativePickerProjectURL(
+    NSArray<NSURL *> *URLs, AMProjImportKind *kindOut) {
     if (URLs.count != 1 || ![URLs.firstObject isKindOfClass:NSURL.class]) {
         return nil;
     }
     NSURL *URL = URLs.firstObject;
-    return URL.isFileURL &&
-        [URL.pathExtension.lowercaseString isEqualToString:@"xml"] ? URL : nil;
+    if (!URL.isFileURL) return nil;
+    NSString *extension = URL.pathExtension.lowercaseString;
+    if ([extension isEqualToString:@"xml"]) {
+        if (kindOut) *kindOut = AMProjImportKindXMLTemplate;
+        return URL;
+    }
+    if ([extension isEqualToString:@"amproj"]) {
+        if (kindOut) *kindOut = AMProjImportKindPackage;
+        return URL;
+    }
+    return nil;
 }
 
-static BOOL amproj_routeNativePickerXML(UIDocumentPickerViewController *picker,
-                                        NSArray<NSURL *> *URLs,
-                                        NSString *selectorName) {
-    NSURL *selectedURL = [amproj_singleNativePickerXMLURL(URLs) copy];
+static BOOL amproj_routeNativeProjectPicker(
+    UIDocumentPickerViewController *picker, NSArray<NSURL *> *URLs,
+    NSString *selectorName) {
+    AMProjImportKind kind = AMProjImportKindPackage;
+    NSURL *selectedURL =
+        [amproj_singleNativePickerProjectURL(URLs, &kind) copy];
     if (!selectedURL) return NO;
 
+    BOOL XML = kind == AMProjImportKindXMLTemplate;
     NSString *originalName = selectedURL.lastPathComponent.length
-        ? selectedURL.lastPathComponent : @"project.xml";
+        ? selectedURL.lastPathComponent
+        : (XML ? @"project.xml" : @"project.amproj");
     BOOL heldSecurityScope = [selectedURL startAccessingSecurityScopedResource];
-    amproj_showImportStatus(@"AMProj · 1/3 已从上传 XML 选择文件", NO);
-    amproj_logCriticalEvent(@"import.native_xml_picker_intercepted", @{
+    if (XML) {
+        amproj_showImportStatus(@"AMProj · 1/3 已从上传 XML 选择文件", NO);
+    } else {
+        amproj_showImportStatus(
+            @"AMProj · 1/4 已从上传项目选择 .amproj", NO);
+    }
+    amproj_logCriticalEvent(
+        XML ? @"import.native_xml_picker_intercepted"
+            : @"import.native_package_picker_intercepted", @{
         @"picker": NSStringFromClass(picker.class) ?: @"",
         @"delegate_selector": selectorName ?: @"",
         @"filename": originalName,
         @"security_scope": @(heldSecurityScope),
-        @"route": @"xml_minimal_package_offline"
+        @"route": XML ? @"xml_minimal_package_offline"
+                       : @"amproj_verified_package_offline"
     });
 
     dispatch_async(amproj_importInboxQueue(), ^{
@@ -4508,23 +4596,33 @@ static BOOL amproj_routeNativePickerXML(UIDocumentPickerViewController *picker,
             BOOL prepared = NO;
             AMProjIncomingURLResult result =
                 amproj_handleIncomingProjectURLSafely(
-                    selectedURL, @"native_xml_picker_local", @{
+                    selectedURL,
+                    XML ? @"native_xml_picker_local"
+                        : @"native_package_picker_local", @{
                         @"AMProjBackgroundWorker": @YES,
                         @"AMProjDirectStage": @YES,
                         @"AMProjExplicitRetry": @YES,
                         @"AMProjAlreadyScoped": @(heldSecurityScope),
                         @"AMProjOriginalFilename": originalName,
-                        @"AMProjDeclaredType": @"public.xml"
+                        @"AMProjDeclaredType": XML ? @"public.xml" : AMProjUTI
                     }, &prepared);
             if (heldSecurityScope) {
                 [selectedURL stopAccessingSecurityScopedResource];
             }
-            amproj_debugEvent(@"import.native_xml_picker_result", @{
+            amproj_debugEvent(
+                XML ? @"import.native_xml_picker_result"
+                    : @"import.native_package_picker_result", @{
                 @"result": @(result),
                 @"prepared": @(prepared),
                 @"filename": originalName,
                 @"online_delegate_called": @NO
             });
+            if (result == AMProjIncomingURLNotRecognized && !XML) {
+                amproj_presentImportErrorForKind(
+                    @"选择的文件不是可识别的 .amproj 项目包。",
+                    kind, YES);
+                return;
+            }
             if (result == AMProjIncomingURLNotRecognized) {
                 amproj_presentXMLImportError(
                     @"选择的文件不是可识别的 Alight Motion XML 项目。", YES);
@@ -4559,7 +4657,7 @@ static void amproj_finishOriginalPickerAsCancelled(
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
     didPickDocumentsAtURLs:(NSArray<NSURL *> *)URLs {
-    if (amproj_routeNativePickerXML(
+    if (amproj_routeNativeProjectPicker(
             controller, URLs,
             NSStringFromSelector(@selector(documentPicker:didPickDocumentsAtURLs:)))) {
         id<UIDocumentPickerDelegate> original =
@@ -4583,7 +4681,7 @@ static void amproj_finishOriginalPickerAsCancelled(
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
     didPickDocumentAtURL:(NSURL *)URL {
     NSArray<NSURL *> *URLs = URL ? @[URL] : @[];
-    if (amproj_routeNativePickerXML(
+    if (amproj_routeNativeProjectPicker(
             controller, URLs,
             NSStringFromSelector(@selector(documentPicker:didPickDocumentAtURL:)))) {
         id<UIDocumentPickerDelegate> original =
@@ -14238,9 +14336,9 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         orig_presentVC(self, _cmd, controller, animated, completion);
         return;
     }
-    // Native SwiftUI/UIKit "Upload XML" pickers keep their original delegate
-    // for every non-XML path. A selected XML is redirected before AM can start
-    // its online upload/accelerator flow.
+    // The native Upload Project picker accepts both XML and .amproj. Those two
+    // formats use the local importer; every unrelated picker result keeps AM's
+    // original delegate path.
     if ([controller isKindOfClass:UIDocumentPickerViewController.class]) {
         @try { amproj_attachNativeXMLPickerProxy(controller); }
         @catch (NSException *exception) {
@@ -15325,7 +15423,41 @@ static void amproj_installSceneImportHook(id sceneDelegate) {
     }
 }
 
+static void amproj_installNativeProjectPickerHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class pickerClass = UIDocumentPickerViewController.class;
+        SEL modernSelector =
+            @selector(initForOpeningContentTypes:asCopy:);
+        Method modernMethod =
+            class_getInstanceMethod(pickerClass, modernSelector);
+        IMP modernPrevious = amproj_installMethodHook(
+            modernMethod, (IMP)hooked_documentPickerModernInit, 4,
+            @"UIDocumentPicker.initForOpeningContentTypes");
+        if (modernPrevious) {
+            orig_documentPickerModernInit = (void *)modernPrevious;
+        }
+
+        SEL legacySelector = @selector(initWithDocumentTypes:inMode:);
+        Method legacyMethod =
+            class_getInstanceMethod(pickerClass, legacySelector);
+        IMP legacyPrevious = amproj_installMethodHook(
+            legacyMethod, (IMP)hooked_documentPickerLegacyInit, 4,
+            @"UIDocumentPicker.initWithDocumentTypes");
+        if (legacyPrevious) {
+            orig_documentPickerLegacyInit = (void *)legacyPrevious;
+        }
+
+        amproj_logCriticalEvent(@"import.native_project_picker_hook", @{
+            @"modern": @(orig_documentPickerModernInit != NULL),
+            @"legacy": @(orig_documentPickerLegacyInit != NULL),
+            @"added_type": AMProjUTI
+        });
+    });
+}
+
 static void amproj_installImportHook(void) {
+    amproj_installNativeProjectPickerHook();
     (void)amproj_installColdLaunchHook();
     (void)amproj_installRuntimeColdLaunchHook();
     (void)amproj_installDeclaredURLHooks();
