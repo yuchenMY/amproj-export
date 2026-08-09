@@ -528,12 +528,14 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_writeDirectArchive",
         )
         self.assertIn("item.fileURL = fileURL", direct_share)
+        self.assertIn("#if AMPROJ_CLOUD_SYNC", direct_share)
+        self.assertIn("AMCloudSyncUploadActivities", direct_share)
         self.assertIn(
-            "initWithActivityItems:@[item] applicationActivities:nil", direct_share
+            "initWithActivityItems:@[item] applicationActivities:cloudActivities",
+            direct_share,
         )
         self.assertNotIn("UIImage", direct_share)
         self.assertNotIn(".png", direct_share.lower())
-        self.assertNotIn("cloud", direct_share.lower())
         self.assertNotRegex(direct_share.lower(), r"https?://|qr(?:code)?")
 
     def test_v44_direct_export_failure_cannot_fall_back_to_native_export(self):

@@ -40,6 +40,10 @@
 #import "AMProjImportArchive.h"
 #import "AMProjNativeImportBridge.h"
 
+#if AMPROJ_CLOUD_SYNC
+#import "AMCloudSync.h"
+#endif
+
 static NSString *const kAMProjPluginVersion = @"44";
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
@@ -87,6 +91,10 @@ static void amproj_releaseImportTransactionForURL(NSURL *URL, NSString *name);
 static void amproj_clearImportSuppression(NSURL *URL, NSString *name);
 static AMProjIncomingURLResult amproj_handleIncomingProjectURLSafely(
     NSURL *URL, NSString *source, NSDictionary *options, BOOL *prepared);
+#if AMPROJ_CLOUD_SYNC
+static BOOL amproj_importCloudPackage(NSURL *URL, NSString *filename,
+                                      NSURL *cleanupURL);
+#endif
 static void amproj_presentImportError(NSString *message);
 static void amproj_presentImportErrorOfferingPicker(NSString *message,
                                                      BOOL offerPicker);
@@ -2310,8 +2318,14 @@ static void amproj_presentDirectShare(AMProjDirectRequest *request, NSURL *fileU
             UIActivityViewController *activity = nil;
             @try {
                 amproj_constructingDirectShare = YES;
+#if AMPROJ_CLOUD_SYNC
+                NSArray<UIActivity *> *cloudActivities =
+                    AMCloudSyncUploadActivities(fileURL, request.projectTitle, presenter);
+#else
+                NSArray<UIActivity *> *cloudActivities = nil;
+#endif
                 activity = [[UIActivityViewController alloc]
-                    initWithActivityItems:@[item] applicationActivities:nil];
+                    initWithActivityItems:@[item] applicationActivities:cloudActivities];
             } @catch (NSException *exception) {
                 amproj_finishDirectFailure(request,
                     amproj_directError(43, exception.reason ?: @"Unable to create share sheet"));
@@ -10756,6 +10770,27 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLSafely(
     }
 }
 
+#if AMPROJ_CLOUD_SYNC
+static BOOL amproj_importCloudPackage(NSURL *URL, NSString *filename,
+                                      NSURL *cleanupURL) {
+    if (!URL.isFileURL) return NO;
+    BOOL prepared = NO;
+    NSDictionary *options = @{
+        @"AMProjOriginalFilename": filename.length ? filename : @"project.amproj",
+        @"AMProjPreserveSource": @YES,
+        @"AMProjIncomingCleanupURL": cleanupURL ?: URL
+    };
+    AMProjIncomingURLResult result = amproj_handleIncomingProjectURLSafely(
+        URL, @"cloud_download", options, &prepared);
+    amproj_debugEvent(@"cloud.import_queued", @{
+        @"accepted": @(result == AMProjIncomingURLAccepted),
+        @"prepared": @(prepared),
+        @"filename": filename ?: @""
+    });
+    return result == AMProjIncomingURLAccepted;
+}
+#endif
+
 static dispatch_queue_t amproj_importInboxQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t onceToken;
@@ -15844,6 +15879,11 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                 }
             });
         AMProjInstallNativePackageImportBridge();
+#if AMPROJ_CLOUD_SYNC
+        AMCloudSyncInstall(^BOOL(NSURL *URL, NSString *filename, NSURL *cleanupURL) {
+            return amproj_importCloudPackage(URL, filename, cleanupURL);
+        });
+#endif
 
         NSString *startupTrigger = [trigger copy] ?: @"unknown";
         dispatch_async(dispatch_get_main_queue(), ^{
