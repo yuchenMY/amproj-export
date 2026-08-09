@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -95,12 +96,15 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn(".selectedViewController", detector)
         self.assertNotIn("childViewControllers", detector)
         self.assertIn("![NSThread isMainThread]", CLOUD)
-        self.assertIn(
-            "presentationCompletion:originalCompletion", CLOUD
-        )
-        self.assertIn(
-            "completion:presentationCompletion", CLOUD
-        )
+        handler = CLOUD.split(
+            "BOOL AMCloudSyncHandleNativeAccountPresentation", 1
+        )[1].split("BOOL AMCloudSyncHandleNativeAccountPush", 1)[0]
+        self.assertIn("(void)completion;", handler)
+        self.assertIn("[manager showAccountFrom:presenter];", handler)
+        self.assertNotIn("[completion copy]", handler)
+        self.assertNotIn("originalCompletion", handler)
+        self.assertIsNone(re.search(r"\bcompletion\s*\(", handler))
+        self.assertNotIn("presentationCompletion", CLOUD)
         dispatch = CLOUD.split(
             "__weak UINavigationController *weakNavigationController", 1
         )[1].split("return YES;", 1)[0]

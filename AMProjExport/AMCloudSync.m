@@ -516,11 +516,6 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @end
 
 @interface AMCloudManager ()
-- (void)showAccountFrom:(UIViewController *)presenter
- presentationCompletion:(dispatch_block_t)presentationCompletion;
-- (void)showAuthenticationFrom:(UIViewController *)presenter
-                     completion:(dispatch_block_t)completion
-          presentationCompletion:(dispatch_block_t)presentationCompletion;
 - (UIAlertController *)busyAlert:(NSString *)title presenter:(UIViewController *)presenter;
 - (void)showCredentialsFrom:(UIViewController *)presenter registerAccount:(BOOL)registerAccount
                   completion:(dispatch_block_t)completion;
@@ -777,13 +772,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 - (void)showAuthenticationFrom:(UIViewController *)presenter
                      completion:(dispatch_block_t)completion {
-    [self showAuthenticationFrom:presenter completion:completion
-          presentationCompletion:nil];
-}
-
-- (void)showAuthenticationFrom:(UIViewController *)presenter
-                     completion:(dispatch_block_t)completion
-          presentationCompletion:(dispatch_block_t)presentationCompletion {
     UIViewController *top = AMCloudTopController(presenter);
     if (!top) return;
     UIAlertController *choice = [UIAlertController alertControllerWithTitle:@"猫鹤账户"
@@ -808,8 +796,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         popover.sourceView = top.view;
         popover.sourceRect = CGRectMake(CGRectGetMaxX(top.view.bounds) - 30, 30, 1, 1);
     }
-    [top presentViewController:choice animated:YES
-                    completion:presentationCompletion];
+    [top presentViewController:choice animated:YES completion:nil];
 }
 
 - (void)showCredentialsFrom:(UIViewController *)presenter registerAccount:(BOOL)registerAccount
@@ -868,16 +855,11 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 }
 
 - (void)showAccountFrom:(UIViewController *)presenter {
-    [self showAccountFrom:presenter presentationCompletion:nil];
-}
-
-- (void)showAccountFrom:(UIViewController *)presenter
- presentationCompletion:(dispatch_block_t)presentationCompletion {
     if (!AMCloudReadToken().length) {
         __weak typeof(self) weakSelf = self;
         [self showAuthenticationFrom:presenter completion:^{
             [weakSelf showAccountFrom:presenter];
-        } presentationCompletion:presentationCompletion];
+        }];
         return;
     }
     AMCloudAccountViewController *account = [[AMCloudAccountViewController alloc]
@@ -888,7 +870,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         initWithRootViewController:account];
     navigation.modalPresentationStyle = UIModalPresentationAutomatic;
     [AMCloudTopController(presenter) presentViewController:navigation animated:YES
-                                                completion:presentationCompletion];
+                                                completion:nil];
 }
 
 - (void)beginUploadFile:(NSURL *)fileURL title:(NSString *)title
@@ -1391,14 +1373,14 @@ BOOL AMCloudSyncHandleNativeAccountPresentation(
     }
     NSLog(@"[AMProjExport] Replacing native account presentation: %@",
           NSStringFromClass(controller.class));
-    void (^originalCompletion)(void) = [completion copy];
+    // 原生展示已被取消，执行其 completion 可能访问仅属于 MyAccountVC 的状态。
+    (void)completion;
     dispatch_async(dispatch_get_main_queue(), ^{
         AMCloudManager *manager = [AMCloudManager shared];
         if (AMCloudIsProjectsControllerClass(presenter.class)) {
             manager.lastProjectsController = presenter;
         }
-        [manager showAccountFrom:presenter
-          presentationCompletion:originalCompletion];
+        [manager showAccountFrom:presenter];
     });
     return YES;
 }
