@@ -74,6 +74,55 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("showAuthenticationFrom", CLOUD)
         self.assertIn("AMCloudAccountViewController", CLOUD)
 
+    def test_native_my_account_route_is_replaced_before_presentation_or_push(self):
+        for symbol in (
+            "AMCloudSyncHandleNativeAccountPresentation",
+            "AMCloudSyncHandleNativeAccountPush",
+        ):
+            self.assertIn(symbol, HEADER)
+            self.assertIn(symbol, CLOUD)
+            self.assertIn(symbol, EXPORT)
+        self.assertIn('isEqualToString:@"AlightMotion.MyAccountVC"', CLOUD)
+        self.assertIn(
+            'isEqualToString:@"_TtC12AlightMotion11MyAccountVC"', CLOUD
+        )
+        self.assertNotIn('hasSuffix:@"MyAccountVC"', CLOUD)
+        self.assertIn("AMCloudContainsNativeAccountController", CLOUD)
+        detector = CLOUD.split(
+            "static BOOL AMCloudContainsNativeAccountController", 1
+        )[1].split("static IMP AMCloudOriginalProjectsViewDidAppear", 1)[0]
+        self.assertIn(".topViewController", detector)
+        self.assertIn(".selectedViewController", detector)
+        self.assertNotIn("childViewControllers", detector)
+        self.assertIn("![NSThread isMainThread]", CLOUD)
+        self.assertIn(
+            "presentationCompletion:originalCompletion", CLOUD
+        )
+        self.assertIn(
+            "completion:presentationCompletion", CLOUD
+        )
+        dispatch = CLOUD.split(
+            "__weak UINavigationController *weakNavigationController", 1
+        )[1].split("return YES;", 1)[0]
+        self.assertLess(
+            dispatch.index("dispatch_async"),
+            dispatch.index("navigation.visibleViewController"),
+        )
+
+        presentation = EXPORT.split("static void hooked_presentVC", 1)[1]
+        presentation = presentation.split("#if AMPROJ_DEBUG", 1)[0]
+        replacement = presentation.index(
+            "AMCloudSyncHandleNativeAccountPresentation"
+        )
+        native_forward = presentation.index("orig_presentVC(self", replacement)
+        self.assertLess(replacement, native_forward)
+
+        navigation = EXPORT.split("static void hooked_navigationPush", 1)[1]
+        navigation = navigation.split("static void amproj_forwardPresentation", 1)[0]
+        replacement = navigation.index("AMCloudSyncHandleNativeAccountPush")
+        native_push = navigation.index("orig_navigationPush", replacement)
+        self.assertLess(replacement, native_push)
+
     def test_export_share_exposes_cloud_upload_activity(self):
         self.assertIn("AMCloudSyncUploadActivities", HEADER)
         self.assertIn("AMCloudSyncUploadActivities(fileURL", EXPORT)

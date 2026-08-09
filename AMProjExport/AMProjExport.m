@@ -14111,6 +14111,13 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
 static void hooked_navigationPush(id self, SEL _cmd,
                                   UIViewController *viewController,
                                   BOOL animated) {
+#if AMPROJ_CLOUD_SYNC
+    if ([self isKindOfClass:UINavigationController.class] &&
+        AMCloudSyncHandleNativeAccountPush(
+            (UINavigationController *)self, viewController)) {
+        return;
+    }
+#endif
     // The concrete 6.2.55 project-package controller is the only export
     // boundary. Avoid private ShareVC ivars and leave every other navigation,
     // including project/template deletion, on AM's native path.
@@ -14360,6 +14367,13 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         amproj_forwardPresentation(self, _cmd, controller, animated, completion);
         return;
     }
+#if AMPROJ_CLOUD_SYNC
+    if ([self isKindOfClass:UIViewController.class] &&
+        AMCloudSyncHandleNativeAccountPresentation(
+            (UIViewController *)self, controller, completion)) {
+        return;
+    }
+#endif
     if (amproj_isShareExportHostController(controller)) {
         amproj_installShareExportHook();
     }
