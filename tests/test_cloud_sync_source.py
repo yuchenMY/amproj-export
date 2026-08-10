@@ -1,4 +1,3 @@
-import re
 import unittest
 from pathlib import Path
 
@@ -83,8 +82,8 @@ class CloudSyncSourceTests(unittest.TestCase):
 
     def test_native_my_account_route_is_replaced_before_presentation_or_push(self):
         for symbol in (
-            "AMCloudSyncHandleNativeAccountPresentation",
-            "AMCloudSyncHandleNativeAccountPush",
+            "AMCloudSyncReplacementForNativeAccountPresentation",
+            "AMCloudSyncReplacementForNativeAccountPush",
         ):
             self.assertIn(symbol, HEADER)
             self.assertIn(symbol, CLOUD)
@@ -102,36 +101,58 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn(".selectedViewController", detector)
         self.assertNotIn("childViewControllers", detector)
         self.assertIn("![NSThread isMainThread]", CLOUD)
-        handler = CLOUD.split(
-            "BOOL AMCloudSyncHandleNativeAccountPresentation", 1
-        )[1].split("BOOL AMCloudSyncHandleNativeAccountPush", 1)[0]
-        self.assertIn("(void)completion;", handler)
-        self.assertIn("[manager showAccountFrom:presenter];", handler)
-        self.assertNotIn("[completion copy]", handler)
-        self.assertNotIn("originalCompletion", handler)
-        self.assertIsNone(re.search(r"\bcompletion\s*\(", handler))
-        self.assertNotIn("presentationCompletion", CLOUD)
-        dispatch = CLOUD.split(
-            "__weak UINavigationController *weakNavigationController", 1
-        )[1].split("return YES;", 1)[0]
-        self.assertLess(
-            dispatch.index("dispatch_async"),
-            dispatch.index("navigation.visibleViewController"),
-        )
+        presentation_handler = CLOUD.split(
+            "AMCloudSyncReplacementForNativeAccountPresentation", 1
+        )[1].split("AMCloudSyncReplacementForNativeAccountPush", 1)[0]
+        self.assertIn("newAccountControllerForRoute", presentation_handler)
+        self.assertIn("return navigation;", presentation_handler)
+        self.assertNotIn("dispatch_async", presentation_handler)
+
+        push_handler = CLOUD.split(
+            "AMCloudSyncReplacementForNativeAccountPush", 1
+        )[1].split("AMCloudSyncUploadActivities", 1)[0]
+        self.assertIn("newAccountControllerForRoute", push_handler)
+        self.assertIn("return account;", push_handler)
+        self.assertNotIn("dispatch_async", push_handler)
+        self.assertNotIn("weakNavigationController", push_handler)
 
         presentation = EXPORT.split("static void hooked_presentVC", 1)[1]
         presentation = presentation.split("#if AMPROJ_DEBUG", 1)[0]
         replacement = presentation.index(
-            "AMCloudSyncHandleNativeAccountPresentation"
+            "AMCloudSyncReplacementForNativeAccountPresentation"
         )
         native_forward = presentation.index("orig_presentVC(self", replacement)
         self.assertLess(replacement, native_forward)
+        self.assertIn(
+            "orig_presentVC(self, _cmd, accountReplacement, animated, nil)",
+            presentation,
+        )
 
         navigation = EXPORT.split("static void hooked_navigationPush", 1)[1]
         navigation = navigation.split("static void amproj_forwardPresentation", 1)[0]
-        replacement = navigation.index("AMCloudSyncHandleNativeAccountPush")
+        replacement = navigation.index(
+            "AMCloudSyncReplacementForNativeAccountPush"
+        )
         native_push = navigation.index("orig_navigationPush", replacement)
         self.assertLess(replacement, native_push)
+        self.assertIn(
+            "orig_navigationPush(self, _cmd, accountReplacement, animated)",
+            navigation,
+        )
+
+    def test_account_controller_reads_keychain_after_navigation_entry(self):
+        view_load = CLOUD.split("- (void)viewDidLoad", 1)[1].split(
+            "- (void)viewDidAppear", 1
+        )[0]
+        self.assertNotIn("AMCloudReadToken", view_load)
+        self.assertNotIn("[self reloadCloudData]", view_load)
+        appeared = CLOUD.split("- (void)viewDidAppear", 1)[1].split(
+            "- (void)closeAccount", 1
+        )[0]
+        self.assertIn("[self ensureAccountReady]", appeared)
+        self.assertIn("AMCloudReadToken", appeared)
+        self.assertIn('@"route": @"controller"', appeared)
+        self.assertIn("popViewControllerAnimated", CLOUD)
 
     def test_account_route_emits_immediately_flushable_diagnostic_stages(self):
         self.assertIn("emitCriticalEvent", DEBUG_HEADER)
@@ -159,6 +180,11 @@ class CloudSyncSourceTests(unittest.TestCase):
             "cloud.account.exception",
             "cloud.account.native_present_intercepted",
             "cloud.account.native_push_intercepted",
+            "cloud.account.native_present_replacement_ready",
+            "cloud.account.native_push_replacement_ready",
+            "cloud.account.token_read_begin",
+            "cloud.account.token_read_end",
+            "cloud.account.view_did_appear",
         ):
             self.assertIn(f'@"{event}"', CLOUD)
         catch_block = CLOUD.split("} @catch (NSException *exception)", 1)[1].split(

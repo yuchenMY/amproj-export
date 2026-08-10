@@ -502,8 +502,11 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic, copy) NSDictionary *account;
 @property(nonatomic, copy) NSDictionary *usage;
 @property(nonatomic, copy) NSArray<NSDictionary *> *projects;
+@property(nonatomic) BOOL authenticationPending;
+@property(nonatomic) BOOL contentLoaded;
 - (void)reloadCloudData;
 - (void)createCloudProject;
+- (void)ensureAccountReady;
 @end
 
 @interface AMCloudManager : NSObject
@@ -526,6 +529,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @end
 
 @interface AMCloudManager ()
+- (AMCloudAccountViewController *)newAccountControllerForRoute:(NSString *)route;
 - (UIAlertController *)busyAlert:(NSString *)title presenter:(UIViewController *)presenter;
 - (void)showCredentialsFrom:(UIViewController *)presenter registerAccount:(BOOL)registerAccount
                   completion:(dispatch_block_t)completion;
@@ -888,9 +892,39 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     [AMCloudTopController(presenter) presentViewController:alert animated:YES completion:nil];
 }
 
+- (AMCloudAccountViewController *)newAccountControllerForRoute:(NSString *)route {
+    AMCloudDiagnostic(@"cloud.account.controller_create_begin", @{
+        @"route": route ?: @""
+    });
+    AMCloudAccountViewController *account = [[AMCloudAccountViewController alloc]
+        initWithStyle:UITableViewStyleInsetGrouped];
+    account.manager = self;
+    self.accountController = account;
+    AMCloudDiagnostic(@"cloud.account.controller_created", @{
+        @"route": route ?: @"",
+        @"controller": AMCloudClassName(account)
+    });
+    return account;
+}
+
 - (void)showAccountFrom:(UIViewController *)presenter {
+    AMCloudDiagnostic(@"cloud.account.token_read_begin", @{
+        @"route": @"modal"
+    });
     BOOL authenticated = AMCloudReadToken().length > 0;
+    AMCloudDiagnostic(@"cloud.account.token_read_end", @{
+        @"route": @"modal",
+        @"authenticated": @(authenticated)
+    });
+    AMCloudDiagnostic(@"cloud.account.top_controller_begin", @{
+        @"route": @"modal",
+        @"presenter": AMCloudClassName(presenter)
+    });
     UIViewController *top = AMCloudTopController(presenter);
+    AMCloudDiagnostic(@"cloud.account.top_controller_end", @{
+        @"route": @"modal",
+        @"top": AMCloudClassName(top)
+    });
     AMCloudDiagnostic(@"cloud.account.route", @{
         @"presenter": AMCloudClassName(presenter),
         @"top": AMCloudClassName(top),
@@ -910,16 +944,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         return;
     }
     @try {
-        AMCloudDiagnostic(@"cloud.account.controller_create_begin", @{
-            @"top": AMCloudClassName(top)
-        });
-        AMCloudAccountViewController *account = [[AMCloudAccountViewController alloc]
-            initWithStyle:UITableViewStyleInsetGrouped];
-        AMCloudDiagnostic(@"cloud.account.controller_created", @{
-            @"controller": AMCloudClassName(account)
-        });
-        account.manager = self;
-        self.accountController = account;
+        AMCloudAccountViewController *account =
+            [self newAccountControllerForRoute:@"modal"];
         UINavigationController *navigation = [[UINavigationController alloc]
             initWithRootViewController:account];
         navigation.modalPresentationStyle = UIModalPresentationAutomatic;
@@ -1269,11 +1295,52 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         @"controller": AMCloudClassName(self),
         @"manager": AMCloudClassName(self.manager)
     });
-    [self reloadCloudData];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    AMCloudDiagnostic(@"cloud.account.view_did_appear", @{
+        @"controller": AMCloudClassName(self),
+        @"navigation": AMCloudClassName(self.navigationController),
+        @"presenting": AMCloudClassName(self.presentingViewController)
+    });
+    [self ensureAccountReady];
+}
+
+- (void)ensureAccountReady {
+    if (self.contentLoaded || self.authenticationPending) return;
+    AMCloudDiagnostic(@"cloud.account.token_read_begin", @{
+        @"route": @"controller"
+    });
+    BOOL authenticated = AMCloudReadToken().length > 0;
+    AMCloudDiagnostic(@"cloud.account.token_read_end", @{
+        @"route": @"controller",
+        @"authenticated": @(authenticated)
+    });
+    if (authenticated) {
+        self.contentLoaded = YES;
+        [self reloadCloudData];
+        return;
+    }
+
+    self.authenticationPending = YES;
+    __weak typeof(self) weakSelf = self;
+    [self.manager showAuthenticationFrom:self completion:^{
+        weakSelf.authenticationPending = NO;
+        weakSelf.contentLoaded = YES;
+        [weakSelf reloadCloudData];
+    }];
 }
 
 - (void)closeAccount {
-    [self dismissViewControllerAnimated:YES completion:nil];
+    UINavigationController *navigation = self.navigationController;
+    if (navigation.presentingViewController && navigation.viewControllers.firstObject == self) {
+        [navigation dismissViewControllerAnimated:YES completion:nil];
+    } else if (navigation) {
+        [navigation popViewControllerAnimated:YES];
+    } else {
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }
 }
 
 - (void)createCloudProject {
@@ -1323,11 +1390,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         if (error) {
             [weakSelf.refreshControl endRefreshing];
             if (error.code == 401) {
-                [weakSelf dismissViewControllerAnimated:YES completion:^{
-                    [weakSelf.manager showAuthenticationFrom:weakSelf.manager.lastProjectsController
-                                                   completion:^{
-                        [weakSelf.manager showAccountFrom:weakSelf.manager.lastProjectsController];
-                    }];
+                AMCloudDeleteToken();
+                weakSelf.contentLoaded = NO;
+                weakSelf.authenticationPending = YES;
+                [weakSelf.manager showAuthenticationFrom:weakSelf completion:^{
+                    weakSelf.authenticationPending = NO;
+                    weakSelf.contentLoaded = YES;
+                    [weakSelf reloadCloudData];
                 }];
             } else {
                 [weakSelf.manager showError:error presenter:weakSelf];
@@ -1461,23 +1530,19 @@ void AMCloudSyncInstall(AMCloudImportHandler importHandler) {
     [[AMCloudManager shared] installWithImportHandler:importHandler];
 }
 
-BOOL AMCloudSyncHandleNativeAccountPresentation(
-    UIViewController *presenter, UIViewController *controller,
-    void (^completion)(void)) {
+UIViewController *AMCloudSyncReplacementForNativeAccountPresentation(
+    UIViewController *presenter, UIViewController *controller) {
     if (![NSThread isMainThread] || !presenter || !controller ||
         !AMCloudContainsNativeAccountController(controller, 0)) {
-        return NO;
+        return nil;
     }
     NSLog(@"[AMProjExport] Replacing native account presentation: %@",
           NSStringFromClass(controller.class));
     AMCloudDiagnostic(@"cloud.account.native_present_intercepted", @{
         @"presenter": AMCloudClassName(presenter),
-        @"controller": AMCloudClassName(controller),
-        @"completion_present": @(completion != nil)
+        @"controller": AMCloudClassName(controller)
     });
-    // 原生展示已被取消，执行其 completion 可能访问仅属于 MyAccountVC 的状态。
-    (void)completion;
-    dispatch_async(dispatch_get_main_queue(), ^{
+    @try {
         AMCloudDiagnostic(@"cloud.account.native_present_dispatch", @{
             @"presenter": AMCloudClassName(presenter)
         });
@@ -1485,16 +1550,30 @@ BOOL AMCloudSyncHandleNativeAccountPresentation(
         if (AMCloudIsProjectsControllerClass(presenter.class)) {
             manager.lastProjectsController = presenter;
         }
-        [manager showAccountFrom:presenter];
-    });
-    return YES;
+        AMCloudAccountViewController *account =
+            [manager newAccountControllerForRoute:@"native_present"];
+        UINavigationController *navigation = [[UINavigationController alloc]
+            initWithRootViewController:account];
+        navigation.modalPresentationStyle = controller.modalPresentationStyle;
+        AMCloudDiagnostic(@"cloud.account.native_present_replacement_ready", @{
+            @"replacement": AMCloudClassName(navigation)
+        });
+        return navigation;
+    } @catch (NSException *exception) {
+        AMCloudDiagnostic(@"cloud.account.exception", @{
+            @"stage": @"native_present_replacement",
+            @"name": exception.name ?: @"",
+            @"reason": exception.reason ?: @""
+        });
+        return nil;
+    }
 }
 
-BOOL AMCloudSyncHandleNativeAccountPush(
+UIViewController *AMCloudSyncReplacementForNativeAccountPush(
     UINavigationController *navigationController, UIViewController *controller) {
     if (![NSThread isMainThread] || !navigationController || !controller ||
         !AMCloudContainsNativeAccountController(controller, 0)) {
-        return NO;
+        return nil;
     }
     NSLog(@"[AMProjExport] Replacing native account push: %@",
           NSStringFromClass(controller.class));
@@ -1502,17 +1581,9 @@ BOOL AMCloudSyncHandleNativeAccountPush(
         @"navigation": AMCloudClassName(navigationController),
         @"controller": AMCloudClassName(controller)
     });
-    __weak UINavigationController *weakNavigationController = navigationController;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UINavigationController *navigation = weakNavigationController;
-        if (!navigation) {
-            AMCloudDiagnostic(@"cloud.account.route_failed", @{
-                @"stage": @"native_push_dispatch",
-                @"reason": @"navigation_released"
-            });
-            return;
-        }
-        UIViewController *presenter = navigation.visibleViewController ?: navigation;
+    @try {
+        UIViewController *presenter = navigationController.visibleViewController ?:
+            navigationController;
         AMCloudDiagnostic(@"cloud.account.native_push_dispatch", @{
             @"presenter": AMCloudClassName(presenter)
         });
@@ -1520,9 +1591,20 @@ BOOL AMCloudSyncHandleNativeAccountPush(
         if (AMCloudIsProjectsControllerClass(presenter.class)) {
             manager.lastProjectsController = presenter;
         }
-        [manager showAccountFrom:presenter];
-    });
-    return YES;
+        AMCloudAccountViewController *account =
+            [manager newAccountControllerForRoute:@"native_push"];
+        AMCloudDiagnostic(@"cloud.account.native_push_replacement_ready", @{
+            @"replacement": AMCloudClassName(account)
+        });
+        return account;
+    } @catch (NSException *exception) {
+        AMCloudDiagnostic(@"cloud.account.exception", @{
+            @"stage": @"native_push_replacement",
+            @"name": exception.name ?: @"",
+            @"reason": exception.reason ?: @""
+        });
+        return nil;
+    }
 }
 
 NSArray<UIActivity *> *AMCloudSyncUploadActivities(

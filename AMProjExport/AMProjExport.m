@@ -14112,9 +14112,16 @@ static void hooked_navigationPush(id self, SEL _cmd,
                                   UIViewController *viewController,
                                   BOOL animated) {
 #if AMPROJ_CLOUD_SYNC
-    if ([self isKindOfClass:UINavigationController.class] &&
-        AMCloudSyncHandleNativeAccountPush(
-            (UINavigationController *)self, viewController)) {
+    UIViewController *accountReplacement = nil;
+    if ([self isKindOfClass:UINavigationController.class]) {
+        accountReplacement = AMCloudSyncReplacementForNativeAccountPush(
+            (UINavigationController *)self, viewController);
+    }
+    if (accountReplacement && orig_navigationPush) {
+        amproj_logCriticalEvent(@"cloud.account.native_push_forward", @{
+            @"replacement": NSStringFromClass(accountReplacement.class) ?: @""
+        });
+        orig_navigationPush(self, _cmd, accountReplacement, animated);
         return;
     }
 #endif
@@ -14368,9 +14375,16 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         return;
     }
 #if AMPROJ_CLOUD_SYNC
-    if ([self isKindOfClass:UIViewController.class] &&
-        AMCloudSyncHandleNativeAccountPresentation(
-            (UIViewController *)self, controller, completion)) {
+    UIViewController *accountReplacement = nil;
+    if ([self isKindOfClass:UIViewController.class]) {
+        accountReplacement = AMCloudSyncReplacementForNativeAccountPresentation(
+            (UIViewController *)self, controller);
+    }
+    if (accountReplacement) {
+        amproj_logCriticalEvent(@"cloud.account.native_present_forward", @{
+            @"replacement": NSStringFromClass(accountReplacement.class) ?: @""
+        });
+        orig_presentVC(self, _cmd, accountReplacement, animated, nil);
         return;
     }
 #endif
