@@ -741,6 +741,20 @@ static id AMDebugJSONValue(id value, NSUInteger depth) {
     });
 }
 
+- (void)emitCriticalEvent:(NSString *)name fields:(NSDictionary<NSString *,id> *)fields {
+    if (!self.enabled || !name.length) return;
+    NSString *eventName = [name copy];
+    NSDictionary *fieldSnapshot = [fields copy] ?: @{};
+    [self performSync:^{
+        NSDictionary *safeFields = AMDebugJSONValue(fieldSnapshot, 0);
+        [self appendEvent:eventName fields:safeFields];
+    }];
+    dispatch_async(self.queue, ^{
+        [self sendHelloForce:NO];
+        [self flushEvents];
+    });
+}
+
 - (void)appendEvent:(NSString *)name fields:(NSDictionary *)fields {
     if (self.pendingEvents.count >= kAMDebugMaxBufferedEvents) {
         [self.pendingEvents removeObjectAtIndex:0];

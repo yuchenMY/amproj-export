@@ -8,6 +8,12 @@ CLOUD = (ROOT / "AMProjExport" / "AMCloudSync.m").read_text(encoding="utf-8")
 HEADER = (ROOT / "AMProjExport" / "AMCloudSync.h").read_text(encoding="utf-8")
 EXPORT = (ROOT / "AMProjExport" / "AMProjExport.m").read_text(encoding="utf-8")
 MAKEFILE = (ROOT / "AMProjExport" / "Makefile").read_text(encoding="utf-8")
+DEBUG_HEADER = (ROOT / "AMProjExport" / "AMDebugTransport.h").read_text(
+    encoding="utf-8"
+)
+DEBUG_SOURCE = (ROOT / "AMProjExport" / "AMDebugTransport.m").read_text(
+    encoding="utf-8"
+)
 
 
 class CloudSyncSourceTests(unittest.TestCase):
@@ -126,6 +132,40 @@ class CloudSyncSourceTests(unittest.TestCase):
         replacement = navigation.index("AMCloudSyncHandleNativeAccountPush")
         native_push = navigation.index("orig_navigationPush", replacement)
         self.assertLess(replacement, native_push)
+
+    def test_account_route_emits_immediately_flushable_diagnostic_stages(self):
+        self.assertIn("emitCriticalEvent", DEBUG_HEADER)
+        self.assertIn("- (void)emitCriticalEvent", DEBUG_SOURCE)
+        critical = DEBUG_SOURCE.split("- (void)emitCriticalEvent", 1)[1].split(
+            "- (void)appendEvent", 1
+        )[0]
+        self.assertIn("[self performSync:", critical)
+        self.assertIn("[self flushEvents]", critical)
+        header_contract = DEBUG_HEADER.split("- (void)emitCriticalEvent", 1)[0]
+        self.assertIn("best-effort", header_contract)
+        self.assertIn("任意线程", header_contract)
+        self.assertIn("内存队列", header_contract)
+        for event in (
+            "cloud.account.tap",
+            "cloud.account.route",
+            "cloud.account.controller_create_begin",
+            "cloud.account.controller_created",
+            "cloud.account.present_begin",
+            "cloud.account.present_completed",
+            "cloud.account.view_load_enter",
+            "cloud.account.view_load_super_returned",
+            "cloud.account.view_load_configured",
+            "cloud.account.reload_begin",
+            "cloud.account.exception",
+            "cloud.account.native_present_intercepted",
+            "cloud.account.native_push_intercepted",
+        ):
+            self.assertIn(f'@"{event}"', CLOUD)
+        catch_block = CLOUD.split("} @catch (NSException *exception)", 1)[1].split(
+            "- (void)beginUploadFile", 1
+        )[0]
+        self.assertIn('AMCloudDiagnostic(@"cloud.account.exception"', catch_block)
+        self.assertNotIn("showError:", catch_block)
 
     def test_export_share_exposes_cloud_upload_activity(self):
         self.assertIn("AMCloudSyncUploadActivities", HEADER)

@@ -24,6 +24,11 @@ FOUNDATION_EXPORT NSString *const AMDebugTransportMarkerHeader;
 - (void)start;
 - (void)emitEvent:(NSString *)name
            fields:(nullable NSDictionary<NSString *, id> *)fields;
+// 可从任意线程调用；仅同步等待事件序列化并进入内存队列。在 transport 队列内
+// 重入时直接入队，不会再次 dispatch_sync。网络 flush 随后异步执行，属于
+// best-effort 投递，不保证进程异常终止前已经到达服务端。
+- (void)emitCriticalEvent:(NSString *)name
+                   fields:(nullable NSDictionary<NSString *, id> *)fields;
 - (void)flush;
 
 // beginExportTransaction consumes a pending capture_next command atomically.
