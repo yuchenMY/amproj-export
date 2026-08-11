@@ -15,6 +15,7 @@ class ImportArchiveSourceTests(unittest.TestCase):
         header = HEADER.read_text(encoding="utf-8")
         self.assertIn("AMProjPrepareNativeImport", header)
         self.assertIn("AMProjNormalizeProjectArchive", header)
+        self.assertIn("AMProjExtractPluginArchive", header)
         makefile = MAKEFILE.read_text(encoding="utf-8")
         self.assertEqual(makefile.count("AMProjZIPWriter.m AMProjImportArchive.m"), 3)
         self.assertIn("AMProjExportCloud.dylib", makefile)

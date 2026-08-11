@@ -16096,6 +16096,9 @@ static void AMProjExportInit(void) {
         NSLog(@"[AMProjExport] ===== Loading v44 =====");
 #endif
         NSLog(@"%@", kAMProjCloudStabilityContract);
+#if AMPROJ_CLOUD_SYNC
+        AMCloudSyncInstallPluginHooksEarly();
+#endif
         amproj_restorePhotoAlbumMode();
 
         // ObjC classes are registered before image constructors. Installing only

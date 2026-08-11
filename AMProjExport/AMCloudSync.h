@@ -8,6 +8,8 @@ typedef BOOL (^AMCloudImportHandler)(NSURL *fileURL, NSString *filename,
 typedef void (^AMCloudAuthorizationCompletion)(BOOL allowed,
                                                 NSError * _Nullable error);
 
+/// 构造期仅恢复与当前 Keychain token 匹配的云插件资源 Hook，不触碰 UIKit UI。
+FOUNDATION_EXPORT void AMCloudSyncInstallPluginHooksEarly(void);
 FOUNDATION_EXPORT void AMCloudSyncInstall(AMCloudImportHandler importHandler);
 FOUNDATION_EXPORT NSArray<UIActivity *> *AMCloudSyncUploadActivities(
     NSURL *fileURL, NSString *projectTitle, UIViewController *presenter);

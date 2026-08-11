@@ -13,6 +13,15 @@ DEBUG_HEADER = (ROOT / "AMProjExport" / "AMDebugTransport.h").read_text(
 DEBUG_SOURCE = (ROOT / "AMProjExport" / "AMDebugTransport.m").read_text(
     encoding="utf-8"
 )
+PLUGINS = (ROOT / "AMProjExport" / "AMCloudPlugins.m").read_text(
+    encoding="utf-8"
+)
+PLUGIN_HEADER = (ROOT / "AMProjExport" / "AMCloudPlugins.h").read_text(
+    encoding="utf-8"
+)
+IMPORT_ARCHIVE = (ROOT / "AMProjExport" / "AMProjImportArchive.m").read_text(
+    encoding="utf-8"
+)
 
 
 class CloudSyncSourceTests(unittest.TestCase):
@@ -22,6 +31,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         )[0]
         self.assertIn("-DAMPROJ_CLOUD_SYNC=1", cloud_rule)
         self.assertIn("AMCloudSync.m", cloud_rule)
+        self.assertIn("AMCloudPlugins.m", cloud_rule)
         self.assertIn("-framework Security", cloud_rule)
         self.assertIn("-framework WebKit", cloud_rule)
         self.assertIn("#if AMPROJ_CLOUD_SYNC", EXPORT)
@@ -41,6 +51,8 @@ class CloudSyncSourceTests(unittest.TestCase):
             "/auth/logout",
             "/ios/session/activate",
             "/ios/authorize",
+            "/ios/plugins/manifest",
+            "/ios/plugins/releases/",
             "/user/me",
             "/cloud/projects",
             "/upload",
@@ -53,6 +65,88 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('forHTTPHeaderField:@"Authorization"', CLOUD)
         self.assertIn('json[@"code"]', CLOUD)
         self.assertIn('json[@"data"]', CLOUD)
+
+    def test_cloud_plugins_are_downloaded_installed_and_removed_automatically(self):
+        for symbol in (
+            "AMCloudPluginsInstallBundleHooks",
+            "AMCloudPluginsCurrentState",
+            "AMCloudPluginsInstallArchive",
+            "AMCloudPluginsRemoveAllIf",
+            "AMCloudPluginsRemoveAll",
+        ):
+            self.assertIn(symbol, PLUGIN_HEADER)
+            self.assertIn(symbol, PLUGINS)
+        for trigger in (
+            '@"install"',
+            '@"did_become_active"',
+            '@"foreground_timer"',
+            '@"token_changed"',
+            '@"account_activation"',
+        ):
+            self.assertIn(trigger, CLOUD)
+        self.assertIn("scheduledTimerWithTimeInterval:60.0", CLOUD)
+        self.assertIn("downloadPluginRelease", CLOUD)
+        self.assertIn('valueForHTTPHeaderField:@"X-AM-Plugin-SHA256"', CLOUD)
+        self.assertIn("AMCloudPluginsRemoveAllIf", CLOUD)
+        self.assertIn("permission_disabled", CLOUD)
+        self.assertNotIn("plugin picker", CLOUD.lower())
+
+    def test_stale_authenticated_responses_cannot_delete_a_new_token(self):
+        self.assertIn("AMCloudInvalidateTokenForRequest", CLOUD)
+        self.assertIn('valueForHTTPHeaderField:@"Authorization"', CLOUD)
+        self.assertIn("AMCloudInvalidateToken(logoutToken)", CLOUD)
+        self.assertIn("AMCloudInvalidateToken(activationToken)", CLOUD)
+        self.assertIn("AMCloudAuthPerformSync", CLOUD)
+        self.assertIn("AMCloudDeleteTokenMatching(token, YES)", CLOUD)
+        self.assertIn("AMCloudPluginsSetAuthorizationGeneration", CLOUD)
+        self.assertIn("AMCloudCleanupPluginsForAuth(nil, generation, hadToken)", CLOUD)
+        self.assertNotIn(
+            "if (response.statusCode == 401) AMCloudDeleteToken();", CLOUD
+        )
+        self.assertNotIn(
+            "if (response.statusCode == 401 && authenticated) AMCloudDeleteToken();",
+            CLOUD,
+        )
+
+    def test_plugin_install_and_cleanup_share_a_serial_commit_lane(self):
+        self.assertIn("AMCloudPluginsMutationQueue", PLUGINS)
+        self.assertIn("DISPATCH_QUEUE_SERIAL", PLUGINS)
+        self.assertIn("AMCloudPluginsPerformMutation", PLUGINS)
+        self.assertIn("AMCloudPluginsCommitGuard", PLUGIN_HEADER)
+        self.assertIn("commitGuard(commit)", PLUGINS)
+        self.assertIn("AMCloudCommitIfAuthMatches", CLOUD)
+        self.assertIn("authorizationGeneration", PLUGINS)
+        self.assertIn('@"authorization_key"', PLUGINS)
+
+    def test_bundle_hook_overrides_builtin_xml_and_appends_new_effects(self):
+        for selector in (
+            "URLsForResourcesWithExtension:subdirectory:",
+            "URLForResource:withExtension:subdirectory:",
+            "pathsForResourcesOfType:inDirectory:",
+            "pathForResource:ofType:inDirectory:",
+        ):
+            self.assertIn(selector, PLUGINS)
+        self.assertIn('caseInsensitiveCompare:@"BuiltinEffects"', PLUGINS)
+        self.assertIn("remaining[key] = URL", PLUGINS)
+        self.assertIn("[merged addObject:replacement ?: URL]", PLUGINS)
+        self.assertIn("[merged addObjectsFromArray:newURLs]", PLUGINS)
+        self.assertIn("contentsOfDirectoryAtURL", PLUGINS)
+        self.assertNotIn("enumeratorAtURL", PLUGINS)
+        self.assertIn("AMCloudPluginsRelativeDirectory", PLUGINS)
+        self.assertIn("AMCloudBundleHookGuardKey", PLUGINS)
+        self.assertIn("AMCloudSyncInstallPluginHooksEarly();", EXPORT)
+
+    def test_plugin_zip_uses_existing_strict_extractor(self):
+        self.assertIn("AMProjExtractPluginArchive", IMPORT_ARCHIVE)
+        for required in (
+            "AMProjImportReadDirectory",
+            "AMProjImportValidateLocalHeaders",
+            "AMProjImportExtractEntry",
+            '@"BuiltinEffects/"',
+            '@"xml", @"png", @"jpg", @"webp"',
+            "AMProjImportArchiveErrorUnsafeEntry",
+        ):
+            self.assertIn(required, IMPORT_ARCHIVE)
 
     def test_upload_is_file_backed_and_integrity_claimed(self):
         self.assertIn("uploadTaskWithRequest:request fromFile:fileURL", CLOUD)
