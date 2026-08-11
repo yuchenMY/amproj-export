@@ -79,6 +79,7 @@ class CloudSyncSourceTests(unittest.TestCase):
     def test_cloud_plugins_are_downloaded_installed_and_removed_automatically(self):
         for symbol in (
             "AMCloudPluginsInstallBundleHooks",
+            "AMCloudPluginsRestoreInstalledReleaseForAuthorization",
             "AMCloudPluginsCurrentState",
             "AMCloudPluginsInstallArchive",
             "AMCloudPluginsRemoveAllIf",
@@ -106,7 +107,9 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMCloudInvalidateTokenForRequest", CLOUD)
         self.assertIn('valueForHTTPHeaderField:@"Authorization"', CLOUD)
         self.assertIn("AMCloudInvalidateToken(logoutToken)", CLOUD)
-        self.assertIn("AMCloudInvalidateToken(activationToken)", CLOUD)
+        self.assertNotIn("AMCloudInvalidateToken(activationToken)", CLOUD)
+        self.assertIn('[path isEqualToString:@"/user/me"]', CLOUD)
+        self.assertEqual(CLOUD.count("AMCloudInvalidateTokenForRequest(request)"), 1)
         self.assertIn("AMCloudAuthPerformSync", CLOUD)
         self.assertIn("AMCloudDeleteTokenMatching(token, YES)", CLOUD)
         self.assertIn("AMCloudPluginsSetAuthorizationGeneration", CLOUD)
@@ -156,6 +159,11 @@ class CloudSyncSourceTests(unittest.TestCase):
         hook_install = PLUGINS.split("void AMCloudPluginsInstallBundleHooks", 1)[1]
         hook_install = hook_install.split("BOOL AMCloudPluginsActivateInstalledRelease", 1)[0]
         self.assertNotIn("ActivatePersistedState", hook_install)
+
+        early_restore = CLOUD.split("void AMCloudSyncInstallPluginHooksEarly", 1)[1]
+        early_restore = early_restore.split("void AMCloudSyncInstall", 1)[0]
+        self.assertIn("AMCloudReadAuthContext", early_restore)
+        self.assertIn("AMCloudPluginsRestoreInstalledReleaseForAuthorization", early_restore)
         self.assertIn("不会从磁盘恢复插件", PLUGIN_HEADER)
 
         manifest = CLOUD.split("BOOL enabled =", 1)[1].split(
@@ -169,8 +177,10 @@ class CloudSyncSourceTests(unittest.TestCase):
         for selector in (
             "URLsForResourcesWithExtension:subdirectory:",
             "URLForResource:withExtension:subdirectory:",
+            "URLForResource:withExtension:",
             "pathsForResourcesOfType:inDirectory:",
             "pathForResource:ofType:inDirectory:",
+            "pathForResource:ofType:",
         ):
             self.assertIn(selector, PLUGINS)
         self.assertIn('caseInsensitiveCompare:@"BuiltinEffects"', PLUGINS)
@@ -180,6 +190,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("contentsOfDirectoryAtURL", PLUGINS)
         self.assertNotIn("enumeratorAtURL", PLUGINS)
         self.assertIn("AMCloudPluginsRelativeDirectory", PLUGINS)
+        self.assertIn("AMCloudPluginsBuiltinEffectsRootURL", PLUGINS)
         self.assertIn("AMCloudBundleHookGuardKey", PLUGINS)
         self.assertIn("AMCloudSyncInstallPluginHooksEarly();", EXPORT)
 

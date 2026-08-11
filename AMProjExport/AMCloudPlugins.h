@@ -8,6 +8,13 @@ typedef BOOL (^AMCloudPluginsCommitGuard)(dispatch_block_t commit);
 FOUNDATION_EXPORT void AMCloudPluginsSetAuthorizationGeneration(uint64_t generation);
 
 /**
+ Restores the installed release only when its persisted authorization key
+ matches the current Keychain token fingerprint and authorization generation.
+ */
+FOUNDATION_EXPORT BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization(
+    NSString *authorizationKey, uint64_t authorizationGeneration);
+
+/**
  安装主 Bundle 资源 Hook。该步骤不会从磁盘恢复插件，必须等服务端确认权限后再激活。
  该函数应在主线程调用，重复调用不会重复安装 Hook。
  */

@@ -567,7 +567,8 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             ? (NSHTTPURLResponse *)rawResponse : nil;
         NSError *responseError = nil;
         NSDictionary *payload = AMCloudEnvelope(data, response, &responseError);
-        if (response.statusCode == 401 && authenticated) {
+        if (response.statusCode == 401 && authenticated &&
+            [path isEqualToString:@"/user/me"]) {
             AMCloudInvalidateTokenForRequest(request);
         }
         AMCloudCompleteOnMain(completion, payload, responseError);
@@ -682,9 +683,6 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
                 ? (NSHTTPURLResponse *)rawResponse : nil;
             NSError *responseError = nil;
             NSDictionary *payload = AMCloudEnvelope(data, response, &responseError);
-            if (response.statusCode == 401) {
-                AMCloudInvalidateTokenForRequest(request);
-            }
             AMCloudCompleteOnMain(completion, payload, responseError);
         }] resume];
     });
@@ -719,9 +717,6 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
             NSError *responseError = nil;
             AMCloudEnvelope(errorData, response, &responseError);
-            if (response.statusCode == 401) {
-                AMCloudInvalidateTokenForRequest(request);
-            }
             AMCloudCompleteOnMain(completion, nil,
                 responseError ?: AMCloudError(response.statusCode, @"下载云工程失败"));
             return;
@@ -844,9 +839,6 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
             NSError *responseError = nil;
             AMCloudEnvelope(errorData, response, &responseError);
-            if (response.statusCode == 401) {
-                AMCloudInvalidateTokenForRequest(request);
-            }
             AMCloudCompleteOnMain(completion, nil,
                 responseError ?: AMCloudError(response.statusCode, @"下载云端插件失败"));
             return;
@@ -1159,9 +1151,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     NSString *activationToken = token;
     __weak typeof(self) weakSelf = self;
     [self.manager.client activateIOSSession:^(__unused id data, NSError *error) {
-        if (error.code == 401 || error.code == 403) {
-            AMCloudInvalidateToken(activationToken);
-        }
         NSString *activeToken = AMCloudReadToken();
         BOOL activationIsCurrent = [activeToken isEqualToString:activationToken];
         if (!error && activationIsCurrent) {
@@ -1373,11 +1362,16 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.importHandler = importHandler;
     NSString *startupToken = nil;
     uint64_t startupGeneration = 0;
-    AMCloudReadAuthContext(&startupToken, &startupGeneration, NULL);
+    NSString *startupAuthorizationKey = nil;
+    AMCloudReadAuthContext(&startupToken, &startupGeneration,
+                           &startupAuthorizationKey);
     if (!startupToken.length) {
         AMCloudPluginsRemoveAllIf(^BOOL{
             return AMCloudAuthMatches(nil, startupGeneration);
         });
+    } else {
+        AMCloudPluginsRestoreInstalledReleaseForAuthorization(
+            startupAuthorizationKey, startupGeneration);
     }
     AMCloudPluginsInstallBundleHooks();
     AMCloudInstallProjectsHooks();
@@ -2455,7 +2449,15 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 
 void AMCloudSyncInstallPluginHooksEarly(void) {
+    NSString *token = nil;
+    NSString *authorizationKey = nil;
+    uint64_t authorizationGeneration = 0;
+    AMCloudReadAuthContext(&token, &authorizationGeneration, &authorizationKey);
     AMCloudPluginsInstallBundleHooks();
+    if (token.length) {
+        AMCloudPluginsRestoreInstalledReleaseForAuthorization(
+            authorizationKey, authorizationGeneration);
+    }
 }
 
 void AMCloudSyncInstall(AMCloudImportHandler importHandler) {
