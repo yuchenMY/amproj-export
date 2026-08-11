@@ -10,13 +10,17 @@ static NSString *const AMCloudBundleHookGuardKey = @"AMCloudBundleHookGuard";
 
 typedef NSArray<NSURL *> *(*AMCloudBundleURLsIMP)(id, SEL, NSString *, NSString *);
 typedef NSURL *(*AMCloudBundleURLIMP)(id, SEL, NSString *, NSString *, NSString *);
+typedef NSURL *(*AMCloudBundleURLSimpleIMP)(id, SEL, NSString *, NSString *);
 typedef NSArray<NSString *> *(*AMCloudBundlePathsIMP)(id, SEL, NSString *, NSString *);
 typedef NSString *(*AMCloudBundlePathIMP)(id, SEL, NSString *, NSString *, NSString *);
+typedef NSString *(*AMCloudBundlePathSimpleIMP)(id, SEL, NSString *, NSString *);
 
 static AMCloudBundleURLsIMP AMCloudOriginalBundleURLs = NULL;
 static AMCloudBundleURLIMP AMCloudOriginalBundleURL = NULL;
+static AMCloudBundleURLSimpleIMP AMCloudOriginalBundleURLSimple = NULL;
 static AMCloudBundlePathsIMP AMCloudOriginalBundlePaths = NULL;
 static AMCloudBundlePathIMP AMCloudOriginalBundlePath = NULL;
+static AMCloudBundlePathSimpleIMP AMCloudOriginalBundlePathSimple = NULL;
 static NSURL *AMCloudActiveEffectsURL = nil;
 static NSDictionary<NSString *, id> *AMCloudActiveState = nil;
 static uint64_t AMCloudAuthorizationGeneration = 0;
@@ -187,6 +191,31 @@ static BOOL AMCloudPluginsActivatePersistedState(NSString *releaseID, NSString *
     return YES;
 }
 
+BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization(
+    NSString *authorizationKey, uint64_t authorizationGeneration) {
+    if (!AMCloudPluginAuthorizationKeyIsSafe(authorizationKey) ||
+        authorizationGeneration == 0) return NO;
+    __block BOOL restored = NO;
+    AMCloudPluginsPerformMutation(^{
+        NSData *data = [NSData dataWithContentsOfURL:AMCloudPluginsStateURL()];
+        id object = data.length
+            ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        NSDictionary *state = [object isKindOfClass:NSDictionary.class] ? object : nil;
+        NSString *releaseID = [state[@"release_id"] isKindOfClass:NSString.class]
+            ? state[@"release_id"] : nil;
+        NSString *sha256 = [state[@"sha256"] isKindOfClass:NSString.class]
+            ? [state[@"sha256"] lowercaseString] : nil;
+        NSString *storedKey = [state[@"authorization_key"] isKindOfClass:NSString.class]
+            ? [state[@"authorization_key"] lowercaseString] : nil;
+        if (!AMCloudPluginReleaseIDIsSafe(releaseID) ||
+            !AMCloudPluginAuthorizationKeyIsSafe(sha256) ||
+            ![storedKey isEqualToString:authorizationKey.lowercaseString]) return;
+        restored = AMCloudPluginsActivatePersistedState(
+            releaseID, sha256, authorizationKey, authorizationGeneration);
+    });
+    return restored;
+}
+
 static NSString *AMCloudPluginsRelativeDirectory(NSString *subdirectory) {
     if (![subdirectory isKindOfClass:NSString.class] || !subdirectory.length ||
         [subdirectory hasPrefix:@"/"] || [subdirectory hasPrefix:@"\\"]) return nil;
@@ -223,6 +252,22 @@ static NSURL *AMCloudPluginsActiveDirectoryURL(NSString *subdirectory) {
     if (![directoryURL getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil] ||
         !directory.boolValue) return nil;
     return directoryURL;
+}
+
+static NSURL *AMCloudPluginsBuiltinEffectsRootURL(NSString *name,
+                                                   NSString *extension) {
+    if (![name isKindOfClass:NSString.class] || !name.length || extension.length ||
+        [name caseInsensitiveCompare:@"BuiltinEffects"] != NSOrderedSame) return nil;
+    NSURL *effectsURL = nil;
+    @synchronized (NSBundle.class) {
+        if (AMCloudActiveAuthorizationGeneration == AMCloudAuthorizationGeneration) {
+            effectsURL = AMCloudActiveEffectsURL;
+        }
+    }
+    NSNumber *directory = nil;
+    if (![effectsURL getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil] ||
+        !directory.boolValue) return nil;
+    return effectsURL;
 }
 
 static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *extension) {
@@ -341,13 +386,35 @@ static NSURL *AMCloudBundleURLHook(id self, SEL selector, NSString *name,
             ? AMCloudOriginalBundleURL(self, selector, name, extension, subdirectory) : nil;
     }
     @try {
-        if (self == NSBundle.mainBundle &&
-            AMCloudPluginsRelativeDirectory(subdirectory)) {
-            NSURL *cloud = AMCloudPluginsResourceURL(name, extension, subdirectory);
-            if (cloud) return cloud;
+        if (self == NSBundle.mainBundle) {
+            NSURL *root = !subdirectory.length
+                ? AMCloudPluginsBuiltinEffectsRootURL(name, extension) : nil;
+            if (root) return root;
+            if (AMCloudPluginsRelativeDirectory(subdirectory)) {
+                NSURL *cloud = AMCloudPluginsResourceURL(name, extension, subdirectory);
+                if (cloud) return cloud;
+            }
         }
         return AMCloudOriginalBundleURL
             ? AMCloudOriginalBundleURL(self, selector, name, extension, subdirectory) : nil;
+    } @finally {
+        AMCloudPluginsLeaveBundleHook();
+    }
+}
+
+static NSURL *AMCloudBundleURLSimpleHook(id self, SEL selector, NSString *name,
+                                         NSString *extension) {
+    if (!AMCloudPluginsEnterBundleHook()) {
+        return AMCloudOriginalBundleURLSimple
+            ? AMCloudOriginalBundleURLSimple(self, selector, name, extension) : nil;
+    }
+    @try {
+        if (self == NSBundle.mainBundle) {
+            NSURL *root = AMCloudPluginsBuiltinEffectsRootURL(name, extension);
+            if (root) return root;
+        }
+        return AMCloudOriginalBundleURLSimple
+            ? AMCloudOriginalBundleURLSimple(self, selector, name, extension) : nil;
     } @finally {
         AMCloudPluginsLeaveBundleHook();
     }
@@ -389,13 +456,35 @@ static NSString *AMCloudBundlePathHook(id self, SEL selector, NSString *name,
             ? AMCloudOriginalBundlePath(self, selector, name, extension, subdirectory) : nil;
     }
     @try {
-        if (self == NSBundle.mainBundle &&
-            AMCloudPluginsRelativeDirectory(subdirectory)) {
-            NSURL *cloud = AMCloudPluginsResourceURL(name, extension, subdirectory);
-            if (cloud.path.length) return cloud.path;
+        if (self == NSBundle.mainBundle) {
+            NSURL *root = !subdirectory.length
+                ? AMCloudPluginsBuiltinEffectsRootURL(name, extension) : nil;
+            if (root.path.length) return root.path;
+            if (AMCloudPluginsRelativeDirectory(subdirectory)) {
+                NSURL *cloud = AMCloudPluginsResourceURL(name, extension, subdirectory);
+                if (cloud.path.length) return cloud.path;
+            }
         }
         return AMCloudOriginalBundlePath
             ? AMCloudOriginalBundlePath(self, selector, name, extension, subdirectory) : nil;
+    } @finally {
+        AMCloudPluginsLeaveBundleHook();
+    }
+}
+
+static NSString *AMCloudBundlePathSimpleHook(id self, SEL selector, NSString *name,
+                                             NSString *extension) {
+    if (!AMCloudPluginsEnterBundleHook()) {
+        return AMCloudOriginalBundlePathSimple
+            ? AMCloudOriginalBundlePathSimple(self, selector, name, extension) : nil;
+    }
+    @try {
+        if (self == NSBundle.mainBundle) {
+            NSString *root = AMCloudPluginsBuiltinEffectsRootURL(name, extension).path;
+            if (root.length) return root;
+        }
+        return AMCloudOriginalBundlePathSimple
+            ? AMCloudOriginalBundlePathSimple(self, selector, name, extension) : nil;
     } @finally {
         AMCloudPluginsLeaveBundleHook();
     }
@@ -422,12 +511,20 @@ void AMCloudPluginsInstallBundleHooks(void) {
         AMCloudOriginalBundleURL = (AMCloudBundleURLIMP)AMCloudPluginsInstallHook(
             bundleClass, @selector(URLForResource:withExtension:subdirectory:),
             (IMP)AMCloudBundleURLHook);
+        AMCloudOriginalBundleURLSimple =
+            (AMCloudBundleURLSimpleIMP)AMCloudPluginsInstallHook(
+                bundleClass, @selector(URLForResource:withExtension:),
+                (IMP)AMCloudBundleURLSimpleHook);
         AMCloudOriginalBundlePaths = (AMCloudBundlePathsIMP)AMCloudPluginsInstallHook(
             bundleClass, @selector(pathsForResourcesOfType:inDirectory:),
             (IMP)AMCloudBundlePathsHook);
         AMCloudOriginalBundlePath = (AMCloudBundlePathIMP)AMCloudPluginsInstallHook(
             bundleClass, @selector(pathForResource:ofType:inDirectory:),
             (IMP)AMCloudBundlePathHook);
+        AMCloudOriginalBundlePathSimple =
+            (AMCloudBundlePathSimpleIMP)AMCloudPluginsInstallHook(
+                bundleClass, @selector(pathForResource:ofType:),
+                (IMP)AMCloudBundlePathSimpleHook);
     });
 }
 
