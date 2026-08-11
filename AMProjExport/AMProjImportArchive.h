@@ -75,4 +75,17 @@ FOUNDATION_EXPORT BOOL AMProjNormalizeProjectArchive(
     NSDictionary<NSString *, id> * _Nullable * _Nullable metrics,
     NSError * _Nullable * _Nullable error);
 
+/**
+ Extracts a validated cloud-plugin ZIP into `destinationURL`. Every entry must
+ live below a single `BuiltinEffects/` root and files are limited to the effect
+ formats used by this Alight Motion build: XML, PNG, JPG, and WebP. The same
+ ZIP32, path, overlap, size, decompression, and CRC checks used by project
+ imports are applied before the destination becomes visible to the caller.
+ */
+FOUNDATION_EXPORT BOOL AMProjExtractPluginArchive(
+    NSURL *archiveURL,
+    NSURL *destinationURL,
+    NSDictionary<NSString *, id> * _Nullable * _Nullable metrics,
+    NSError * _Nullable * _Nullable error);
+
 NS_ASSUME_NONNULL_END

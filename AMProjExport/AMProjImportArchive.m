@@ -765,6 +765,151 @@ static BOOL AMProjImportExtractEntry(int sourceFD, AMProjImportEntry *entry,
     return YES;
 }
 
+BOOL AMProjExtractPluginArchive(NSURL *archiveURL, NSURL *destinationURL,
+                                NSDictionary<NSString *, id> **metrics,
+                                NSError **error) {
+    if (metrics) *metrics = nil;
+    if (error) *error = nil;
+    if (![archiveURL isKindOfClass:NSURL.class] || !archiveURL.isFileURL ||
+        ![destinationURL isKindOfClass:NSURL.class] || !destinationURL.isFileURL) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidArgument,
+                                @"Plugin archive and destination must be local file URLs", nil);
+    }
+
+    int sourceFD = open(archiveURL.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
+    if (sourceFD < 0) {
+        return AMProjImportFail(error, AMProjImportArchiveErrorSourceUnavailable,
+                                @"Unable to open the cloud plugin archive",
+                                @{ @"errno": @(errno), @"path": archiveURL.path ?: @"" });
+    }
+    struct stat sourceStat = {0};
+    if (fstat(sourceFD, &sourceStat) != 0 || !S_ISREG(sourceStat.st_mode) ||
+        sourceStat.st_size < 22 ||
+        (uint64_t)sourceStat.st_size > kAMProjImportMaximumArchiveBytes) {
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorSourceUnavailable,
+                                @"The cloud plugin archive is not a supported regular ZIP file",
+                                @{ @"bytes": sourceStat.st_size > 0 ? @(sourceStat.st_size) : @0 });
+    }
+
+    uint64_t centralOffset = 0;
+    uint64_t compressedTotal = 0;
+    uint64_t uncompressedTotal = 0;
+    NSArray<AMProjImportEntry *> *entries = AMProjImportReadDirectory(
+        sourceFD, (uint64_t)sourceStat.st_size, &centralOffset,
+        &compressedTotal, &uncompressedTotal, error);
+    if (!entries || !AMProjImportValidateLocalHeaders(sourceFD, entries, centralOffset, error)) {
+        close(sourceFD);
+        return NO;
+    }
+
+    NSSet<NSString *> *allowedExtensions = [NSSet setWithArray:@[
+        @"xml", @"png", @"jpg", @"webp"
+    ]];
+    NSUInteger fileCount = 0;
+    NSUInteger directoryCount = 0;
+    NSUInteger xmlCount = 0;
+    for (AMProjImportEntry *entry in entries) {
+        BOOL rootDirectory = entry.directory &&
+            [entry.name caseInsensitiveCompare:@"BuiltinEffects"] == NSOrderedSame;
+        BOOL belowRoot = entry.name.length > @"BuiltinEffects/".length &&
+            [[entry.name substringToIndex:@"BuiltinEffects/".length]
+                caseInsensitiveCompare:@"BuiltinEffects/"] == NSOrderedSame;
+        if (!rootDirectory && !belowRoot) {
+            close(sourceFD);
+            return AMProjImportFail(error, AMProjImportArchiveErrorUnsafeEntry,
+                                    @"Cloud plugin entries must be inside BuiltinEffects",
+                                    @{ @"entry": entry.name ?: @"" });
+        }
+        if (entry.directory) {
+            directoryCount++;
+            continue;
+        }
+        NSString *extension = entry.name.pathExtension.lowercaseString;
+        if (![allowedExtensions containsObject:extension]) {
+            close(sourceFD);
+            return AMProjImportFail(error, AMProjImportArchiveErrorUnsupportedZIP,
+                                    @"Cloud plugin archive contains an unsupported file type",
+                                    @{ @"entry": entry.name ?: @"",
+                                       @"extension": extension ?: @"" });
+        }
+        if (entry.uncompressedSize == 0) {
+            close(sourceFD);
+            return AMProjImportFail(error, AMProjImportArchiveErrorIntegrity,
+                                    @"Cloud plugin archive contains an empty file",
+                                    @{ @"entry": entry.name ?: @"" });
+        }
+        fileCount++;
+        if ([extension isEqualToString:@"xml"]) {
+            if (entry.uncompressedSize > kAMProjImportMaximumXMLBytes) {
+                close(sourceFD);
+                return AMProjImportFail(error, AMProjImportArchiveErrorLimitExceeded,
+                                        @"A cloud plugin XML file is too large",
+                                        @{ @"entry": entry.name ?: @"",
+                                           @"xml_bytes": @(entry.uncompressedSize) });
+            }
+            xmlCount++;
+        }
+    }
+    if (xmlCount == 0) {
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
+                                @"Cloud plugin archive must contain at least one effect XML", nil);
+    }
+
+    NSFileManager *manager = NSFileManager.defaultManager;
+    if ([manager fileExistsAtPath:destinationURL.path]) {
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorInvalidArgument,
+                                @"Cloud plugin extraction destination already exists", nil);
+    }
+    NSError *fileError = nil;
+    if (![manager createDirectoryAtURL:destinationURL.URLByDeletingLastPathComponent
+            withIntermediateDirectories:YES attributes:nil error:&fileError] ||
+        ![manager createDirectoryAtURL:destinationURL
+            withIntermediateDirectories:NO attributes:nil error:&fileError]) {
+        close(sourceFD);
+        return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                @"Unable to create the cloud plugin extraction directory",
+                                @{ @"reason": fileError.localizedDescription ?: @"" });
+    }
+
+    BOOL extracted = YES;
+    for (AMProjImportEntry *entry in entries) {
+        if (!AMProjImportExtractEntry(sourceFD, entry, destinationURL, error)) {
+            extracted = NO;
+            break;
+        }
+    }
+    close(sourceFD);
+    if (!extracted) {
+        [manager removeItemAtURL:destinationURL error:nil];
+        return NO;
+    }
+    NSURL *effectsURL = [destinationURL URLByAppendingPathComponent:@"BuiltinEffects"
+                                                         isDirectory:YES];
+    NSNumber *isDirectory = nil;
+    if (![effectsURL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:&fileError] ||
+        !isDirectory.boolValue) {
+        [manager removeItemAtURL:destinationURL error:nil];
+        return AMProjImportFail(error, AMProjImportArchiveErrorExtractionIO,
+                                @"Cloud plugin archive did not create BuiltinEffects",
+                                @{ @"reason": fileError.localizedDescription ?: @"" });
+    }
+    if (metrics) {
+        *metrics = @{
+            @"entry_count": @(entries.count),
+            @"file_count": @(fileCount),
+            @"directory_count": @(directoryCount),
+            @"xml_count": @(xmlCount),
+            @"archive_bytes": @((uint64_t)sourceStat.st_size),
+            @"compressed_bytes": @(compressedTotal),
+            @"uncompressed_bytes": @(uncompressedTotal)
+        };
+    }
+    return YES;
+}
+
 static BOOL AMProjImportEntryIsXML(AMProjImportEntry *entry) {
     return [entry.name.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame;
 }

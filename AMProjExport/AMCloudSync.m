@@ -1,4 +1,5 @@
 #import "AMCloudSync.h"
+#import "AMCloudPlugins.h"
 #import "AMDebugTransport.h"
 
 #import <CommonCrypto/CommonDigest.h>
@@ -12,6 +13,7 @@ static NSString *const AMCloudKeychainAccount = @"bearer-token";
 static NSString *const AMCloudDeviceKeychainAccount = @"ios-device-id";
 static NSString *const AMCloudErrorDomain = @"com.ayakameow.amproj.cloud";
 static NSString *const AMCloudAccountEntryIdentifier = @"AMCloudAccountEntry";
+static NSString *const AMCloudTokenChangedNotification = @"AMCloudTokenChangedNotification";
 
 typedef void (^AMCloudResult)(id _Nullable data, NSError * _Nullable error);
 
@@ -37,7 +39,38 @@ static void AMCloudCompleteOnMain(AMCloudResult completion, id data, NSError *er
     });
 }
 
-static NSString *AMCloudReadToken(void) {
+static void *AMCloudAuthQueueKey = &AMCloudAuthQueueKey;
+static uint64_t AMCloudAuthGeneration = 1;
+static BOOL AMCloudAuthInitialized = NO;
+
+static dispatch_queue_t AMCloudAuthQueue(void) {
+    static dispatch_queue_t queue = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.ayakameow.amproj.cloud-auth",
+                                      DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(queue, AMCloudAuthQueueKey,
+                                    AMCloudAuthQueueKey, NULL);
+    });
+    return queue;
+}
+
+static void AMCloudAuthPerformSync(dispatch_block_t block) {
+    if (!block) return;
+    if (dispatch_get_specific(AMCloudAuthQueueKey)) {
+        block();
+    } else {
+        dispatch_sync(AMCloudAuthQueue(), block);
+    }
+}
+
+static void AMCloudAuthInitializeUnlocked(void) {
+    if (AMCloudAuthInitialized) return;
+    AMCloudAuthInitialized = YES;
+    AMCloudPluginsSetAuthorizationGeneration(AMCloudAuthGeneration);
+}
+
+static NSString *AMCloudReadTokenUnlocked(void) {
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: AMCloudKeychainService,
@@ -53,8 +86,7 @@ static NSString *AMCloudReadToken(void) {
     return token.length ? token : nil;
 }
 
-static BOOL AMCloudWriteToken(NSString *token) {
-    if (!token.length) return NO;
+static BOOL AMCloudWriteTokenUnlocked(NSString *token) {
     NSData *data = [token dataUsingEncoding:NSUTF8StringEncoding];
     NSDictionary *identity = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
@@ -76,13 +108,158 @@ static BOOL AMCloudWriteToken(NSString *token) {
     return status == errSecSuccess;
 }
 
-static void AMCloudDeleteToken(void) {
+static OSStatus AMCloudDeleteTokenUnlocked(void) {
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: AMCloudKeychainService,
         (__bridge id)kSecAttrAccount: AMCloudKeychainAccount
     };
-    SecItemDelete((__bridge CFDictionaryRef)query);
+    return SecItemDelete((__bridge CFDictionaryRef)query);
+}
+
+static NSString *AMCloudTokenAuthorizationKey(NSString *token) {
+    if (!token.length) return @"";
+    NSData *data = [token dataUsingEncoding:NSUTF8StringEncoding];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
+        [hex appendFormat:@"%02x", digest[index]];
+    }
+    return hex;
+}
+
+static void AMCloudReadAuthContext(NSString **token, uint64_t *generation,
+                                   NSString **authorizationKey) {
+    __block NSString *currentToken = nil;
+    __block uint64_t currentGeneration = 0;
+    AMCloudAuthPerformSync(^{
+        AMCloudAuthInitializeUnlocked();
+        currentToken = AMCloudReadTokenUnlocked();
+        currentGeneration = AMCloudAuthGeneration;
+    });
+    if (token) *token = currentToken;
+    if (generation) *generation = currentGeneration;
+    if (authorizationKey) *authorizationKey = AMCloudTokenAuthorizationKey(currentToken);
+}
+
+static NSString *AMCloudReadToken(void) {
+    NSString *token = nil;
+    AMCloudReadAuthContext(&token, NULL, NULL);
+    return token;
+}
+
+static BOOL AMCloudAuthMatches(NSString *token, uint64_t generation) {
+    __block BOOL matches = NO;
+    AMCloudAuthPerformSync(^{
+        AMCloudAuthInitializeUnlocked();
+        NSString *currentToken = AMCloudReadTokenUnlocked();
+        matches = AMCloudAuthGeneration == generation &&
+            ((token.length && [currentToken isEqualToString:token]) ||
+             (!token.length && !currentToken.length));
+    });
+    return matches;
+}
+
+static BOOL AMCloudCommitIfAuthMatches(NSString *token, uint64_t generation,
+                                       dispatch_block_t commit) {
+    __block BOOL committed = NO;
+    AMCloudAuthPerformSync(^{
+        AMCloudAuthInitializeUnlocked();
+        if (AMCloudAuthGeneration != generation ||
+            ![AMCloudReadTokenUnlocked() isEqualToString:token]) return;
+        commit();
+        committed = YES;
+    });
+    return committed;
+}
+
+static void AMCloudPostTokenChanged(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSNotificationCenter.defaultCenter
+            postNotificationName:AMCloudTokenChangedNotification object:nil];
+    });
+}
+
+static void AMCloudCleanupPluginsForAuth(NSString *token, uint64_t generation,
+                                         BOOL notifyTokenChange) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL cleared = AMCloudPluginsRemoveAllIf(^BOOL{
+            return AMCloudAuthMatches(token, generation);
+        });
+        if (cleared && notifyTokenChange) AMCloudPostTokenChanged();
+    });
+}
+
+static BOOL AMCloudWriteToken(NSString *token) {
+    if (!token.length) return NO;
+    __block BOOL stored = NO;
+    __block BOOL changed = NO;
+    __block uint64_t generation = 0;
+    AMCloudAuthPerformSync(^{
+        AMCloudAuthInitializeUnlocked();
+        NSString *previousToken = AMCloudReadTokenUnlocked();
+        stored = AMCloudWriteTokenUnlocked(token);
+        changed = stored && ![previousToken isEqualToString:token];
+        if (changed) {
+            generation = ++AMCloudAuthGeneration;
+            AMCloudPluginsSetAuthorizationGeneration(generation);
+        }
+    });
+    if (changed) {
+        AMCloudCleanupPluginsForAuth(token, generation, YES);
+    }
+    return stored;
+}
+
+static BOOL AMCloudDeleteTokenMatching(NSString *expectedToken, BOOL requireMatch) {
+    __block BOOL matched = NO;
+    __block BOOL hadToken = NO;
+    __block BOOL deleted = NO;
+    __block OSStatus deleteStatus = errSecSuccess;
+    __block uint64_t generation = 0;
+    AMCloudAuthPerformSync(^{
+        AMCloudAuthInitializeUnlocked();
+        NSString *currentToken = AMCloudReadTokenUnlocked();
+        matched = !requireMatch ||
+            (expectedToken.length && [currentToken isEqualToString:expectedToken]);
+        if (!matched) return;
+        hadToken = currentToken.length > 0;
+        if (hadToken) {
+            deleteStatus = AMCloudDeleteTokenUnlocked();
+            deleted = deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound;
+            if (!deleted) return;
+            generation = ++AMCloudAuthGeneration;
+            AMCloudPluginsSetAuthorizationGeneration(generation);
+        } else {
+            deleted = YES;
+            generation = AMCloudAuthGeneration;
+        }
+    });
+    if (!matched || !deleted) {
+        if (matched && deleteStatus != errSecSuccess && deleteStatus != errSecItemNotFound) {
+            AMCloudDiagnostic(@"cloud.token.delete_failed", @{ @"status": @(deleteStatus) });
+        }
+        return NO;
+    }
+    AMCloudCleanupPluginsForAuth(nil, generation, hadToken);
+    return YES;
+}
+
+static void AMCloudDeleteToken(void) {
+    AMCloudDeleteTokenMatching(nil, NO);
+}
+
+static void AMCloudInvalidateToken(NSString *token) {
+    if (!token.length) return;
+    AMCloudDeleteTokenMatching(token, YES);
+}
+
+static void AMCloudInvalidateTokenForRequest(NSURLRequest *request) {
+    NSString *authorization = [request valueForHTTPHeaderField:@"Authorization"];
+    NSString *prefix = @"Bearer ";
+    if (![authorization hasPrefix:prefix]) return;
+    AMCloudInvalidateToken([authorization substringFromIndex:prefix.length]);
 }
 
 static BOOL AMCloudIsValidDeviceIdentifier(NSString *identifier) {
@@ -298,6 +475,8 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)logout:(AMCloudResult)completion;
 - (void)activateIOSSession:(AMCloudResult)completion;
 - (void)authorizeFeature:(NSString *)feature completion:(AMCloudResult)completion;
+- (void)loadPluginManifest:(AMCloudResult)completion;
+- (void)downloadPluginRelease:(NSDictionary *)release completion:(AMCloudResult)completion;
 - (void)loadProjects:(AMCloudResult)completion;
 - (void)createProject:(NSString *)title completion:(AMCloudResult)completion;
 - (void)uploadFile:(NSURL *)fileURL projectID:(NSString *)projectID
@@ -388,7 +567,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             ? (NSHTTPURLResponse *)rawResponse : nil;
         NSError *responseError = nil;
         NSDictionary *payload = AMCloudEnvelope(data, response, &responseError);
-        if (response.statusCode == 401 && authenticated) AMCloudDeleteToken();
+        if (response.statusCode == 401 && authenticated) {
+            AMCloudInvalidateTokenForRequest(request);
+        }
         AMCloudCompleteOnMain(completion, payload, responseError);
     }] resume];
 }
@@ -425,9 +606,10 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 }
 
 - (void)logout:(AMCloudResult)completion {
+    NSString *logoutToken = AMCloudReadToken();
     [self performMethod:@"POST" path:@"/auth/logout" body:@{}
           authenticated:YES completion:^(id data, NSError *error) {
-        AMCloudDeleteToken();
+        AMCloudInvalidateToken(logoutToken);
         if (completion) completion(data, error);
     }];
 }
@@ -500,7 +682,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
                 ? (NSHTTPURLResponse *)rawResponse : nil;
             NSError *responseError = nil;
             NSDictionary *payload = AMCloudEnvelope(data, response, &responseError);
-            if (response.statusCode == 401) AMCloudDeleteToken();
+            if (response.statusCode == 401) {
+                AMCloudInvalidateTokenForRequest(request);
+            }
             AMCloudCompleteOnMain(completion, payload, responseError);
         }] resume];
     });
@@ -535,7 +719,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
             NSError *responseError = nil;
             AMCloudEnvelope(errorData, response, &responseError);
-            if (response.statusCode == 401) AMCloudDeleteToken();
+            if (response.statusCode == 401) {
+                AMCloudInvalidateTokenForRequest(request);
+            }
             AMCloudCompleteOnMain(completion, nil,
                 responseError ?: AMCloudError(response.statusCode, @"下载云工程失败"));
             return;
@@ -643,6 +829,10 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic, copy) AMCloudImportHandler importHandler;
 @property(nonatomic, weak) UIViewController *lastProjectsController;
 @property(nonatomic, weak) UIViewController *accountController;
+@property(nonatomic, strong) NSTimer *pluginSyncTimer;
+@property(nonatomic) BOOL pluginSyncInstalled;
+@property(nonatomic) BOOL pluginSyncInFlight;
+@property(nonatomic) BOOL pluginSyncPending;
 + (instancetype)shared;
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
@@ -682,6 +872,8 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)confirmDeleteProject:(NSDictionary *)project
                    presenter:(UIViewController *)presenter;
 - (void)reloadAccountControllerIfSupported;
+- (void)syncPluginsNow:(NSString *)reason;
+- (void)finishPluginSync;
 @end
 
 @interface AMCloudAccountWebViewController : UIViewController
@@ -879,14 +1071,19 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         [self loadAccountWebsiteWithToken:nil activationError:nil];
         return;
     }
+    NSString *activationToken = token;
     __weak typeof(self) weakSelf = self;
     [self.manager.client activateIOSSession:^(__unused id data, NSError *error) {
-        NSString *activeToken = AMCloudReadToken();
         if (error.code == 401 || error.code == 403) {
-            AMCloudDeleteToken();
-            activeToken = nil;
+            AMCloudInvalidateToken(activationToken);
         }
-        [weakSelf loadAccountWebsiteWithToken:activeToken activationError:error];
+        NSString *activeToken = AMCloudReadToken();
+        BOOL activationIsCurrent = [activeToken isEqualToString:activationToken];
+        if (!error && activationIsCurrent) {
+            [weakSelf.manager syncPluginsNow:@"account_activation"];
+        }
+        NSError *activeError = activationIsCurrent || !activeToken.length ? error : nil;
+        [weakSelf loadAccountWebsiteWithToken:activeToken activationError:activeError];
     }];
 }
 
@@ -997,6 +1194,91 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     });
 }
 
+- (void)loadPluginManifest:(AMCloudResult)completion {
+    [self performMethod:@"GET" path:@"/ios/plugins/manifest" body:nil
+          authenticated:YES completion:completion];
+}
+
+- (void)downloadPluginRelease:(NSDictionary *)release completion:(AMCloudResult)completion {
+    NSString *releaseID = [release[@"id"] isKindOfClass:NSString.class]
+        ? release[@"id"] : nil;
+    NSString *expectedSHA = [release[@"sha256"] isKindOfClass:NSString.class]
+        ? [release[@"sha256"] lowercaseString] : nil;
+    NSNumber *expectedSize = [release[@"sizeBytes"] isKindOfClass:NSNumber.class]
+        ? release[@"sizeBytes"] : nil;
+    if (!releaseID.length || expectedSHA.length != 64 || expectedSize.longLongValue <= 0) {
+        AMCloudCompleteOnMain(completion, nil,
+            AMCloudError(22, @"云端插件版本信息不完整"));
+        return;
+    }
+    NSString *path = [NSString stringWithFormat:@"/ios/plugins/releases/%@/download", releaseID];
+    NSError *requestError = nil;
+    NSMutableURLRequest *request = [self requestMethod:@"GET" path:path body:nil
+                                          authenticated:YES error:&requestError];
+    if (!request) {
+        AMCloudCompleteOnMain(completion, nil, requestError);
+        return;
+    }
+    request.timeoutInterval = 15 * 60;
+    [[self.session downloadTaskWithRequest:request
+                         completionHandler:^(NSURL *temporaryURL, NSURLResponse *rawResponse,
+                                             NSError *networkError) {
+        NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
+            ? (NSHTTPURLResponse *)rawResponse : nil;
+        if (networkError) {
+            AMCloudCompleteOnMain(completion, nil, networkError);
+            return;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+            NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
+            NSError *responseError = nil;
+            AMCloudEnvelope(errorData, response, &responseError);
+            if (response.statusCode == 401) {
+                AMCloudInvalidateTokenForRequest(request);
+            }
+            AMCloudCompleteOnMain(completion, nil,
+                responseError ?: AMCloudError(response.statusCode, @"下载云端插件失败"));
+            return;
+        }
+        NSError *hashError = nil;
+        NSString *actualSHA = temporaryURL ? AMCloudSHA256(temporaryURL, &hashError) : nil;
+        NSNumber *actualSize = nil;
+        [temporaryURL getResourceValue:&actualSize forKey:NSURLFileSizeKey error:&hashError];
+        NSString *headerSHA = [[response valueForHTTPHeaderField:@"X-AM-Plugin-SHA256"]
+            lowercaseString];
+        BOOL headerMismatch = headerSHA.length &&
+            [headerSHA caseInsensitiveCompare:expectedSHA] != NSOrderedSame;
+        if (!temporaryURL || hashError || !actualSHA.length || headerMismatch ||
+            [actualSHA caseInsensitiveCompare:expectedSHA] != NSOrderedSame ||
+            actualSize.longLongValue != expectedSize.longLongValue) {
+            AMCloudCompleteOnMain(completion, nil,
+                hashError ?: AMCloudError(23, @"云端插件文件校验失败"));
+            return;
+        }
+        NSURL *downloadsURL = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+            URLByAppendingPathComponent:@"AMCloudPluginDownloads" isDirectory:YES];
+        NSError *fileError = nil;
+        if (![NSFileManager.defaultManager createDirectoryAtURL:downloadsURL
+                                    withIntermediateDirectories:YES attributes:nil
+                                                         error:&fileError]) {
+            AMCloudCompleteOnMain(completion, nil, fileError);
+            return;
+        }
+        NSURL *destinationURL = [downloadsURL URLByAppendingPathComponent:
+            [[NSUUID.UUID.UUIDString lowercaseString] stringByAppendingPathExtension:@"zip"]];
+        if (![NSFileManager.defaultManager moveItemAtURL:temporaryURL
+                                                   toURL:destinationURL error:&fileError]) {
+            AMCloudCompleteOnMain(completion, nil, fileError);
+            return;
+        }
+        AMCloudCompleteOnMain(completion, @{
+            @"url": destinationURL,
+            @"cleanup": destinationURL,
+            @"release": release
+        }, nil);
+    }] resume];
+}
+
 - (void)webView:(WKWebView *)webView
     decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
                     decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
@@ -1089,11 +1371,35 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler {
     self.importHandler = importHandler;
+    NSString *startupToken = nil;
+    NSString *authorizationKey = nil;
+    uint64_t startupGeneration = 0;
+    AMCloudReadAuthContext(&startupToken, &startupGeneration, &authorizationKey);
+    if (!startupToken.length) {
+        AMCloudPluginsRemoveAllIf(^BOOL{
+            return AMCloudAuthMatches(nil, startupGeneration);
+        });
+    }
+    AMCloudPluginsInstallBundleHooks(authorizationKey ?: @"");
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
     [NSNotificationCenter.defaultCenter
         addObserver:self selector:@selector(applicationDidBecomeActive:)
                name:UIApplicationDidBecomeActiveNotification object:nil];
+    if (!self.pluginSyncInstalled) {
+        self.pluginSyncInstalled = YES;
+        [NSNotificationCenter.defaultCenter
+            addObserver:self selector:@selector(pluginTokenChanged:)
+                   name:AMCloudTokenChangedNotification object:nil];
+        self.pluginSyncTimer = [NSTimer scheduledTimerWithTimeInterval:60.0
+            target:self selector:@selector(pluginSyncTimerFired:)
+            userInfo:nil repeats:YES];
+        self.pluginSyncTimer.tolerance = 10.0;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            [self syncPluginsNow:@"install"];
+        });
+    }
     for (NSNumber *delay in @[@0, @1, @3]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
@@ -1108,6 +1414,153 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     (void)notification;
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
+    [self syncPluginsNow:@"did_become_active"];
+}
+
+- (void)pluginTokenChanged:(NSNotification *)notification {
+    (void)notification;
+    if (!AMCloudReadToken().length) return;
+    [self syncPluginsNow:@"token_changed"];
+}
+
+- (void)pluginSyncTimerFired:(NSTimer *)timer {
+    (void)timer;
+    if (UIApplication.sharedApplication.applicationState == UIApplicationStateActive) {
+        [self syncPluginsNow:@"foreground_timer"];
+    }
+}
+
+- (void)syncPluginsNow:(NSString *)reason {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self syncPluginsNow:reason];
+        });
+        return;
+    }
+    NSString *token = nil;
+    NSString *authorizationKey = nil;
+    uint64_t authorizationGeneration = 0;
+    AMCloudReadAuthContext(&token, &authorizationGeneration, &authorizationKey);
+    if (!token.length) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            AMCloudPluginsRemoveAllIf(^BOOL{
+                return AMCloudAuthMatches(nil, authorizationGeneration);
+            });
+        });
+        return;
+    }
+    if (self.pluginSyncInFlight) {
+        self.pluginSyncPending = YES;
+        return;
+    }
+    self.pluginSyncInFlight = YES;
+    AMCloudDiagnostic(@"cloud.plugins.sync_begin", @{ @"reason": reason ?: @"unknown" });
+    __weak typeof(self) weakSelf = self;
+    [self.client loadPluginManifest:^(NSDictionary *manifest, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if (!AMCloudAuthMatches(token, authorizationGeneration)) {
+            [self finishPluginSync];
+            return;
+        }
+        if (error) {
+            AMCloudDiagnostic(@"cloud.plugins.manifest_failed", @{
+                @"reason": reason ?: @"unknown",
+                @"error": error.localizedDescription ?: @""
+            });
+            [self finishPluginSync];
+            return;
+        }
+        BOOL enabled = [manifest[@"enabled"] boolValue];
+        NSDictionary *release = [manifest[@"release"] isKindOfClass:NSDictionary.class]
+            ? manifest[@"release"] : nil;
+        if (!enabled || !release) {
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                BOOL cleared = AMCloudPluginsRemoveAllIf(^BOOL{
+                    return AMCloudAuthMatches(token, authorizationGeneration);
+                });
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (cleared) {
+                        AMCloudDiagnostic(@"cloud.plugins.cleared", @{
+                            @"reason": enabled ? @"no_published_release" : @"permission_disabled"
+                        });
+                    }
+                    [self finishPluginSync];
+                });
+            });
+            return;
+        }
+        NSString *releaseID = [release[@"id"] isKindOfClass:NSString.class]
+            ? release[@"id"] : nil;
+        NSString *sha256 = [release[@"sha256"] isKindOfClass:NSString.class]
+            ? [release[@"sha256"] lowercaseString] : nil;
+        NSDictionary *state = AMCloudPluginsCurrentState();
+        if (releaseID.length && sha256.length == 64 &&
+            [state[@"release_id"] isEqualToString:releaseID] &&
+            [[state[@"sha256"] lowercaseString] isEqualToString:sha256]) {
+            AMCloudDiagnostic(@"cloud.plugins.up_to_date", @{
+                @"release_id": releaseID,
+                @"effect_count": state[@"effect_count"] ?: @0
+            });
+            [self finishPluginSync];
+            return;
+        }
+        [self.client downloadPluginRelease:release completion:^(NSDictionary *download,
+                                                                 NSError *downloadError) {
+            NSURL *archiveURL = [download[@"url"] isKindOfClass:NSURL.class]
+                ? download[@"url"] : nil;
+            NSURL *cleanupURL = [download[@"cleanup"] isKindOfClass:NSURL.class]
+                ? download[@"cleanup"] : archiveURL;
+            if (downloadError || !archiveURL) {
+                AMCloudDiagnostic(@"cloud.plugins.download_failed", @{
+                    @"release_id": releaseID ?: @"",
+                    @"error": downloadError.localizedDescription ?: @"missing download"
+                });
+                [self finishPluginSync];
+                return;
+            }
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                NSError *installError = nil;
+                BOOL tokenUnchanged = AMCloudAuthMatches(token, authorizationGeneration);
+                BOOL installed = tokenUnchanged && AMCloudPluginsInstallArchive(
+                    archiveURL, releaseID, sha256, authorizationKey,
+                    authorizationGeneration, ^BOOL(dispatch_block_t commit) {
+                        return AMCloudCommitIfAuthMatches(
+                            token, authorizationGeneration, commit);
+                    }, &installError);
+                if (installed && !AMCloudAuthMatches(token, authorizationGeneration)) {
+                    installed = NO;
+                    tokenUnchanged = NO;
+                }
+                [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:nil];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (installed) {
+                        NSDictionary *newState = AMCloudPluginsCurrentState();
+                        AMCloudDiagnostic(@"cloud.plugins.installed", @{
+                            @"release_id": releaseID ?: @"",
+                            @"effect_count": newState[@"effect_count"] ?: @0
+                        });
+                    } else if (tokenUnchanged) {
+                        AMCloudDiagnostic(@"cloud.plugins.install_failed", @{
+                            @"release_id": releaseID ?: @"",
+                            @"error": installError.localizedDescription ?: @"unknown"
+                        });
+                    }
+                    [self finishPluginSync];
+                });
+            });
+        }];
+    }];
+}
+
+- (void)finishPluginSync {
+    self.pluginSyncInFlight = NO;
+    if (!self.pluginSyncPending) return;
+    self.pluginSyncPending = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        [self syncPluginsNow:@"pending"];
+    });
 }
 
 - (void)attachAccountEntryToController:(UIViewController *)controller {
@@ -1809,6 +2262,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         @"client": AMCloudClassName(self.manager.client)
     });
     [self.refreshControl beginRefreshing];
+    NSString *requestToken = AMCloudReadToken();
     __weak typeof(self) weakSelf = self;
     [self.manager.client loadMe:^(NSDictionary *data, NSError *error) {
         AMCloudDiagnostic(@"cloud.account.reload_me_result", @{
@@ -1819,11 +2273,16 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         if (error) {
             [weakSelf.refreshControl endRefreshing];
             if (error.code == 401) {
-                AMCloudDeleteToken();
-                weakSelf.authenticated = NO;
-                weakSelf.contentLoaded = NO;
-                weakSelf.authenticationPending = NO;
-                [weakSelf beginAuthentication];
+                AMCloudInvalidateToken(requestToken);
+                NSString *activeToken = AMCloudReadToken();
+                if (activeToken.length && ![activeToken isEqualToString:requestToken]) {
+                    [weakSelf reloadCloudData];
+                } else {
+                    weakSelf.authenticated = NO;
+                    weakSelf.contentLoaded = NO;
+                    weakSelf.authenticationPending = NO;
+                    [weakSelf beginAuthentication];
+                }
             } else {
                 [weakSelf.manager showError:error presenter:weakSelf];
             }
@@ -1989,6 +2448,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 @end
 
+
+void AMCloudSyncInstallPluginHooksEarly(void) {
+    NSString *token = nil;
+    NSString *authorizationKey = nil;
+    AMCloudReadAuthContext(&token, NULL, &authorizationKey);
+    AMCloudPluginsInstallBundleHooks(token.length ? authorizationKey : @"");
+}
 
 void AMCloudSyncInstall(AMCloudImportHandler importHandler) {
     [[AMCloudManager shared] installWithImportHandler:importHandler];
