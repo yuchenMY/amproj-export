@@ -5,6 +5,7 @@
 
 static NSString *const AMCloudPluginsDirectoryName = @"AMCloudPlugins";
 static NSString *const AMCloudPluginsStateName = @"state.json";
+static NSString *const AMCloudPluginsRevocationName = @"AMCloudPlugins.revoked";
 static NSString *const AMCloudBundleHookGuardKey = @"AMCloudBundleHookGuard";
 
 typedef NSArray<NSURL *> *(*AMCloudBundleURLsIMP)(id, SEL, NSString *, NSString *);
@@ -54,6 +55,34 @@ static NSURL *AMCloudPluginsStateURL(void) {
     return [AMCloudPluginsRootURL() URLByAppendingPathComponent:AMCloudPluginsStateName];
 }
 
+static NSURL *AMCloudPluginsRevocationURL(void) {
+    NSURL *support = [NSFileManager.defaultManager
+        URLsForDirectory:NSApplicationSupportDirectory
+               inDomains:NSUserDomainMask].firstObject;
+    return [support URLByAppendingPathComponent:AMCloudPluginsRevocationName];
+}
+
+static BOOL AMCloudPluginsInvalidatePersistedState(NSFileManager *manager) {
+    NSURL *stateURL = AMCloudPluginsStateURL();
+    if (![manager fileExistsAtPath:stateURL.path]) return YES;
+
+    NSData *invalidState = [NSData dataWithBytes:"{}" length:2];
+    NSError *error = nil;
+    if ([invalidState writeToURL:stateURL options:NSDataWritingAtomic error:&error]) {
+        return YES;
+    }
+
+    [manager removeItemAtURL:stateURL error:nil];
+    return ![manager fileExistsAtPath:stateURL.path];
+}
+
+static BOOL AMCloudPluginsPersistRevocationMarker(NSFileManager *manager) {
+    NSURL *markerURL = AMCloudPluginsRevocationURL();
+    NSData *marker = [NSData dataWithBytes:"revoked" length:7];
+    if ([marker writeToURL:markerURL options:NSDataWritingAtomic error:nil]) return YES;
+    return [manager fileExistsAtPath:markerURL.path];
+}
+
 static BOOL AMCloudPluginReleaseIDIsSafe(NSString *releaseID) {
     if (![releaseID isKindOfClass:NSString.class] || releaseID.length == 0 ||
         releaseID.length > 128) return NO;
@@ -93,32 +122,43 @@ static uint64_t AMCloudPluginsAuthorizationGeneration(void) {
     }
 }
 
-static void AMCloudPluginsLoadState(NSString *authorizationKey) {
+static BOOL AMCloudPluginsActivatePersistedState(NSString *releaseID, NSString *sha256,
+                                                  NSString *authorizationKey,
+                                                  uint64_t authorizationGeneration) {
+    if ([NSFileManager.defaultManager fileExistsAtPath:AMCloudPluginsRevocationURL().path]) {
+        AMCloudPluginsSetActiveState(nil, nil, 0);
+        return NO;
+    }
     NSData *data = [NSData dataWithContentsOfURL:AMCloudPluginsStateURL()];
-    NSDictionary *state = data.length
+    id object = data.length
         ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    NSString *releaseID = [state[@"release_id"] isKindOfClass:NSString.class]
+    NSDictionary *state = [object isKindOfClass:NSDictionary.class] ? object : nil;
+    NSString *storedReleaseID = [state[@"release_id"] isKindOfClass:NSString.class]
         ? state[@"release_id"] : nil;
+    NSString *storedSHA = [state[@"sha256"] isKindOfClass:NSString.class]
+        ? [state[@"sha256"] lowercaseString] : nil;
     NSString *storedKey = [state[@"authorization_key"] isKindOfClass:NSString.class]
         ? state[@"authorization_key"] : nil;
-    if (!AMCloudPluginReleaseIDIsSafe(releaseID) ||
-        ![storedKey isEqualToString:authorizationKey]) {
+    if (![storedReleaseID isEqualToString:releaseID] ||
+        ![storedSHA isEqualToString:sha256.lowercaseString] ||
+        ![storedKey isEqualToString:authorizationKey.lowercaseString]) {
         AMCloudPluginsSetActiveState(nil, nil, 0);
-        return;
+        return NO;
     }
     NSURL *effectsURL = [[[[AMCloudPluginsRootURL()
         URLByAppendingPathComponent:@"releases" isDirectory:YES]
-        URLByAppendingPathComponent:releaseID isDirectory:YES]
+        URLByAppendingPathComponent:storedReleaseID isDirectory:YES]
         URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES]
         URLByStandardizingPath];
     NSNumber *directory = nil;
     if (![effectsURL getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil] ||
         !directory.boolValue) {
         AMCloudPluginsSetActiveState(nil, nil, 0);
-        return;
+        return NO;
     }
-    AMCloudPluginsSetActiveState(state, effectsURL,
-                                 AMCloudPluginsAuthorizationGeneration());
+    if (authorizationGeneration != AMCloudPluginsAuthorizationGeneration()) return NO;
+    AMCloudPluginsSetActiveState(state, effectsURL, authorizationGeneration);
+    return YES;
 }
 
 static NSString *AMCloudPluginsRelativeDirectory(NSString *subdirectory) {
@@ -346,10 +386,9 @@ static IMP AMCloudPluginsInstallHook(Class bundleClass, SEL selector, IMP hook) 
     return original;
 }
 
-void AMCloudPluginsInstallBundleHooks(NSString *authorizationKey) {
+void AMCloudPluginsInstallBundleHooks(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        AMCloudPluginsLoadState(authorizationKey);
         Class bundleClass = object_getClass(NSBundle.mainBundle);
         AMCloudOriginalBundleURLs = (AMCloudBundleURLsIMP)AMCloudPluginsInstallHook(
             bundleClass, @selector(URLsForResourcesWithExtension:subdirectory:),
@@ -364,6 +403,21 @@ void AMCloudPluginsInstallBundleHooks(NSString *authorizationKey) {
             bundleClass, @selector(pathForResource:ofType:inDirectory:),
             (IMP)AMCloudBundlePathHook);
     });
+}
+
+BOOL AMCloudPluginsActivateInstalledRelease(NSString *releaseID, NSString *sha256,
+                                             NSString *authorizationKey,
+                                             uint64_t authorizationGeneration) {
+    if (!AMCloudPluginReleaseIDIsSafe(releaseID) ||
+        !AMCloudPluginAuthorizationKeyIsSafe(sha256) ||
+        !AMCloudPluginAuthorizationKeyIsSafe(authorizationKey) ||
+        authorizationGeneration == 0) return NO;
+    __block BOOL activated = NO;
+    AMCloudPluginsPerformMutation(^{
+        activated = AMCloudPluginsActivatePersistedState(
+            releaseID, sha256, authorizationKey, authorizationGeneration);
+    });
+    return activated;
 }
 
 NSDictionary<NSString *, id> *AMCloudPluginsCurrentState(void) {
@@ -405,49 +459,73 @@ BOOL AMCloudPluginsInstallArchive(NSURL *archiveURL, NSString *releaseID,
         NSDictionary *metrics = nil;
         if (!AMProjExtractPluginArchive(archiveURL, stagingURL, &metrics, &installError)) return;
 
+        NSObject *commitLock = [NSObject new];
         __block BOOL commitInvoked = NO;
+        __block BOOL commitGuardReturned = NO;
         dispatch_block_t commit = ^{
-            commitInvoked = YES;
-            NSURL *finalURL = [releasesURL URLByAppendingPathComponent:releaseID
-                                                           isDirectory:YES];
-            [manager removeItemAtURL:finalURL error:nil];
-            if (![manager moveItemAtURL:stagingURL toURL:finalURL error:&installError]) {
-                [manager removeItemAtURL:stagingURL error:nil];
-                return;
-            }
-            NSURL *effectsURL = [finalURL URLByAppendingPathComponent:@"BuiltinEffects"
-                                                          isDirectory:YES];
-            NSNumber *effectCount = @(AMCloudPluginsFiles(effectsURL, @"xml").count);
-            NSDictionary *state = @{
-                @"release_id": releaseID,
-                @"sha256": sha256.lowercaseString,
-                @"authorization_key": authorizationKey.lowercaseString,
-                @"installed_at": @((long long)NSDate.date.timeIntervalSince1970),
-                @"effect_count": effectCount
-            };
-            NSData *stateData = [NSJSONSerialization dataWithJSONObject:state
-                                                                options:0 error:&installError];
-            if (!stateData || ![stateData writeToURL:AMCloudPluginsStateURL()
-                                              options:NSDataWritingAtomic error:&installError]) {
+            @synchronized (commitLock) {
+                if (commitGuardReturned || commitInvoked) return;
+                commitInvoked = YES;
+                NSURL *finalURL = [releasesURL URLByAppendingPathComponent:releaseID
+                                                               isDirectory:YES];
                 [manager removeItemAtURL:finalURL error:nil];
-                return;
-            }
-            [rootURL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
-            AMCloudPluginsSetActiveState(state, effectsURL, authorizationGeneration);
-
-            NSArray<NSURL *> *releases = [manager contentsOfDirectoryAtURL:releasesURL
-                                                includingPropertiesForKeys:nil
-                                                                   options:0 error:nil];
-            for (NSURL *URL in releases) {
-                if (![URL.lastPathComponent isEqualToString:releaseID]) {
-                    [manager removeItemAtURL:URL error:nil];
+                if (![manager moveItemAtURL:stagingURL toURL:finalURL error:&installError]) {
+                    [manager removeItemAtURL:stagingURL error:nil];
+                    return;
                 }
+                NSURL *effectsURL = [finalURL URLByAppendingPathComponent:@"BuiltinEffects"
+                                                              isDirectory:YES];
+                NSNumber *effectCount = @(AMCloudPluginsFiles(effectsURL, @"xml").count);
+                NSDictionary *state = @{
+                    @"release_id": releaseID,
+                    @"sha256": sha256.lowercaseString,
+                    @"authorization_key": authorizationKey.lowercaseString,
+                    @"installed_at": @((long long)NSDate.date.timeIntervalSince1970),
+                    @"effect_count": effectCount
+                };
+                NSData *stateData = [NSJSONSerialization dataWithJSONObject:state
+                                                                    options:0 error:&installError];
+                if (!stateData || ![stateData writeToURL:AMCloudPluginsStateURL()
+                                                  options:NSDataWritingAtomic error:&installError]) {
+                    [manager removeItemAtURL:finalURL error:nil];
+                    return;
+                }
+                NSURL *revocationURL = AMCloudPluginsRevocationURL();
+                if ([manager fileExistsAtPath:revocationURL.path] &&
+                    ![manager removeItemAtURL:revocationURL error:&installError] &&
+                    [manager fileExistsAtPath:revocationURL.path]) {
+                    [manager removeItemAtURL:finalURL error:nil];
+                    return;
+                }
+                [rootURL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+                AMCloudPluginsSetActiveState(state, effectsURL, authorizationGeneration);
+
+                NSArray<NSURL *> *releases = [manager contentsOfDirectoryAtURL:releasesURL
+                                                    includingPropertiesForKeys:nil
+                                                                       options:0 error:nil];
+                for (NSURL *URL in releases) {
+                    if (![URL.lastPathComponent isEqualToString:releaseID]) {
+                        [manager removeItemAtURL:URL error:nil];
+                    }
+                }
+                [manager removeItemAtURL:stagingRoot error:nil];
+                installed = YES;
             }
-            [manager removeItemAtURL:stagingRoot error:nil];
-            installed = YES;
         };
         BOOL authorized = commitGuard(commit);
-        if (!authorized || !commitInvoked) {
+        BOOL commitAccepted = NO;
+        @synchronized (commitLock) {
+            commitGuardReturned = YES;
+            commitAccepted = commitInvoked;
+        }
+        if (!authorized && commitAccepted && installed) {
+            AMCloudPluginsSetActiveState(nil, nil, 0);
+            BOOL stateInvalidated = AMCloudPluginsInvalidatePersistedState(manager);
+            if (!stateInvalidated) AMCloudPluginsPersistRevocationMarker(manager);
+            [manager removeItemAtURL:rootURL error:nil];
+            installed = NO;
+        }
+        if (!authorized || !commitAccepted) {
             [manager removeItemAtURL:stagingURL error:nil];
             installError = [NSError errorWithDomain:NSURLErrorDomain
                                                 code:NSURLErrorCancelled
@@ -463,9 +541,22 @@ BOOL AMCloudPluginsRemoveAllIf(BOOL (^validator)(void)) {
     __block BOOL removed = NO;
     AMCloudPluginsPerformMutation(^{
         if (validator && !validator()) return;
+        NSFileManager *manager = NSFileManager.defaultManager;
+        NSURL *rootURL = AMCloudPluginsRootURL();
         AMCloudPluginsSetActiveState(nil, nil, 0);
-        [NSFileManager.defaultManager removeItemAtURL:AMCloudPluginsRootURL() error:nil];
-        removed = YES;
+        BOOL stateInvalidated = AMCloudPluginsInvalidatePersistedState(manager);
+        BOOL revocationMarked = stateInvalidated || AMCloudPluginsPersistRevocationMarker(manager);
+
+        if (![manager fileExistsAtPath:rootURL.path]) {
+            removed = YES;
+            [manager removeItemAtURL:AMCloudPluginsRevocationURL() error:nil];
+            return;
+        }
+        [manager removeItemAtURL:rootURL error:nil];
+        removed = ![manager fileExistsAtPath:rootURL.path];
+        if (removed && revocationMarked) {
+            [manager removeItemAtURL:AMCloudPluginsRevocationURL() error:nil];
+        }
     });
     return removed;
 }
