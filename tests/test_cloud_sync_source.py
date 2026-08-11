@@ -147,7 +147,9 @@ class CloudSyncSourceTests(unittest.TestCase):
         remove_root_at = cleanup.index("removeItemAtURL:rootURL")
         self.assertLess(invalidate_at, remove_root_at)
         self.assertIn("AMCloudPluginsPersistRevocationMarker", cleanup)
-        self.assertIn("removed = ![manager fileExistsAtPath:rootURL.path]", cleanup)
+        self.assertIn("removed = rootKnown && !rootExists", cleanup)
+        self.assertIn("attributesOfItemAtPath", PLUGINS)
+        self.assertNotIn("fileExistsAtPath", PLUGINS)
         self.assertIn("NSDataWritingAtomic", PLUGINS)
         self.assertIn("插件根目录已不存在", PLUGIN_HEADER)
 
