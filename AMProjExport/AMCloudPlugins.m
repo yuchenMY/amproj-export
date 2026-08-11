@@ -62,9 +62,29 @@ static NSURL *AMCloudPluginsRevocationURL(void) {
     return [support URLByAppendingPathComponent:AMCloudPluginsRevocationName];
 }
 
+static BOOL AMCloudPluginsGetItemExistence(NSFileManager *manager, NSURL *URL,
+                                            BOOL *exists) {
+    NSError *error = nil;
+    NSDictionary *attributes = [manager attributesOfItemAtPath:URL.path error:&error];
+    if (attributes) {
+        if (exists) *exists = YES;
+        return YES;
+    }
+    if ([error.domain isEqualToString:NSCocoaErrorDomain] &&
+        (error.code == NSFileNoSuchFileError ||
+         error.code == NSFileReadNoSuchFileError)) {
+        if (exists) *exists = NO;
+        return YES;
+    }
+    if (exists) *exists = NO;
+    return NO;
+}
+
 static BOOL AMCloudPluginsInvalidatePersistedState(NSFileManager *manager) {
     NSURL *stateURL = AMCloudPluginsStateURL();
-    if (![manager fileExistsAtPath:stateURL.path]) return YES;
+    BOOL stateExists = NO;
+    if (AMCloudPluginsGetItemExistence(manager, stateURL, &stateExists) &&
+        !stateExists) return YES;
 
     NSData *invalidState = [NSData dataWithBytes:"{}" length:2];
     NSError *error = nil;
@@ -73,14 +93,17 @@ static BOOL AMCloudPluginsInvalidatePersistedState(NSFileManager *manager) {
     }
 
     [manager removeItemAtURL:stateURL error:nil];
-    return ![manager fileExistsAtPath:stateURL.path];
+    return AMCloudPluginsGetItemExistence(manager, stateURL, &stateExists) &&
+        !stateExists;
 }
 
 static BOOL AMCloudPluginsPersistRevocationMarker(NSFileManager *manager) {
     NSURL *markerURL = AMCloudPluginsRevocationURL();
     NSData *marker = [NSData dataWithBytes:"revoked" length:7];
     if ([marker writeToURL:markerURL options:NSDataWritingAtomic error:nil]) return YES;
-    return [manager fileExistsAtPath:markerURL.path];
+    BOOL markerExists = NO;
+    return AMCloudPluginsGetItemExistence(manager, markerURL, &markerExists) &&
+        markerExists;
 }
 
 static BOOL AMCloudPluginReleaseIDIsSafe(NSString *releaseID) {
@@ -125,7 +148,10 @@ static uint64_t AMCloudPluginsAuthorizationGeneration(void) {
 static BOOL AMCloudPluginsActivatePersistedState(NSString *releaseID, NSString *sha256,
                                                   NSString *authorizationKey,
                                                   uint64_t authorizationGeneration) {
-    if ([NSFileManager.defaultManager fileExistsAtPath:AMCloudPluginsRevocationURL().path]) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    BOOL markerExists = NO;
+    if (!AMCloudPluginsGetItemExistence(
+            manager, AMCloudPluginsRevocationURL(), &markerExists) || markerExists) {
         AMCloudPluginsSetActiveState(nil, nil, 0);
         return NO;
     }
@@ -491,11 +517,30 @@ BOOL AMCloudPluginsInstallArchive(NSURL *archiveURL, NSString *releaseID,
                     return;
                 }
                 NSURL *revocationURL = AMCloudPluginsRevocationURL();
-                if ([manager fileExistsAtPath:revocationURL.path] &&
-                    ![manager removeItemAtURL:revocationURL error:&installError] &&
-                    [manager fileExistsAtPath:revocationURL.path]) {
+                BOOL markerExists = NO;
+                if (!AMCloudPluginsGetItemExistence(manager, revocationURL,
+                                                     &markerExists)) {
+                    installError = [NSError errorWithDomain:NSCocoaErrorDomain
+                                                       code:NSFileReadUnknownError
+                                                   userInfo:@{NSLocalizedDescriptionKey:
+                                                       @"Cloud plugin revocation state is unreadable"}];
                     [manager removeItemAtURL:finalURL error:nil];
                     return;
+                }
+                if (markerExists &&
+                    ![manager removeItemAtURL:revocationURL error:&installError]) {
+                    BOOL markerKnown = AMCloudPluginsGetItemExistence(
+                        manager, revocationURL, &markerExists);
+                    if (!markerKnown || markerExists) {
+                        if (!installError) {
+                            installError = [NSError errorWithDomain:NSCocoaErrorDomain
+                                                               code:NSFileWriteUnknownError
+                                                           userInfo:@{NSLocalizedDescriptionKey:
+                                                               @"Cloud plugin revocation state could not be cleared"}];
+                        }
+                        [manager removeItemAtURL:finalURL error:nil];
+                        return;
+                    }
                 }
                 [rootURL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
                 AMCloudPluginsSetActiveState(state, effectsURL, authorizationGeneration);
@@ -547,13 +592,16 @@ BOOL AMCloudPluginsRemoveAllIf(BOOL (^validator)(void)) {
         BOOL stateInvalidated = AMCloudPluginsInvalidatePersistedState(manager);
         BOOL revocationMarked = stateInvalidated || AMCloudPluginsPersistRevocationMarker(manager);
 
-        if (![manager fileExistsAtPath:rootURL.path]) {
+        BOOL rootExists = NO;
+        BOOL rootKnown = AMCloudPluginsGetItemExistence(manager, rootURL, &rootExists);
+        if (rootKnown && !rootExists) {
             removed = YES;
             [manager removeItemAtURL:AMCloudPluginsRevocationURL() error:nil];
             return;
         }
         [manager removeItemAtURL:rootURL error:nil];
-        removed = ![manager fileExistsAtPath:rootURL.path];
+        rootKnown = AMCloudPluginsGetItemExistence(manager, rootURL, &rootExists);
+        removed = rootKnown && !rootExists;
         if (removed && revocationMarked) {
             [manager removeItemAtURL:AMCloudPluginsRevocationURL() error:nil];
         }
