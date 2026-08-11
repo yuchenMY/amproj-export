@@ -805,6 +805,91 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
     [self performMethod:@"DELETE" path:path body:nil authenticated:YES completion:completion];
 }
 
+- (void)loadPluginManifest:(AMCloudResult)completion {
+    [self performMethod:@"GET" path:@"/ios/plugins/manifest" body:nil
+          authenticated:YES completion:completion];
+}
+
+- (void)downloadPluginRelease:(NSDictionary *)release completion:(AMCloudResult)completion {
+    NSString *releaseID = [release[@"id"] isKindOfClass:NSString.class]
+        ? release[@"id"] : nil;
+    NSString *expectedSHA = [release[@"sha256"] isKindOfClass:NSString.class]
+        ? [release[@"sha256"] lowercaseString] : nil;
+    NSNumber *expectedSize = [release[@"sizeBytes"] isKindOfClass:NSNumber.class]
+        ? release[@"sizeBytes"] : nil;
+    if (!releaseID.length || expectedSHA.length != 64 || expectedSize.longLongValue <= 0) {
+        AMCloudCompleteOnMain(completion, nil,
+            AMCloudError(22, @"云端插件版本信息不完整"));
+        return;
+    }
+    NSString *path = [NSString stringWithFormat:@"/ios/plugins/releases/%@/download", releaseID];
+    NSError *requestError = nil;
+    NSMutableURLRequest *request = [self requestMethod:@"GET" path:path body:nil
+                                          authenticated:YES error:&requestError];
+    if (!request) {
+        AMCloudCompleteOnMain(completion, nil, requestError);
+        return;
+    }
+    request.timeoutInterval = 15 * 60;
+    [[self.session downloadTaskWithRequest:request
+                         completionHandler:^(NSURL *temporaryURL, NSURLResponse *rawResponse,
+                                             NSError *networkError) {
+        NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
+            ? (NSHTTPURLResponse *)rawResponse : nil;
+        if (networkError) {
+            AMCloudCompleteOnMain(completion, nil, networkError);
+            return;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+            NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
+            NSError *responseError = nil;
+            AMCloudEnvelope(errorData, response, &responseError);
+            if (response.statusCode == 401) {
+                AMCloudInvalidateTokenForRequest(request);
+            }
+            AMCloudCompleteOnMain(completion, nil,
+                responseError ?: AMCloudError(response.statusCode, @"下载云端插件失败"));
+            return;
+        }
+        NSError *hashError = nil;
+        NSString *actualSHA = temporaryURL ? AMCloudSHA256(temporaryURL, &hashError) : nil;
+        NSNumber *actualSize = nil;
+        [temporaryURL getResourceValue:&actualSize forKey:NSURLFileSizeKey error:&hashError];
+        NSString *headerSHA = [[response valueForHTTPHeaderField:@"X-AM-Plugin-SHA256"]
+            lowercaseString];
+        BOOL headerMismatch = headerSHA.length &&
+            [headerSHA caseInsensitiveCompare:expectedSHA] != NSOrderedSame;
+        if (!temporaryURL || hashError || !actualSHA.length || headerMismatch ||
+            [actualSHA caseInsensitiveCompare:expectedSHA] != NSOrderedSame ||
+            actualSize.longLongValue != expectedSize.longLongValue) {
+            AMCloudCompleteOnMain(completion, nil,
+                hashError ?: AMCloudError(23, @"云端插件文件校验失败"));
+            return;
+        }
+        NSURL *downloadsURL = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+            URLByAppendingPathComponent:@"AMCloudPluginDownloads" isDirectory:YES];
+        NSError *fileError = nil;
+        if (![NSFileManager.defaultManager createDirectoryAtURL:downloadsURL
+                                    withIntermediateDirectories:YES attributes:nil
+                                                         error:&fileError]) {
+            AMCloudCompleteOnMain(completion, nil, fileError);
+            return;
+        }
+        NSURL *destinationURL = [downloadsURL URLByAppendingPathComponent:
+            [[NSUUID.UUID.UUIDString lowercaseString] stringByAppendingPathExtension:@"zip"]];
+        if (![NSFileManager.defaultManager moveItemAtURL:temporaryURL
+                                                   toURL:destinationURL error:&fileError]) {
+            AMCloudCompleteOnMain(completion, nil, fileError);
+            return;
+        }
+        AMCloudCompleteOnMain(completion, @{
+            @"url": destinationURL,
+            @"cleanup": destinationURL,
+            @"release": release
+        }, nil);
+    }] resume];
+}
+
 @end
 
 @class AMCloudManager;
@@ -1194,91 +1279,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     });
 }
 
-- (void)loadPluginManifest:(AMCloudResult)completion {
-    [self performMethod:@"GET" path:@"/ios/plugins/manifest" body:nil
-          authenticated:YES completion:completion];
-}
-
-- (void)downloadPluginRelease:(NSDictionary *)release completion:(AMCloudResult)completion {
-    NSString *releaseID = [release[@"id"] isKindOfClass:NSString.class]
-        ? release[@"id"] : nil;
-    NSString *expectedSHA = [release[@"sha256"] isKindOfClass:NSString.class]
-        ? [release[@"sha256"] lowercaseString] : nil;
-    NSNumber *expectedSize = [release[@"sizeBytes"] isKindOfClass:NSNumber.class]
-        ? release[@"sizeBytes"] : nil;
-    if (!releaseID.length || expectedSHA.length != 64 || expectedSize.longLongValue <= 0) {
-        AMCloudCompleteOnMain(completion, nil,
-            AMCloudError(22, @"云端插件版本信息不完整"));
-        return;
-    }
-    NSString *path = [NSString stringWithFormat:@"/ios/plugins/releases/%@/download", releaseID];
-    NSError *requestError = nil;
-    NSMutableURLRequest *request = [self requestMethod:@"GET" path:path body:nil
-                                          authenticated:YES error:&requestError];
-    if (!request) {
-        AMCloudCompleteOnMain(completion, nil, requestError);
-        return;
-    }
-    request.timeoutInterval = 15 * 60;
-    [[self.session downloadTaskWithRequest:request
-                         completionHandler:^(NSURL *temporaryURL, NSURLResponse *rawResponse,
-                                             NSError *networkError) {
-        NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
-            ? (NSHTTPURLResponse *)rawResponse : nil;
-        if (networkError) {
-            AMCloudCompleteOnMain(completion, nil, networkError);
-            return;
-        }
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-            NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
-            NSError *responseError = nil;
-            AMCloudEnvelope(errorData, response, &responseError);
-            if (response.statusCode == 401) {
-                AMCloudInvalidateTokenForRequest(request);
-            }
-            AMCloudCompleteOnMain(completion, nil,
-                responseError ?: AMCloudError(response.statusCode, @"下载云端插件失败"));
-            return;
-        }
-        NSError *hashError = nil;
-        NSString *actualSHA = temporaryURL ? AMCloudSHA256(temporaryURL, &hashError) : nil;
-        NSNumber *actualSize = nil;
-        [temporaryURL getResourceValue:&actualSize forKey:NSURLFileSizeKey error:&hashError];
-        NSString *headerSHA = [[response valueForHTTPHeaderField:@"X-AM-Plugin-SHA256"]
-            lowercaseString];
-        BOOL headerMismatch = headerSHA.length &&
-            [headerSHA caseInsensitiveCompare:expectedSHA] != NSOrderedSame;
-        if (!temporaryURL || hashError || !actualSHA.length || headerMismatch ||
-            [actualSHA caseInsensitiveCompare:expectedSHA] != NSOrderedSame ||
-            actualSize.longLongValue != expectedSize.longLongValue) {
-            AMCloudCompleteOnMain(completion, nil,
-                hashError ?: AMCloudError(23, @"云端插件文件校验失败"));
-            return;
-        }
-        NSURL *downloadsURL = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
-            URLByAppendingPathComponent:@"AMCloudPluginDownloads" isDirectory:YES];
-        NSError *fileError = nil;
-        if (![NSFileManager.defaultManager createDirectoryAtURL:downloadsURL
-                                    withIntermediateDirectories:YES attributes:nil
-                                                         error:&fileError]) {
-            AMCloudCompleteOnMain(completion, nil, fileError);
-            return;
-        }
-        NSURL *destinationURL = [downloadsURL URLByAppendingPathComponent:
-            [[NSUUID.UUID.UUIDString lowercaseString] stringByAppendingPathExtension:@"zip"]];
-        if (![NSFileManager.defaultManager moveItemAtURL:temporaryURL
-                                                   toURL:destinationURL error:&fileError]) {
-            AMCloudCompleteOnMain(completion, nil, fileError);
-            return;
-        }
-        AMCloudCompleteOnMain(completion, @{
-            @"url": destinationURL,
-            @"cleanup": destinationURL,
-            @"release": release
-        }, nil);
-    }] resume];
-}
-
 - (void)webView:(WKWebView *)webView
     decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
                     decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
@@ -1372,15 +1372,14 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler {
     self.importHandler = importHandler;
     NSString *startupToken = nil;
-    NSString *authorizationKey = nil;
     uint64_t startupGeneration = 0;
-    AMCloudReadAuthContext(&startupToken, &startupGeneration, &authorizationKey);
+    AMCloudReadAuthContext(&startupToken, &startupGeneration, NULL);
     if (!startupToken.length) {
         AMCloudPluginsRemoveAllIf(^BOOL{
             return AMCloudAuthMatches(nil, startupGeneration);
         });
     }
-    AMCloudPluginsInstallBundleHooks(authorizationKey ?: @"");
+    AMCloudPluginsInstallBundleHooks();
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
     [NSNotificationCenter.defaultCenter
@@ -1495,6 +1494,12 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         NSString *sha256 = [release[@"sha256"] isKindOfClass:NSString.class]
             ? [release[@"sha256"] lowercaseString] : nil;
         NSDictionary *state = AMCloudPluginsCurrentState();
+        if (![state[@"release_id"] isEqualToString:releaseID] ||
+            ![[state[@"sha256"] lowercaseString] isEqualToString:sha256]) {
+            AMCloudPluginsActivateInstalledRelease(
+                releaseID, sha256, authorizationKey, authorizationGeneration);
+            state = AMCloudPluginsCurrentState();
+        }
         if (releaseID.length && sha256.length == 64 &&
             [state[@"release_id"] isEqualToString:releaseID] &&
             [[state[@"sha256"] lowercaseString] isEqualToString:sha256]) {
@@ -2450,10 +2455,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 
 void AMCloudSyncInstallPluginHooksEarly(void) {
-    NSString *token = nil;
-    NSString *authorizationKey = nil;
-    AMCloudReadAuthContext(&token, NULL, &authorizationKey);
-    AMCloudPluginsInstallBundleHooks(token.length ? authorizationKey : @"");
+    AMCloudPluginsInstallBundleHooks();
 }
 
 void AMCloudSyncInstall(AMCloudImportHandler importHandler) {

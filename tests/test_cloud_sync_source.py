@@ -66,6 +66,16 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('json[@"code"]', CLOUD)
         self.assertIn('json[@"data"]', CLOUD)
 
+    def test_plugin_network_methods_belong_to_cloud_client(self):
+        client = CLOUD.split("@implementation AMCloudClient", 1)[1].split("\n@end", 1)[0]
+        webview = CLOUD.split("@implementation AMCloudAccountWebViewController", 1)[1]
+        webview = webview.split("\n@end", 1)[0]
+        for method in ("loadPluginManifest:", "downloadPluginRelease:"):
+            self.assertIn(method, client)
+            self.assertNotIn(method, webview)
+        self.assertIn("[self performMethod:", client)
+        self.assertIn("self.session", client)
+
     def test_cloud_plugins_are_downloaded_installed_and_removed_automatically(self):
         for symbol in (
             "AMCloudPluginsInstallBundleHooks",
@@ -86,6 +96,7 @@ class CloudSyncSourceTests(unittest.TestCase):
             self.assertIn(trigger, CLOUD)
         self.assertIn("scheduledTimerWithTimeInterval:60.0", CLOUD)
         self.assertIn("downloadPluginRelease", CLOUD)
+        self.assertIn("AMCloudPluginsActivateInstalledRelease", CLOUD)
         self.assertIn('valueForHTTPHeaderField:@"X-AM-Plugin-SHA256"', CLOUD)
         self.assertIn("AMCloudPluginsRemoveAllIf", CLOUD)
         self.assertIn("permission_disabled", CLOUD)
@@ -114,9 +125,43 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMCloudPluginsPerformMutation", PLUGINS)
         self.assertIn("AMCloudPluginsCommitGuard", PLUGIN_HEADER)
         self.assertIn("commitGuard(commit)", PLUGINS)
+        self.assertIn("if (commitGuardReturned || commitInvoked) return;", PLUGINS)
+        self.assertIn("@synchronized (commitLock)", PLUGINS)
+        self.assertIn("不得保存或逃逸 commit", PLUGIN_HEADER)
+        self.assertIn("返回 NO 时不得调用 commit", PLUGIN_HEADER)
+        self.assertIn("if (!authorized && commitAccepted && installed)", PLUGINS)
         self.assertIn("AMCloudCommitIfAuthMatches", CLOUD)
         self.assertIn("authorizationGeneration", PLUGINS)
         self.assertIn('@"authorization_key"', PLUGINS)
+
+    def test_plugin_state_restore_and_cleanup_are_fail_closed(self):
+        load_state = PLUGINS.split("static BOOL AMCloudPluginsActivatePersistedState", 1)[1]
+        load_state = load_state.split("static NSString *AMCloudPluginsRelativeDirectory", 1)[0]
+        self.assertIn("id object =", load_state)
+        self.assertIn("[object isKindOfClass:NSDictionary.class]", load_state)
+        self.assertIn("AMCloudPluginsRevocationURL", load_state)
+
+        cleanup = PLUGINS.split("BOOL AMCloudPluginsRemoveAllIf", 1)[1]
+        cleanup = cleanup.split("void AMCloudPluginsRemoveAll", 1)[0]
+        invalidate_at = cleanup.index("AMCloudPluginsInvalidatePersistedState")
+        remove_root_at = cleanup.index("removeItemAtURL:rootURL")
+        self.assertLess(invalidate_at, remove_root_at)
+        self.assertIn("AMCloudPluginsPersistRevocationMarker", cleanup)
+        self.assertIn("removed = ![manager fileExistsAtPath:rootURL.path]", cleanup)
+        self.assertIn("NSDataWritingAtomic", PLUGINS)
+        self.assertIn("插件根目录已不存在", PLUGIN_HEADER)
+
+        hook_install = PLUGINS.split("void AMCloudPluginsInstallBundleHooks", 1)[1]
+        hook_install = hook_install.split("BOOL AMCloudPluginsActivateInstalledRelease", 1)[0]
+        self.assertNotIn("ActivatePersistedState", hook_install)
+        self.assertIn("不会从磁盘恢复插件", PLUGIN_HEADER)
+
+        manifest = CLOUD.split("BOOL enabled =", 1)[1].split(
+            "[self.client downloadPluginRelease", 1
+        )[0]
+        activate_at = manifest.index("AMCloudPluginsActivateInstalledRelease")
+        up_to_date_at = manifest.index('AMCloudDiagnostic(@"cloud.plugins.up_to_date"')
+        self.assertLess(activate_at, up_to_date_at)
 
     def test_bundle_hook_overrides_builtin_xml_and_appends_new_effects(self):
         for selector in (
