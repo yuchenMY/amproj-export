@@ -1028,6 +1028,19 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     AMCloudDiagnostic(@"cloud.account.web_loaded", @{
         @"url": webView.URL.absoluteString ?: @""
     });
+    // 网页登录完成后再从同源 localStorage 读取一次 token。脚本消息仍是主通道，
+    // 这里负责覆盖 WKWebView 首次挂载时偶发漏掉消息的情况。
+    [webView evaluateJavaScript:
+        @"(function(){try{return localStorage.getItem('af-token')||'';}catch(e){return '';}})();"
+        completionHandler:^(id value, NSError *error) {
+        NSString *token = [value isKindOfClass:NSString.class] ? value : @"";
+        if (error || !token.length) return;
+        BOOL stored = AMCloudWriteToken(token);
+        BOOL verified = stored && [AMCloudReadToken() isEqualToString:token];
+        AMCloudDiagnostic(@"cloud.account.web_token_recovered", @{
+            @"stored": @(stored), @"verified": @(verified)
+        });
+    }];
 }
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation
