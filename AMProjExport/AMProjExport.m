@@ -2528,10 +2528,10 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
     }
 }
 
-static void amproj_startDirectExport(UIViewController *presenter,
-                                     UIViewController *originalController,
-                                     BOOL animated, void (^completion)(void),
-                                     NSString *projectTitle) {
+static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
+                                               UIViewController *originalController,
+                                               BOOL animated, void (^completion)(void),
+                                               NSString *projectTitle) {
     if (amproj_directRequest) {
         if (completion) completion();
         return;
@@ -2570,6 +2570,28 @@ static void amproj_startDirectExport(UIViewController *presenter,
                    dispatch_get_main_queue(), ^{
         if (amproj_directRequest == request) amproj_buildDirectPackage(request);
     });
+}
+
+static void amproj_startDirectExport(UIViewController *presenter,
+                                     UIViewController *originalController,
+                                     BOOL animated, void (^completion)(void),
+                                     NSString *projectTitle) {
+    if (amproj_directRequest) {
+        if (completion) completion();
+        return;
+    }
+#if AMPROJ_CLOUD_SYNC
+    AMCloudAuthorizeFeature(@"export", presenter,
+        ^(BOOL allowed, __unused NSError *error) {
+            if (allowed) {
+                amproj_startAuthorizedDirectExport(
+                    presenter, originalController, animated, completion, projectTitle);
+            }
+        });
+#else
+    amproj_startAuthorizedDirectExport(
+        presenter, originalController, animated, completion, projectTitle);
+#endif
 }
 
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error) {
@@ -2688,7 +2710,7 @@ static CFAbsoluteTime amproj_pendingImportDeadline = 0;
 static NSUInteger amproj_activeNativeImportGeneration = 0;
 #if AMPROJ_CLOUD_SYNC
 static BOOL amproj_importAuthorizationPending = NO;
-static NSUInteger amproj_importAuthorizedGeneration = 0;
+static NSUInteger amproj_importAuthorizationGeneration = 0;
 #endif
 static NSString *amproj_activeNativeImportTransactionID = nil;
 static BOOL amproj_importVerificationActive = NO;
@@ -9985,6 +10007,43 @@ static void amproj_finishNativePackageImport(NSUInteger generation,
     });
 }
 
+#if AMPROJ_CLOUD_SYNC
+static void amproj_finishImportAuthorizationDenied(NSUInteger generation,
+                                                    NSString *transactionID,
+                                                    NSString *name,
+                                                    NSError *error) {
+    if (generation != amproj_pendingImportGeneration ||
+        ![transactionID isEqualToString:amproj_pendingImportTransactionID ?: @""]) {
+        return;
+    }
+    AMProjImportTransaction *transaction =
+        amproj_importTransactionForID(transactionID);
+    NSURL *retryURL = transaction.archiveURL ?: amproj_pendingImportURL;
+    NSString *reason = error.localizedDescription.length
+        ? error.localizedDescription : @"iOS 导入权限未开通";
+    amproj_retryImportURL = retryURL;
+    amproj_retryImportName = name;
+    amproj_pendingImportURL = nil;
+    amproj_pendingImportName = nil;
+    amproj_pendingImportTransactionID = nil;
+    amproj_pendingImportDeadline = 0;
+    amproj_importProjectRowBaselineCount = -1;
+    amproj_writeImportBreadcrumb(
+        transactionID, transaction.fingerprint, @"authorization_denied",
+        transaction.source, nil, nil, reason);
+    amproj_releaseImportTransaction(transactionID, NO);
+    amproj_debugEvent(@"import.authorization", @{
+        @"allowed": @NO,
+        @"transaction_id": transactionID,
+        @"error": reason
+    });
+    amproj_showImportStatusForTransaction(
+        [NSString stringWithFormat:@"AMProj · 导入未开始：%@", reason],
+        YES, transactionID);
+    amproj_resumeQueuedImports(@"authorization_denied");
+}
+#endif
+
 static void amproj_tryDispatchPendingImport(NSUInteger generation) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (generation != amproj_pendingImportGeneration || !amproj_pendingImportURL) return;
@@ -10004,57 +10063,6 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             });
             return;
         }
-#if AMPROJ_CLOUD_SYNC
-        if (amproj_importAuthorizedGeneration != generation) {
-            if (amproj_importAuthorizationPending) return;
-            amproj_importAuthorizationPending = YES;
-            NSString *authorizationTransactionID =
-                [amproj_pendingImportTransactionID copy] ?: @"";
-            NSString *authorizationName = [amproj_pendingImportName copy] ?: @"project.amproj";
-            AMCloudAuthorizeFeature(@"import", nil, ^(BOOL allowed, NSError *error) {
-                amproj_importAuthorizationPending = NO;
-                if (generation != amproj_pendingImportGeneration ||
-                    ![authorizationTransactionID
-                        isEqualToString:amproj_pendingImportTransactionID ?: @""]) return;
-                if (allowed) {
-                    amproj_importAuthorizedGeneration = generation;
-                    amproj_debugEvent(@"import.authorization", @{
-                        @"allowed": @YES,
-                        @"transaction_id": authorizationTransactionID
-                    });
-                    amproj_tryDispatchPendingImport(generation);
-                    return;
-                }
-
-                AMProjImportTransaction *transaction =
-                    amproj_importTransactionForID(authorizationTransactionID);
-                NSURL *retryURL = transaction.archiveURL ?: amproj_pendingImportURL;
-                NSString *reason = error.localizedDescription.length
-                    ? error.localizedDescription : @"iOS 导入权限未开通";
-                amproj_retryImportURL = retryURL;
-                amproj_retryImportName = authorizationName;
-                amproj_pendingImportURL = nil;
-                amproj_pendingImportName = nil;
-                amproj_pendingImportTransactionID = nil;
-                amproj_pendingImportDeadline = 0;
-                amproj_importProjectRowBaselineCount = -1;
-                amproj_writeImportBreadcrumb(
-                    authorizationTransactionID, transaction.fingerprint,
-                    @"authorization_denied", transaction.source, nil, nil, reason);
-                amproj_releaseImportTransaction(authorizationTransactionID, NO);
-                amproj_debugEvent(@"import.authorization", @{
-                    @"allowed": @NO,
-                    @"transaction_id": authorizationTransactionID,
-                    @"error": reason
-                });
-                amproj_showImportStatusForTransaction(
-                    [NSString stringWithFormat:@"AMProj · 导入未开始：%@", reason],
-                    YES, authorizationTransactionID);
-                amproj_resumeQueuedImports(@"authorization_denied");
-            });
-            return;
-        }
-#endif
         if (amproj_nativeImportAlertActive) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
                            dispatch_get_main_queue(), ^{
@@ -10104,6 +10112,12 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             NSURL *URL = amproj_pendingImportURL;
             NSString *name = amproj_pendingImportName ?: @"project.amproj";
             CFAbsoluteTime deadline = amproj_pendingImportDeadline;
+            void (^startAuthorized)(void) = ^{
+            if (generation != amproj_pendingImportGeneration ||
+                ![transactionID isEqualToString:amproj_pendingImportTransactionID ?: @""] ||
+                !amproj_pendingImportURL) {
+                return;
+            }
             amproj_importDispatchCoolingDown = YES;
             amproj_markImportTransactionState(
                 transactionID, AMProjImportTransactionNativeActive);
@@ -10224,6 +10238,60 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
                     @"filename": name
                 });
             }
+            };
+#if AMPROJ_CLOUD_SYNC
+            if (amproj_importAuthorizationPending &&
+                amproj_importAuthorizationGeneration == generation) {
+                return;
+            }
+            amproj_importAuthorizationPending = YES;
+            amproj_importAuthorizationGeneration = generation;
+            NSString *authorizationTransactionID = [transactionID copy];
+            NSString *authorizationName = [name copy];
+            AMCloudAuthorizeFeature(@"import", nil, ^(BOOL allowed, NSError *error) {
+                if (amproj_importAuthorizationGeneration == generation) {
+                    amproj_importAuthorizationPending = NO;
+                    amproj_importAuthorizationGeneration = 0;
+                }
+                if (generation != amproj_pendingImportGeneration ||
+                    ![authorizationTransactionID
+                        isEqualToString:amproj_pendingImportTransactionID ?: @""]) {
+                    return;
+                }
+                if (!allowed) {
+                    amproj_finishImportAuthorizationDenied(
+                        generation, authorizationTransactionID,
+                        authorizationName, error);
+                    return;
+                }
+
+                AMProjImportTransaction *currentOwner =
+                    amproj_importTransactionForID(authorizationTransactionID);
+                BOOL stillReady = currentOwner &&
+                    currentOwner.state == AMProjImportTransactionWaitingForProjects &&
+                    currentOwner.projectTitleBaselineCaptured &&
+                    currentOwner.persistenceBaselineCaptured &&
+                    currentOwner.persistenceBaselineGeneration == generation &&
+                    amproj_visibleProjectsControllers().count > 0 &&
+                    UIApplication.sharedApplication.applicationState ==
+                        UIApplicationStateActive &&
+                    !amproj_nativeImportAlertActive &&
+                    !AMProjNativePackageImportBridgeRequiresRestart() &&
+                    !AMProjNativePackageImportBridgeIsBusy() &&
+                    amproj_nativePackageImportStarter == starter;
+                if (!stillReady) {
+                    amproj_tryDispatchPendingImport(generation);
+                    return;
+                }
+                amproj_debugEvent(@"import.authorization", @{
+                    @"allowed": @YES,
+                    @"transaction_id": authorizationTransactionID
+                });
+                startAuthorized();
+            });
+#else
+            startAuthorized();
+#endif
             return;
         }
 
@@ -14159,16 +14227,7 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
 
     NSString *title = amproj_currentProjectTitle(shareController);
     dispatch_async(dispatch_get_main_queue(), ^{
-#if AMPROJ_CLOUD_SYNC
-        AMCloudAuthorizeFeature(@"export", shareController,
-            ^(BOOL allowed, __unused NSError *error) {
-                if (allowed) {
-                    amproj_startDirectExport(shareController, nil, YES, nil, title);
-                }
-            });
-#else
         amproj_startDirectExport(shareController, nil, YES, nil, title);
-#endif
     });
 }
 
@@ -14209,16 +14268,7 @@ static void hooked_navigationPush(id self, SEL _cmd,
         });
         NSString *title = amproj_currentProjectTitle(presenter);
         dispatch_async(dispatch_get_main_queue(), ^{
-#if AMPROJ_CLOUD_SYNC
-            AMCloudAuthorizeFeature(@"export", presenter,
-                ^(BOOL allowed, __unused NSError *error) {
-                    if (allowed) {
-                        amproj_startDirectExport(presenter, viewController, animated, nil, title);
-                    }
-                });
-#else
             amproj_startDirectExport(presenter, viewController, animated, nil, title);
-#endif
         });
         return;
     }
@@ -14678,18 +14728,8 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             NSString *title = amproj_currentProjectTitle(presenter);
             void (^originalCompletion)(void) = [completion copy];
             dispatch_async(dispatch_get_main_queue(), ^{
-#if AMPROJ_CLOUD_SYNC
-                AMCloudAuthorizeFeature(@"export", presenter,
-                    ^(BOOL allowed, __unused NSError *error) {
-                        if (allowed) {
-                            amproj_startDirectExport(
-                                presenter, controller, animated, originalCompletion, title);
-                        }
-                    });
-#else
                 amproj_startDirectExport(
                     presenter, controller, animated, originalCompletion, title);
-#endif
             });
             return;
         }

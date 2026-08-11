@@ -85,42 +85,82 @@ static void AMCloudDeleteToken(void) {
     SecItemDelete((__bridge CFDictionaryRef)query);
 }
 
+static BOOL AMCloudIsValidDeviceIdentifier(NSString *identifier) {
+    if (![identifier isKindOfClass:NSString.class] || !identifier.length) return NO;
+    NSUUID *UUID = [[NSUUID alloc] initWithUUIDString:identifier];
+    return UUID != nil;
+}
+
 static NSString *AMCloudDeviceIdentifier(void) {
     static NSString *cachedIdentifier = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSDictionary *query = @{
+        NSDictionary *identity = @{
             (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
             (__bridge id)kSecAttrService: AMCloudKeychainService,
-            (__bridge id)kSecAttrAccount: AMCloudDeviceKeychainAccount,
+            (__bridge id)kSecAttrAccount: AMCloudDeviceKeychainAccount
+        };
+        NSMutableDictionary *query = [identity mutableCopy];
+        [query addEntriesFromDictionary:@{
             (__bridge id)kSecReturnData: @YES,
             (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
-        };
+        }];
         CFTypeRef result = NULL;
         OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
         if (status == errSecSuccess && result) {
             NSData *data = CFBridgingRelease(result);
             NSString *stored = [[NSString alloc] initWithData:data
                                                       encoding:NSUTF8StringEncoding];
-            if (stored.length >= 8) cachedIdentifier = stored;
+            if (AMCloudIsValidDeviceIdentifier(stored)) {
+                NSUUID *storedUUID = [[NSUUID alloc] initWithUUIDString:stored];
+                cachedIdentifier = storedUUID.UUIDString.lowercaseString;
+                return;
+            }
+        } else if (status != errSecItemNotFound) {
+            if (result) CFRelease(result);
+            AMCloudDiagnostic(@"cloud.device_id.read_failed", @{
+                @"status": @(status)
+            });
+            return;
         }
-        if (cachedIdentifier.length) return;
 
-        cachedIdentifier = NSUUID.UUID.UUIDString.lowercaseString;
-        NSData *data = [cachedIdentifier dataUsingEncoding:NSUTF8StringEncoding];
-        NSDictionary *identity = @{
-            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-            (__bridge id)kSecAttrService: AMCloudKeychainService,
-            (__bridge id)kSecAttrAccount: AMCloudDeviceKeychainAccount
+        NSString *candidate = NSUUID.UUID.UUIDString.lowercaseString;
+        NSData *data = [candidate dataUsingEncoding:NSUTF8StringEncoding];
+        NSDictionary *values = @{
+            (__bridge id)kSecValueData: data,
+            (__bridge id)kSecAttrAccessible:
+                (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         };
-        NSMutableDictionary *insert = [identity mutableCopy];
-        insert[(__bridge id)kSecValueData] = data;
-        insert[(__bridge id)kSecAttrAccessible] =
-            (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
-        SecItemDelete((__bridge CFDictionaryRef)identity);
-        SecItemAdd((__bridge CFDictionaryRef)insert, NULL);
+        OSStatus writeStatus = errSecSuccess;
+        if (status == errSecSuccess) {
+            writeStatus = SecItemUpdate((__bridge CFDictionaryRef)identity,
+                                        (__bridge CFDictionaryRef)values);
+        } else {
+            NSMutableDictionary *insert = [identity mutableCopy];
+            [insert addEntriesFromDictionary:values];
+            writeStatus = SecItemAdd((__bridge CFDictionaryRef)insert, NULL);
+            if (writeStatus == errSecDuplicateItem) {
+                writeStatus = SecItemUpdate((__bridge CFDictionaryRef)identity,
+                                            (__bridge CFDictionaryRef)values);
+            }
+        }
+        if (writeStatus == errSecSuccess) {
+            cachedIdentifier = candidate;
+        } else {
+            AMCloudDiagnostic(@"cloud.device_id.write_failed", @{
+                @"status": @(writeStatus)
+            });
+        }
     });
     return cachedIdentifier;
+}
+
+static BOOL AMCloudIsTrustedAccountURL(NSURL *URL) {
+    if (![URL isKindOfClass:NSURL.class]) return NO;
+    BOOL defaultPort = !URL.port || URL.port.integerValue == 443;
+    return [URL.scheme.lowercaseString isEqualToString:@"https"] &&
+        [URL.host.lowercaseString isEqualToString:@"am.meowcr.cn"] &&
+        !URL.user.length && !URL.password.length && defaultPort;
 }
 
 static NSString *AMCloudDeviceName(void) {
@@ -296,8 +336,16 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
     request.HTTPMethod = method;
     request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    NSString *deviceIdentifier = AMCloudDeviceIdentifier();
+    if (!deviceIdentifier.length) {
+        if (error) {
+            *error = AMCloudError(21,
+                @"无法安全保存此设备标识，请解锁设备后重新打开应用");
+        }
+        return nil;
+    }
     [request setValue:@"ios" forHTTPHeaderField:@"X-AM-Platform"];
-    [request setValue:AMCloudDeviceIdentifier() forHTTPHeaderField:@"X-AM-Device-ID"];
+    [request setValue:deviceIdentifier forHTTPHeaderField:@"X-AM-Device-ID"];
     if (authenticated) {
         NSString *token = AMCloudReadToken();
         if (!token.length) {
@@ -348,11 +396,17 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)loginUsername:(NSString *)username password:(NSString *)password
              nickname:(NSString *)nickname registerAccount:(BOOL)registerAccount
            completion:(AMCloudResult)completion {
+    NSString *deviceIdentifier = AMCloudDeviceIdentifier();
+    if (!deviceIdentifier.length) {
+        AMCloudCompleteOnMain(completion, nil, AMCloudError(21,
+            @"无法安全保存此设备标识，请解锁设备后重新打开应用"));
+        return;
+    }
     NSMutableDictionary *body = [@{
         @"username": username ?: @"",
         @"password": password ?: @"",
         @"platform": @"ios",
-        @"device_id": AMCloudDeviceIdentifier(),
+        @"device_id": deviceIdentifier,
         @"device_name": AMCloudDeviceName()
     } mutableCopy];
     if (registerAccount) body[@"nickname"] = nickname.length ? nickname : username ?: @"";
@@ -379,9 +433,15 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 }
 
 - (void)activateIOSSession:(AMCloudResult)completion {
+    NSString *deviceIdentifier = AMCloudDeviceIdentifier();
+    if (!deviceIdentifier.length) {
+        AMCloudCompleteOnMain(completion, nil, AMCloudError(21,
+            @"无法安全保存此设备标识，请解锁设备后重新打开应用"));
+        return;
+    }
     [self performMethod:@"POST" path:@"/ios/session/activate" body:@{
         @"platform": @"ios",
-        @"device_id": AMCloudDeviceIdentifier(),
+        @"device_id": deviceIdentifier,
         @"device_name": AMCloudDeviceName()
     } authenticated:YES completion:completion];
 }
@@ -621,6 +681,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
                     presenter:(UIViewController *)presenter;
 - (void)confirmDeleteProject:(NSDictionary *)project
                    presenter:(UIViewController *)presenter;
+- (void)reloadAccountControllerIfSupported;
 @end
 
 @interface AMCloudAccountWebViewController : UIViewController
@@ -798,11 +859,21 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     ]];
     [self.spinner startAnimating];
 
+    NSString *deviceIdentifier = AMCloudDeviceIdentifier();
     AMCloudDiagnostic(@"cloud.account.web_begin", @{
         @"route": self.route ?: @"",
         @"authenticated": @(AMCloudReadToken().length > 0),
-        @"device_id": AMCloudDeviceIdentifier()
+        @"device_id": deviceIdentifier ?: @""
     });
+    if (!deviceIdentifier.length) {
+        [self.spinner stopAnimating];
+        NSError *deviceError = AMCloudError(21,
+            @"无法安全保存此设备标识，请解锁设备后重新打开应用");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.manager showError:deviceError presenter:self];
+        });
+        return;
+    }
     NSString *token = AMCloudReadToken();
     if (!token.length) {
         [self loadAccountWebsiteWithToken:nil activationError:nil];
@@ -821,10 +892,17 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 - (void)loadAccountWebsiteWithToken:(NSString *)token activationError:(NSError *)error {
     if (!self.viewIfLoaded || self.webView) return;
+    NSString *deviceIdentifier = AMCloudDeviceIdentifier();
+    if (!deviceIdentifier.length) {
+        [self.spinner stopAnimating];
+        [self.manager showError:AMCloudError(21,
+            @"无法安全保存此设备标识，请解锁设备后重新打开应用") presenter:self];
+        return;
+    }
     NSDictionary *bootstrap = @{
         @"context": @{
             @"platform": @"ios",
-            @"deviceId": AMCloudDeviceIdentifier(),
+            @"deviceId": deviceIdentifier,
             @"deviceName": AMCloudDeviceName()
         },
         @"token": token ?: @""
@@ -833,7 +911,9 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     NSString *bootstrapJSON = [[NSString alloc] initWithData:bootstrapData
                                                     encoding:NSUTF8StringEncoding] ?: @"{}";
     NSString *source = [NSString stringWithFormat:
-        @"(function(){var b=%@;window.AF_NATIVE_CONTEXT=b.context||{};"
+        @"(function(){if(location.protocol!=='https:'||location.hostname!=='am.meowcr.cn'||"
+         @"(location.port&&location.port!=='443')){return;}var b=%@;"
+         @"window.AF_NATIVE_CONTEXT=b.context||{};"
          @"try{var k='am-native-account-bootstrapped';if(sessionStorage.getItem(k)!=='1'){"
          @"if(b.token){localStorage.setItem('af-token',b.token);}else{localStorage.removeItem('af-token');}"
          @"sessionStorage.setItem(k,'1');}}catch(e){}})();",
@@ -892,6 +972,21 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     (void)userContentController;
     if (![message.name isEqualToString:@"amAccount"] ||
         ![message.body isKindOfClass:NSDictionary.class]) return;
+    WKFrameInfo *frameInfo = message.frameInfo;
+    WKSecurityOrigin *origin = frameInfo.securityOrigin;
+    BOOL trustedOrigin = frameInfo.isMainFrame &&
+        [origin.protocol.lowercaseString isEqualToString:@"https"] &&
+        [origin.host.lowercaseString isEqualToString:@"am.meowcr.cn"] &&
+        (origin.port == 0 || origin.port == 443);
+    if (!trustedOrigin) {
+        AMCloudDiagnostic(@"cloud.account.web_message_rejected", @{
+            @"main_frame": @(frameInfo.isMainFrame),
+            @"scheme": origin.protocol ?: @"",
+            @"host": origin.host ?: @"",
+            @"port": @(origin.port)
+        });
+        return;
+    }
     NSDictionary *body = message.body;
     if (![body[@"type"] isEqualToString:@"token"]) return;
     NSString *token = [body[@"token"] isKindOfClass:NSString.class] ? body[@"token"] : @"";
@@ -900,6 +995,30 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     AMCloudDiagnostic(@"cloud.account.web_token", @{
         @"present": @(token.length > 0), @"stored": @(stored)
     });
+}
+
+- (void)webView:(WKWebView *)webView
+    decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
+                    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *URL = navigationAction.request.URL;
+    if (AMCloudIsTrustedAccountURL(URL)) {
+        decisionHandler(WKNavigationActionPolicyAllow);
+        return;
+    }
+
+    BOOL mainNavigation = !navigationAction.targetFrame ||
+        navigationAction.targetFrame.isMainFrame;
+    AMCloudDiagnostic(@"cloud.account.web_navigation_rejected", @{
+        @"url": URL.absoluteString ?: @"",
+        @"main_frame": @(mainNavigation)
+    });
+    if (mainNavigation &&
+        ([URL.scheme.lowercaseString isEqualToString:@"https"] ||
+         [URL.scheme.lowercaseString isEqualToString:@"http"])) {
+        [UIApplication.sharedApplication openURL:URL options:@{}
+                               completionHandler:nil];
+    }
+    decisionHandler(WKNavigationActionPolicyCancel);
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
@@ -1172,6 +1291,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     return account;
 }
 
+- (void)reloadAccountControllerIfSupported {
+    UIViewController *account = self.accountController;
+    if ([account respondsToSelector:@selector(reloadCloudData)]) {
+        [(AMCloudAccountViewController *)account reloadCloudData];
+    }
+}
+
 - (void)showAccountFrom:(UIViewController *)presenter {
     AMCloudDiagnostic(@"cloud.account.token_read_begin", @{
         @"route": @"modal"
@@ -1349,7 +1475,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             [success addAction:[UIAlertAction actionWithTitle:@"好"
                 style:UIAlertActionStyleDefault handler:nil]];
             [top presentViewController:success animated:YES completion:nil];
-            [weakSelf.accountController reloadCloudData];
+            [weakSelf reloadAccountControllerIfSupported];
         }];
     }];
 }
@@ -1490,7 +1616,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 (void)data;
                 [busy dismissViewControllerAnimated:YES completion:^{
                     if (error) [weakSelf showError:error presenter:presenter];
-                    else [weakSelf.accountController reloadCloudData];
+                    else [weakSelf reloadAccountControllerIfSupported];
                 }];
             }];
         });
@@ -1513,7 +1639,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 (void)data;
                 [busy dismissViewControllerAnimated:YES completion:^{
                     if (error) [weakSelf showError:error presenter:presenter];
-                    else [weakSelf.accountController reloadCloudData];
+                    else [weakSelf reloadAccountControllerIfSupported];
                 }];
             }];
         });

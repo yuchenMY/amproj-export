@@ -155,6 +155,32 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("activateIOSSession", CLOUD)
         self.assertIn('forHTTPHeaderField:@"X-AM-Device-ID"', CLOUD)
 
+        device_identifier = CLOUD.split(
+            "static NSString *AMCloudDeviceIdentifier", 1
+        )[1].split("static NSString *AMCloudDeviceName", 1)[0]
+        self.assertIn("AMCloudIsValidDeviceIdentifier", device_identifier)
+        self.assertIn("status != errSecItemNotFound", device_identifier)
+        self.assertIn("writeStatus == errSecSuccess", device_identifier)
+        self.assertIn("errSecDuplicateItem", device_identifier)
+        self.assertNotIn("SecItemDelete", device_identifier)
+
+        webview = CLOUD.split("@implementation AMCloudAccountWebViewController", 1)[1]
+        webview = webview.split("@implementation AMCloudWeakScriptMessageHandler", 1)[0]
+        self.assertIn("AMCloudIsTrustedAccountURL", webview)
+        self.assertIn("location.protocol!=='https:'", webview)
+        self.assertIn("location.hostname!=='am.meowcr.cn'", webview)
+        self.assertIn("message.frameInfo", webview)
+        self.assertIn("frameInfo.isMainFrame", webview)
+        self.assertIn("frameInfo.securityOrigin", webview)
+        self.assertIn("WKNavigationActionPolicyCancel", webview)
+
+    def test_account_refresh_only_targets_the_legacy_native_controller(self):
+        self.assertNotIn("[weakSelf.accountController reloadCloudData]", CLOUD)
+        refresh = CLOUD.split("- (void)reloadAccountControllerIfSupported", 1)[1]
+        refresh = refresh.split("- (void)showAccountFrom", 1)[0]
+        self.assertIn("respondsToSelector:@selector(reloadCloudData)", refresh)
+        self.assertIn("(AMCloudAccountViewController *)account", refresh)
+
     def test_account_route_emits_immediately_flushable_diagnostic_stages(self):
         self.assertIn("emitCriticalEvent", DEBUG_HEADER)
         self.assertIn("- (void)emitCriticalEvent", DEBUG_SOURCE)
@@ -206,6 +232,28 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('AMCloudAuthorizeFeature(@"import"', EXPORT)
         self.assertIn("amproj_importAuthorizationPending", EXPORT)
         self.assertIn('body:@{ @"feature": feature ?: @"" }', CLOUD)
+
+        export_boundary = EXPORT.split(
+            "static void amproj_startDirectExport", 1
+        )[1].split("static void amproj_finishDirectFailure", 1)[0]
+        self.assertIn('AMCloudAuthorizeFeature(@"export"', export_boundary)
+        self.assertIn("amproj_startAuthorizedDirectExport", export_boundary)
+        retry = EXPORT.split('actionWithTitle:@"重试"', 1)[1].split(
+            "actionWithTitle", 1
+        )[0]
+        self.assertIn("amproj_startDirectExport", retry)
+        self.assertNotIn("amproj_startAuthorizedDirectExport", retry)
+
+        import_dispatch = EXPORT.rsplit(
+            "static void amproj_tryDispatchPendingImport(NSUInteger generation) {", 1
+        )[1].split("static void amproj_queuePreparedImport", 1)[0]
+        authorize_at = import_dispatch.index('AMCloudAuthorizeFeature(@"import"')
+        starter_at = import_dispatch.index("AMProjNativePackageImportStarter starter")
+        self.assertGreater(authorize_at, starter_at)
+        authorization_callback = import_dispatch[authorize_at:]
+        self.assertIn("BOOL stillReady", authorization_callback)
+        self.assertIn("startAuthorized();", authorization_callback)
+        self.assertNotIn("amproj_importAuthorizedGeneration", EXPORT)
 
 
 if __name__ == "__main__":
