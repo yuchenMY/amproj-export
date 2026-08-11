@@ -23,6 +23,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("-DAMPROJ_CLOUD_SYNC=1", cloud_rule)
         self.assertIn("AMCloudSync.m", cloud_rule)
         self.assertIn("-framework Security", cloud_rule)
+        self.assertIn("-framework WebKit", cloud_rule)
         self.assertIn("#if AMPROJ_CLOUD_SYNC", EXPORT)
 
     def test_token_is_stored_only_in_keychain(self):
@@ -38,6 +39,8 @@ class CloudSyncSourceTests(unittest.TestCase):
             "/auth/login",
             "/auth/register",
             "/auth/logout",
+            "/ios/session/activate",
+            "/ios/authorize",
             "/user/me",
             "/cloud/projects",
             "/upload",
@@ -77,8 +80,10 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMCloudProjectsViewDidAppear", CLOUD)
         self.assertIn("if (updated.count) updated[0] = accountItem", CLOUD)
         self.assertIn("person.crop.circle", CLOUD)
-        self.assertIn("showAuthenticationFrom", CLOUD)
-        self.assertIn("AMCloudAccountViewController", CLOUD)
+        self.assertIn("AMCloudAccountWebViewController", CLOUD)
+        self.assertIn("WKWebView", CLOUD)
+        self.assertIn("https://am.meowcr.cn/me.html?embed=1&platform=ios", CLOUD)
+        self.assertIn('name:@"amAccount"', CLOUD)
 
     def test_native_my_account_route_is_replaced_before_presentation_or_push(self):
         for symbol in (
@@ -140,19 +145,15 @@ class CloudSyncSourceTests(unittest.TestCase):
             navigation,
         )
 
-    def test_account_controller_reads_keychain_after_navigation_entry(self):
-        view_load = CLOUD.split("- (void)viewDidLoad", 1)[1].split(
-            "- (void)viewDidAppear", 1
-        )[0]
-        self.assertNotIn("AMCloudReadToken", view_load)
-        self.assertNotIn("[self reloadCloudData]", view_load)
-        appeared = CLOUD.split("- (void)viewDidAppear", 1)[1].split(
-            "- (void)closeAccount", 1
-        )[0]
-        self.assertIn("[self ensureAccountReady]", appeared)
-        self.assertIn("AMCloudReadToken", appeared)
-        self.assertIn('@"route": @"controller"', appeared)
-        self.assertIn("popViewControllerAnimated", CLOUD)
+    def test_account_webview_syncs_keychain_token_and_device_context(self):
+        self.assertIn("AMCloudDeviceKeychainAccount", CLOUD)
+        self.assertIn("AMCloudDeviceIdentifier", CLOUD)
+        self.assertIn("AMCloudDeviceName", CLOUD)
+        self.assertIn("window.AF_NATIVE_CONTEXT", CLOUD)
+        self.assertIn("localStorage.setItem('af-token'", CLOUD)
+        self.assertIn("AMCloudWriteToken(token)", CLOUD)
+        self.assertIn("activateIOSSession", CLOUD)
+        self.assertIn('forHTTPHeaderField:@"X-AM-Device-ID"', CLOUD)
 
     def test_account_route_emits_immediately_flushable_diagnostic_stages(self):
         self.assertIn("emitCriticalEvent", DEBUG_HEADER)
@@ -198,6 +199,13 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMCloudSyncUploadActivities(fileURL", EXPORT)
         self.assertIn("applicationActivities:cloudActivities", EXPORT)
         self.assertIn('return @"上传云工程"', CLOUD)
+
+    def test_import_and_export_require_server_authorization(self):
+        self.assertIn("AMCloudAuthorizeFeature", HEADER)
+        self.assertIn('AMCloudAuthorizeFeature(@"export"', EXPORT)
+        self.assertIn('AMCloudAuthorizeFeature(@"import"', EXPORT)
+        self.assertIn("amproj_importAuthorizationPending", EXPORT)
+        self.assertIn('body:@{ @"feature": feature ?: @"" }', CLOUD)
 
 
 if __name__ == "__main__":

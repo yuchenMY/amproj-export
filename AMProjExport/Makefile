@@ -19,7 +19,7 @@ AMProjExport.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMPro
 	@ls -la $@
 
 AMProjExportCloud.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m AMDebugTransport.h AMCloudSync.m AMCloudSync.h
-	$(CC) $(CFLAGS) -DAMPROJ_TELEMETRY=1 -DAMPROJ_CLOUD_SYNC=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m AMCloudSync.m $(LDLIBS) -framework Security
+	$(CC) $(CFLAGS) -DAMPROJ_TELEMETRY=1 -DAMPROJ_CLOUD_SYNC=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m AMCloudSync.m $(LDLIBS) -framework Security -framework WebKit
 	@ls -la $@
 
 AMProjExportDebug.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m AMDebugTransport.h

@@ -3,11 +3,13 @@
 
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
+#import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
 static NSString *const AMCloudAPIBase = @"https://am.meowcr.cn/api";
 static NSString *const AMCloudKeychainService = @"com.ayakameow.ambeta.amproj-cloud";
 static NSString *const AMCloudKeychainAccount = @"bearer-token";
+static NSString *const AMCloudDeviceKeychainAccount = @"ios-device-id";
 static NSString *const AMCloudErrorDomain = @"com.ayakameow.amproj.cloud";
 static NSString *const AMCloudAccountEntryIdentifier = @"AMCloudAccountEntry";
 
@@ -81,6 +83,49 @@ static void AMCloudDeleteToken(void) {
         (__bridge id)kSecAttrAccount: AMCloudKeychainAccount
     };
     SecItemDelete((__bridge CFDictionaryRef)query);
+}
+
+static NSString *AMCloudDeviceIdentifier(void) {
+    static NSString *cachedIdentifier = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSDictionary *query = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: AMCloudKeychainService,
+            (__bridge id)kSecAttrAccount: AMCloudDeviceKeychainAccount,
+            (__bridge id)kSecReturnData: @YES,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
+        };
+        CFTypeRef result = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+        if (status == errSecSuccess && result) {
+            NSData *data = CFBridgingRelease(result);
+            NSString *stored = [[NSString alloc] initWithData:data
+                                                      encoding:NSUTF8StringEncoding];
+            if (stored.length >= 8) cachedIdentifier = stored;
+        }
+        if (cachedIdentifier.length) return;
+
+        cachedIdentifier = NSUUID.UUID.UUIDString.lowercaseString;
+        NSData *data = [cachedIdentifier dataUsingEncoding:NSUTF8StringEncoding];
+        NSDictionary *identity = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: AMCloudKeychainService,
+            (__bridge id)kSecAttrAccount: AMCloudDeviceKeychainAccount
+        };
+        NSMutableDictionary *insert = [identity mutableCopy];
+        insert[(__bridge id)kSecValueData] = data;
+        insert[(__bridge id)kSecAttrAccessible] =
+            (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
+        SecItemDelete((__bridge CFDictionaryRef)identity);
+        SecItemAdd((__bridge CFDictionaryRef)insert, NULL);
+    });
+    return cachedIdentifier;
+}
+
+static NSString *AMCloudDeviceName(void) {
+    NSString *name = UIDevice.currentDevice.name;
+    return name.length ? name : (UIDevice.currentDevice.model ?: @"iOS Device");
 }
 
 static NSString *AMCloudSHA256(NSURL *URL, NSError **error) {
@@ -211,6 +256,8 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
            completion:(AMCloudResult)completion;
 - (void)loadMe:(AMCloudResult)completion;
 - (void)logout:(AMCloudResult)completion;
+- (void)activateIOSSession:(AMCloudResult)completion;
+- (void)authorizeFeature:(NSString *)feature completion:(AMCloudResult)completion;
 - (void)loadProjects:(AMCloudResult)completion;
 - (void)createProject:(NSString *)title completion:(AMCloudResult)completion;
 - (void)uploadFile:(NSURL *)fileURL projectID:(NSString *)projectID
@@ -249,6 +296,8 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
     request.HTTPMethod = method;
     request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    [request setValue:@"ios" forHTTPHeaderField:@"X-AM-Platform"];
+    [request setValue:AMCloudDeviceIdentifier() forHTTPHeaderField:@"X-AM-Device-ID"];
     if (authenticated) {
         NSString *token = AMCloudReadToken();
         if (!token.length) {
@@ -301,7 +350,10 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
            completion:(AMCloudResult)completion {
     NSMutableDictionary *body = [@{
         @"username": username ?: @"",
-        @"password": password ?: @""
+        @"password": password ?: @"",
+        @"platform": @"ios",
+        @"device_id": AMCloudDeviceIdentifier(),
+        @"device_name": AMCloudDeviceName()
     } mutableCopy];
     if (registerAccount) body[@"nickname"] = nickname.length ? nickname : username ?: @"";
     NSString *path = registerAccount ? @"/auth/register" : @"/auth/login";
@@ -324,6 +376,20 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         AMCloudDeleteToken();
         if (completion) completion(data, error);
     }];
+}
+
+- (void)activateIOSSession:(AMCloudResult)completion {
+    [self performMethod:@"POST" path:@"/ios/session/activate" body:@{
+        @"platform": @"ios",
+        @"device_id": AMCloudDeviceIdentifier(),
+        @"device_name": AMCloudDeviceName()
+    } authenticated:YES completion:completion];
+}
+
+- (void)authorizeFeature:(NSString *)feature completion:(AMCloudResult)completion {
+    [self performMethod:@"POST" path:@"/ios/authorize"
+                   body:@{ @"feature": feature ?: @"" }
+          authenticated:YES completion:completion];
 }
 
 - (void)loadProjects:(AMCloudResult)completion {
@@ -504,16 +570,19 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic, copy) NSArray<NSDictionary *> *projects;
 @property(nonatomic) BOOL authenticationPending;
 @property(nonatomic) BOOL contentLoaded;
+@property(nonatomic) BOOL authenticated;
 - (void)reloadCloudData;
 - (void)createCloudProject;
 - (void)ensureAccountReady;
+- (void)beginAuthentication;
+- (void)resetAccountContent;
 @end
 
 @interface AMCloudManager : NSObject
 @property(nonatomic, strong) AMCloudClient *client;
 @property(nonatomic, copy) AMCloudImportHandler importHandler;
 @property(nonatomic, weak) UIViewController *lastProjectsController;
-@property(nonatomic, weak) AMCloudAccountViewController *accountController;
+@property(nonatomic, weak) UIViewController *accountController;
 + (instancetype)shared;
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
@@ -529,7 +598,10 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @end
 
 @interface AMCloudManager ()
-- (AMCloudAccountViewController *)newAccountControllerForRoute:(NSString *)route;
+- (UIViewController *)newAccountControllerForRoute:(NSString *)route;
+- (void)showAuthenticationFrom:(UIViewController *)presenter
+                     completion:(dispatch_block_t)completion
+                    cancellation:(dispatch_block_t)cancellation;
 - (UIAlertController *)busyAlert:(NSString *)title presenter:(UIViewController *)presenter;
 - (void)showCredentialsFrom:(UIViewController *)presenter registerAccount:(BOOL)registerAccount
                   completion:(dispatch_block_t)completion;
@@ -549,6 +621,20 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
                     presenter:(UIViewController *)presenter;
 - (void)confirmDeleteProject:(NSDictionary *)project
                    presenter:(UIViewController *)presenter;
+@end
+
+@interface AMCloudAccountWebViewController : UIViewController
+    <WKNavigationDelegate, WKScriptMessageHandler>
+@property(nonatomic, weak) AMCloudManager *manager;
+@property(nonatomic, copy) NSString *route;
+@property(nonatomic, strong) WKWebView *webView;
+@property(nonatomic, strong) UIActivityIndicatorView *spinner;
+- (void)loadAccountWebsiteWithToken:(NSString *)token activationError:(NSError *)error;
+@end
+
+@interface AMCloudWeakScriptMessageHandler : NSObject <WKScriptMessageHandler>
+@property(nonatomic, weak) id<WKScriptMessageHandler> target;
++ (instancetype)handlerWithTarget:(id<WKScriptMessageHandler>)target;
 @end
 
 @interface AMCloudUploadActivity : UIActivity
@@ -689,6 +775,174 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     }
 }
 
+@implementation AMCloudAccountWebViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"猫鹤账户";
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    if ([self.route isEqualToString:@"modal"] ||
+        [self.route isEqualToString:@"native_present"]) {
+        self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
+            initWithBarButtonSystemItem:UIBarButtonSystemItemClose
+                                 target:self action:@selector(closeAccountWebsite)];
+    }
+
+    self.spinner = [[UIActivityIndicatorView alloc]
+        initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    self.spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.spinner];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.spinner.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [self.spinner.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor]
+    ]];
+    [self.spinner startAnimating];
+
+    AMCloudDiagnostic(@"cloud.account.web_begin", @{
+        @"route": self.route ?: @"",
+        @"authenticated": @(AMCloudReadToken().length > 0),
+        @"device_id": AMCloudDeviceIdentifier()
+    });
+    NSString *token = AMCloudReadToken();
+    if (!token.length) {
+        [self loadAccountWebsiteWithToken:nil activationError:nil];
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    [self.manager.client activateIOSSession:^(__unused id data, NSError *error) {
+        NSString *activeToken = AMCloudReadToken();
+        if (error.code == 401 || error.code == 403) {
+            AMCloudDeleteToken();
+            activeToken = nil;
+        }
+        [weakSelf loadAccountWebsiteWithToken:activeToken activationError:error];
+    }];
+}
+
+- (void)loadAccountWebsiteWithToken:(NSString *)token activationError:(NSError *)error {
+    if (!self.viewIfLoaded || self.webView) return;
+    NSDictionary *bootstrap = @{
+        @"context": @{
+            @"platform": @"ios",
+            @"deviceId": AMCloudDeviceIdentifier(),
+            @"deviceName": AMCloudDeviceName()
+        },
+        @"token": token ?: @""
+    };
+    NSData *bootstrapData = [NSJSONSerialization dataWithJSONObject:bootstrap options:0 error:nil];
+    NSString *bootstrapJSON = [[NSString alloc] initWithData:bootstrapData
+                                                    encoding:NSUTF8StringEncoding] ?: @"{}";
+    NSString *source = [NSString stringWithFormat:
+        @"(function(){var b=%@;window.AF_NATIVE_CONTEXT=b.context||{};"
+         @"try{var k='am-native-account-bootstrapped';if(sessionStorage.getItem(k)!=='1'){"
+         @"if(b.token){localStorage.setItem('af-token',b.token);}else{localStorage.removeItem('af-token');}"
+         @"sessionStorage.setItem(k,'1');}}catch(e){}})();",
+        bootstrapJSON];
+    WKUserContentController *content = [WKUserContentController new];
+    [content addUserScript:[[WKUserScript alloc] initWithSource:source
+                                                 injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                              forMainFrameOnly:YES]];
+    [content addScriptMessageHandler:
+        [AMCloudWeakScriptMessageHandler handlerWithTarget:self] name:@"amAccount"];
+    WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
+    configuration.userContentController = content;
+    configuration.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+    WKWebView *webView = [[WKWebView alloc] initWithFrame:CGRectZero
+                                            configuration:configuration];
+    webView.translatesAutoresizingMaskIntoConstraints = NO;
+    webView.navigationDelegate = self;
+    webView.customUserAgent = @"AutFengApp/ios AMProjCloud";
+    self.webView = webView;
+    [self.view insertSubview:webView belowSubview:self.spinner];
+    [NSLayoutConstraint activateConstraints:@[
+        [webView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [webView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [webView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [webView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
+    ]];
+    NSURL *URL = [NSURL URLWithString:@"https://am.meowcr.cn/me.html?embed=1&platform=ios"];
+    [webView loadRequest:[NSURLRequest requestWithURL:URL
+                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                     timeoutInterval:60]];
+
+    if (error && (error.code == 401 || error.code == 403)) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"iOS 设备需要重新登录"
+                message:error.localizedDescription ?: @"当前设备登录状态已失效"
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"知道了"
+                                                     style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    }
+}
+
+- (void)closeAccountWebsite {
+    if (self.navigationController.presentingViewController &&
+        self.navigationController.viewControllers.firstObject == self) {
+        [self.navigationController dismissViewControllerAnimated:YES completion:nil];
+    } else {
+        [self.navigationController popViewControllerAnimated:YES];
+    }
+}
+
+- (void)userContentController:(WKUserContentController *)userContentController
+      didReceiveScriptMessage:(WKScriptMessage *)message {
+    (void)userContentController;
+    if (![message.name isEqualToString:@"amAccount"] ||
+        ![message.body isKindOfClass:NSDictionary.class]) return;
+    NSDictionary *body = message.body;
+    if (![body[@"type"] isEqualToString:@"token"]) return;
+    NSString *token = [body[@"token"] isKindOfClass:NSString.class] ? body[@"token"] : @"";
+    BOOL stored = token.length ? AMCloudWriteToken(token) : YES;
+    if (!token.length) AMCloudDeleteToken();
+    AMCloudDiagnostic(@"cloud.account.web_token", @{
+        @"present": @(token.length > 0), @"stored": @(stored)
+    });
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    (void)navigation;
+    [self.spinner stopAnimating];
+    self.spinner.hidden = YES;
+    AMCloudDiagnostic(@"cloud.account.web_loaded", @{
+        @"url": webView.URL.absoluteString ?: @""
+    });
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation
+       withError:(NSError *)error {
+    (void)webView;
+    (void)navigation;
+    [self.spinner stopAnimating];
+    AMCloudDiagnostic(@"cloud.account.web_failed", @{
+        @"error": error.localizedDescription ?: @""
+    });
+    [self.manager showError:error presenter:self];
+}
+
+- (void)dealloc {
+    [self.webView.configuration.userContentController removeScriptMessageHandlerForName:@"amAccount"];
+}
+
+@end
+
+@implementation AMCloudWeakScriptMessageHandler
+
++ (instancetype)handlerWithTarget:(id<WKScriptMessageHandler>)target {
+    AMCloudWeakScriptMessageHandler *handler = [AMCloudWeakScriptMessageHandler new];
+    handler.target = target;
+    return handler;
+}
+
+- (void)userContentController:(WKUserContentController *)userContentController
+      didReceiveScriptMessage:(WKScriptMessage *)message {
+    [self.target userContentController:userContentController didReceiveScriptMessage:message];
+}
+
+@end
+
 @implementation AMCloudManager
 
 + (instancetype)shared {
@@ -794,6 +1048,12 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 - (void)showAuthenticationFrom:(UIViewController *)presenter
                      completion:(dispatch_block_t)completion {
+    [self showAuthenticationFrom:presenter completion:completion cancellation:nil];
+}
+
+- (void)showAuthenticationFrom:(UIViewController *)presenter
+                     completion:(dispatch_block_t)completion
+                    cancellation:(dispatch_block_t)cancellation {
     UIViewController *top = AMCloudTopController(presenter);
     AMCloudDiagnostic(@"cloud.account.auth_route", @{
         @"presenter": AMCloudClassName(presenter),
@@ -821,7 +1081,12 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             });
         }]];
     [choice addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel
-                                            handler:nil]];
+        handler:^(__unused UIAlertAction *action) {
+            AMCloudDiagnostic(@"cloud.account.auth_cancelled", @{
+                @"presenter": AMCloudClassName(presenter)
+            });
+            if (cancellation) cancellation();
+        }]];
     UIPopoverPresentationController *popover = choice.popoverPresentationController;
     if (popover) {
         popover.sourceView = top.view;
@@ -892,13 +1157,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     [AMCloudTopController(presenter) presentViewController:alert animated:YES completion:nil];
 }
 
-- (AMCloudAccountViewController *)newAccountControllerForRoute:(NSString *)route {
+- (UIViewController *)newAccountControllerForRoute:(NSString *)route {
     AMCloudDiagnostic(@"cloud.account.controller_create_begin", @{
         @"route": route ?: @""
     });
-    AMCloudAccountViewController *account = [[AMCloudAccountViewController alloc]
-        initWithStyle:UITableViewStyleInsetGrouped];
+    AMCloudAccountWebViewController *account = [AMCloudAccountWebViewController new];
     account.manager = self;
+    account.route = route ?: @"";
     self.accountController = account;
     AMCloudDiagnostic(@"cloud.account.controller_created", @{
         @"route": route ?: @"",
@@ -930,13 +1195,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         @"top": AMCloudClassName(top),
         @"authenticated": @(authenticated)
     });
-    if (!authenticated) {
-        __weak typeof(self) weakSelf = self;
-        [self showAuthenticationFrom:presenter completion:^{
-            [weakSelf showAccountFrom:presenter];
-        }];
-        return;
-    }
     if (!top) {
         AMCloudDiagnostic(@"cloud.account.route_failed", @{
             @"stage": @"account", @"reason": @"missing_presenter"
@@ -944,8 +1202,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         return;
     }
     @try {
-        AMCloudAccountViewController *account =
-            [self newAccountControllerForRoute:@"modal"];
+        UIViewController *account = [self newAccountControllerForRoute:@"modal"];
         UINavigationController *navigation = [[UINavigationController alloc]
             initWithRootViewController:account];
         navigation.modalPresentationStyle = UIModalPresentationAutomatic;
@@ -1277,6 +1534,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         @"controller": AMCloudClassName(self)
     });
     self.title = @"猫鹤账户";
+    self.account = @{};
+    self.usage = @{};
     self.projects = @[];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
         initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:self
@@ -1317,19 +1576,44 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         @"route": @"controller",
         @"authenticated": @(authenticated)
     });
+    self.authenticated = authenticated;
+    [self.tableView reloadData];
     if (authenticated) {
         self.contentLoaded = YES;
         [self reloadCloudData];
         return;
     }
 
+    [self beginAuthentication];
+}
+
+- (void)beginAuthentication {
+    if (self.authenticationPending) return;
+
     self.authenticationPending = YES;
+    self.authenticated = NO;
+    self.contentLoaded = NO;
+    [self resetAccountContent];
     __weak typeof(self) weakSelf = self;
     [self.manager showAuthenticationFrom:self completion:^{
         weakSelf.authenticationPending = NO;
+        weakSelf.authenticated = YES;
         weakSelf.contentLoaded = YES;
         [weakSelf reloadCloudData];
+    } cancellation:^{
+        weakSelf.authenticationPending = NO;
+        weakSelf.authenticated = NO;
+        weakSelf.contentLoaded = NO;
+        [weakSelf.tableView reloadData];
     }];
+}
+
+- (void)resetAccountContent {
+    self.account = @{};
+    self.usage = @{};
+    self.projects = @[];
+    [self.refreshControl endRefreshing];
+    [self.tableView reloadData];
 }
 
 - (void)closeAccount {
@@ -1374,6 +1658,12 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 }
 
 - (void)reloadCloudData {
+    if (!self.authenticated || !AMCloudReadToken().length) {
+        self.authenticated = NO;
+        self.contentLoaded = NO;
+        [self beginAuthentication];
+        return;
+    }
     AMCloudDiagnostic(@"cloud.account.reload_begin", @{
         @"controller": AMCloudClassName(self),
         @"manager": AMCloudClassName(self.manager),
@@ -1391,18 +1681,16 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             [weakSelf.refreshControl endRefreshing];
             if (error.code == 401) {
                 AMCloudDeleteToken();
+                weakSelf.authenticated = NO;
                 weakSelf.contentLoaded = NO;
-                weakSelf.authenticationPending = YES;
-                [weakSelf.manager showAuthenticationFrom:weakSelf completion:^{
-                    weakSelf.authenticationPending = NO;
-                    weakSelf.contentLoaded = YES;
-                    [weakSelf reloadCloudData];
-                }];
+                weakSelf.authenticationPending = NO;
+                [weakSelf beginAuthentication];
             } else {
                 [weakSelf.manager showError:error presenter:weakSelf];
             }
             return;
         }
+        weakSelf.authenticated = YES;
         weakSelf.account = data;
         [weakSelf.tableView reloadData];
         [weakSelf.manager.client loadProjects:^(NSDictionary *projectsData,
@@ -1439,7 +1727,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     (void)tableView;
-    if (section == 0) return @"账户";
+    if (section == 0) return @"猫鹤账户";
     if (section == 1) return @"云空间";
     return @"云工程";
 }
@@ -1455,24 +1743,44 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     cell.textLabel.text = @"";
     cell.detailTextLabel.text = @"";
     if (indexPath.section == 0) {
-        NSString *nickname = [self.account[@"nickname"] isKindOfClass:NSString.class]
-            ? self.account[@"nickname"] : self.account[@"username"];
-        cell.textLabel.text = nickname.length ? nickname : @"已登录";
-        NSString *username = [self.account[@"username"] isKindOfClass:NSString.class]
-            ? self.account[@"username"] : @"";
-        NSDictionary *vip = [self.account[@"vip"] isKindOfClass:NSDictionary.class]
-            ? self.account[@"vip"] : nil;
-        NSString *tier = [vip[@"tier"] isKindOfClass:NSString.class]
-            ? [vip[@"tier"] uppercaseString] : @"";
-        cell.detailTextLabel.text = tier.length
-            ? [NSString stringWithFormat:@"%@ · %@", username, tier] : username;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        if (self.authenticationPending) {
+            cell.textLabel.text = @"正在等待登录";
+            cell.detailTextLabel.text = @"请在弹出的账户窗口中继续";
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if (!self.authenticated) {
+            cell.textLabel.text = @"登录或注册";
+            cell.detailTextLabel.text = @"登录后管理云空间与云工程";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else {
+            NSString *nickname = [self.account[@"nickname"] isKindOfClass:NSString.class]
+                ? self.account[@"nickname"] : self.account[@"username"];
+            cell.textLabel.text = nickname.length ? nickname : @"已登录";
+            NSString *username = [self.account[@"username"] isKindOfClass:NSString.class]
+                ? self.account[@"username"] : @"";
+            NSDictionary *vip = [self.account[@"vip"] isKindOfClass:NSDictionary.class]
+                ? self.account[@"vip"] : nil;
+            NSString *tier = [vip[@"tier"] isKindOfClass:NSString.class]
+                ? [vip[@"tier"] uppercaseString] : @"";
+            cell.detailTextLabel.text = tier.length
+                ? [NSString stringWithFormat:@"%@ · %@", username, tier]
+                : (username.length ? username : @"账户资料尚未加载，可下拉刷新");
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
     } else if (indexPath.section == 1) {
-        long long used = [self.usage[@"usedBytes"] longLongValue];
-        long long quota = [self.usage[@"quotaBytes"] longLongValue];
-        cell.textLabel.text = [NSString stringWithFormat:@"%@ / %@",
-            AMCloudByteText(used), AMCloudByteText(quota)];
-        cell.detailTextLabel.text = quota > 0 ? @"" : @"当前会员未开通云空间";
+        if (!self.authenticated) {
+            cell.textLabel.text = @"登录后查看云空间";
+            cell.detailTextLabel.text = @"";
+        } else {
+            long long used = [self.usage[@"usedBytes"] longLongValue];
+            long long quota = [self.usage[@"quotaBytes"] longLongValue];
+            cell.textLabel.text = [NSString stringWithFormat:@"%@ / %@",
+                AMCloudByteText(used), AMCloudByteText(quota)];
+            cell.detailTextLabel.text = quota > 0 ? @"" : @"当前会员未开通云空间";
+        }
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (!self.authenticated) {
+        cell.textLabel.text = @"登录后查看云工程";
+        cell.detailTextLabel.text = @"";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if (!self.projects.count) {
         cell.textLabel.text = @"暂无云工程";
@@ -1500,13 +1808,30 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section == 0) {
+        if (self.authenticationPending) return;
+        if (!self.authenticated) {
+            [self beginAuthentication];
+            return;
+        }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"猫鹤账户"
             message:nil preferredStyle:UIAlertControllerStyleActionSheet];
         __weak typeof(self) weakSelf = self;
         [sheet addAction:[UIAlertAction actionWithTitle:@"退出登录" style:UIAlertActionStyleDestructive
             handler:^(__unused UIAlertAction *action) {
-                [weakSelf.manager.client logout:^(__unused id data, __unused NSError *error) {
-                    [weakSelf dismissViewControllerAnimated:YES completion:nil];
+                AMCloudDiagnostic(@"cloud.account.logout_begin", @{
+                    @"controller": AMCloudClassName(weakSelf)
+                });
+                [weakSelf.manager.client logout:^(__unused id data, NSError *error) {
+                    AMCloudDiagnostic(@"cloud.account.logout_result", @{
+                        @"success": @(error == nil),
+                        @"error_code": @(error.code),
+                        @"controller_alive": @(weakSelf != nil)
+                    });
+                    weakSelf.authenticated = NO;
+                    weakSelf.authenticationPending = NO;
+                    weakSelf.contentLoaded = NO;
+                    [weakSelf resetAccountContent];
+                    [weakSelf closeAccount];
                 }];
             }]];
         [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel
@@ -1530,6 +1855,49 @@ void AMCloudSyncInstall(AMCloudImportHandler importHandler) {
     [[AMCloudManager shared] installWithImportHandler:importHandler];
 }
 
+void AMCloudAuthorizeFeature(NSString *feature, UIViewController *presenter,
+                             AMCloudAuthorizationCompletion completion) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMCloudAuthorizeFeature(feature, presenter, completion);
+        });
+        return;
+    }
+    AMCloudManager *manager = [AMCloudManager shared];
+    UIViewController *top = AMCloudTopController(presenter);
+    void (^deny)(NSError *) = ^(NSError *error) {
+        if (completion) completion(NO, error);
+        if (!top || top.presentedViewController) return;
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"iOS 权限未通过"
+            message:error.localizedDescription ?: @"请登录账户并联系管理员开通权限"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"打开账户"
+            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                [manager showAccountFrom:top];
+            }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"取消"
+            style:UIAlertActionStyleCancel handler:nil]];
+        [top presentViewController:alert animated:YES completion:nil];
+    };
+    if (!AMCloudReadToken().length) {
+        deny(AMCloudError(401, @"请先登录猫鹤账户；iOS 权限由管理员后台开通"));
+        return;
+    }
+    [manager.client authorizeFeature:feature completion:^(__unused id data, NSError *error) {
+        AMCloudDiagnostic(@"cloud.authorization.result", @{
+            @"feature": feature ?: @"",
+            @"allowed": @(error == nil),
+            @"error_code": @(error.code)
+        });
+        if (error) {
+            deny(error);
+            return;
+        }
+        if (completion) completion(YES, nil);
+    }];
+}
+
 UIViewController *AMCloudSyncReplacementForNativeAccountPresentation(
     UIViewController *presenter, UIViewController *controller) {
     if (![NSThread isMainThread] || !presenter || !controller ||
@@ -1550,7 +1918,7 @@ UIViewController *AMCloudSyncReplacementForNativeAccountPresentation(
         if (AMCloudIsProjectsControllerClass(presenter.class)) {
             manager.lastProjectsController = presenter;
         }
-        AMCloudAccountViewController *account =
+        UIViewController *account =
             [manager newAccountControllerForRoute:@"native_present"];
         UINavigationController *navigation = [[UINavigationController alloc]
             initWithRootViewController:account];
@@ -1591,7 +1959,7 @@ UIViewController *AMCloudSyncReplacementForNativeAccountPush(
         if (AMCloudIsProjectsControllerClass(presenter.class)) {
             manager.lastProjectsController = presenter;
         }
-        AMCloudAccountViewController *account =
+        UIViewController *account =
             [manager newAccountControllerForRoute:@"native_push"];
         AMCloudDiagnostic(@"cloud.account.native_push_replacement_ready", @{
             @"replacement": AMCloudClassName(account)
