@@ -2314,12 +2314,21 @@ static NSURL* amproj_createOutputURL(NSString *title, NSError **error) {
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error);
 
 #if AMPROJ_CLOUD_SYNC
+static UIViewController *amproj_visibleCloudUploadPresenter(
+    UIViewController *preferred) {
+    UIViewController *candidate = amproj_topViewController(preferred);
+    if (candidate.viewIfLoaded.window) return candidate;
+    candidate = amproj_topViewController(amproj_keyWindow().rootViewController);
+    return candidate.viewIfLoaded.window ? candidate : nil;
+}
+
 static void amproj_beginDirectCloudUpload(AMProjDirectRequest *request,
                                           NSURL *fileURL) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (amproj_directRequest != request) return;
         request.outputURL = fileURL;
-        UIViewController *presenter = request.presenter;
+        UIViewController *presenter =
+            amproj_visibleCloudUploadPresenter(request.presenter);
         if (!presenter) {
             amproj_finishDirectFailure(
                 request,
@@ -2654,6 +2663,13 @@ static void amproj_startDirectExportWithDestination(
             }
             amproj_directAuthorizationPending = NO;
             if (allowed) {
+                if (!presenter.viewIfLoaded.window) {
+                    amproj_logCriticalEvent(@"direct.authorization_presenter_detached", @{
+                        @"generation": @(authorizationGeneration),
+                        @"destination": uploadToCloud ? @"autfeng_hub" : @"share_sheet"
+                    });
+                    return;
+                }
                 if (uploadToCloud) {
                     uint8_t selectedExportOption = UINT8_MAX;
                     UIViewController *shareVC = amproj_shareVCRecursive(

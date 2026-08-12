@@ -543,6 +543,35 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('@"云工程上传失败"', upload)
         self.assertIn('actionWithTitle:@"重试"', upload)
         self.assertIn("[weakSelf uploadFile:fileURL title:title", upload)
+        self.assertIn("error.code == 401", upload)
+        self.assertIn("showAuthenticationFrom:retryPresenter", upload)
+        self.assertIn('AMCloudAuthorizeFeature(@"export", retryPresenter', upload)
+        self.assertIn("if (!allowed) return", upload)
+
+    def test_cloud_export_revalidates_its_visible_presenter(self):
+        top_controller = CLOUD.split(
+            "static UIViewController *AMCloudTopController", 1
+        )[1].split("static NSDictionary *AMCloudEnvelope", 1)[0]
+        self.assertIn("!controller.viewIfLoaded.window", top_controller)
+        self.assertIn("NSMutableSet<NSValue *> *visited", top_controller)
+        self.assertIn("!next || !next.viewIfLoaded.window", top_controller)
+        self.assertNotIn("return AMCloudTopController", top_controller)
+
+        cloud_ready = EXPORT.split(
+            "static UIViewController *amproj_visibleCloudUploadPresenter", 1
+        )[1].split("static void amproj_presentDirectShare", 1)[0]
+        self.assertIn("amproj_topViewController(preferred)", cloud_ready)
+        self.assertIn("amproj_keyWindow().rootViewController", cloud_ready)
+        self.assertLess(
+            cloud_ready.index("amproj_visibleCloudUploadPresenter(request.presenter)"),
+            cloud_ready.index("amproj_directRequest = nil"),
+        )
+
+        authorization = EXPORT.split(
+            "static void amproj_startDirectExportWithDestination", 1
+        )[1].split("static void amproj_startDirectExport", 1)[0]
+        self.assertIn("if (!presenter.viewIfLoaded.window)", authorization)
+        self.assertIn("direct.authorization_presenter_detached", authorization)
 
     def test_import_and_export_require_server_authorization(self):
         self.assertIn("AMCloudAuthorizeFeature", HEADER)

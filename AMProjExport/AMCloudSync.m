@@ -505,7 +505,11 @@ static void AMCloudAfterAlertAction(dispatch_block_t block) {
 
 static UIViewController *AMCloudTopController(UIViewController *base) {
     UIViewController *controller = base;
+    if (controller && !controller.viewIfLoaded.window) {
+        controller = nil;
+    }
     if (!controller) {
+        UIWindow *fallbackWindow = nil;
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (![scene isKindOfClass:UIWindowScene.class] ||
                 scene.activationState != UISceneActivationStateForegroundActive) continue;
@@ -514,18 +518,31 @@ static UIViewController *AMCloudTopController(UIViewController *base) {
                     controller = window.rootViewController;
                     break;
                 }
+                if (!fallbackWindow && !window.hidden && window.alpha > 0.01 &&
+                    window.windowLevel == UIWindowLevelNormal) {
+                    fallbackWindow = window;
+                }
             }
             if (controller) break;
         }
+        if (!controller) controller = fallbackWindow.rootViewController;
     }
-    while (controller.presentedViewController) controller = controller.presentedViewController;
-    if ([controller isKindOfClass:UINavigationController.class]) {
-        return AMCloudTopController(((UINavigationController *)controller).visibleViewController);
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    while (controller) {
+        NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
+        if ([visited containsObject:identity]) break;
+        [visited addObject:identity];
+        UIViewController *next = controller.presentedViewController;
+        if (!next && [controller isKindOfClass:UINavigationController.class]) {
+            next = ((UINavigationController *)controller).visibleViewController;
+        }
+        if (!next && [controller isKindOfClass:UITabBarController.class]) {
+            next = ((UITabBarController *)controller).selectedViewController;
+        }
+        if (!next || !next.viewIfLoaded.window) break;
+        controller = next;
     }
-    if ([controller isKindOfClass:UITabBarController.class]) {
-        return AMCloudTopController(((UITabBarController *)controller).selectedViewController);
-    }
-    return controller;
+    return controller.viewIfLoaded.window ? controller : nil;
 }
 
 static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
@@ -2856,8 +2873,24 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 [failure addAction:[UIAlertAction actionWithTitle:@"重试"
                     style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
                         AMCloudAfterAlertAction(^{
+                            UIViewController *retryPresenter =
+                                AMCloudTopController(presenter);
+                            if (!retryPresenter) return;
+                            if ([error.domain isEqualToString:AMCloudErrorDomain] &&
+                                error.code == 401) {
+                                [weakSelf showAuthenticationFrom:retryPresenter completion:^{
+                                    AMCloudAuthorizeFeature(@"export", retryPresenter,
+                                        ^(BOOL allowed, __unused NSError *authorizationError) {
+                                            if (!allowed) return;
+                                            [weakSelf uploadFile:fileURL title:title
+                                                       toProject:project
+                                                       presenter:retryPresenter];
+                                        });
+                                }];
+                                return;
+                            }
                             [weakSelf uploadFile:fileURL title:title
-                                       toProject:project presenter:presenter];
+                                       toProject:project presenter:retryPresenter];
                         });
                     }]];
                 [failure addAction:[UIAlertAction actionWithTitle:@"取消"
