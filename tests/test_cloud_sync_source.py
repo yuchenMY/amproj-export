@@ -143,9 +143,16 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("hidePluginDownloadNotice", CLOUD)
         self.assertIn("cancelPluginDownloadNotice", CLOUD)
         self.assertIn("[window addSubview:overlay]", CLOUD)
-        self.assertIn('@"隐藏" : @"好"', CLOUD)
+        self.assertIn('@"后台继续下载" : @"知道了"', CLOUD)
         self.assertIn("pluginDownloadNoticeGeneration", CLOUD)
         self.assertIn("pluginDownloadNoticeOperationID", CLOUD)
+        self.assertIn("AMCloudGradientProgressView", CLOUD)
+        self.assertIn("AMCloudGradientButton", CLOUD)
+        self.assertIn("#import <QuartzCore/QuartzCore.h>", CLOUD)
+        self.assertIn("updatePluginDownloadNoticeCompletedBytes", CLOUD)
+        self.assertIn("AMCloudTrackDownloadTask", CLOUD)
+        self.assertIn("systemImageNamed:", CLOUD)
+        self.assertIn("panel.layer.cornerRadius = 24", CLOUD)
         self.assertIn("pluginSyncOperationID = nil", CLOUD)
         self.assertIn("pluginSyncInFlight = NO", CLOUD)
         self.assertIn("AMCloudPostTokenChanged();", CLOUD)
@@ -165,6 +172,23 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("UILayoutPriorityDefaultHigh", CLOUD)
         self.assertIn("constraintLessThanOrEqualToAnchor:overlay.widthAnchor", CLOUD)
         self.assertIn("finishPluginSyncAllowingPending:NO", sync)
+        item_progress = CLOUD.split(
+            "[self.client downloadPluginItem:plugin progress:", 1
+        )[1].split("long long delta", 1)[0]
+        self.assertIn(
+            "[self.pluginSyncOperationID isEqualToString:operationID]",
+            item_progress,
+        )
+        self.assertIn(
+            "[self.pluginDownloadNoticeOperationID isEqualToString:operationID]",
+            item_progress,
+        )
+        self.assertIn("AMCloudAuthMatches(token, authorizationGeneration)", item_progress)
+        initial_progress = CLOUD.split("progressLabel.text =", 1)[1].split(
+            ': @"正在连接云端";', 1
+        )[0]
+        self.assertIn("self.pluginDownloadCompletedBytes", initial_progress)
+        self.assertIn("self.pluginDownloadCompletedItems", initial_progress)
         timer = CLOUD.split("- (void)pluginSyncTimerFired:", 1)[1].split(
             "- (void)syncPluginsNow:", 1
         )[0]

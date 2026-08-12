@@ -3,6 +3,7 @@
 #import "AMDebugTransport.h"
 
 #import <CommonCrypto/CommonDigest.h>
+#import <QuartzCore/QuartzCore.h>
 #import <Security/Security.h>
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
@@ -17,6 +18,79 @@ static NSString *const AMCloudTokenChangedNotification = @"AMCloudTokenChangedNo
 static NSString *const AMCloudAvatarCacheFilename = @"account-avatar.png";
 
 typedef void (^AMCloudResult)(id _Nullable data, NSError * _Nullable error);
+typedef void (^AMCloudDownloadProgress)(long long completedBytes, long long totalBytes);
+
+static UIColor *AMCloudBrandColor(void) {
+    return [UIColor colorWithRed:0.08 green:0.58 blue:0.55 alpha:1.0];
+}
+
+static UIColor *AMCloudBrandEndColor(void) {
+    return [UIColor colorWithRed:0.22 green:0.64 blue:0.84 alpha:1.0];
+}
+
+@interface AMCloudGradientButton : UIButton
+@end
+
+@implementation AMCloudGradientButton
++ (Class)layerClass { return CAGradientLayer.class; }
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        CAGradientLayer *gradient = (CAGradientLayer *)self.layer;
+        gradient.colors = @[(id)AMCloudBrandColor().CGColor,
+                            (id)AMCloudBrandEndColor().CGColor];
+        gradient.startPoint = CGPointMake(0, 0.5);
+        gradient.endPoint = CGPointMake(1, 0.5);
+        self.layer.cornerRadius = 16;
+        self.layer.masksToBounds = YES;
+    }
+    return self;
+}
+@end
+
+@interface AMCloudGradientProgressView : UIView
+@property(nonatomic) CGFloat progress;
+@property(nonatomic, strong) CALayer *trackLayer;
+@property(nonatomic, strong) CAGradientLayer *fillLayer;
+@end
+
+@implementation AMCloudGradientProgressView
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = UIColor.clearColor;
+        self.isAccessibilityElement = YES;
+        self.accessibilityLabel = @"云端插件下载进度";
+        _trackLayer = [CALayer layer];
+        _trackLayer.backgroundColor = [AMCloudBrandColor() colorWithAlphaComponent:0.12].CGColor;
+        [self.layer addSublayer:_trackLayer];
+        _fillLayer = [CAGradientLayer layer];
+        _fillLayer.colors = @[(id)AMCloudBrandColor().CGColor,
+                              (id)AMCloudBrandEndColor().CGColor];
+        _fillLayer.startPoint = CGPointMake(0, 0.5);
+        _fillLayer.endPoint = CGPointMake(1, 0.5);
+        [self.layer addSublayer:_fillLayer];
+    }
+    return self;
+}
+- (void)setProgress:(CGFloat)progress {
+    _progress = MIN(1, MAX(0, progress));
+    self.accessibilityValue = [NSString stringWithFormat:@"%.0f%%", _progress * 100];
+    [self setNeedsLayout];
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat radius = CGRectGetHeight(self.bounds) / 2.0;
+    self.trackLayer.frame = self.bounds;
+    self.trackLayer.cornerRadius = radius;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.fillLayer.frame = CGRectMake(0, 0,
+        CGRectGetWidth(self.bounds) * self.progress, CGRectGetHeight(self.bounds));
+    self.fillLayer.cornerRadius = radius;
+    [CATransaction commit];
+}
+@end
 
 static NSString *AMCloudClassName(id object) {
     return object ? (NSStringFromClass([object class]) ?: @"") : @"";
@@ -54,6 +128,23 @@ static dispatch_queue_t AMCloudAuthQueue(void) {
                                     AMCloudAuthQueueKey, NULL);
     });
     return queue;
+}
+
+static dispatch_source_t AMCloudTrackDownloadTask(NSURLSessionDownloadTask *task,
+                                                   long long fallbackTotal,
+                                                   AMCloudDownloadProgress progress) {
+    if (!task || !progress) return nil;
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                      dispatch_get_main_queue());
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                              200 * NSEC_PER_MSEC, 50 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer, ^{
+        long long total = task.countOfBytesExpectedToReceive;
+        if (total <= 0) total = fallbackTotal;
+        progress(MAX(0, task.countOfBytesReceived), MAX(0, total));
+    });
+    dispatch_resume(timer);
+    return timer;
 }
 
 static void AMCloudAuthPerformSync(dispatch_block_t block) {
@@ -478,8 +569,12 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)activateIOSSession:(AMCloudResult)completion;
 - (void)authorizeFeature:(NSString *)feature completion:(AMCloudResult)completion;
 - (void)loadPluginManifest:(AMCloudResult)completion;
-- (void)downloadPluginRelease:(NSDictionary *)release completion:(AMCloudResult)completion;
-- (void)downloadPluginItem:(NSDictionary *)plugin completion:(AMCloudResult)completion;
+- (void)downloadPluginRelease:(NSDictionary *)release
+                      progress:(AMCloudDownloadProgress)progress
+                    completion:(AMCloudResult)completion;
+- (void)downloadPluginItem:(NSDictionary *)plugin
+                   progress:(AMCloudDownloadProgress)progress
+                 completion:(AMCloudResult)completion;
 - (void)loadProjects:(AMCloudResult)completion;
 - (void)createProject:(NSString *)title completion:(AMCloudResult)completion;
 - (void)uploadFile:(NSURL *)fileURL projectID:(NSString *)projectID
@@ -834,7 +929,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
           authenticated:YES completion:completion];
 }
 
-- (void)downloadPluginRelease:(NSDictionary *)release completion:(AMCloudResult)completion {
+- (void)downloadPluginRelease:(NSDictionary *)release
+                      progress:(AMCloudDownloadProgress)progress
+                    completion:(AMCloudResult)completion {
     NSString *releaseID = [release[@"id"] isKindOfClass:NSString.class]
         ? release[@"id"] : nil;
     NSString *expectedSHA = [release[@"sha256"] isKindOfClass:NSString.class]
@@ -855,9 +952,14 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         return;
     }
     request.timeoutInterval = 15 * 60;
-    [[self.session downloadTaskWithRequest:request
+    __block dispatch_source_t progressTimer = nil;
+    NSURLSessionDownloadTask *task = [self.session downloadTaskWithRequest:request
                          completionHandler:^(NSURL *temporaryURL, NSURLResponse *rawResponse,
                                              NSError *networkError) {
+        if (progressTimer) {
+            dispatch_source_cancel(progressTimer);
+            progressTimer = nil;
+        }
         NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
             ? (NSHTTPURLResponse *)rawResponse : nil;
         if (networkError) {
@@ -876,6 +978,11 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         NSString *actualSHA = temporaryURL ? AMCloudSHA256(temporaryURL, &hashError) : nil;
         NSNumber *actualSize = nil;
         [temporaryURL getResourceValue:&actualSize forKey:NSURLFileSizeKey error:&hashError];
+        if (progress && actualSize.longLongValue > 0) {
+            AMCloudCompleteOnMain(^(id data, NSError *error) {
+                progress(actualSize.longLongValue, expectedSize.longLongValue);
+            }, nil, nil);
+        }
         NSString *headerSHA = [[response valueForHTTPHeaderField:@"X-AM-Plugin-SHA256"]
             lowercaseString];
         BOOL headerMismatch = headerSHA.length &&
@@ -908,10 +1015,14 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             @"cleanup": destinationURL,
             @"release": release
         }, nil);
-    }] resume];
+    }];
+    progressTimer = AMCloudTrackDownloadTask(task, expectedSize.longLongValue, progress);
+    [task resume];
 }
 
-- (void)downloadPluginItem:(NSDictionary *)plugin completion:(AMCloudResult)completion {
+- (void)downloadPluginItem:(NSDictionary *)plugin
+                   progress:(AMCloudDownloadProgress)progress
+                 completion:(AMCloudResult)completion {
     NSString *pluginID = [plugin[@"id"] isKindOfClass:NSString.class] ? plugin[@"id"] : nil;
     NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
         ? plugin[@"version"] : nil;
@@ -935,9 +1046,14 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         return;
     }
     request.timeoutInterval = 15 * 60;
-    [[self.session downloadTaskWithRequest:request
+    __block dispatch_source_t progressTimer = nil;
+    NSURLSessionDownloadTask *task = [self.session downloadTaskWithRequest:request
                          completionHandler:^(NSURL *temporaryURL, NSURLResponse *rawResponse,
                                              NSError *networkError) {
+        if (progressTimer) {
+            dispatch_source_cancel(progressTimer);
+            progressTimer = nil;
+        }
         NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
             ? (NSHTTPURLResponse *)rawResponse : nil;
         if (networkError) {
@@ -956,6 +1072,11 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         NSString *actualSHA = temporaryURL ? AMCloudSHA256(temporaryURL, &hashError) : nil;
         NSNumber *actualSize = nil;
         [temporaryURL getResourceValue:&actualSize forKey:NSURLFileSizeKey error:&hashError];
+        if (progress && actualSize.longLongValue > 0) {
+            AMCloudCompleteOnMain(^(id data, NSError *error) {
+                progress(actualSize.longLongValue, expectedSize.longLongValue);
+            }, nil, nil);
+        }
         NSString *headerSHA = [[response valueForHTTPHeaderField:@"X-AM-Plugin-SHA256"]
             lowercaseString];
         if (!temporaryURL || hashError ||
@@ -984,7 +1105,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         }
         AMCloudCompleteOnMain(completion, @{ @"url": destinationURL,
             @"cleanup": destinationURL, @"plugin": plugin }, nil);
-    }] resume];
+    }];
+    progressTimer = AMCloudTrackDownloadTask(task, expectedSize.longLongValue, progress);
+    [task resume];
 }
 
 @end
@@ -1022,6 +1145,10 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic) uint64_t pluginDownloadNoticeGeneration;
 @property(nonatomic, copy) NSString *pluginDownloadNoticeTitle;
 @property(nonatomic, copy) NSString *pluginDownloadNoticeMessage;
+@property(nonatomic) long long pluginDownloadExpectedBytes;
+@property(nonatomic) long long pluginDownloadCompletedBytes;
+@property(nonatomic) NSUInteger pluginDownloadCompletedItems;
+@property(nonatomic) NSUInteger pluginDownloadTotalItems;
 @property(nonatomic) BOOL pluginDownloadNoticeBusy;
 @property(nonatomic) BOOL pluginDownloadNoticeSuppressed;
 @property(nonatomic, strong) UIImage *accountAvatarImage;
@@ -1798,8 +1925,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         }
         [self beginPluginDownloadNoticeForRelease:release operationID:operationID
             token:token authorizationGeneration:authorizationGeneration];
-        [self.client downloadPluginRelease:release completion:^(NSDictionary *download,
-                                                                 NSError *downloadError) {
+        [self.client downloadPluginRelease:release progress:^(long long completedBytes,
+                                                               long long totalBytes) {
+            [self updatePluginDownloadNoticeCompletedBytes:completedBytes
+                                                totalBytes:totalBytes
+                                            completedItems:0 totalItems:1
+                                              operationID:operationID];
+        } completion:^(NSDictionary *download, NSError *downloadError) {
             NSURL *archiveURL = [download[@"url"] isKindOfClass:NSURL.class]
                 ? download[@"url"] : nil;
             NSURL *cleanupURL = [download[@"cleanup"] isKindOfClass:NSURL.class]
@@ -1927,6 +2059,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             (unsigned long)pending.count], @"sizeBytes": @(totalBytes) };
         [self beginPluginDownloadNoticeForRelease:notice operationID:operationID
             token:token authorizationGeneration:authorizationGeneration];
+        self.pluginDownloadTotalItems = pending.count;
     }
     [self downloadPluginCatalogItems:pending index:0 token:token
       authorizationGeneration:authorizationGeneration operationID:operationID
@@ -1972,7 +2105,23 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         return;
     }
     NSDictionary *plugin = plugins[index];
-    [self.client downloadPluginItem:plugin completion:^(NSDictionary *download, NSError *error) {
+    NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
+        ? plugin[@"version"] : nil;
+    long long itemBytes = [version[@"sizeBytes"] longLongValue];
+    __block long long lastReportedBytes = 0;
+    [self.client downloadPluginItem:plugin progress:^(long long completedBytes,
+                                                       long long totalBytes) {
+        if (![self.pluginSyncOperationID isEqualToString:operationID] ||
+            ![self.pluginDownloadNoticeOperationID isEqualToString:operationID] ||
+            !AMCloudAuthMatches(token, authorizationGeneration)) return;
+        long long delta = MAX(0, completedBytes - lastReportedBytes);
+        lastReportedBytes = MAX(lastReportedBytes, completedBytes);
+        self.pluginDownloadCompletedBytes += delta;
+        [self updatePluginDownloadNoticeCompletedBytes:self.pluginDownloadCompletedBytes
+                                            totalBytes:self.pluginDownloadExpectedBytes
+                                        completedItems:index totalItems:plugins.count
+                                          operationID:operationID];
+    } completion:^(NSDictionary *download, NSError *error) {
         NSURL *archiveURL = [download[@"url"] isKindOfClass:NSURL.class] ? download[@"url"] : nil;
         NSURL *cleanupURL = [download[@"cleanup"] isKindOfClass:NSURL.class]
             ? download[@"cleanup"] : archiveURL;
@@ -2003,6 +2152,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                     if (completion) completion(installError ?: AMCloudError(25, @"单插件安装失败"));
                     return;
                 }
+                if (lastReportedBytes < itemBytes) {
+                    self.pluginDownloadCompletedBytes += itemBytes - lastReportedBytes;
+                }
+                [self updatePluginDownloadNoticeCompletedBytes:self.pluginDownloadCompletedBytes
+                                                    totalBytes:self.pluginDownloadExpectedBytes
+                                                completedItems:index + 1 totalItems:plugins.count
+                                                  operationID:operationID];
                 [self downloadPluginCatalogItems:plugins index:index + 1 token:token
                   authorizationGeneration:authorizationGeneration operationID:operationID
                     completion:completion];
@@ -2024,12 +2180,56 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.pluginDownloadNoticeGeneration = authorizationGeneration;
     self.pluginDownloadNoticeTitle = @"正在下载云端插件";
     self.pluginDownloadNoticeMessage = size.longLongValue > 0
-        ? [NSString stringWithFormat:@"正在自动下载 %@ 的云端插件，完成前请勿退出软件。",
+        ? [NSString stringWithFormat:@"已准备下载 %@，下载完成后会自动安装。",
                                       AMCloudByteText(size.longLongValue)]
-        : @"正在自动下载云端插件，完成前请勿退出软件。";
+        : @"正在准备云端插件，下载完成后会自动安装。";
+    self.pluginDownloadExpectedBytes = MAX(0, size.longLongValue);
+    self.pluginDownloadCompletedBytes = 0;
+    self.pluginDownloadCompletedItems = 0;
+    self.pluginDownloadTotalItems = 1;
     self.pluginDownloadNoticeBusy = YES;
     self.pluginDownloadNoticeSuppressed = NO;
     [self showPluginDownloadNoticeIfPossible];
+}
+
+- (void)updatePluginDownloadNoticeCompletedBytes:(long long)completedBytes
+                                      totalBytes:(long long)totalBytes
+                                  completedItems:(NSUInteger)completedItems
+                                      totalItems:(NSUInteger)totalItems
+                                    operationID:(NSString *)operationID {
+    if (![self.pluginDownloadNoticeOperationID isEqualToString:operationID] ||
+        !self.pluginDownloadNoticeBusy) return;
+    self.pluginDownloadCompletedBytes = MAX(0, completedBytes);
+    if (totalBytes > 0) self.pluginDownloadExpectedBytes = totalBytes;
+    self.pluginDownloadCompletedItems = completedItems;
+    if (totalItems > 0) self.pluginDownloadTotalItems = totalItems;
+    UIView *overlay = self.pluginDownloadOverlay;
+    AMCloudGradientProgressView *progressView = [overlay viewWithTag:7311];
+    UILabel *progressLabel = [overlay viewWithTag:7312];
+    UILabel *message = [overlay viewWithTag:7313];
+    if (!progressView || !progressLabel) return;
+    CGFloat progress = self.pluginDownloadExpectedBytes > 0
+        ? (CGFloat)self.pluginDownloadCompletedBytes /
+          (CGFloat)self.pluginDownloadExpectedBytes : 0;
+    progressView.progress = progress;
+    NSString *bytes = self.pluginDownloadExpectedBytes > 0
+        ? [NSString stringWithFormat:@"%@ / %@",
+            AMCloudByteText(MIN(self.pluginDownloadCompletedBytes,
+                                self.pluginDownloadExpectedBytes)),
+            AMCloudByteText(self.pluginDownloadExpectedBytes)]
+        : @"正在连接云端";
+    NSString *items = self.pluginDownloadTotalItems > 1
+        ? [NSString stringWithFormat:@" · %lu/%lu 个插件",
+            (unsigned long)MIN(self.pluginDownloadCompletedItems,
+                               self.pluginDownloadTotalItems),
+            (unsigned long)self.pluginDownloadTotalItems] : @"";
+    progressLabel.text = [bytes stringByAppendingString:items];
+    if (message) {
+        message.text = progress > 0
+            ? [NSString stringWithFormat:@"正在下载，已完成 %.0f%%。安装完成前请保持软件运行。",
+                                          MIN(progress, 1) * 100]
+            : self.pluginDownloadNoticeMessage;
+    }
 }
 
 - (void)finishPluginDownloadNoticeInstalled:(BOOL)installed
@@ -2056,6 +2256,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                                           effectCount]
             : @"插件已经安装，重新打开效果页面即可使用。")
         : (error.localizedDescription ?: @"请检查网络后重新打开软件重试。");
+    self.pluginDownloadCompletedBytes = installed ? self.pluginDownloadExpectedBytes : 0;
     [self.pluginDownloadOverlay removeFromSuperview];
     self.pluginDownloadOverlay = nil;
     [self showPluginDownloadNoticeIfPossible];
@@ -2086,17 +2287,36 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
     UIView *overlay = [[UIView alloc] initWithFrame:window.bounds];
     overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.36];
+    overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.24];
     UIView *panel = [UIView new];
     panel.translatesAutoresizingMaskIntoConstraints = NO;
-    panel.backgroundColor = UIColor.systemBackgroundColor;
-    panel.layer.cornerRadius = 8;
+    panel.backgroundColor = [UIColor colorWithRed:0.96 green:0.995 blue:0.995 alpha:1.0];
+    panel.layer.cornerRadius = 24;
     panel.layer.masksToBounds = YES;
+    panel.layer.borderWidth = 1;
+    panel.layer.borderColor = [AMCloudBrandColor() colorWithAlphaComponent:0.18].CGColor;
     [overlay addSubview:panel];
+
+    UIView *iconBadge = [UIView new];
+    iconBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    iconBadge.backgroundColor = [AMCloudBrandColor() colorWithAlphaComponent:0.12];
+    iconBadge.layer.cornerRadius = 26;
+    [panel addSubview:iconBadge];
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:
+        self.pluginDownloadNoticeBusy ? @"arrow.down.circle.fill" :
+        ([self.pluginDownloadNoticeTitle containsString:@"完成"] ? @"checkmark.circle.fill" :
+                                                              @"exclamationmark.triangle.fill")]];
+    icon.translatesAutoresizingMaskIntoConstraints = NO;
+    icon.tintColor = self.pluginDownloadNoticeBusy ||
+        [self.pluginDownloadNoticeTitle containsString:@"完成"]
+        ? AMCloudBrandColor() : UIColor.systemRedColor;
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+    [iconBadge addSubview:icon];
 
     UILabel *title = [UILabel new];
     title.translatesAutoresizingMaskIntoConstraints = NO;
-    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
+    title.textColor = [UIColor colorWithRed:0.03 green:0.18 blue:0.18 alpha:1.0];
     title.textAlignment = NSTextAlignmentCenter;
     title.text = self.pluginDownloadNoticeTitle;
     UILabel *message = [UILabel new];
@@ -2106,46 +2326,87 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     message.textAlignment = NSTextAlignmentCenter;
     message.numberOfLines = 0;
     message.text = self.pluginDownloadNoticeMessage;
+    message.tag = 7313;
     [panel addSubview:title];
     [panel addSubview:message];
 
-    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc]
-        initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    spinner.translatesAutoresizingMaskIntoConstraints = NO;
-    spinner.hidden = !self.pluginDownloadNoticeBusy;
-    if (self.pluginDownloadNoticeBusy) [spinner startAnimating];
-    [panel addSubview:spinner];
+    AMCloudGradientProgressView *progressView = [AMCloudGradientProgressView new];
+    progressView.translatesAutoresizingMaskIntoConstraints = NO;
+    progressView.tag = 7311;
+    progressView.hidden = !self.pluginDownloadNoticeBusy;
+    progressView.progress = self.pluginDownloadExpectedBytes > 0
+        ? (CGFloat)self.pluginDownloadCompletedBytes /
+          (CGFloat)self.pluginDownloadExpectedBytes : 0;
+    [panel addSubview:progressView];
+    UILabel *progressLabel = [UILabel new];
+    progressLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    progressLabel.tag = 7312;
+    progressLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium];
+    progressLabel.textColor = [AMCloudBrandColor() colorWithAlphaComponent:0.88];
+    progressLabel.textAlignment = NSTextAlignmentCenter;
+    progressLabel.hidden = !self.pluginDownloadNoticeBusy;
+    progressLabel.text = self.pluginDownloadExpectedBytes > 0
+        ? [NSString stringWithFormat:@"%@ / %@%@",
+            AMCloudByteText(MIN(self.pluginDownloadCompletedBytes,
+                                self.pluginDownloadExpectedBytes)),
+            AMCloudByteText(self.pluginDownloadExpectedBytes),
+            self.pluginDownloadTotalItems > 1
+                ? [NSString stringWithFormat:@" · %lu/%lu 个插件",
+                    (unsigned long)MIN(self.pluginDownloadCompletedItems,
+                                       self.pluginDownloadTotalItems),
+                    (unsigned long)self.pluginDownloadTotalItems] : @""]
+        : @"正在连接云端";
+    [panel addSubview:progressLabel];
 
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButton *button = self.pluginDownloadNoticeBusy
+        ? [UIButton buttonWithType:UIButtonTypeSystem] : [AMCloudGradientButton new];
     button.translatesAutoresizingMaskIntoConstraints = NO;
     button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    [button setTitle:self.pluginDownloadNoticeBusy ? @"隐藏" : @"好"
+    [button setTitle:self.pluginDownloadNoticeBusy ? @"后台继续下载" : @"知道了"
             forState:UIControlStateNormal];
+    [button setTitleColor:self.pluginDownloadNoticeBusy ? AMCloudBrandColor() : UIColor.whiteColor
+                 forState:UIControlStateNormal];
+    if (self.pluginDownloadNoticeBusy) {
+        button.backgroundColor = [AMCloudBrandColor() colorWithAlphaComponent:0.09];
+        button.layer.cornerRadius = 16;
+    }
     [button addTarget:self action:@selector(hidePluginDownloadNotice)
      forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:button];
-    NSLayoutConstraint *panelWidth =
-        [panel.widthAnchor constraintEqualToConstant:320];
+    NSLayoutConstraint *panelWidth = [panel.widthAnchor constraintEqualToConstant:344];
     panelWidth.priority = UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[
         [panel.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
         [panel.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
         panelWidth,
-        [panel.widthAnchor constraintLessThanOrEqualToAnchor:overlay.widthAnchor
-                                                   multiplier:0.82],
-        [title.topAnchor constraintEqualToAnchor:panel.topAnchor constant:20],
-        [title.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:18],
-        [title.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-18],
+        [panel.widthAnchor constraintLessThanOrEqualToAnchor:overlay.widthAnchor multiplier:0.88],
+        [iconBadge.topAnchor constraintEqualToAnchor:panel.topAnchor constant:22],
+        [iconBadge.centerXAnchor constraintEqualToAnchor:panel.centerXAnchor],
+        [iconBadge.widthAnchor constraintEqualToConstant:52],
+        [iconBadge.heightAnchor constraintEqualToConstant:52],
+        [icon.centerXAnchor constraintEqualToAnchor:iconBadge.centerXAnchor],
+        [icon.centerYAnchor constraintEqualToAnchor:iconBadge.centerYAnchor],
+        [icon.widthAnchor constraintEqualToConstant:28],
+        [icon.heightAnchor constraintEqualToConstant:28],
+        [title.topAnchor constraintEqualToAnchor:iconBadge.bottomAnchor constant:14],
+        [title.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:22],
+        [title.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-22],
         [message.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
-        [message.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:18],
-        [message.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-18],
-        [spinner.topAnchor constraintEqualToAnchor:message.bottomAnchor constant:14],
-        [spinner.centerXAnchor constraintEqualToAnchor:panel.centerXAnchor],
-        [button.topAnchor constraintEqualToAnchor:spinner.bottomAnchor constant:10],
-        [button.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor],
-        [button.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor],
-        [button.heightAnchor constraintEqualToConstant:46],
-        [button.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor]
+        [message.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:24],
+        [message.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-24],
+        [progressView.topAnchor constraintEqualToAnchor:message.bottomAnchor constant:18],
+        [progressView.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:24],
+        [progressView.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-24],
+        [progressView.heightAnchor constraintEqualToConstant:10],
+        [progressLabel.topAnchor constraintEqualToAnchor:progressView.bottomAnchor constant:8],
+        [progressLabel.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:24],
+        [progressLabel.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-24],
+        [button.topAnchor constraintEqualToAnchor:(self.pluginDownloadNoticeBusy ?
+            progressLabel.bottomAnchor : message.bottomAnchor) constant:20],
+        [button.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:24],
+        [button.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-24],
+        [button.heightAnchor constraintEqualToConstant:48],
+        [button.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor constant:-22]
     ]];
     self.pluginDownloadOverlay = overlay;
     [window addSubview:overlay];
@@ -2169,6 +2430,10 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.pluginDownloadNoticeGeneration = 0;
     self.pluginDownloadNoticeTitle = nil;
     self.pluginDownloadNoticeMessage = nil;
+    self.pluginDownloadExpectedBytes = 0;
+    self.pluginDownloadCompletedBytes = 0;
+    self.pluginDownloadCompletedItems = 0;
+    self.pluginDownloadTotalItems = 0;
     self.pluginDownloadNoticeBusy = NO;
     self.pluginDownloadNoticeSuppressed = NO;
 }
