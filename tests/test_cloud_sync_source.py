@@ -19,6 +19,9 @@ PLUGINS = (ROOT / "AMProjExport" / "AMCloudPlugins.m").read_text(
 PLUGIN_HEADER = (ROOT / "AMProjExport" / "AMCloudPlugins.h").read_text(
     encoding="utf-8"
 )
+EDITOR = (ROOT / "AMProjExport" / "AMEditorCustomization.m").read_text(
+    encoding="utf-8"
+)
 IMPORT_ARCHIVE = (ROOT / "AMProjExport" / "AMProjImportArchive.m").read_text(
     encoding="utf-8"
 )
@@ -32,9 +35,23 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("-DAMPROJ_CLOUD_SYNC=1", cloud_rule)
         self.assertIn("AMCloudSync.m", cloud_rule)
         self.assertIn("AMCloudPlugins.m", cloud_rule)
+        self.assertIn("AMEditorCustomization.m", cloud_rule)
         self.assertIn("-framework Security", cloud_rule)
         self.assertIn("-framework WebKit", cloud_rule)
         self.assertIn("#if AMPROJ_CLOUD_SYNC", EXPORT)
+
+    def test_editor_buttons_are_customized_only_on_project_edit_controller(self):
+        self.assertIn('@"AlightMotion.ProjectEditVC"', EDITOR)
+        self.assertIn('objc_getClass("_TtC12AlightMotion13ProjectEditVC")', EDITOR)
+        self.assertIn('@"quickActionsButton"', EDITOR)
+        self.assertIn("quickActionsButton.hidden = YES", EDITOR)
+        self.assertIn("quickActionsButton.userInteractionEnabled = NO", EDITOR)
+        self.assertIn('@"addLibraryButton"', EDITOR)
+        self.assertIn('@"autfeng_add_layer_button"', EDITOR)
+        self.assertIn("UIImageRenderingModeAlwaysOriginal", EDITOR)
+        self.assertIn("@selector(viewDidLayoutSubviews)", EDITOR)
+        self.assertNotIn("class_getInstanceMethod(UIButton.class", EDITOR)
+        self.assertIn("AMEditorCustomizationInstall();", CLOUD)
 
     def test_token_is_stored_only_in_keychain(self):
         self.assertIn("SecItemCopyMatching", CLOUD)

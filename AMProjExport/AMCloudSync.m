@@ -1,6 +1,7 @@
 #import "AMCloudSync.h"
 #import "AMCloudPlugins.h"
 #import "AMDebugTransport.h"
+#import "AMEditorCustomization.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <QuartzCore/QuartzCore.h>
@@ -1682,6 +1683,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             startupAuthorizationKey, startupGeneration);
     }
     AMCloudPluginsInstallBundleHooks();
+    AMEditorCustomizationInstall();
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
     [NSNotificationCenter.defaultCenter
