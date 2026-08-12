@@ -13,6 +13,9 @@ FOUNDATION_EXPORT void AMCloudSyncInstallPluginHooksEarly(void);
 FOUNDATION_EXPORT void AMCloudSyncInstall(AMCloudImportHandler importHandler);
 FOUNDATION_EXPORT NSArray<UIActivity *> *AMCloudSyncUploadActivities(
     NSURL *fileURL, NSString *projectTitle, UIViewController *presenter);
+/// 将已生成的 .amproj 交给 AutFeng Hub 云工程选择器，由用户选择新建或覆盖工程。
+FOUNDATION_EXPORT void AMCloudSyncBeginUploadFile(
+    NSURL *fileURL, NSString *projectTitle, UIViewController *presenter);
 /// 在导入、导出或云端插件下载的最终入口向服务端校验 iOS 权限和设备绑定。
 FOUNDATION_EXPORT void AMCloudAuthorizeFeature(
     NSString *feature, UIViewController * _Nullable presenter,

@@ -203,8 +203,10 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('valueForHTTPHeaderField:@"Authorization"', CLOUD)
         self.assertIn("AMCloudInvalidateToken(logoutToken)", CLOUD)
         self.assertNotIn("AMCloudInvalidateToken(activationToken)", CLOUD)
-        self.assertIn('[path isEqualToString:@"/user/me"]', CLOUD)
-        self.assertEqual(CLOUD.count("AMCloudInvalidateTokenForRequest(request)"), 1)
+        self.assertIn("if (response.statusCode == 401 && authenticated)", CLOUD)
+        self.assertGreaterEqual(
+            CLOUD.count("AMCloudInvalidateTokenForRequest(request)"), 3
+        )
         self.assertIn("AMCloudAuthPerformSync", CLOUD)
         self.assertIn("AMCloudDeleteTokenMatching(token, YES)", CLOUD)
         self.assertIn("AMCloudPluginsSetAuthorizationGeneration", CLOUD)
@@ -484,7 +486,63 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMCloudSyncUploadActivities", HEADER)
         self.assertIn("AMCloudSyncUploadActivities(fileURL", EXPORT)
         self.assertIn("applicationActivities:cloudActivities", EXPORT)
-        self.assertIn('return @"上传云工程"', CLOUD)
+        self.assertIn('return @"保存到 AutFeng Hub"', CLOUD)
+
+    def test_native_cloud_export_saves_to_autfeng_hub_only_when_selected(self):
+        self.assertIn("AMCloudSyncBeginUploadFile", HEADER)
+        direct_upload = EXPORT.split(
+            "static void amproj_beginDirectCloudUpload", 1
+        )[1].split("static void amproj_presentDirectShare", 1)[0]
+        self.assertIn("AMCloudSyncBeginUploadFile(fileURL", direct_upload)
+        self.assertIn('amproj_finishDirectFlow(@"cloud_upload_ready")', direct_upload)
+
+        export_action = EXPORT.split(
+            "static void hooked_shareNCOnTapExport", 1
+        )[1].split("static void hooked_navigationPush", 1)[0]
+        self.assertIn("AMProjShareCloudUploadOption = 6", EXPORT)
+        self.assertIn(
+            "selectedExportOption == AMProjShareCloudUploadOption", export_action
+        )
+        self.assertIn("amproj_startCloudUpload(shareController, title)", export_action)
+        self.assertIn("orig_shareNCOnTapExport", export_action)
+        self.assertIn("(!isProjectPackage && !isCloudUpload)", export_action)
+        self.assertIn("amproj_directAuthorizationPending", export_action)
+        self.assertIn('reason\": @"new_export_tap"', export_action)
+
+        authorization = EXPORT.split(
+            "static void amproj_startDirectExportWithDestination", 1
+        )[1].split("static void amproj_startDirectExport", 1)[0]
+        self.assertIn("++amproj_directAuthorizationGeneration", authorization)
+        self.assertIn(
+            "authorizationGeneration != amproj_directAuthorizationGeneration",
+            authorization,
+        )
+        self.assertIn(
+            "selectedExportOption != AMProjShareCloudUploadOption", authorization
+        )
+        self.assertIn('direct.authorization_selection_changed', authorization)
+
+        archive_ready = EXPORT.split(
+            "static void amproj_writeDirectArchive", 1
+        )[1].split("static void amproj_buildDirectPackage", 1)[0]
+        self.assertIn("if (request.uploadToCloud)", archive_ready)
+        self.assertIn("amproj_beginDirectCloudUpload(request, outputURL)", archive_ready)
+        self.assertIn("amproj_presentDirectShare(request, outputURL)", archive_ready)
+
+    def test_native_cloud_export_uses_autfeng_hub_copy(self):
+        self.assertIn('@"保存到 AutFeng Hub"', EXPORT)
+        self.assertIn('@"选择性保存为云工程"', EXPORT)
+        self.assertIn('@"保存到 AutFeng Hub"', CLOUD)
+        self.assertIn('@"新建云工程"', CLOUD)
+        self.assertIn("chooseUploadTarget", CLOUD)
+
+    def test_cloud_project_upload_can_retry_the_generated_package(self):
+        upload = CLOUD.rsplit("- (void)uploadFile:(NSURL *)fileURL", 1)[1].split(
+            "- (void)showActionsForProject", 1
+        )[0]
+        self.assertIn('@"云工程上传失败"', upload)
+        self.assertIn('actionWithTitle:@"重试"', upload)
+        self.assertIn("[weakSelf uploadFile:fileURL title:title", upload)
 
     def test_import_and_export_require_server_authorization(self):
         self.assertIn("AMCloudAuthorizeFeature", HEADER)

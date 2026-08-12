@@ -48,6 +48,9 @@ static NSString *const kAMProjPluginVersion = @"44";
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
 static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
+#if AMPROJ_CLOUD_SYNC
+static const uint8_t AMProjShareCloudUploadOption = 6;
+#endif
 
 extern BOOL AMProjV44ReleaseNativeActivityFallbackEnabled(void);
 extern BOOL AMProjV44IsDirectProjectPackageOption(uint8_t selectedExportOption);
@@ -68,6 +71,9 @@ typedef NS_ENUM(NSInteger, AMProjIncomingURLResult) {
     AMProjIncomingURLAccepted,
     AMProjIncomingURLFailed,
 };
+static UIViewController* amproj_shareVCRecursive(
+    UIViewController *controller, NSUInteger depth,
+    NSMutableSet<NSValue *> *visited, uint8_t *selectedExportOption);
 
 typedef NS_ENUM(NSInteger, AMProjImportKind) {
     AMProjImportKindPackage = 0,
@@ -2026,6 +2032,7 @@ static void (*orig_navigationPush)(id, SEL, UIViewController *, BOOL) = NULL;
 @property(nonatomic, copy) NSString *mode;
 @property(nonatomic, strong) NSURL *outputURL;
 @property(nonatomic, copy) NSString *projectTitle;
+@property(nonatomic) BOOL uploadToCloud;
 @end
 
 @implementation AMProjDirectRequest
@@ -2033,6 +2040,10 @@ static void (*orig_navigationPush)(id, SEL, UIViewController *, BOOL) = NULL;
 
 static AMProjDirectRequest *amproj_directRequest = nil;
 static BOOL amproj_constructingDirectShare = NO;
+#if AMPROJ_CLOUD_SYNC
+static uint64_t amproj_directAuthorizationGeneration = 0;
+static BOOL amproj_directAuthorizationPending = NO;
+#endif
 
 #if AMPROJ_DEBUG
 typedef NS_ENUM(int, AMProjDebugPhase) {
@@ -2302,6 +2313,45 @@ static NSURL* amproj_createOutputURL(NSString *title, NSError **error) {
 
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error);
 
+#if AMPROJ_CLOUD_SYNC
+static void amproj_beginDirectCloudUpload(AMProjDirectRequest *request,
+                                          NSURL *fileURL) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (amproj_directRequest != request) return;
+        request.outputURL = fileURL;
+        UIViewController *presenter = request.presenter;
+        if (!presenter) {
+            amproj_finishDirectFailure(
+                request,
+                amproj_directError(40, @"Export presenter is no longer available"));
+            return;
+        }
+
+        NSString *title = request.projectTitle.length
+            ? request.projectTitle
+            : fileURL.lastPathComponent.stringByDeletingPathExtension;
+        void (^beginUpload)(void) = ^{
+            if (amproj_directRequest != request) return;
+            request.originalCompletion = nil;
+            amproj_directRequest = nil;
+            amproj_setPersistentStage(nil);
+            amproj_finishDirectFlow(@"cloud_upload_ready");
+            amproj_logCriticalEvent(@"direct.cloud_upload_ready", @{
+                @"filename": fileURL.lastPathComponent ?: @"",
+                @"title": title ?: @""
+            });
+            AMCloudSyncBeginUploadFile(fileURL, title ?: @"", presenter);
+        };
+        if (request.progressAlert.presentingViewController) {
+            [request.progressAlert dismissViewControllerAnimated:NO
+                                                       completion:beginUpload];
+        } else {
+            beginUpload();
+        }
+    });
+}
+#endif
+
 static void amproj_presentDirectShare(AMProjDirectRequest *request, NSURL *fileURL) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (amproj_directRequest != request) return;
@@ -2441,6 +2491,12 @@ static void amproj_writeDirectArchive(AMProjDirectRequest *request, NSData *xmlD
                 }
             }
 #endif
+#if AMPROJ_CLOUD_SYNC
+            if (request.uploadToCloud) {
+                amproj_beginDirectCloudUpload(request, outputURL);
+                return;
+            }
+#endif
             amproj_presentDirectShare(request, outputURL);
         } @catch (NSException *exception) {
             NSString *reason = exception.reason.length ? exception.reason : @"Unexpected export exception";
@@ -2531,7 +2587,8 @@ static void amproj_buildDirectPackage(AMProjDirectRequest *request) {
 static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
                                                UIViewController *originalController,
                                                BOOL animated, void (^completion)(void),
-                                               NSString *projectTitle) {
+                                               NSString *projectTitle,
+                                               BOOL uploadToCloud) {
     if (amproj_directRequest) {
         if (completion) completion();
         return;
@@ -2542,6 +2599,7 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
     request.animated = animated;
     request.originalCompletion = completion;
     request.projectTitle = projectTitle;
+    request.uploadToCloud = uploadToCloud;
     request.mode = amproj_exportMode();
     // Do not present a second UIKit modal from ShareNC.onTapExport.  On 6.2.55
     // the action is still inside SwiftUI/UIKit's transition, and presenting a
@@ -2557,6 +2615,7 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
         @"controller": NSStringFromClass([originalController class]) ?: @"",
         @"holder": @"not_accessed",
         @"source": @"share_export_button",
+        @"destination": uploadToCloud ? @"autfeng_hub" : @"share_sheet",
         @"mode": request.mode ?: @""
     });
     if (!presenter || !orig_presentVC) {
@@ -2572,27 +2631,70 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
     });
 }
 
-static void amproj_startDirectExport(UIViewController *presenter,
-                                     UIViewController *originalController,
-                                     BOOL animated, void (^completion)(void),
-                                     NSString *projectTitle) {
+static void amproj_startDirectExportWithDestination(
+    UIViewController *presenter, UIViewController *originalController,
+    BOOL animated, void (^completion)(void), NSString *projectTitle,
+    BOOL uploadToCloud) {
     if (amproj_directRequest) {
         if (completion) completion();
         return;
     }
 #if AMPROJ_CLOUD_SYNC
+    uint64_t authorizationGeneration = ++amproj_directAuthorizationGeneration;
+    amproj_directAuthorizationPending = YES;
     AMCloudAuthorizeFeature(@"export", presenter,
         ^(BOOL allowed, __unused NSError *error) {
+            if (authorizationGeneration != amproj_directAuthorizationGeneration ||
+                !amproj_directAuthorizationPending) {
+                amproj_logCriticalEvent(@"direct.authorization_stale", @{
+                    @"generation": @(authorizationGeneration),
+                    @"destination": uploadToCloud ? @"autfeng_hub" : @"share_sheet"
+                });
+                return;
+            }
+            amproj_directAuthorizationPending = NO;
             if (allowed) {
+                if (uploadToCloud) {
+                    uint8_t selectedExportOption = UINT8_MAX;
+                    UIViewController *shareVC = amproj_shareVCRecursive(
+                        presenter, 0, [NSMutableSet set], &selectedExportOption);
+                    if (!shareVC ||
+                        selectedExportOption != AMProjShareCloudUploadOption) {
+                        amproj_logCriticalEvent(@"direct.authorization_selection_changed", @{
+                            @"generation": @(authorizationGeneration),
+                            @"selected_export_option": shareVC
+                                ? @(selectedExportOption) : @(-1)
+                        });
+                        return;
+                    }
+                }
                 amproj_startAuthorizedDirectExport(
-                    presenter, originalController, animated, completion, projectTitle);
+                    presenter, originalController, animated, completion, projectTitle,
+                    uploadToCloud);
             }
         });
 #else
     amproj_startAuthorizedDirectExport(
-        presenter, originalController, animated, completion, projectTitle);
+        presenter, originalController, animated, completion, projectTitle,
+        uploadToCloud);
 #endif
 }
+
+static void amproj_startDirectExport(UIViewController *presenter,
+                                     UIViewController *originalController,
+                                     BOOL animated, void (^completion)(void),
+                                     NSString *projectTitle) {
+    amproj_startDirectExportWithDestination(
+        presenter, originalController, animated, completion, projectTitle, NO);
+}
+
+#if AMPROJ_CLOUD_SYNC
+static void amproj_startCloudUpload(UIViewController *presenter,
+                                    NSString *projectTitle) {
+    amproj_startDirectExportWithDestination(
+        presenter, nil, YES, nil, projectTitle, YES);
+}
+#endif
 
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -2607,6 +2709,7 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
         BOOL animated = request.animated;
         void (^originalCompletion)(void) = request.originalCompletion;
         NSString *projectTitle = request.projectTitle;
+        BOOL uploadToCloud = request.uploadToCloud;
         void (^showFailure)(void) = ^{
             amproj_directRequest = nil;
             amproj_finishDirectFlow(@"failed");
@@ -2616,8 +2719,15 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
                 preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"重试" style:UIAlertActionStyleDefault
                 handler:^(__unused UIAlertAction *action) {
-                    amproj_startDirectExport(presenter, originalController, animated, originalCompletion,
-                                             projectTitle);
+                    if (uploadToCloud) {
+#if AMPROJ_CLOUD_SYNC
+                        amproj_startCloudUpload(presenter, projectTitle);
+#endif
+                    } else {
+                        amproj_startDirectExport(
+                            presenter, originalController, animated,
+                            originalCompletion, projectTitle);
+                    }
                 }]];
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
             orig_presentVC(presenter, @selector(presentViewController:animated:completion:), alert, YES, nil);
@@ -14120,6 +14230,42 @@ static BOOL amproj_isExactShareVCClass(Class cls) {
     return NO;
 }
 
+#if AMPROJ_CLOUD_SYNC
+static void amproj_customizeCloudUploadLabelsInView(UIView *view) {
+    if (!view) return;
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        NSString *text = [label.text
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([text isEqualToString:@"上传到云端"] ||
+            [text isEqualToString:@"Upload to Cloud"]) {
+            label.text = @"保存到 AutFeng Hub";
+        } else if ([text isEqualToString:@"确保您的项目安全！"] ||
+                   [text isEqualToString:@"Keep your projects safe!"]) {
+            label.text = @"选择性保存为云工程";
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        amproj_customizeCloudUploadLabelsInView(subview);
+    }
+}
+
+static void amproj_scheduleCloudUploadLabelCustomization(UIViewController *controller) {
+    if (!controller || !amproj_isExactShareVCClass(controller.class)) return;
+    __weak UIViewController *weakController = controller;
+    for (NSNumber *delay in @[@0, @0.15, @0.5]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIViewController *strongController = weakController;
+            if (strongController) {
+                amproj_customizeCloudUploadLabelsInView(strongController.view);
+            }
+        });
+    }
+}
+#endif
+
 static BOOL amproj_readShareExportOption(id object, uint8_t *value) {
     if (!object || !amproj_isExactShareVCClass([object class])) return NO;
     NSString *bundleVersion = NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"];
@@ -14195,6 +14341,16 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
         return;
     }
 
+#if AMPROJ_CLOUD_SYNC
+    if (amproj_directAuthorizationPending) {
+        ++amproj_directAuthorizationGeneration;
+        amproj_directAuthorizationPending = NO;
+        amproj_logCriticalEvent(@"direct.authorization_invalidated", @{
+            @"reason": @"new_export_tap"
+        });
+    }
+#endif
+
     UIViewController *shareController =
         [self isKindOfClass:UIViewController.class] ? self : nil;
     uint8_t selectedExportOption = UINT8_MAX;
@@ -14211,15 +14367,23 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
 
     BOOL isProjectPackage = shareVC &&
         AMProjV44IsDirectProjectPackageOption(selectedExportOption);
+#if AMPROJ_CLOUD_SYNC
+    BOOL isCloudUpload = shareVC &&
+        selectedExportOption == AMProjShareCloudUploadOption;
+#else
+    BOOL isCloudUpload = NO;
+#endif
     NSString *mode = amproj_exportMode();
     amproj_logCriticalEvent(@"direct.export_button", @{
         @"mode": mode ?: @"",
         @"selected_export_option": shareVC ? @(selectedExportOption) : @(-1),
         @"package": @(isProjectPackage),
+        @"cloud_upload": @(isCloudUpload),
         @"controller": shareVC ? NSStringFromClass(shareVC.class) : @""
     });
 
-    if (!isProjectPackage || [mode isEqualToString:@"observe"] ||
+    if ((!isProjectPackage && !isCloudUpload) ||
+        [mode isEqualToString:@"observe"] ||
         !shareController || !orig_presentVC) {
         if (orig_shareNCOnTapExport) orig_shareNCOnTapExport(self, _cmd, sender);
         return;
@@ -14227,6 +14391,12 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
 
     NSString *title = amproj_currentProjectTitle(shareController);
     dispatch_async(dispatch_get_main_queue(), ^{
+#if AMPROJ_CLOUD_SYNC
+        if (isCloudUpload) {
+            amproj_startCloudUpload(shareController, title);
+            return;
+        }
+#endif
         amproj_startDirectExport(shareController, nil, YES, nil, title);
     });
 }
@@ -14280,6 +14450,12 @@ static void hooked_navigationPush(id self, SEL _cmd,
         amproj_installShareExportHook();
         dispatch_async(dispatch_get_main_queue(), ^{
             amproj_installShareExportHook();
+#if AMPROJ_CLOUD_SYNC
+            uint8_t selectedExportOption = UINT8_MAX;
+            UIViewController *shareVC = amproj_shareVCRecursive(
+                viewController, 0, [NSMutableSet set], &selectedExportOption);
+            amproj_scheduleCloudUploadLabelCustomization(shareVC);
+#endif
         });
     }
 }
@@ -14511,7 +14687,8 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         return;
     }
 #endif
-    if (amproj_isShareExportHostController(controller)) {
+    BOOL isShareExportHost = amproj_isShareExportHostController(controller);
+    if (isShareExportHost) {
         amproj_installShareExportHook();
     }
     // Ordinary confirmations, including project/template deletion, must not
@@ -14748,6 +14925,16 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     orig_presentVC(self, _cmd, controller, animated, completion);
+#if AMPROJ_CLOUD_SYNC
+    if (isShareExportHost) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            uint8_t selectedExportOption = UINT8_MAX;
+            UIViewController *shareVC = amproj_shareVCRecursive(
+                controller, 0, [NSMutableSet set], &selectedExportOption);
+            amproj_scheduleCloudUploadLabelCustomization(shareVC);
+        });
+    }
+#endif
     if (isActivity) {
         amproj_debugEvent(@"present.return", @{
             @"duration_ms": @((CFAbsoluteTimeGetCurrent() - started) * 1000.0)

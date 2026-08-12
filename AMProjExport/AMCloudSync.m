@@ -665,8 +665,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             ? (NSHTTPURLResponse *)rawResponse : nil;
         NSError *responseError = nil;
         NSDictionary *payload = AMCloudEnvelope(data, response, &responseError);
-        if (response.statusCode == 401 && authenticated &&
-            [path isEqualToString:@"/user/me"]) {
+        if (response.statusCode == 401 && authenticated) {
             AMCloudInvalidateTokenForRequest(request);
         }
         AMCloudCompleteOnMain(completion, payload, responseError);
@@ -807,6 +806,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
                 ? (NSHTTPURLResponse *)rawResponse : nil;
             NSError *responseError = nil;
             NSDictionary *payload = AMCloudEnvelope(data, response, &responseError);
+            if (response.statusCode == 401) {
+                AMCloudInvalidateTokenForRequest(request);
+            }
             AMCloudCompleteOnMain(completion, payload, responseError);
         }] resume];
     });
@@ -838,6 +840,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             return;
         }
         if (response.statusCode < 200 || response.statusCode >= 300) {
+            if (response.statusCode == 401) {
+                AMCloudInvalidateTokenForRequest(request);
+            }
             NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
             NSError *responseError = nil;
             AMCloudEnvelope(errorData, response, &responseError);
@@ -967,6 +972,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             return;
         }
         if (response.statusCode < 200 || response.statusCode >= 300) {
+            if (response.statusCode == 401) {
+                AMCloudInvalidateTokenForRequest(request);
+            }
             NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
             NSError *responseError = nil;
             AMCloudEnvelope(errorData, response, &responseError);
@@ -1061,6 +1069,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             return;
         }
         if (response.statusCode < 200 || response.statusCode >= 300) {
+            if (response.statusCode == 401) {
+                AMCloudInvalidateTokenForRequest(request);
+            }
             NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
             NSError *responseError = nil;
             AMCloudEnvelope(errorData, response, &responseError);
@@ -1250,7 +1261,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @implementation AMCloudUploadActivity
 
 - (NSString *)activityType { return @"com.ayakameow.amproj.cloud-upload"; }
-- (NSString *)activityTitle { return @"上传云工程"; }
+- (NSString *)activityTitle { return @"保存到 AutFeng Hub"; }
 - (UIImage *)activityImage {
     if (@available(iOS 13.0, *)) return [UIImage systemImageNamed:@"cloud.and.arrow.up"];
     return nil;
@@ -2731,7 +2742,21 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     [self.client loadProjects:^(NSDictionary *data, NSError *error) {
         [busy dismissViewControllerAnimated:YES completion:^{
             if (error) {
-                [weakSelf showError:error presenter:presenter];
+                UIViewController *top = AMCloudTopController(presenter);
+                UIAlertController *failure = [UIAlertController
+                    alertControllerWithTitle:@"无法读取云工程"
+                    message:error.localizedDescription ?: @"读取失败"
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [failure addAction:[UIAlertAction actionWithTitle:@"重试"
+                    style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                        AMCloudAfterAlertAction(^{
+                            [weakSelf beginUploadFile:fileURL title:title
+                                           presenter:presenter];
+                        });
+                    }]];
+                [failure addAction:[UIAlertAction actionWithTitle:@"取消"
+                    style:UIAlertActionStyleCancel handler:nil]];
+                [top presentViewController:failure animated:YES completion:nil];
                 return;
             }
             [weakSelf chooseUploadTarget:data[@"projects"] fileURL:fileURL
@@ -2743,7 +2768,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 - (void)chooseUploadTarget:(NSArray *)projects fileURL:(NSURL *)fileURL
                       title:(NSString *)title presenter:(UIViewController *)presenter {
     UIViewController *top = AMCloudTopController(presenter);
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"上传云工程"
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"保存到 AutFeng Hub"
         message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf = self;
     [sheet addAction:[UIAlertAction actionWithTitle:@"新建云工程" style:UIAlertActionStyleDefault
@@ -2823,7 +2848,21 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         (void)data;
         [busy dismissViewControllerAnimated:YES completion:^{
             if (error) {
-                [weakSelf showError:error presenter:presenter];
+                UIViewController *top = AMCloudTopController(presenter);
+                UIAlertController *failure = [UIAlertController
+                    alertControllerWithTitle:@"云工程上传失败"
+                    message:error.localizedDescription ?: @"上传失败"
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [failure addAction:[UIAlertAction actionWithTitle:@"重试"
+                    style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                        AMCloudAfterAlertAction(^{
+                            [weakSelf uploadFile:fileURL title:title
+                                       toProject:project presenter:presenter];
+                        });
+                    }]];
+                [failure addAction:[UIAlertAction actionWithTitle:@"取消"
+                    style:UIAlertActionStyleCancel handler:nil]];
+                [top presentViewController:failure animated:YES completion:nil];
                 return;
             }
             UIViewController *top = AMCloudTopController(presenter);
@@ -3486,4 +3525,17 @@ NSArray<UIActivity *> *AMCloudSyncUploadActivities(
         ? projectTitle : fileURL.lastPathComponent.stringByDeletingPathExtension;
     activity.sourcePresenter = presenter;
     return @[activity];
+}
+
+void AMCloudSyncBeginUploadFile(NSURL *fileURL, NSString *projectTitle,
+                                UIViewController *presenter) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMCloudSyncBeginUploadFile(fileURL, projectTitle, presenter);
+        });
+        return;
+    }
+    [[AMCloudManager shared] beginUploadFile:fileURL
+                                       title:projectTitle
+                                   presenter:presenter];
 }

@@ -477,6 +477,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void hooked_navigationPush",
         )
         self.assertIn("AMProjV44IsDirectProjectPackageOption", action)
+        self.assertIn("AMProjShareCloudUploadOption", action)
+        self.assertIn("amproj_startCloudUpload", action)
         self.assertIn("amproj_startDirectExport", action)
         self.assertIn("orig_shareNCOnTapExport", action)
         self.assertNotIn("amproj_viewVisibleText", action)
