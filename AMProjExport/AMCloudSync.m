@@ -181,13 +181,11 @@ static void AMCloudPostTokenChanged(void) {
     });
 }
 
-static void AMCloudCleanupPluginsForAuth(NSString *token, uint64_t generation,
-                                         BOOL notifyTokenChange) {
+static void AMCloudCleanupPluginsForAuth(NSString *token, uint64_t generation) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        BOOL cleared = AMCloudPluginsRemoveAllIf(^BOOL{
+        AMCloudPluginsRemoveAllIf(^BOOL{
             return AMCloudAuthMatches(token, generation);
         });
-        if (cleared && notifyTokenChange) AMCloudPostTokenChanged();
     });
 }
 
@@ -207,7 +205,8 @@ static BOOL AMCloudWriteToken(NSString *token) {
         }
     });
     if (changed) {
-        AMCloudCleanupPluginsForAuth(token, generation, YES);
+        AMCloudPostTokenChanged();
+        AMCloudCleanupPluginsForAuth(token, generation);
     }
     return stored;
 }
@@ -242,7 +241,8 @@ static BOOL AMCloudDeleteTokenMatching(NSString *expectedToken, BOOL requireMatc
         }
         return NO;
     }
-    AMCloudCleanupPluginsForAuth(nil, generation, hadToken);
+    if (hadToken) AMCloudPostTokenChanged();
+    AMCloudCleanupPluginsForAuth(nil, generation);
     return YES;
 }
 
@@ -910,6 +910,15 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic) BOOL pluginSyncInstalled;
 @property(nonatomic) BOOL pluginSyncInFlight;
 @property(nonatomic) BOOL pluginSyncPending;
+@property(nonatomic, copy) NSString *pluginSyncOperationID;
+@property(nonatomic, strong) UIView *pluginDownloadOverlay;
+@property(nonatomic, copy) NSString *pluginDownloadNoticeOperationID;
+@property(nonatomic, copy) NSString *pluginDownloadNoticeToken;
+@property(nonatomic) uint64_t pluginDownloadNoticeGeneration;
+@property(nonatomic, copy) NSString *pluginDownloadNoticeTitle;
+@property(nonatomic, copy) NSString *pluginDownloadNoticeMessage;
+@property(nonatomic) BOOL pluginDownloadNoticeBusy;
+@property(nonatomic) BOOL pluginDownloadNoticeSuppressed;
 + (instancetype)shared;
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
@@ -950,7 +959,19 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
                    presenter:(UIViewController *)presenter;
 - (void)reloadAccountControllerIfSupported;
 - (void)syncPluginsNow:(NSString *)reason;
-- (void)finishPluginSync;
+- (void)finishPluginSyncAllowingPending:(BOOL)allowPending;
+- (void)beginPluginDownloadNoticeForRelease:(NSDictionary *)release
+                                operationID:(NSString *)operationID
+                                      token:(NSString *)token
+                         authorizationGeneration:(uint64_t)authorizationGeneration;
+- (void)finishPluginDownloadNoticeInstalled:(BOOL)installed
+                                      state:(NSDictionary * _Nullable)state
+                                      error:(NSError * _Nullable)error
+                                  cancelled:(BOOL)cancelled
+                                operationID:(NSString *)operationID;
+- (void)showPluginDownloadNoticeIfPossible;
+- (void)hidePluginDownloadNotice;
+- (void)cancelPluginDownloadNotice;
 @end
 
 @interface AMCloudAccountWebViewController : UIViewController
@@ -1407,11 +1428,16 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     (void)notification;
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
+    [self showPluginDownloadNoticeIfPossible];
     [self syncPluginsNow:@"did_become_active"];
 }
 
 - (void)pluginTokenChanged:(NSNotification *)notification {
     (void)notification;
+    self.pluginSyncOperationID = nil;
+    self.pluginSyncInFlight = NO;
+    self.pluginSyncPending = NO;
+    [self cancelPluginDownloadNotice];
     if (!AMCloudReadToken().length) return;
     [self syncPluginsNow:@"token_changed"];
 }
@@ -1443,17 +1469,22 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         return;
     }
     if (self.pluginSyncInFlight) {
-        self.pluginSyncPending = YES;
+        if (![reason isEqualToString:@"foreground_timer"]) {
+            self.pluginSyncPending = YES;
+        }
         return;
     }
     self.pluginSyncInFlight = YES;
+    NSString *operationID = NSUUID.UUID.UUIDString;
+    self.pluginSyncOperationID = operationID;
     AMCloudDiagnostic(@"cloud.plugins.sync_begin", @{ @"reason": reason ?: @"unknown" });
     __weak typeof(self) weakSelf = self;
     [self.client loadPluginManifest:^(NSDictionary *manifest, NSError *error) {
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
+        if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
         if (!AMCloudAuthMatches(token, authorizationGeneration)) {
-            [self finishPluginSync];
+            [self finishPluginSyncAllowingPending:YES];
             return;
         }
         if (error) {
@@ -1461,7 +1492,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 @"reason": reason ?: @"unknown",
                 @"error": error.localizedDescription ?: @""
             });
-            [self finishPluginSync];
+            [self finishPluginSyncAllowingPending:NO];
             return;
         }
         BOOL enabled = [manifest[@"enabled"] boolValue];
@@ -1473,12 +1504,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                     return AMCloudAuthMatches(token, authorizationGeneration);
                 });
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
                     if (cleared) {
                         AMCloudDiagnostic(@"cloud.plugins.cleared", @{
                             @"reason": enabled ? @"no_published_release" : @"permission_disabled"
                         });
                     }
-                    [self finishPluginSync];
+                    [self finishPluginSyncAllowingPending:YES];
                 });
             });
             return;
@@ -1501,21 +1533,45 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 @"release_id": releaseID,
                 @"effect_count": state[@"effect_count"] ?: @0
             });
-            [self finishPluginSync];
+            [self finishPluginSyncAllowingPending:YES];
             return;
         }
+        [self beginPluginDownloadNoticeForRelease:release operationID:operationID
+            token:token authorizationGeneration:authorizationGeneration];
         [self.client downloadPluginRelease:release completion:^(NSDictionary *download,
                                                                  NSError *downloadError) {
             NSURL *archiveURL = [download[@"url"] isKindOfClass:NSURL.class]
                 ? download[@"url"] : nil;
             NSURL *cleanupURL = [download[@"cleanup"] isKindOfClass:NSURL.class]
                 ? download[@"cleanup"] : archiveURL;
+            if (![self.pluginSyncOperationID isEqualToString:operationID]) {
+                if (cleanupURL) {
+                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                        [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:nil];
+                    });
+                }
+                return;
+            }
+            if (!AMCloudAuthMatches(token, authorizationGeneration)) {
+                if (cleanupURL) {
+                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                        [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:nil];
+                    });
+                }
+                [self finishPluginDownloadNoticeInstalled:NO state:nil error:nil
+                    cancelled:YES operationID:operationID];
+                [self finishPluginSyncAllowingPending:YES];
+                return;
+            }
             if (downloadError || !archiveURL) {
                 AMCloudDiagnostic(@"cloud.plugins.download_failed", @{
                     @"release_id": releaseID ?: @"",
                     @"error": downloadError.localizedDescription ?: @"missing download"
                 });
-                [self finishPluginSync];
+                [self finishPluginDownloadNoticeInstalled:NO state:nil
+                    error:downloadError ?: AMCloudError(24, @"云端插件下载失败")
+                    cancelled:NO operationID:operationID];
+                [self finishPluginSyncAllowingPending:NO];
                 return;
             }
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -1533,27 +1589,203 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 }
                 [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:nil];
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
                     if (installed) {
                         NSDictionary *newState = AMCloudPluginsCurrentState();
                         AMCloudDiagnostic(@"cloud.plugins.installed", @{
                             @"release_id": releaseID ?: @"",
                             @"effect_count": newState[@"effect_count"] ?: @0
                         });
+                        [self finishPluginDownloadNoticeInstalled:YES state:newState
+                            error:nil cancelled:NO operationID:operationID];
                     } else if (tokenUnchanged) {
                         AMCloudDiagnostic(@"cloud.plugins.install_failed", @{
                             @"release_id": releaseID ?: @"",
                             @"error": installError.localizedDescription ?: @"unknown"
                         });
+                        [self finishPluginDownloadNoticeInstalled:NO state:nil
+                            error:installError ?: AMCloudError(25, @"云端插件安装失败")
+                            cancelled:NO operationID:operationID];
+                    } else {
+                        [self finishPluginDownloadNoticeInstalled:NO state:nil
+                            error:nil cancelled:YES operationID:operationID];
                     }
-                    [self finishPluginSync];
+                    [self finishPluginSyncAllowingPending:installed || !tokenUnchanged];
                 });
             });
         }];
     }];
 }
 
-- (void)finishPluginSync {
+- (void)beginPluginDownloadNoticeForRelease:(NSDictionary *)release
+                                operationID:(NSString *)operationID
+                                      token:(NSString *)token
+                         authorizationGeneration:(uint64_t)authorizationGeneration {
+    if (!operationID.length || !token.length ||
+        !AMCloudAuthMatches(token, authorizationGeneration)) return;
+    NSNumber *size = [release[@"sizeBytes"] isKindOfClass:NSNumber.class]
+        ? release[@"sizeBytes"] : nil;
+    self.pluginDownloadNoticeOperationID = operationID;
+    self.pluginDownloadNoticeToken = token;
+    self.pluginDownloadNoticeGeneration = authorizationGeneration;
+    self.pluginDownloadNoticeTitle = @"正在下载云端插件";
+    self.pluginDownloadNoticeMessage = size.longLongValue > 0
+        ? [NSString stringWithFormat:@"正在自动下载 %@ 的云端插件，完成前请勿退出软件。",
+                                      AMCloudByteText(size.longLongValue)]
+        : @"正在自动下载云端插件，完成前请勿退出软件。";
+    self.pluginDownloadNoticeBusy = YES;
+    self.pluginDownloadNoticeSuppressed = NO;
+    [self showPluginDownloadNoticeIfPossible];
+}
+
+- (void)finishPluginDownloadNoticeInstalled:(BOOL)installed
+                                      state:(NSDictionary *)state
+                                      error:(NSError *)error
+                                  cancelled:(BOOL)cancelled
+                                operationID:(NSString *)operationID {
+    if (![self.pluginDownloadNoticeOperationID isEqualToString:operationID]) return;
+    BOOL authenticationMatches = AMCloudAuthMatches(
+        self.pluginDownloadNoticeToken, self.pluginDownloadNoticeGeneration);
+    if (cancelled || !authenticationMatches) {
+        [self cancelPluginDownloadNotice];
+        return;
+    }
+    NSNumber *effectCount = [state[@"effect_count"] isKindOfClass:NSNumber.class]
+        ? state[@"effect_count"] : nil;
+    self.pluginDownloadNoticeBusy = NO;
+    self.pluginDownloadNoticeSuppressed = NO;
+    self.pluginDownloadNoticeTitle = installed
+        ? @"云端插件下载完成" : @"云端插件下载失败";
+    self.pluginDownloadNoticeMessage = installed
+        ? (effectCount.unsignedIntegerValue > 0
+            ? [NSString stringWithFormat:@"已安装 %@ 个插件效果，重新打开效果页面即可使用。",
+                                          effectCount]
+            : @"插件已经安装，重新打开效果页面即可使用。")
+        : (error.localizedDescription ?: @"请检查网络后重新打开软件重试。");
+    [self.pluginDownloadOverlay removeFromSuperview];
+    self.pluginDownloadOverlay = nil;
+    [self showPluginDownloadNoticeIfPossible];
+}
+
+- (void)showPluginDownloadNoticeIfPossible {
+    if (!self.pluginDownloadNoticeOperationID.length ||
+        (self.pluginDownloadNoticeBusy && self.pluginDownloadNoticeSuppressed) ||
+        self.pluginDownloadOverlay) return;
+    if (!AMCloudAuthMatches(self.pluginDownloadNoticeToken,
+                            self.pluginDownloadNoticeGeneration)) {
+        [self cancelPluginDownloadNotice];
+        return;
+    }
+    UIWindow *window = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] ||
+            scene.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
+            if (candidate.isKeyWindow) {
+                window = candidate;
+                break;
+            }
+        }
+        if (window) break;
+    }
+    if (!window) return;
+
+    UIView *overlay = [[UIView alloc] initWithFrame:window.bounds];
+    overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.36];
+    UIView *panel = [UIView new];
+    panel.translatesAutoresizingMaskIntoConstraints = NO;
+    panel.backgroundColor = UIColor.systemBackgroundColor;
+    panel.layer.cornerRadius = 8;
+    panel.layer.masksToBounds = YES;
+    [overlay addSubview:panel];
+
+    UILabel *title = [UILabel new];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    title.textAlignment = NSTextAlignmentCenter;
+    title.text = self.pluginDownloadNoticeTitle;
+    UILabel *message = [UILabel new];
+    message.translatesAutoresizingMaskIntoConstraints = NO;
+    message.font = [UIFont systemFontOfSize:13];
+    message.textColor = UIColor.secondaryLabelColor;
+    message.textAlignment = NSTextAlignmentCenter;
+    message.numberOfLines = 0;
+    message.text = self.pluginDownloadNoticeMessage;
+    [panel addSubview:title];
+    [panel addSubview:message];
+
+    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc]
+        initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    spinner.hidden = !self.pluginDownloadNoticeBusy;
+    if (self.pluginDownloadNoticeBusy) [spinner startAnimating];
+    [panel addSubview:spinner];
+
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [button setTitle:self.pluginDownloadNoticeBusy ? @"隐藏" : @"好"
+            forState:UIControlStateNormal];
+    [button addTarget:self action:@selector(hidePluginDownloadNotice)
+     forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:button];
+    NSLayoutConstraint *panelWidth =
+        [panel.widthAnchor constraintEqualToConstant:320];
+    panelWidth.priority = UILayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[
+        [panel.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [panel.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
+        panelWidth,
+        [panel.widthAnchor constraintLessThanOrEqualToAnchor:overlay.widthAnchor
+                                                   multiplier:0.82],
+        [title.topAnchor constraintEqualToAnchor:panel.topAnchor constant:20],
+        [title.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:18],
+        [title.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-18],
+        [message.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
+        [message.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:18],
+        [message.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-18],
+        [spinner.topAnchor constraintEqualToAnchor:message.bottomAnchor constant:14],
+        [spinner.centerXAnchor constraintEqualToAnchor:panel.centerXAnchor],
+        [button.topAnchor constraintEqualToAnchor:spinner.bottomAnchor constant:10],
+        [button.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor],
+        [button.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor],
+        [button.heightAnchor constraintEqualToConstant:46],
+        [button.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor]
+    ]];
+    self.pluginDownloadOverlay = overlay;
+    [window addSubview:overlay];
+}
+
+- (void)hidePluginDownloadNotice {
+    [self.pluginDownloadOverlay removeFromSuperview];
+    self.pluginDownloadOverlay = nil;
+    if (self.pluginDownloadNoticeBusy) {
+        self.pluginDownloadNoticeSuppressed = YES;
+    } else {
+        [self cancelPluginDownloadNotice];
+    }
+}
+
+- (void)cancelPluginDownloadNotice {
+    [self.pluginDownloadOverlay removeFromSuperview];
+    self.pluginDownloadOverlay = nil;
+    self.pluginDownloadNoticeOperationID = nil;
+    self.pluginDownloadNoticeToken = nil;
+    self.pluginDownloadNoticeGeneration = 0;
+    self.pluginDownloadNoticeTitle = nil;
+    self.pluginDownloadNoticeMessage = nil;
+    self.pluginDownloadNoticeBusy = NO;
+    self.pluginDownloadNoticeSuppressed = NO;
+}
+
+- (void)finishPluginSyncAllowingPending:(BOOL)allowPending {
     self.pluginSyncInFlight = NO;
+    self.pluginSyncOperationID = nil;
+    if (!allowPending) {
+        self.pluginSyncPending = NO;
+        return;
+    }
     if (!self.pluginSyncPending) return;
     self.pluginSyncPending = NO;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
