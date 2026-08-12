@@ -618,7 +618,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
     request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     request.timeoutInterval = 20;
-    [self.session dataTaskWithRequest:request completionHandler:^(NSData *data,
+    [[self.session dataTaskWithRequest:request completionHandler:^(NSData *data,
         NSURLResponse *rawResponse, NSError *error) {
         NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
             ? (NSHTTPURLResponse *)rawResponse : nil;
