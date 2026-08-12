@@ -74,6 +74,7 @@ typedef NS_ENUM(NSInteger, AMProjIncomingURLResult) {
 static UIViewController* amproj_shareVCRecursive(
     UIViewController *controller, NSUInteger depth,
     NSMutableSet<NSValue *> *visited, uint8_t *selectedExportOption);
+static UIViewController* amproj_topViewController(UIViewController *controller);
 
 typedef NS_ENUM(NSInteger, AMProjImportKind) {
     AMProjImportKindPackage = 0,
