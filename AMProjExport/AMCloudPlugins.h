@@ -46,6 +46,24 @@ FOUNDATION_EXPORT BOOL AMCloudPluginsInstallArchive(
     NSError * _Nullable * _Nullable error);
 
 /**
+ 安装或替换一个云端插件版本。插件包按 pluginID/versionID 独立保存，成功后不会
+ 自动改变当前可见目录；调用 AMCloudPluginsActivateCatalog 才会原子切换清单。
+ */
+FOUNDATION_EXPORT BOOL AMCloudPluginsInstallItemArchive(
+    NSURL *archiveURL, NSString *pluginID, NSString *versionID, NSString *sha256,
+    NSError * _Nullable * _Nullable error);
+
+/**
+ 按服务端启用清单重建云端覆盖目录。只会复制清单中的插件；停用插件会从覆盖层
+ 消失，IPA 原版 BuiltinEffects 始终保留。共享依赖文件内容不一致时拒绝激活。
+ */
+FOUNDATION_EXPORT BOOL AMCloudPluginsActivateCatalog(
+    NSArray<NSDictionary<NSString *, id> *> *plugins, NSNumber *revision,
+    NSString *authorizationKey, uint64_t authorizationGeneration,
+    AMCloudPluginsCommitGuard commitGuard,
+    NSError * _Nullable * _Nullable error);
+
+/**
  在插件串行队列中重新执行 validator，仅条件仍成立时清理全部插件。
  返回 YES 仅表示插件根目录已不存在；返回 NO 表示 validator 已失效或磁盘清理失败。
  只要 validator 通过，内存状态会先失效，磁盘状态也会在删除根目录前禁止冷启动恢复。

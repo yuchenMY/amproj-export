@@ -27,6 +27,8 @@ static uint64_t AMCloudAuthorizationGeneration = 0;
 static uint64_t AMCloudActiveAuthorizationGeneration = 0;
 static void *AMCloudPluginsMutationQueueKey = &AMCloudPluginsMutationQueueKey;
 
+static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *extension);
+
 static dispatch_queue_t AMCloudPluginsMutationQueue(void) {
     static dispatch_queue_t queue = nil;
     static dispatch_once_t onceToken;
@@ -127,6 +129,34 @@ static BOOL AMCloudPluginAuthorizationKeyIsSafe(NSString *authorizationKey) {
         rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
 }
 
+static NSURL *AMCloudPluginsItemsURL(void) {
+    return [AMCloudPluginsRootURL() URLByAppendingPathComponent:@"items" isDirectory:YES];
+}
+
+static NSURL *AMCloudPluginsCatalogURL(void) {
+    return [AMCloudPluginsRootURL() URLByAppendingPathComponent:@"catalog" isDirectory:YES];
+}
+
+static NSString *AMCloudPluginsItemVersionID(NSDictionary *plugin) {
+    NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
+        ? plugin[@"version"] : nil;
+    return [version[@"id"] isKindOfClass:NSString.class] ? version[@"id"] : nil;
+}
+
+static NSString *AMCloudPluginsItemSHA(NSDictionary *plugin) {
+    NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
+        ? plugin[@"version"] : nil;
+    return [version[@"sha256"] isKindOfClass:NSString.class]
+        ? [version[@"sha256"] lowercaseString] : nil;
+}
+
+static BOOL AMCloudPluginsCatalogEntryIsSafe(NSDictionary *plugin) {
+    NSString *pluginID = [plugin[@"id"] isKindOfClass:NSString.class] ? plugin[@"id"] : nil;
+    return AMCloudPluginReleaseIDIsSafe(pluginID) &&
+        AMCloudPluginReleaseIDIsSafe(AMCloudPluginsItemVersionID(plugin)) &&
+        AMCloudPluginAuthorizationKeyIsSafe(AMCloudPluginsItemSHA(plugin));
+}
+
 static void AMCloudPluginsSetActiveState(NSDictionary<NSString *, id> *state,
                                          NSURL *effectsURL,
                                          uint64_t authorizationGeneration) {
@@ -191,6 +221,38 @@ static BOOL AMCloudPluginsActivatePersistedState(NSString *releaseID, NSString *
     return YES;
 }
 
+static BOOL AMCloudPluginsActivatePersistedCatalog(
+    NSString *authorizationKey, uint64_t authorizationGeneration) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    BOOL markerExists = NO;
+    if (!AMCloudPluginsGetItemExistence(
+            manager, AMCloudPluginsRevocationURL(), &markerExists) || markerExists) {
+        AMCloudPluginsSetActiveState(nil, nil, 0);
+        return NO;
+    }
+    NSData *data = [NSData dataWithContentsOfURL:AMCloudPluginsStateURL()];
+    id object = data.length
+        ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSDictionary *state = [object isKindOfClass:NSDictionary.class] ? object : nil;
+    NSNumber *protocol = [state[@"protocol_version"] isKindOfClass:NSNumber.class]
+        ? state[@"protocol_version"] : nil;
+    NSString *storedKey = [state[@"authorization_key"] isKindOfClass:NSString.class]
+        ? [state[@"authorization_key"] lowercaseString] : nil;
+    NSArray *plugins = [state[@"plugins"] isKindOfClass:NSArray.class] ? state[@"plugins"] : nil;
+    if (protocol.integerValue != 2 || !plugins ||
+        ![storedKey isEqualToString:authorizationKey.lowercaseString]) {
+        return NO;
+    }
+    NSURL *effectsURL = [AMCloudPluginsCatalogURL()
+        URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES];
+    NSNumber *directory = nil;
+    if (![effectsURL getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil] ||
+        !directory.boolValue ||
+        authorizationGeneration != AMCloudPluginsAuthorizationGeneration()) return NO;
+    AMCloudPluginsSetActiveState(state, effectsURL, authorizationGeneration);
+    return YES;
+}
+
 BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization(
     NSString *authorizationKey, uint64_t authorizationGeneration) {
     if (!AMCloudPluginAuthorizationKeyIsSafe(authorizationKey) ||
@@ -201,6 +263,13 @@ BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization(
         id object = data.length
             ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         NSDictionary *state = [object isKindOfClass:NSDictionary.class] ? object : nil;
+        NSNumber *protocol = [state[@"protocol_version"] isKindOfClass:NSNumber.class]
+            ? state[@"protocol_version"] : nil;
+        if (protocol.integerValue == 2) {
+            restored = AMCloudPluginsActivatePersistedCatalog(
+                authorizationKey, authorizationGeneration);
+            return;
+        }
         NSString *releaseID = [state[@"release_id"] isKindOfClass:NSString.class]
             ? state[@"release_id"] : nil;
         NSString *sha256 = [state[@"sha256"] isKindOfClass:NSString.class]
@@ -214,6 +283,232 @@ BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization(
             releaseID, sha256, authorizationKey, authorizationGeneration);
     });
     return restored;
+}
+
+BOOL AMCloudPluginsInstallItemArchive(NSURL *archiveURL, NSString *pluginID,
+                                      NSString *versionID, NSString *sha256,
+                                      NSError **error) {
+    if (!archiveURL || !AMCloudPluginReleaseIDIsSafe(pluginID) ||
+        !AMCloudPluginReleaseIDIsSafe(versionID) ||
+        !AMCloudPluginAuthorizationKeyIsSafe(sha256)) {
+        if (error) *error = [NSError errorWithDomain:AMProjImportArchiveErrorDomain
+            code:AMProjImportArchiveErrorInvalidArgument
+            userInfo:@{NSLocalizedDescriptionKey: @"Cloud plugin item metadata is invalid"}];
+        return NO;
+    }
+    __block BOOL installed = NO;
+    __block NSError *installError = nil;
+    AMCloudPluginsPerformMutation(^{
+        NSFileManager *manager = NSFileManager.defaultManager;
+        NSURL *itemsURL = AMCloudPluginsItemsURL();
+        NSURL *pluginURL = [itemsURL URLByAppendingPathComponent:pluginID isDirectory:YES];
+        NSURL *versionsURL = [pluginURL URLByAppendingPathComponent:@"versions" isDirectory:YES];
+        NSURL *stagingRoot = [AMCloudPluginsRootURL()
+            URLByAppendingPathComponent:@"item-staging" isDirectory:YES];
+        for (NSURL *URL in @[AMCloudPluginsRootURL(), itemsURL, pluginURL, versionsURL, stagingRoot]) {
+            if (![manager createDirectoryAtURL:URL withIntermediateDirectories:YES
+                                    attributes:nil error:&installError]) return;
+        }
+        NSURL *stagingURL = [stagingRoot URLByAppendingPathComponent:
+            NSUUID.UUID.UUIDString.lowercaseString isDirectory:YES];
+        NSDictionary *metrics = nil;
+        if (!AMProjExtractPluginArchive(archiveURL, stagingURL, &metrics, &installError)) return;
+        NSURL *finalURL = [versionsURL URLByAppendingPathComponent:versionID isDirectory:YES];
+        [manager removeItemAtURL:finalURL error:nil];
+        if (![manager moveItemAtURL:stagingURL toURL:finalURL error:&installError]) return;
+        NSDictionary *metadata = @{ @"plugin_id": pluginID, @"version_id": versionID,
+            @"sha256": sha256.lowercaseString,
+            @"installed_at": @((long long)NSDate.date.timeIntervalSince1970) };
+        NSData *metadataData = [NSJSONSerialization dataWithJSONObject:metadata options:0
+                                                                  error:&installError];
+        NSURL *metadataURL = [finalURL URLByAppendingPathComponent:@"item.json"];
+        if (!metadataData || ![metadataData writeToURL:metadataURL
+                                               options:NSDataWritingAtomic error:&installError]) {
+            [manager removeItemAtURL:finalURL error:nil];
+            return;
+        }
+        NSArray<NSURL *> *versions = [manager contentsOfDirectoryAtURL:versionsURL
+                                             includingPropertiesForKeys:nil options:0 error:nil];
+        for (NSURL *URL in versions) {
+            if (![URL.lastPathComponent isEqualToString:versionID]) {
+                [manager removeItemAtURL:URL error:nil];
+            }
+        }
+        installed = YES;
+    });
+    if (!installed && error) *error = installError;
+    return installed;
+}
+
+static NSURL *AMCloudPluginsBundledEffectsURL(void) {
+    NSURL *URL = [NSBundle.mainBundle.resourceURL
+        URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES];
+    NSNumber *directory = nil;
+    return [URL getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil] &&
+        directory.boolValue ? URL : nil;
+}
+
+static BOOL AMCloudPluginsCopyCatalogDirectory(NSFileManager *manager,
+                                                NSURL *sourceURL,
+                                                NSURL *destinationURL,
+                                                BOOL replaceExisting,
+                                                NSError **error) {
+    NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:sourceURL
+        includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 error:error];
+    if (!children) return NO;
+    for (NSURL *source in children) {
+        NSNumber *directory = nil;
+        if (![source getResourceValue:&directory forKey:NSURLIsDirectoryKey error:error]) return NO;
+        NSURL *destination = [destinationURL URLByAppendingPathComponent:source.lastPathComponent
+                                                              isDirectory:directory.boolValue];
+        if (directory.boolValue) {
+            if (![manager createDirectoryAtURL:destination withIntermediateDirectories:YES
+                                    attributes:nil error:error]) return NO;
+            if (!AMCloudPluginsCopyCatalogDirectory(
+                    manager, source, destination, replaceExisting, error)) return NO;
+            continue;
+        }
+        if ([source.lastPathComponent isEqualToString:@"item.json"]) continue;
+        BOOL destinationExists = NO;
+        if (!AMCloudPluginsGetItemExistence(manager, destination, &destinationExists)) return NO;
+        if (destinationExists) {
+			if (replaceExisting) {
+				if (![manager removeItemAtURL:destination error:error] ||
+					![manager copyItemAtURL:source toURL:destination error:error]) return NO;
+				continue;
+			}
+            NSData *existing = [NSData dataWithContentsOfURL:destination options:0 error:error];
+            NSData *incoming = [NSData dataWithContentsOfURL:source options:0 error:error];
+            if (!existing || !incoming || ![existing isEqualToData:incoming]) {
+                if (error && !*error) *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                    code:NSFileWriteFileExistsError
+                    userInfo:@{NSLocalizedDescriptionKey:
+                        [NSString stringWithFormat:@"Plugin dependency conflict: %@",
+                                                   source.lastPathComponent ?: @""]}];
+                return NO;
+            }
+            continue;
+        }
+        if (![manager copyItemAtURL:source toURL:destination error:error]) return NO;
+    }
+    return YES;
+}
+
+BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugins,
+                                   NSNumber *revision, NSString *authorizationKey,
+                                   uint64_t authorizationGeneration,
+                                   AMCloudPluginsCommitGuard commitGuard,
+                                   NSError **error) {
+    if (![plugins isKindOfClass:NSArray.class] ||
+        !AMCloudPluginAuthorizationKeyIsSafe(authorizationKey) ||
+        authorizationGeneration == 0 || !commitGuard) return NO;
+    for (NSDictionary *plugin in plugins) {
+        if (![plugin isKindOfClass:NSDictionary.class] ||
+            !AMCloudPluginsCatalogEntryIsSafe(plugin)) return NO;
+    }
+    __block BOOL activated = NO;
+    __block NSError *activationError = nil;
+    AMCloudPluginsPerformMutation(^{
+        NSFileManager *manager = NSFileManager.defaultManager;
+        NSURL *rootURL = AMCloudPluginsRootURL();
+        NSURL *stagingRoot = [rootURL URLByAppendingPathComponent:@"catalog-staging"
+                                                      isDirectory:YES];
+        [manager createDirectoryAtURL:stagingRoot withIntermediateDirectories:YES
+                            attributes:nil error:&activationError];
+        if (activationError) return;
+        NSURL *stagingURL = [stagingRoot URLByAppendingPathComponent:
+            NSUUID.UUID.UUIDString.lowercaseString isDirectory:YES];
+        NSURL *effectsURL = [stagingURL URLByAppendingPathComponent:@"BuiltinEffects"
+                                                        isDirectory:YES];
+        if (![manager createDirectoryAtURL:effectsURL withIntermediateDirectories:YES
+                                attributes:nil error:&activationError]) return;
+		NSURL *bundledEffectsURL = AMCloudPluginsBundledEffectsURL();
+		if (!bundledEffectsURL || !AMCloudPluginsCopyCatalogDirectory(
+				manager, bundledEffectsURL, effectsURL, NO, &activationError)) {
+			[manager removeItemAtURL:stagingURL error:nil];
+			return;
+		}
+        NSMutableArray *statePlugins = [NSMutableArray arrayWithCapacity:plugins.count];
+        for (NSDictionary *plugin in plugins) {
+            NSString *pluginID = plugin[@"id"];
+            NSString *versionID = AMCloudPluginsItemVersionID(plugin);
+            NSString *sha = AMCloudPluginsItemSHA(plugin);
+            NSURL *versionURL = [[[[AMCloudPluginsItemsURL()
+                URLByAppendingPathComponent:pluginID isDirectory:YES]
+                URLByAppendingPathComponent:@"versions" isDirectory:YES]
+                URLByAppendingPathComponent:versionID isDirectory:YES] URLByStandardizingPath];
+            NSData *metadataData = [NSData dataWithContentsOfURL:
+                [versionURL URLByAppendingPathComponent:@"item.json"]];
+            NSDictionary *metadata = metadataData.length ?
+                [NSJSONSerialization JSONObjectWithData:metadataData options:0 error:nil] : nil;
+            if (![metadata[@"plugin_id"] isEqualToString:pluginID] ||
+                ![metadata[@"version_id"] isEqualToString:versionID] ||
+                ![[metadata[@"sha256"] lowercaseString] isEqualToString:sha]) {
+                activationError = [NSError errorWithDomain:NSCocoaErrorDomain
+                    code:NSFileReadCorruptFileError
+                    userInfo:@{NSLocalizedDescriptionKey: @"Installed plugin item is incomplete"}];
+                break;
+            }
+            NSURL *sourceEffects = [versionURL URLByAppendingPathComponent:@"BuiltinEffects"
+                                                               isDirectory:YES];
+			if (!AMCloudPluginsCopyCatalogDirectory(manager, sourceEffects, effectsURL,
+			                                             YES, &activationError)) break;
+            [statePlugins addObject:@{ @"id": pluginID, @"version_id": versionID,
+                                       @"sha256": sha }];
+        }
+        if (activationError) {
+            [manager removeItemAtURL:stagingURL error:nil];
+            return;
+        }
+        NSObject *commitLock = [NSObject new];
+        __block BOOL commitInvoked = NO;
+        __block BOOL commitGuardReturned = NO;
+        dispatch_block_t commit = ^{
+            @synchronized (commitLock) {
+                if (commitGuardReturned || commitInvoked) return;
+                commitInvoked = YES;
+                NSURL *catalogURL = AMCloudPluginsCatalogURL();
+                NSURL *oldURL = [rootURL URLByAppendingPathComponent:@"catalog-old"
+                                                          isDirectory:YES];
+                [manager removeItemAtURL:oldURL error:nil];
+                BOOL catalogExists = NO;
+                if (AMCloudPluginsGetItemExistence(manager, catalogURL, &catalogExists) &&
+                    catalogExists && ![manager moveItemAtURL:catalogURL toURL:oldURL
+                                                  error:&activationError]) return;
+                if (![manager moveItemAtURL:stagingURL toURL:catalogURL
+                                      error:&activationError]) {
+                    [manager moveItemAtURL:oldURL toURL:catalogURL error:nil];
+                    return;
+                }
+                NSDictionary *state = @{ @"protocol_version": @2,
+                    @"catalog_revision": revision ?: @0,
+                    @"authorization_key": authorizationKey.lowercaseString,
+                    @"installed_at": @((long long)NSDate.date.timeIntervalSince1970),
+                    @"effect_count": @(AMCloudPluginsFiles(
+                        [catalogURL URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES],
+                        @"xml").count), @"plugins": statePlugins };
+                NSData *stateData = [NSJSONSerialization dataWithJSONObject:state options:0
+                                                                       error:&activationError];
+                if (!stateData || ![stateData writeToURL:AMCloudPluginsStateURL()
+                                                 options:NSDataWritingAtomic error:&activationError]) {
+                    [manager removeItemAtURL:catalogURL error:nil];
+                    [manager moveItemAtURL:oldURL toURL:catalogURL error:nil];
+                    return;
+                }
+                [manager removeItemAtURL:oldURL error:nil];
+                [manager removeItemAtURL:AMCloudPluginsRevocationURL() error:nil];
+                AMCloudPluginsSetActiveState(state,
+                    [catalogURL URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES],
+                    authorizationGeneration);
+                activated = YES;
+            }
+        };
+        BOOL authorized = commitGuard(commit);
+        @synchronized (commitLock) { commitGuardReturned = YES; }
+        if (!authorized || !activated) [manager removeItemAtURL:stagingURL error:nil];
+    });
+    if (!activated && error) *error = activationError;
+    return activated;
 }
 
 static NSString *AMCloudPluginsRelativeDirectory(NSString *subdirectory) {

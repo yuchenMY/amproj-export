@@ -479,6 +479,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)authorizeFeature:(NSString *)feature completion:(AMCloudResult)completion;
 - (void)loadPluginManifest:(AMCloudResult)completion;
 - (void)downloadPluginRelease:(NSDictionary *)release completion:(AMCloudResult)completion;
+- (void)downloadPluginItem:(NSDictionary *)plugin completion:(AMCloudResult)completion;
 - (void)loadProjects:(AMCloudResult)completion;
 - (void)createProject:(NSString *)title completion:(AMCloudResult)completion;
 - (void)uploadFile:(NSURL *)fileURL projectID:(NSString *)projectID
@@ -910,6 +911,82 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
     }] resume];
 }
 
+- (void)downloadPluginItem:(NSDictionary *)plugin completion:(AMCloudResult)completion {
+    NSString *pluginID = [plugin[@"id"] isKindOfClass:NSString.class] ? plugin[@"id"] : nil;
+    NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
+        ? plugin[@"version"] : nil;
+    NSString *versionID = [version[@"id"] isKindOfClass:NSString.class] ? version[@"id"] : nil;
+    NSString *expectedSHA = [version[@"sha256"] isKindOfClass:NSString.class]
+        ? [version[@"sha256"] lowercaseString] : nil;
+    NSNumber *expectedSize = [version[@"sizeBytes"] isKindOfClass:NSNumber.class]
+        ? version[@"sizeBytes"] : nil;
+    if (!pluginID.length || !versionID.length || expectedSHA.length != 64 ||
+        expectedSize.longLongValue <= 0) {
+        AMCloudCompleteOnMain(completion, nil, AMCloudError(22, @"单插件版本信息不完整"));
+        return;
+    }
+    NSString *path = [NSString stringWithFormat:
+        @"/ios/plugins/items/%@/versions/%@/download", pluginID, versionID];
+    NSError *requestError = nil;
+    NSMutableURLRequest *request = [self requestMethod:@"GET" path:path body:nil
+                                          authenticated:YES error:&requestError];
+    if (!request) {
+        AMCloudCompleteOnMain(completion, nil, requestError);
+        return;
+    }
+    request.timeoutInterval = 15 * 60;
+    [[self.session downloadTaskWithRequest:request
+                         completionHandler:^(NSURL *temporaryURL, NSURLResponse *rawResponse,
+                                             NSError *networkError) {
+        NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
+            ? (NSHTTPURLResponse *)rawResponse : nil;
+        if (networkError) {
+            AMCloudCompleteOnMain(completion, nil, networkError);
+            return;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+            NSData *errorData = temporaryURL ? [NSData dataWithContentsOfURL:temporaryURL] : nil;
+            NSError *responseError = nil;
+            AMCloudEnvelope(errorData, response, &responseError);
+            AMCloudCompleteOnMain(completion, nil,
+                responseError ?: AMCloudError(response.statusCode, @"下载单插件失败"));
+            return;
+        }
+        NSError *hashError = nil;
+        NSString *actualSHA = temporaryURL ? AMCloudSHA256(temporaryURL, &hashError) : nil;
+        NSNumber *actualSize = nil;
+        [temporaryURL getResourceValue:&actualSize forKey:NSURLFileSizeKey error:&hashError];
+        NSString *headerSHA = [[response valueForHTTPHeaderField:@"X-AM-Plugin-SHA256"]
+            lowercaseString];
+        if (!temporaryURL || hashError ||
+            [actualSHA caseInsensitiveCompare:expectedSHA] != NSOrderedSame ||
+            (headerSHA.length && [headerSHA caseInsensitiveCompare:expectedSHA] != NSOrderedSame) ||
+            actualSize.longLongValue != expectedSize.longLongValue) {
+            AMCloudCompleteOnMain(completion, nil,
+                hashError ?: AMCloudError(23, @"单插件文件校验失败"));
+            return;
+        }
+        NSURL *downloadsURL = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+            URLByAppendingPathComponent:@"AMCloudPluginItemDownloads" isDirectory:YES];
+        NSError *fileError = nil;
+        if (![NSFileManager.defaultManager createDirectoryAtURL:downloadsURL
+                                    withIntermediateDirectories:YES attributes:nil
+                                                         error:&fileError]) {
+            AMCloudCompleteOnMain(completion, nil, fileError);
+            return;
+        }
+        NSURL *destinationURL = [downloadsURL URLByAppendingPathComponent:
+            [[NSUUID.UUID.UUIDString lowercaseString] stringByAppendingPathExtension:@"zip"]];
+        if (![NSFileManager.defaultManager moveItemAtURL:temporaryURL
+                                                   toURL:destinationURL error:&fileError]) {
+            AMCloudCompleteOnMain(completion, nil, fileError);
+            return;
+        }
+        AMCloudCompleteOnMain(completion, @{ @"url": destinationURL,
+            @"cleanup": destinationURL, @"plugin": plugin }, nil);
+    }] resume];
+}
+
 @end
 
 @class AMCloudManager;
@@ -1009,6 +1086,18 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)updateAccountEntryImage;
 - (void)clearAccountAvatar;
 - (void)loadCachedAccountAvatar;
+- (void)syncPluginCatalog:(NSArray<NSDictionary *> *)plugins
+                 revision:(NSNumber *)revision
+                    token:(NSString *)token
+  authorizationGeneration:(uint64_t)authorizationGeneration
+         authorizationKey:(NSString *)authorizationKey
+              operationID:(NSString *)operationID;
+- (void)downloadPluginCatalogItems:(NSArray<NSDictionary *> *)plugins
+                             index:(NSUInteger)index
+                             token:(NSString *)token
+           authorizationGeneration:(uint64_t)authorizationGeneration
+                      operationID:(NSString *)operationID
+                        completion:(void (^)(NSError *error))completion;
 @end
 
 @interface AMCloudAccountWebViewController : UIViewController
@@ -1655,6 +1744,18 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             return;
         }
         BOOL enabled = [manifest[@"enabled"] boolValue];
+        NSNumber *protocolVersion = [manifest[@"protocolVersion"] isKindOfClass:NSNumber.class]
+            ? manifest[@"protocolVersion"] : nil;
+        NSArray<NSDictionary *> *plugins = [manifest[@"plugins"] isKindOfClass:NSArray.class]
+            ? manifest[@"plugins"] : nil;
+        if (enabled && protocolVersion.integerValue == 2 && plugins) {
+            NSNumber *revision = [manifest[@"catalogRevision"] isKindOfClass:NSNumber.class]
+                ? manifest[@"catalogRevision"] : @0;
+            [self syncPluginCatalog:plugins revision:revision token:token
+              authorizationGeneration:authorizationGeneration
+                     authorizationKey:authorizationKey operationID:operationID];
+            return;
+        }
         NSDictionary *release = [manifest[@"release"] isKindOfClass:NSDictionary.class]
             ? manifest[@"release"] : nil;
         if (!enabled || !release) {
@@ -1773,6 +1874,140 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 });
             });
         }];
+    }];
+}
+
+- (void)syncPluginCatalog:(NSArray<NSDictionary *> *)plugins
+                 revision:(NSNumber *)revision
+                    token:(NSString *)token
+  authorizationGeneration:(uint64_t)authorizationGeneration
+         authorizationKey:(NSString *)authorizationKey
+              operationID:(NSString *)operationID {
+    NSDictionary *state = AMCloudPluginsCurrentState();
+    NSArray *installed = [state[@"plugins"] isKindOfClass:NSArray.class] ? state[@"plugins"] : @[];
+    NSMutableDictionary<NSString *, NSDictionary *> *installedByID = [NSMutableDictionary dictionary];
+    for (NSDictionary *item in installed) {
+        NSString *itemID = [item[@"id"] isKindOfClass:NSString.class] ? item[@"id"] : nil;
+        if (itemID.length) installedByID[itemID] = item;
+    }
+    NSMutableArray<NSDictionary *> *pending = [NSMutableArray array];
+	BOOL catalogMatches = installed.count == plugins.count;
+    for (NSDictionary *plugin in plugins) {
+        NSString *pluginID = [plugin[@"id"] isKindOfClass:NSString.class] ? plugin[@"id"] : nil;
+        NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
+            ? plugin[@"version"] : nil;
+        NSString *versionID = [version[@"id"] isKindOfClass:NSString.class]
+            ? version[@"id"] : nil;
+        NSString *sha = [version[@"sha256"] isKindOfClass:NSString.class]
+            ? [version[@"sha256"] lowercaseString] : nil;
+        NSDictionary *local = pluginID.length ? installedByID[pluginID] : nil;
+        if (![local[@"version_id"] isEqualToString:versionID] ||
+            ![[local[@"sha256"] lowercaseString] isEqualToString:sha]) {
+            [pending addObject:plugin];
+			catalogMatches = NO;
+        }
+    }
+    BOOL sameRevision = [state[@"protocol_version"] integerValue] == 2 &&
+        [state[@"catalog_revision"] longLongValue] == revision.longLongValue;
+	if (pending.count == 0 && sameRevision && catalogMatches) {
+        AMCloudDiagnostic(@"cloud.plugins.catalog_up_to_date", @{
+            @"plugin_count": @(plugins.count), @"catalog_revision": revision ?: @0
+        });
+        [self finishPluginSyncAllowingPending:YES];
+        return;
+    }
+    if (pending.count > 0) {
+        long long totalBytes = 0;
+        for (NSDictionary *plugin in pending) {
+            NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
+                ? plugin[@"version"] : nil;
+            totalBytes += [version[@"sizeBytes"] longLongValue];
+        }
+        NSDictionary *notice = @{ @"version": [NSString stringWithFormat:@"%lu 个插件",
+            (unsigned long)pending.count], @"sizeBytes": @(totalBytes) };
+        [self beginPluginDownloadNoticeForRelease:notice operationID:operationID
+            token:token authorizationGeneration:authorizationGeneration];
+    }
+    [self downloadPluginCatalogItems:pending index:0 token:token
+      authorizationGeneration:authorizationGeneration operationID:operationID
+        completion:^(NSError *downloadError) {
+        if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
+        if (downloadError || !AMCloudAuthMatches(token, authorizationGeneration)) {
+            [self finishPluginDownloadNoticeInstalled:NO state:nil
+                error:downloadError cancelled:!downloadError operationID:operationID];
+            [self finishPluginSyncAllowingPending:downloadError == nil];
+            return;
+        }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSError *activationError = nil;
+            BOOL activated = AMCloudPluginsActivateCatalog(
+                plugins, revision, authorizationKey, authorizationGeneration,
+                ^BOOL(dispatch_block_t commit) {
+                    return AMCloudCommitIfAuthMatches(token, authorizationGeneration, commit);
+                }, &activationError);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
+                NSDictionary *newState = activated ? AMCloudPluginsCurrentState() : nil;
+                AMCloudDiagnostic(activated ? @"cloud.plugins.catalog_activated" :
+                    @"cloud.plugins.catalog_activation_failed", @{
+                    @"plugin_count": @(plugins.count),
+                    @"error": activationError.localizedDescription ?: @""
+                });
+                [self finishPluginDownloadNoticeInstalled:activated state:newState
+                    error:activationError cancelled:NO operationID:operationID];
+                [self finishPluginSyncAllowingPending:activated];
+            });
+        });
+    }];
+}
+
+- (void)downloadPluginCatalogItems:(NSArray<NSDictionary *> *)plugins
+                             index:(NSUInteger)index
+                             token:(NSString *)token
+           authorizationGeneration:(uint64_t)authorizationGeneration
+                      operationID:(NSString *)operationID
+                        completion:(void (^)(NSError *error))completion {
+    if (index >= plugins.count) {
+        if (completion) completion(nil);
+        return;
+    }
+    NSDictionary *plugin = plugins[index];
+    [self.client downloadPluginItem:plugin completion:^(NSDictionary *download, NSError *error) {
+        NSURL *archiveURL = [download[@"url"] isKindOfClass:NSURL.class] ? download[@"url"] : nil;
+        NSURL *cleanupURL = [download[@"cleanup"] isKindOfClass:NSURL.class]
+            ? download[@"cleanup"] : archiveURL;
+        if (![self.pluginSyncOperationID isEqualToString:operationID] ||
+            !AMCloudAuthMatches(token, authorizationGeneration)) {
+            if (cleanupURL) [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:nil];
+            if (completion) completion(AMCloudError(NSURLErrorCancelled, @"单插件同步已取消"));
+            return;
+        }
+        if (error || !archiveURL) {
+            if (cleanupURL) [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:nil];
+            if (completion) completion(error ?: AMCloudError(24, @"单插件下载失败"));
+            return;
+        }
+        NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
+            ? plugin[@"version"] : nil;
+        NSString *pluginID = [plugin[@"id"] isKindOfClass:NSString.class] ? plugin[@"id"] : nil;
+        NSString *versionID = [version[@"id"] isKindOfClass:NSString.class] ? version[@"id"] : nil;
+        NSString *sha = [version[@"sha256"] isKindOfClass:NSString.class]
+            ? [version[@"sha256"] lowercaseString] : nil;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSError *installError = nil;
+            BOOL installed = AMCloudPluginsInstallItemArchive(
+                archiveURL, pluginID, versionID, sha, &installError);
+            [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!installed) {
+                    if (completion) completion(installError ?: AMCloudError(25, @"单插件安装失败"));
+                    return;
+                }
+                [self downloadPluginCatalogItems:plugins index:index + 1 token:token
+                  authorizationGeneration:authorizationGeneration operationID:operationID
+                    completion:completion];
+            });
+        });
     }];
 }
 

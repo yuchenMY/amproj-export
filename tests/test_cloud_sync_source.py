@@ -103,6 +103,28 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("permission_disabled", CLOUD)
         self.assertNotIn("plugin picker", CLOUD.lower())
 
+    def test_cloud_plugins_support_per_item_incremental_delivery(self):
+        for symbol in (
+            "AMCloudPluginsInstallItemArchive",
+            "AMCloudPluginsActivateCatalog",
+        ):
+            self.assertIn(symbol, PLUGIN_HEADER)
+            self.assertIn(symbol, PLUGINS)
+        self.assertIn("downloadPluginItem:", CLOUD)
+        self.assertIn("syncPluginCatalog:", CLOUD)
+        self.assertIn('manifest[@"protocolVersion"]', CLOUD)
+        self.assertIn('manifest[@"catalogRevision"]', CLOUD)
+        self.assertIn('manifest[@"plugins"]', CLOUD)
+        self.assertIn('@"/ios/plugins/items/%@/versions/%@/download"', CLOUD)
+        self.assertIn('@"protocol_version": @2', PLUGINS)
+        self.assertIn('@"catalog_revision"', PLUGINS)
+        self.assertIn('@"plugins": statePlugins', PLUGINS)
+        self.assertIn("AMCloudPluginsCopyCatalogDirectory", PLUGINS)
+        self.assertIn("AMCloudPluginsBundledEffectsURL", PLUGINS)
+        self.assertIn("replaceExisting", PLUGINS)
+        self.assertIn("Plugin dependency conflict", PLUGINS)
+        self.assertIn("installed.count == plugins.count", CLOUD)
+
     def test_plugin_download_has_visible_start_and_result_alerts(self):
         self.assertIn("beginPluginDownloadNoticeForRelease", CLOUD)
         self.assertIn("finishPluginDownloadNoticeInstalled", CLOUD)
