@@ -383,6 +383,18 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("respondsToSelector:@selector(reloadCloudData)", refresh)
         self.assertIn("(AMCloudAccountViewController *)account", refresh)
 
+    def test_account_avatar_is_synced_to_home_and_web_account(self):
+        self.assertIn('profile[@"avatarUrl"]', CLOUD)
+        self.assertIn("loadAvatarURL", CLOUD)
+        self.assertIn("circularAvatarImage", CLOUD)
+        self.assertIn("UIImageRenderingModeAlwaysOriginal", CLOUD)
+        self.assertIn("self.accountAvatarImage", CLOUD)
+        self.assertIn("updateAccountEntryImage", CLOUD)
+        self.assertIn("AMCloudAvatarCacheFilename", CLOUD)
+        self.assertIn('[body[@"type"] isEqualToString:@"profile"]', CLOUD)
+        self.assertIn("[self.manager applyAccountProfile:profile]", CLOUD)
+        self.assertIn("[self clearAccountAvatar]", CLOUD)
+
     def test_account_route_emits_immediately_flushable_diagnostic_stages(self):
         self.assertIn("emitCriticalEvent", DEBUG_HEADER)
         self.assertIn("- (void)emitCriticalEvent", DEBUG_SOURCE)

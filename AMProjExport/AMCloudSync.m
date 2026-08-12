@@ -14,6 +14,7 @@ static NSString *const AMCloudDeviceKeychainAccount = @"ios-device-id";
 static NSString *const AMCloudErrorDomain = @"com.ayakameow.amproj.cloud";
 static NSString *const AMCloudAccountEntryIdentifier = @"AMCloudAccountEntry";
 static NSString *const AMCloudTokenChangedNotification = @"AMCloudTokenChangedNotification";
+static NSString *const AMCloudAvatarCacheFilename = @"account-avatar.png";
 
 typedef void (^AMCloudResult)(id _Nullable data, NSError * _Nullable error);
 
@@ -472,6 +473,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
              nickname:(NSString *)nickname registerAccount:(BOOL)registerAccount
            completion:(AMCloudResult)completion;
 - (void)loadMe:(AMCloudResult)completion;
+- (void)loadAvatarURL:(NSURL *)URL completion:(void (^)(NSData *data, NSError *error))completion;
 - (void)logout:(AMCloudResult)completion;
 - (void)activateIOSSession:(AMCloudResult)completion;
 - (void)authorizeFeature:(NSString *)feature completion:(AMCloudResult)completion;
@@ -604,6 +606,32 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 
 - (void)loadMe:(AMCloudResult)completion {
     [self performMethod:@"GET" path:@"/user/me" body:nil authenticated:YES completion:completion];
+}
+
+- (void)loadAvatarURL:(NSURL *)URL completion:(void (^)(NSData *data, NSError *error))completion {
+    if (!URL || ![[URL.scheme lowercaseString] isEqualToString:@"https"]) {
+        AMCloudCompleteOnMain(^(id data, NSError *error) {
+            if (completion) completion(data, error);
+        }, nil, AMCloudError(4, @"头像地址无效"));
+        return;
+    }
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
+    request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    request.timeoutInterval = 20;
+    [self.session dataTaskWithRequest:request completionHandler:^(NSData *data,
+        NSURLResponse *rawResponse, NSError *error) {
+        NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
+            ? (NSHTTPURLResponse *)rawResponse : nil;
+        if (!error && (response.statusCode < 200 || response.statusCode >= 300)) {
+            error = AMCloudError(response.statusCode, @"头像下载失败");
+        }
+        if (!error && (!data.length || data.length > 5 * 1024 * 1024)) {
+            error = AMCloudError(4, @"头像文件无效或过大");
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(error ? nil : data, error);
+        });
+    }] resume];
 }
 
 - (void)logout:(AMCloudResult)completion {
@@ -919,11 +947,17 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic, copy) NSString *pluginDownloadNoticeMessage;
 @property(nonatomic) BOOL pluginDownloadNoticeBusy;
 @property(nonatomic) BOOL pluginDownloadNoticeSuppressed;
+@property(nonatomic, strong) UIImage *accountAvatarImage;
+@property(nonatomic, copy) NSString *accountAvatarURL;
+@property(nonatomic, copy) NSString *accountAvatarRequestID;
+@property(nonatomic) BOOL accountAvatarRefreshInFlight;
 + (instancetype)shared;
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
+- (void)refreshAccountAvatar;
+- (void)applyAccountProfile:(NSDictionary *)profile;
 - (void)showAuthenticationFrom:(UIViewController *)presenter
                      completion:(dispatch_block_t)completion;
 - (void)beginUploadFile:(NSURL *)fileURL title:(NSString *)title
@@ -972,6 +1006,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)showPluginDownloadNoticeIfPossible;
 - (void)hidePluginDownloadNotice;
 - (void)cancelPluginDownloadNotice;
+- (void)updateAccountEntryImage;
+- (void)clearAccountAvatar;
+- (void)loadCachedAccountAvatar;
 @end
 
 @interface AMCloudAccountWebViewController : UIViewController
@@ -1280,6 +1317,12 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         return;
     }
     NSDictionary *body = message.body;
+    if ([body[@"type"] isEqualToString:@"profile"]) {
+        NSDictionary *profile = [body[@"user"] isKindOfClass:NSDictionary.class]
+            ? body[@"user"] : nil;
+        if (profile) [self.manager applyAccountProfile:profile];
+        return;
+    }
     if (![body[@"type"] isEqualToString:@"token"]) return;
     NSString *token = [body[@"token"] isKindOfClass:NSString.class] ? body[@"token"] : @"";
     BOOL stored = token.length ? AMCloudWriteToken(token) : YES;
@@ -1409,6 +1452,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             target:self selector:@selector(pluginSyncTimerFired:)
             userInfo:nil repeats:YES];
         self.pluginSyncTimer.tolerance = 10.0;
+		if (startupToken.length) [self loadCachedAccountAvatar];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
             [self syncPluginsNow:@"install"];
@@ -1430,6 +1474,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     AMCloudAttachVisibleProjectsControllers();
     [self showPluginDownloadNoticeIfPossible];
     [self syncPluginsNow:@"did_become_active"];
+	[self refreshAccountAvatar];
 }
 
 - (void)pluginTokenChanged:(NSNotification *)notification {
@@ -1438,8 +1483,122 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.pluginSyncInFlight = NO;
     self.pluginSyncPending = NO;
     [self cancelPluginDownloadNotice];
-    if (!AMCloudReadToken().length) return;
+	if (!AMCloudReadToken().length) {
+		[self clearAccountAvatar];
+		return;
+	}
+	[self clearAccountAvatar];
+	[self refreshAccountAvatar];
     [self syncPluginsNow:@"token_changed"];
+}
+
+- (NSURL *)accountAvatarCacheURL {
+    NSURL *directory = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory
+                                                             inDomains:NSUserDomainMask].firstObject;
+    return [directory URLByAppendingPathComponent:AMCloudAvatarCacheFilename isDirectory:NO];
+}
+
+- (void)loadCachedAccountAvatar {
+    NSData *data = [NSData dataWithContentsOfURL:[self accountAvatarCacheURL]];
+    UIImage *image = data.length ? [UIImage imageWithData:data scale:UIScreen.mainScreen.scale] : nil;
+    if (image) {
+        self.accountAvatarImage = image;
+        [self updateAccountEntryImage];
+    }
+}
+
+- (UIImage *)circularAvatarImage:(UIImage *)source {
+    if (!source || source.size.width <= 0 || source.size.height <= 0) return nil;
+    CGFloat side = 30.0;
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(side, side), NO, 0);
+    CGRect bounds = CGRectMake(0, 0, side, side);
+    [[UIBezierPath bezierPathWithOvalInRect:bounds] addClip];
+    CGFloat scale = MAX(side / source.size.width, side / source.size.height);
+    CGSize drawSize = CGSizeMake(source.size.width * scale, source.size.height * scale);
+    CGRect drawRect = CGRectMake((side - drawSize.width) * 0.5,
+                                 (side - drawSize.height) * 0.5,
+                                 drawSize.width, drawSize.height);
+    [source drawInRect:drawRect];
+    UIImage *result = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+	return [result imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+}
+
+- (NSURL *)resolvedAvatarURL:(NSString *)value {
+    NSString *text = [value isKindOfClass:NSString.class] ? [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"";
+    if (!text.length) return nil;
+    NSURL *URL = [NSURL URLWithString:text];
+    if (!URL.scheme.length) URL = [NSURL URLWithString:text relativeToURL:[NSURL URLWithString:@"https://am.meowcr.cn"]].absoluteURL;
+    if (![[URL.scheme lowercaseString] isEqualToString:@"https"]) return nil;
+    NSString *host = URL.host.lowercaseString;
+    if (![host isEqualToString:@"am.meowcr.cn"] &&
+        ![host isEqualToString:@"q.qlogo.cn"] &&
+        ![host hasSuffix:@".qlogo.cn"] &&
+        ![host hasSuffix:@".qq.com"]) return nil;
+    return URL;
+}
+
+- (void)applyAccountProfile:(NSDictionary *)profile {
+    if (![profile isKindOfClass:NSDictionary.class] || !AMCloudReadToken().length) return;
+    NSString *value = [profile[@"avatarUrl"] isKindOfClass:NSString.class]
+        ? profile[@"avatarUrl"] : @"";
+    NSURL *URL = [self resolvedAvatarURL:value];
+    if (!URL) {
+        [self clearAccountAvatar];
+        return;
+    }
+    NSString *URLText = URL.absoluteString;
+    if ([self.accountAvatarURL isEqualToString:URLText] && self.accountAvatarImage) {
+        [self updateAccountEntryImage];
+        return;
+    }
+    NSString *requestID = NSUUID.UUID.UUIDString;
+    self.accountAvatarRequestID = requestID;
+    __weak typeof(self) weakSelf = self;
+    [self.client loadAvatarURL:URL completion:^(NSData *data, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || ![self.accountAvatarRequestID isEqualToString:requestID] || !AMCloudReadToken().length) return;
+        UIImage *decoded = error ? nil : [UIImage imageWithData:data scale:UIScreen.mainScreen.scale];
+        UIImage *image = [self circularAvatarImage:decoded];
+        if (!image) return;
+        self.accountAvatarURL = URLText;
+        self.accountAvatarImage = image;
+        NSData *cacheData = UIImagePNGRepresentation(image);
+        if (cacheData.length) [cacheData writeToURL:[self accountAvatarCacheURL] options:NSDataWritingAtomic error:nil];
+        [self updateAccountEntryImage];
+        UIViewController *account = self.accountController;
+        if ([account respondsToSelector:@selector(reloadCloudData)]) {
+            [(AMCloudAccountViewController *)account reloadCloudData];
+        }
+    }];
+}
+
+- (void)refreshAccountAvatar {
+    if (!AMCloudReadToken().length) {
+        [self clearAccountAvatar];
+        return;
+    }
+	if (self.accountAvatarRefreshInFlight) return;
+	self.accountAvatarRefreshInFlight = YES;
+    __weak typeof(self) weakSelf = self;
+    [self.client loadMe:^(NSDictionary *data, NSError *error) {
+		weakSelf.accountAvatarRefreshInFlight = NO;
+        if (!error && data) [weakSelf applyAccountProfile:data];
+    }];
+}
+
+- (void)clearAccountAvatar {
+    self.accountAvatarRequestID = NSUUID.UUID.UUIDString;
+	self.accountAvatarRefreshInFlight = NO;
+    self.accountAvatarURL = nil;
+    self.accountAvatarImage = nil;
+    [NSFileManager.defaultManager removeItemAtURL:[self accountAvatarCacheURL] error:nil];
+    [self updateAccountEntryImage];
+}
+
+- (void)updateAccountEntryImage {
+    UIViewController *controller = self.lastProjectsController;
+    if (controller) [self attachAccountEntryToController:controller];
 }
 
 - (void)pluginSyncTimerFired:(NSTimer *)timer {
@@ -1801,10 +1960,9 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         self.lastProjectsController = controller;
     }
     NSArray<UIBarButtonItem *> *current = controller.navigationItem.rightBarButtonItems ?: @[];
-    if ([current.firstObject.accessibilityIdentifier
-            isEqualToString:AMCloudAccountEntryIdentifier]) return;
-    UIImage *image = nil;
+    UIImage *image = self.accountAvatarImage;
     if (@available(iOS 13.0, *)) image = [UIImage systemImageNamed:@"person.crop.circle"];
+	if (self.accountAvatarImage) image = self.accountAvatarImage;
     UIBarButtonItem *accountItem = image
         ? [[UIBarButtonItem alloc] initWithImage:image style:UIBarButtonItemStylePlain
                                          target:self action:@selector(showAccountEntry:)]
@@ -1816,6 +1974,9 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     if (updated.count) updated[0] = accountItem;
     else [updated addObject:accountItem];
     controller.navigationItem.rightBarButtonItems = updated;
+	if (AMCloudReadToken().length && !self.accountAvatarImage && !self.accountAvatarRequestID.length) {
+		[self refreshAccountAvatar];
+	}
     AMCloudDiagnostic(@"cloud.account.entry_attached", @{
         @"controller": AMCloudClassName(controller),
         @"previous_item_count": @(current.count)
