@@ -103,6 +103,55 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("permission_disabled", CLOUD)
         self.assertNotIn("plugin picker", CLOUD.lower())
 
+    def test_plugin_download_has_visible_start_and_result_alerts(self):
+        self.assertIn("beginPluginDownloadNoticeForRelease", CLOUD)
+        self.assertIn("finishPluginDownloadNoticeInstalled", CLOUD)
+        self.assertIn('@"正在下载云端插件"', CLOUD)
+        self.assertIn('@"云端插件下载完成"', CLOUD)
+        self.assertIn('@"云端插件下载失败"', CLOUD)
+        sync = CLOUD.rsplit("- (void)syncPluginsNow:", 1)[1].split(
+            "- (void)finishPluginSync", 1
+        )[0]
+        self.assertLess(
+            sync.index("beginPluginDownloadNoticeForRelease"),
+            sync.index("downloadPluginRelease:release"),
+        )
+        self.assertIn("effect_count", sync)
+        self.assertIn("showPluginDownloadNoticeIfPossible", CLOUD)
+        self.assertIn("hidePluginDownloadNotice", CLOUD)
+        self.assertIn("cancelPluginDownloadNotice", CLOUD)
+        self.assertIn("[window addSubview:overlay]", CLOUD)
+        self.assertIn('@"隐藏" : @"好"', CLOUD)
+        self.assertIn("pluginDownloadNoticeGeneration", CLOUD)
+        self.assertIn("pluginDownloadNoticeOperationID", CLOUD)
+        self.assertIn("pluginSyncOperationID = nil", CLOUD)
+        self.assertIn("pluginSyncInFlight = NO", CLOUD)
+        self.assertIn("AMCloudPostTokenChanged();", CLOUD)
+        self.assertLess(
+            CLOUD.index("AMCloudPostTokenChanged();", CLOUD.index("if (changed)")),
+            CLOUD.index("AMCloudCleanupPluginsForAuth(token, generation);"),
+        )
+        cleanup = CLOUD.split("static void AMCloudCleanupPluginsForAuth", 1)[1].split(
+            "static BOOL AMCloudWriteToken", 1
+        )[0]
+        self.assertNotIn("AMCloudPostTokenChanged", cleanup)
+        self.assertIn("if (cleanupURL)", sync)
+        self.assertGreaterEqual(
+            sync.count("[self.pluginSyncOperationID isEqualToString:operationID]"),
+            4,
+        )
+        self.assertIn("UILayoutPriorityDefaultHigh", CLOUD)
+        self.assertIn("constraintLessThanOrEqualToAnchor:overlay.widthAnchor", CLOUD)
+        self.assertIn("finishPluginSyncAllowingPending:NO", sync)
+        timer = CLOUD.split("- (void)pluginSyncTimerFired:", 1)[1].split(
+            "- (void)syncPluginsNow:", 1
+        )[0]
+        self.assertIn('@"foreground_timer"', timer)
+        in_flight = sync.split("if (self.pluginSyncInFlight)", 1)[1].split(
+            "self.pluginSyncInFlight = YES", 1
+        )[0]
+        self.assertIn('![reason isEqualToString:@"foreground_timer"]', in_flight)
+
     def test_stale_authenticated_responses_cannot_delete_a_new_token(self):
         self.assertIn("AMCloudInvalidateTokenForRequest", CLOUD)
         self.assertIn('valueForHTTPHeaderField:@"Authorization"', CLOUD)
@@ -113,7 +162,8 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMCloudAuthPerformSync", CLOUD)
         self.assertIn("AMCloudDeleteTokenMatching(token, YES)", CLOUD)
         self.assertIn("AMCloudPluginsSetAuthorizationGeneration", CLOUD)
-        self.assertIn("AMCloudCleanupPluginsForAuth(nil, generation, hadToken)", CLOUD)
+        self.assertIn("if (hadToken) AMCloudPostTokenChanged();", CLOUD)
+        self.assertIn("AMCloudCleanupPluginsForAuth(nil, generation);", CLOUD)
         self.assertNotIn(
             "if (response.statusCode == 401) AMCloudDeleteToken();", CLOUD
         )
