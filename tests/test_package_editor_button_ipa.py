@@ -2,6 +2,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import inject_dylib
 import package_editor_button_ipa as packager
@@ -10,26 +11,26 @@ import package_editor_button_ipa as packager
 class EditorHomePackageTests(unittest.TestCase):
     def test_home_ui_verifier_requires_expected_install_name_and_url(self):
         binary = b"prefixhttps://amhome.meowcr.cn/homesuffix"
-        original = inject_dylib.verify_dylib_architecture
-        try:
-            inject_dylib.verify_dylib_architecture = lambda _: {
+        with mock.patch.object(
+            inject_dylib,
+            "verify_dylib_architecture",
+            return_value={
                 "id_dylibs": ["@rpath/AMHomeUI.dylib"]
-            }
+            },
+        ) as verify:
             packager.verify_home_ui_binary("AMHomeUI.dylib", binary)
 
-            inject_dylib.verify_dylib_architecture = lambda _: {
+            verify.return_value = {
                 "id_dylibs": ["@rpath/Wrong.dylib"]
             }
             with self.assertRaisesRegex(RuntimeError, "install name"):
                 packager.verify_home_ui_binary("AMHomeUI.dylib", binary)
 
-            inject_dylib.verify_dylib_architecture = lambda _: {
+            verify.return_value = {
                 "id_dylibs": ["@rpath/AMHomeUI.dylib"]
             }
             with self.assertRaisesRegex(RuntimeError, "AutFeng home URL"):
                 packager.verify_home_ui_binary("AMHomeUI.dylib", b"wrong")
-        finally:
-            inject_dylib.verify_dylib_architecture = original
 
     def test_patch_main_adds_one_home_ui_load_and_preserves_payload(self):
         command_end = 32 + 152

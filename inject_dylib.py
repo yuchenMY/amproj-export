@@ -31,6 +31,7 @@ CPU_TYPE_ARM64 = 0x0100000C
 MH_EXECUTE = 0x2
 MH_DYLIB = 0x6
 LC_LOAD_DYLIB = 0x0C
+LC_ID_DYLIB = 0x0D
 LC_SEGMENT_64 = 0x19
 LC_UUID = 0x1B
 SHARE_EXTENSION_POINT = "com.apple.share-services"
@@ -83,6 +84,7 @@ def parse_macho_data(data, label="<memory>"):
     offset = 32
     first_section_offset = len(data)
     load_dylibs = []
+    id_dylibs = []
     macho_uuid = None
     for index in range(ncmds):
         if offset + 8 > commands_end:
@@ -108,26 +110,35 @@ def parse_macho_data(data, label="<memory>"):
                     first_section_offset = min(first_section_offset, file_offset)
                 section_offset += 80
 
-        if cmd == LC_LOAD_DYLIB:
+        if cmd in (LC_LOAD_DYLIB, LC_ID_DYLIB):
+            command_name = (
+                "LC_LOAD_DYLIB" if cmd == LC_LOAD_DYLIB else "LC_ID_DYLIB"
+            )
             if cmdsize < 24:
-                raise ValueError(f"Invalid LC_LOAD_DYLIB at 0x{offset:x}: {label}")
+                raise ValueError(
+                    f"Invalid {command_name} at 0x{offset:x}: {label}"
+                )
             name_offset = struct.unpack_from("<I", data, offset + 8)[0]
             if name_offset < 24 or name_offset >= cmdsize:
                 raise ValueError(
-                    f"Invalid LC_LOAD_DYLIB name offset at 0x{offset:x}: {label}"
+                    f"Invalid {command_name} name offset at 0x{offset:x}: {label}"
                 )
             name_start = offset + name_offset
             name_end = data.find(b"\x00", name_start, offset + cmdsize)
             if name_end < 0:
                 raise ValueError(
-                    f"Unterminated LC_LOAD_DYLIB name at 0x{offset:x}: {label}"
+                    f"Unterminated {command_name} name at 0x{offset:x}: {label}"
                 )
             try:
-                load_dylibs.append(data[name_start:name_end].decode("utf-8"))
+                dylib_name = data[name_start:name_end].decode("utf-8")
             except UnicodeDecodeError as error:
                 raise ValueError(
-                    f"Invalid LC_LOAD_DYLIB UTF-8 at 0x{offset:x}: {label}"
+                    f"Invalid {command_name} UTF-8 at 0x{offset:x}: {label}"
                 ) from error
+            if cmd == LC_LOAD_DYLIB:
+                load_dylibs.append(dylib_name)
+            else:
+                id_dylibs.append(dylib_name)
 
         if cmd == LC_UUID:
             if cmdsize != 24:
@@ -155,6 +166,7 @@ def parse_macho_data(data, label="<memory>"):
         "load_commands_end": commands_end,
         "first_section_offset": first_section_offset,
         "load_dylibs": load_dylibs,
+        "id_dylibs": id_dylibs,
         "uuid": macho_uuid,
     }
 

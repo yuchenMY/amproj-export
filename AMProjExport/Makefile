@@ -33,6 +33,7 @@ AMMeowLoader.dylib: AMMeowLoader.c
 AMHomeUI.dylib: AMHomeUI.m AMHomeUI.h
 	$(CC) $(CFLAGS) -Wall -Wextra -Werror -o $@ AMHomeUI.m \
 		-framework Foundation -framework UIKit -framework QuartzCore \
+		-framework CoreGraphics \
 		-framework WebKit -install_name @rpath/AMHomeUI.dylib
 	@ls -la $@
 

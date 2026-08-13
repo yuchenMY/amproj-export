@@ -16,6 +16,7 @@ def make_macho(
     filetype=2,
     cputype=inject_dylib.CPU_TYPE_ARM64,
     uuid=None,
+    install_name=None,
 ):
     segment_size = 72 + 80
     uuid_command = b""
@@ -24,14 +25,27 @@ def make_macho(
         if len(uuid_bytes) != 16:
             raise ValueError("test Mach-O UUID must contain 16 bytes")
         uuid_command = struct.pack("<II", inject_dylib.LC_UUID, 24) + uuid_bytes
+    id_command = b""
+    if install_name is not None:
+        name = install_name.encode("utf-8") + b"\0"
+        command_size = (24 + len(name) + 7) & ~7
+        id_command = struct.pack(
+            "<IIIIII",
+            inject_dylib.LC_ID_DYLIB,
+            command_size,
+            24,
+            2,
+            0x10000,
+            0x10000,
+        ) + name.ljust(command_size - 24, b"\0")
     header = struct.pack(
         "<IIIIIIII",
         0xFEEDFACF,
         cputype,
         0,
         filetype,
-        1 + bool(uuid_command),
-        segment_size + len(uuid_command),
+        1 + bool(uuid_command) + bool(id_command),
+        segment_size + len(uuid_command) + len(id_command),
         0,
         0,
     )
@@ -64,7 +78,7 @@ def make_macho(
         0,
         0,
     )
-    data = bytearray(header + segment + section + uuid_command)
+    data = bytearray(header + segment + section + uuid_command + id_command)
     data.extend(b"\0" * (section_offset - len(data)))
     data.extend(b"PAYLOAD-MUST-NOT-MOVE")
     path.write_bytes(data)
@@ -137,6 +151,20 @@ def make_fake_ipa(
 
 
 class MachOTests(unittest.TestCase):
+    def test_parse_exposes_dylib_install_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            binary = Path(temp_dir) / "HomeUI.dylib"
+            expected = "@rpath/AMHomeUI.dylib"
+            make_macho(
+                binary,
+                filetype=inject_dylib.MH_DYLIB,
+                install_name=expected,
+            )
+
+            self.assertEqual(
+                inject_dylib.parse_macho(binary)["id_dylibs"], [expected]
+            )
+
     def test_parse_exposes_normalized_uuid(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             binary = Path(temp_dir) / "App"

@@ -19,6 +19,7 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertNotIn("AMWebHome.m", cloud_rule)
         self.assertIn("AMHomeUI.m", home_rule)
         self.assertIn("-framework WebKit", home_rule)
+        self.assertIn("-framework CoreGraphics", home_rule)
         self.assertIn("-install_name @rpath/AMHomeUI.dylib", home_rule)
 
     def test_home_ui_self_installs_without_cloud_linkage(self):
