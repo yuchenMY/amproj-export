@@ -56,6 +56,20 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertNotIn("class_getInstanceMethod(UIButton.class", EDITOR)
         self.assertIn("AMEditorCustomizationInstall();", CLOUD)
 
+    def test_other_effect_category_uses_its_dedicated_background(self):
+        self.assertIn('@"AlightMotion.EffectBrowser"', EDITOR)
+        self.assertIn('objc_getClass("_TtC12AlightMotion13EffectBrowser")', EDITOR)
+        self.assertIn('@"AlightMotion.CategoryCell"', EDITOR)
+        self.assertIn('objc_getClass("_TtC12AlightMotion12CategoryCell")', EDITOR)
+        self.assertIn('@selector(collectionView:cellForItemAtIndexPath:)', EDITOR)
+        self.assertIn('@"fxcat_other"', EDITOR)
+        self.assertIn('@"ic_category_thumbnail_other"', EDITOR)
+        self.assertIn('@"BuiltinCategory/thumb"', EDITOR)
+        self.assertIn("cell.backgroundView = imageView", EDITOR)
+        self.assertIn("UIViewContentModeScaleAspectFill", EDITOR)
+        self.assertNotIn("indexPath.item == 11", EDITOR)
+        self.assertNotIn("cell.contentView.subviews", EDITOR)
+
     def test_token_is_stored_only_in_keychain(self):
         self.assertIn("SecItemCopyMatching", CLOUD)
         self.assertIn("SecItemUpdate", CLOUD)
