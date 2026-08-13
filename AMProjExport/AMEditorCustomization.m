@@ -57,12 +57,30 @@ static UIControl *AMEditorFindMirroredQuickActionsControl(
     CGRect addFrame = [addLibraryView.superview convertRect:addLibraryView.frame
                                                     toView:rootView];
     if (CGRectIsEmpty(addFrame) || CGRectIsNull(addFrame)) return nil;
+    CGRect rootBounds = rootView.bounds;
     CGFloat rootWidth = CGRectGetWidth(rootView.bounds);
-    if (rootWidth <= 0 || CGRectGetMidX(addFrame) <= rootWidth * 0.5) return nil;
+    CGFloat rootHeight = CGRectGetHeight(rootBounds);
+    CGFloat addWidth = CGRectGetWidth(addFrame);
+    CGFloat addHeight = CGRectGetHeight(addFrame);
+    CGFloat rootMidX = CGRectGetMidX(rootBounds);
+    CGFloat bottomEdgeY = CGRectGetMaxY(rootBounds) -
+        MAX(0, rootView.safeAreaInsets.bottom);
+    CGFloat maximumBottomDistance =
+        MAX(44, MIN(72, addHeight * 1.25));
+    if (rootWidth <= 0 || rootHeight <= 0 || addWidth <= 0 || addHeight <= 0 ||
+        CGRectGetMidX(addFrame) <= rootMidX + MAX(24, addWidth * 0.5) ||
+        fabs(bottomEdgeY - CGRectGetMaxY(addFrame)) > maximumBottomDistance) {
+        return nil;
+    }
 
-    CGPoint expectedCenter = CGPointMake(rootWidth - CGRectGetMidX(addFrame),
-                                         CGRectGetMidY(addFrame));
-    CGFloat verticalTolerance = MAX(44, CGRectGetHeight(addFrame) * 0.75);
+    CGPoint expectedCenter = CGPointMake(
+        CGRectGetMinX(rootBounds) + CGRectGetMaxX(rootBounds) -
+            CGRectGetMidX(addFrame),
+        CGRectGetMidY(addFrame));
+    CGFloat horizontalTolerance = MAX(8, MIN(16, addWidth * 0.22));
+    CGFloat verticalTolerance = MAX(6, MIN(14, addHeight * 0.18));
+    CGFloat widthTolerance = MAX(5, addWidth * 0.12);
+    CGFloat heightTolerance = MAX(5, addHeight * 0.12);
     CGFloat bestScore = CGFLOAT_MAX;
     UIControl *bestControl = nil;
     NSMutableArray<UIControl *> *controls = [NSMutableArray array];
@@ -73,16 +91,20 @@ static UIControl *AMEditorFindMirroredQuickActionsControl(
         CGRect frame = [control.superview convertRect:control.frame toView:rootView];
         CGFloat width = CGRectGetWidth(frame);
         CGFloat height = CGRectGetHeight(frame);
-        if (width < 36 || height < 36 || width > 120 || height > 120 ||
-            CGRectGetMidX(frame) >= rootWidth * 0.4 ||
-            fabs(CGRectGetMidY(frame) - expectedCenter.y) > verticalTolerance) {
-            continue;
-        }
         CGFloat dx = CGRectGetMidX(frame) - expectedCenter.x;
         CGFloat dy = CGRectGetMidY(frame) - expectedCenter.y;
-        CGFloat sizeDelta = fabs(width - CGRectGetWidth(addFrame)) +
-                            fabs(height - CGRectGetHeight(addFrame));
-        CGFloat score = hypot(dx, dy) + sizeDelta * 0.5;
+        CGFloat widthDelta = fabs(width - addWidth);
+        CGFloat heightDelta = fabs(height - addHeight);
+        if (CGRectIsEmpty(frame) || CGRectIsNull(frame) ||
+            CGRectGetMidX(frame) >= rootMidX - MAX(24, addWidth * 0.5) ||
+            fabs(bottomEdgeY - CGRectGetMaxY(frame)) >
+                maximumBottomDistance ||
+            fabs(dx) > horizontalTolerance ||
+            fabs(dy) > verticalTolerance || widthDelta > widthTolerance ||
+            heightDelta > heightTolerance) {
+            continue;
+        }
+        CGFloat score = hypot(dx, dy) + (widthDelta + heightDelta) * 0.5;
         if (score < bestScore) {
             bestScore = score;
             bestControl = control;
@@ -194,25 +216,61 @@ static NSString *AMEditorNormalizedTitle(NSString *title) {
     return [[title stringByTrimmingCharactersInSet:whitespace] lowercaseString];
 }
 
-static BOOL AMEditorIsOtherCategoryCell(UICollectionViewCell *cell,
-                                        UICollectionView *collectionView,
-                                        NSIndexPath *indexPath) {
+static UILabel *AMEditorCategoryCellLabel(UICollectionViewCell *cell) {
+    UIView *view = AMEditorViewForKey(cell, @"label");
+    return [view isKindOfClass:UILabel.class] ? (UILabel *)view : nil;
+}
+
+static BOOL AMEditorTitleMatchesKnownTitles(
+    NSString *title, NSSet<NSString *> *knownTitles) {
+    NSString *normalized = AMEditorNormalizedTitle(title);
+    return normalized.length && [knownTitles containsObject:normalized];
+}
+
+static BOOL AMEditorViewContainsOtherAccessibilityTitle(
+    UIView *view, NSSet<NSString *> *knownTitles) {
+    if (!view) return NO;
+    if (AMEditorTitleMatchesKnownTitles(view.accessibilityLabel, knownTitles)) {
+        return YES;
+    }
+    for (UIView *subview in view.subviews) {
+        if (AMEditorViewContainsOtherAccessibilityTitle(subview, knownTitles)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL AMEditorIsOtherCategoryCell(UICollectionViewCell *cell) {
     Class categoryCellClass = AMEditorCategoryCellClass();
     if (!categoryCellClass || ![cell isKindOfClass:categoryCellClass]) return NO;
     NSString *otherTitle = [NSBundle.mainBundle
         localizedStringForKey:@"fxcat_other" value:@"Other" table:nil];
-    NSSet<NSString *> *knownTitles = [NSSet setWithObjects:
-        AMEditorNormalizedTitle(otherTitle), @"other", @"\u5176\u4ed6", nil];
+    NSMutableSet<NSString *> *knownTitles =
+        [NSMutableSet setWithObjects:@"other", @"\u5176\u4ed6", nil];
+    NSString *localizedTitle = AMEditorNormalizedTitle(otherTitle);
+    if (localizedTitle.length) [knownTitles addObject:localizedTitle];
+
+    UILabel *outletLabel = AMEditorCategoryCellLabel(cell);
+    if (AMEditorTitleMatchesKnownTitles(outletLabel.text, knownTitles) ||
+        AMEditorTitleMatchesKnownTitles(outletLabel.accessibilityLabel,
+                                        knownTitles)) {
+        return YES;
+    }
+
     NSMutableArray<UILabel *> *labels = [NSMutableArray array];
     AMEditorCollectLabels(cell.contentView, labels);
     for (UILabel *label in labels) {
-        if ([knownTitles containsObject:AMEditorNormalizedTitle(label.text)]) {
+        if (label != outletLabel &&
+            (AMEditorTitleMatchesKnownTitles(label.text, knownTitles) ||
+             AMEditorTitleMatchesKnownTitles(label.accessibilityLabel,
+                                             knownTitles))) {
             return YES;
         }
     }
-
-    NSInteger itemCount = [collectionView numberOfItemsInSection:indexPath.section];
-    return itemCount >= 12 && indexPath.item == itemCount - 1;
+    return AMEditorViewContainsOtherAccessibilityTitle(cell.contentView,
+                                                        knownTitles) ||
+           AMEditorTitleMatchesKnownTitles(cell.accessibilityLabel, knownTitles);
 }
 
 static void AMEditorCollectImageViews(UIView *view,
@@ -257,8 +315,10 @@ static void AMEditorRestoreCategoryCell(UICollectionViewCell *cell) {
 static void AMEditorCustomizeCategoryCell(UICollectionViewCell *cell,
                                           UICollectionView *collectionView,
                                           NSIndexPath *indexPath) {
+    (void)collectionView;
+    (void)indexPath;
     AMEditorRestoreCategoryCell(cell);
-    if (!AMEditorIsOtherCategoryCell(cell, collectionView, indexPath)) {
+    if (!AMEditorIsOtherCategoryCell(cell)) {
         return;
     }
 

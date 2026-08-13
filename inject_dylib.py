@@ -32,8 +32,19 @@ MH_EXECUTE = 0x2
 MH_DYLIB = 0x6
 LC_LOAD_DYLIB = 0x0C
 LC_ID_DYLIB = 0x0D
+LC_LOAD_WEAK_DYLIB = 0x80000018
 LC_SEGMENT_64 = 0x19
 LC_UUID = 0x1B
+LC_REEXPORT_DYLIB = 0x8000001F
+LC_LAZY_LOAD_DYLIB = 0x20
+LC_LOAD_UPWARD_DYLIB = 0x80000023
+DYLIB_LOAD_COMMAND_NAMES = {
+    LC_LOAD_DYLIB: "LC_LOAD_DYLIB",
+    LC_LOAD_WEAK_DYLIB: "LC_LOAD_WEAK_DYLIB",
+    LC_REEXPORT_DYLIB: "LC_REEXPORT_DYLIB",
+    LC_LAZY_LOAD_DYLIB: "LC_LAZY_LOAD_DYLIB",
+    LC_LOAD_UPWARD_DYLIB: "LC_LOAD_UPWARD_DYLIB",
+}
 SHARE_EXTENSION_POINT = "com.apple.share-services"
 SHARE_EXTENSION_BUNDLE_SUFFIX = ".amprojshare"
 SHARE_EXTENSION_BUNDLE_NAME = "AMProjShareExtension.appex"
@@ -84,6 +95,8 @@ def parse_macho_data(data, label="<memory>"):
     offset = 32
     first_section_offset = len(data)
     load_dylibs = []
+    all_load_dylibs = []
+    dylib_load_commands = []
     id_dylibs = []
     macho_uuid = None
     for index in range(ncmds):
@@ -110,9 +123,11 @@ def parse_macho_data(data, label="<memory>"):
                     first_section_offset = min(first_section_offset, file_offset)
                 section_offset += 80
 
-        if cmd in (LC_LOAD_DYLIB, LC_ID_DYLIB):
+        if cmd in DYLIB_LOAD_COMMAND_NAMES or cmd == LC_ID_DYLIB:
             command_name = (
-                "LC_LOAD_DYLIB" if cmd == LC_LOAD_DYLIB else "LC_ID_DYLIB"
+                "LC_ID_DYLIB"
+                if cmd == LC_ID_DYLIB
+                else DYLIB_LOAD_COMMAND_NAMES[cmd]
             )
             if cmdsize < 24:
                 raise ValueError(
@@ -135,10 +150,21 @@ def parse_macho_data(data, label="<memory>"):
                 raise ValueError(
                     f"Invalid {command_name} UTF-8 at 0x{offset:x}: {label}"
                 ) from error
-            if cmd == LC_LOAD_DYLIB:
-                load_dylibs.append(dylib_name)
-            else:
+            if cmd == LC_ID_DYLIB:
                 id_dylibs.append(dylib_name)
+            else:
+                all_load_dylibs.append(dylib_name)
+                dylib_load_commands.append(
+                    {
+                        "cmd": cmd,
+                        "command": command_name,
+                        "name": dylib_name,
+                        "offset": offset,
+                        "cmdsize": cmdsize,
+                    }
+                )
+                if cmd == LC_LOAD_DYLIB:
+                    load_dylibs.append(dylib_name)
 
         if cmd == LC_UUID:
             if cmdsize != 24:
@@ -166,6 +192,8 @@ def parse_macho_data(data, label="<memory>"):
         "load_commands_end": commands_end,
         "first_section_offset": first_section_offset,
         "load_dylibs": load_dylibs,
+        "all_load_dylibs": all_load_dylibs,
+        "dylib_load_commands": dylib_load_commands,
         "id_dylibs": id_dylibs,
         "uuid": macho_uuid,
     }
@@ -199,16 +227,31 @@ def insert_load_dylib(macho_path, dylib_path):
         data = bytearray(file.read())
 
     dylib_name = f"@executable_path/Frameworks/{os.path.basename(dylib_path)}"
-    if dylib_name in info["load_dylibs"]:
+    existing_commands = [
+        command
+        for command in info["dylib_load_commands"]
+        if command["name"] == dylib_name
+    ]
+    if (
+        len(existing_commands) == 1
+        and existing_commands[0]["cmd"] == LC_LOAD_DYLIB
+    ):
         print(f"[!] {dylib_name} already injected, skipping")
         return False
+    if existing_commands:
+        command_names = ", ".join(
+            command["command"] for command in existing_commands
+        )
+        raise RuntimeError(
+            f"Conflicting Mach-O loads for {dylib_name}: {command_names}"
+        )
 
     name_offset = 24
     name_bytes = dylib_name.encode("utf-8") + b"\x00"
     cmd_size = (name_offset + len(name_bytes) + 7) & ~7
     name_bytes += b"\x00" * (cmd_size - name_offset - len(name_bytes))
 
-    dylib_cmd = struct.pack("<II", 0x0C, cmd_size)
+    dylib_cmd = struct.pack("<II", LC_LOAD_DYLIB, cmd_size)
     dylib_cmd += struct.pack("<I", name_offset)
     dylib_cmd += struct.pack("<I", 2)
     dylib_cmd += struct.pack("<I", 0x10000)
@@ -1466,10 +1509,21 @@ def verify_injected_ipa(
                 raise RuntimeError("Embedded dylib is not a thin arm64 MH_DYLIB")
 
             load_name = f"@executable_path/Frameworks/{dylib_path.name}"
-            load_count = executable_info["load_dylibs"].count(load_name)
-            if load_count != 1:
+            matching_loads = [
+                command
+                for command in executable_info["dylib_load_commands"]
+                if command["name"] == load_name
+            ]
+            if not (
+                len(matching_loads) == 1
+                and matching_loads[0]["cmd"] == LC_LOAD_DYLIB
+            ):
+                found = ", ".join(
+                    command["command"] for command in matching_loads
+                ) or "none"
                 raise RuntimeError(
-                    f"Expected exactly one {load_name} load command; found {load_count}"
+                    f"Expected exactly one strong {load_name} load command; "
+                    f"found {found}"
                 )
 
             if settings.enabled:

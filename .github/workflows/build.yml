@@ -12,6 +12,7 @@ on:
       - 'AMProjExport/**'
       - 'debug_backend/**'
       - 'inject_dylib.py'
+      - 'package_editor_button_ipa.py'
       - 'tests/**'
       - '.github/workflows/build.yml'
   workflow_dispatch:

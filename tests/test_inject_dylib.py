@@ -17,6 +17,7 @@ def make_macho(
     cputype=inject_dylib.CPU_TYPE_ARM64,
     uuid=None,
     install_name=None,
+    dylib_loads=(),
 ):
     segment_size = 72 + 80
     uuid_command = b""
@@ -38,14 +39,27 @@ def make_macho(
             0x10000,
             0x10000,
         ) + name.ljust(command_size - 24, b"\0")
+    load_commands = b""
+    for command, dylib_name in dylib_loads:
+        name = dylib_name.encode("utf-8") + b"\0"
+        command_size = (24 + len(name) + 7) & ~7
+        load_commands += struct.pack(
+            "<IIIIII",
+            command,
+            command_size,
+            24,
+            2,
+            0x10000,
+            0x10000,
+        ) + name.ljust(command_size - 24, b"\0")
     header = struct.pack(
         "<IIIIIIII",
         0xFEEDFACF,
         cputype,
         0,
         filetype,
-        1 + bool(uuid_command) + bool(id_command),
-        segment_size + len(uuid_command) + len(id_command),
+        1 + bool(uuid_command) + bool(id_command) + len(dylib_loads),
+        segment_size + len(uuid_command) + len(id_command) + len(load_commands),
         0,
         0,
     )
@@ -78,7 +92,9 @@ def make_macho(
         0,
         0,
     )
-    data = bytearray(header + segment + section + uuid_command + id_command)
+    data = bytearray(
+        header + segment + section + uuid_command + id_command + load_commands
+    )
     data.extend(b"\0" * (section_offset - len(data)))
     data.extend(b"PAYLOAD-MUST-NOT-MOVE")
     path.write_bytes(data)
@@ -151,6 +167,40 @@ def make_fake_ipa(
 
 
 class MachOTests(unittest.TestCase):
+    def test_parse_exposes_all_dylib_load_command_kinds(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            binary = Path(temp_dir) / "App"
+            loads = (
+                (inject_dylib.LC_LOAD_DYLIB, "@rpath/Strong.dylib"),
+                (inject_dylib.LC_LOAD_WEAK_DYLIB, "@rpath/Weak.dylib"),
+                (inject_dylib.LC_REEXPORT_DYLIB, "@rpath/Reexport.dylib"),
+                (inject_dylib.LC_LAZY_LOAD_DYLIB, "@rpath/Lazy.dylib"),
+                (inject_dylib.LC_LOAD_UPWARD_DYLIB, "@rpath/Upward.dylib"),
+            )
+            make_macho(binary, dylib_loads=loads)
+
+            info = inject_dylib.parse_macho(binary)
+
+            self.assertEqual(info["load_dylibs"], ["@rpath/Strong.dylib"])
+            self.assertEqual(
+                info["all_load_dylibs"],
+                [name for _, name in loads],
+            )
+            self.assertEqual(
+                [command["cmd"] for command in info["dylib_load_commands"]],
+                [command for command, _ in loads],
+            )
+            self.assertEqual(
+                [command["command"] for command in info["dylib_load_commands"]],
+                [
+                    "LC_LOAD_DYLIB",
+                    "LC_LOAD_WEAK_DYLIB",
+                    "LC_REEXPORT_DYLIB",
+                    "LC_LAZY_LOAD_DYLIB",
+                    "LC_LOAD_UPWARD_DYLIB",
+                ],
+            )
+
     def test_parse_exposes_dylib_install_name(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             binary = Path(temp_dir) / "HomeUI.dylib"
@@ -207,6 +257,23 @@ class MachOTests(unittest.TestCase):
 
             self.assertFalse(inject_dylib.insert_load_dylib(binary, dylib))
             self.assertEqual(inject_dylib.parse_macho(binary)["ncmds"], 2)
+
+    def test_insert_rejects_an_existing_non_strong_load_for_same_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            binary = Path(temp_dir) / "App"
+            dylib = Path(temp_dir) / "AMHomeUI.dylib"
+            load_name = "@executable_path/Frameworks/AMHomeUI.dylib"
+            make_macho(
+                binary,
+                dylib_loads=((inject_dylib.LC_LOAD_WEAK_DYLIB, load_name),),
+            )
+            dylib.write_bytes(b"dylib")
+            original = binary.read_bytes()
+
+            with self.assertRaisesRegex(RuntimeError, "Conflicting Mach-O loads"):
+                inject_dylib.insert_load_dylib(binary, dylib)
+
+            self.assertEqual(binary.read_bytes(), original)
 
     def test_dylib_architecture_requires_arm64_mh_dylib(self):
         with tempfile.TemporaryDirectory() as temp_dir:

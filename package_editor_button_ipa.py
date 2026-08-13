@@ -65,7 +65,30 @@ def new_zip_info(name):
     return info
 
 
+def dylib_command_size(name):
+    return (24 + len(name.encode("utf-8")) + 1 + 7) & ~7
+
+
+def validate_home_ui_loads(info, context, allow_missing):
+    commands = [
+        command
+        for command in info["dylib_load_commands"]
+        if command["name"] == HOME_UI_LOAD
+    ]
+    if not commands and allow_missing:
+        return False
+    if len(commands) == 1 and commands[0]["cmd"] == inject_dylib.LC_LOAD_DYLIB:
+        return True
+    found = ", ".join(command["command"] for command in commands) or "none"
+    raise RuntimeError(
+        f"{context} must contain exactly one strong AMHomeUI load; found {found}"
+    )
+
+
 def patch_main_with_home_ui(main, home_ui_name="AMHomeUI.dylib"):
+    source_info = inject_dylib.parse_macho_data(main, MAIN_PATH)
+    if validate_home_ui_loads(source_info, "source main", allow_missing=True):
+        raise RuntimeError("source main already strongly loads AMHomeUI")
     with tempfile.TemporaryDirectory(prefix="am-home-ui-main-") as temporary_directory:
         main_path = Path(temporary_directory) / "AlightMotion"
         home_ui_path = Path(temporary_directory) / home_ui_name
@@ -74,8 +97,21 @@ def patch_main_with_home_ui(main, home_ui_name="AMHomeUI.dylib"):
         inject_dylib.insert_load_dylib(str(main_path), str(home_ui_path))
         patched = main_path.read_bytes()
     info = inject_dylib.parse_macho_data(patched, MAIN_PATH)
-    if info["load_dylibs"].count(HOME_UI_LOAD) != 1:
-        raise RuntimeError("main executable must strongly load AMHomeUI exactly once")
+    validate_home_ui_loads(info, "patched main", allow_missing=False)
+    matching_command = next(
+        command
+        for command in info["dylib_load_commands"]
+        if command["name"] == HOME_UI_LOAD
+    )
+    expected_command_size = dylib_command_size(HOME_UI_LOAD)
+    if len(patched) != len(main):
+        raise RuntimeError("Home UI injection changed the main executable length")
+    if info["ncmds"] != source_info["ncmds"] + 1:
+        raise RuntimeError("Home UI injection must add exactly one load command")
+    if matching_command["cmdsize"] != expected_command_size:
+        raise RuntimeError("Home UI load command has an unexpected size")
+    if info["sizeofcmds"] != source_info["sizeofcmds"] + expected_command_size:
+        raise RuntimeError("Home UI injection has an unexpected sizeofcmds delta")
     return patched
 
 
@@ -118,10 +154,10 @@ def package(source_path, output_path, dylib_path, home_ui_path, image_path,
             raise RuntimeError("source IPA has an unexpected Home UI layout")
         source_main = source.read(MAIN_PATH)
         source_main_info = inject_dylib.parse_macho_data(source_main, MAIN_PATH)
-        source_loads = source_main_info["load_dylibs"]
-        if source_loads.count(HOME_UI_LOAD) > 1:
-            raise RuntimeError("source main contains duplicate AMHomeUI loads")
-        main = source_main if HOME_UI_LOAD in source_loads else (
+        source_has_home_ui = validate_home_ui_loads(
+            source_main_info, "source main", allow_missing=True
+        )
+        main = source_main if source_has_home_ui else (
             patch_main_with_home_ui(source_main)
         )
         missing_categories = [
@@ -182,18 +218,28 @@ def package(source_path, output_path, dylib_path, home_ui_path, image_path,
             if output.read(HOME_UI_PATH) != home_ui:
                 raise RuntimeError("output Home UI dylib mismatch")
             output_main = output.read(MAIN_PATH)
-            output_loads = inject_dylib.parse_macho_data(
-                output_main, MAIN_PATH
-            )["load_dylibs"]
-            if output_loads.count(HOME_UI_LOAD) != 1:
-                raise RuntimeError("output main does not load AMHomeUI exactly once")
-            if HOME_UI_LOAD not in source_loads:
-                output_main_info = inject_dylib.parse_macho_data(
-                    output_main, MAIN_PATH
+            output_main_info = inject_dylib.parse_macho_data(output_main, MAIN_PATH)
+            validate_home_ui_loads(
+                output_main_info, "output main", allow_missing=False
+            )
+            if len(output_main) != len(source_main):
+                raise RuntimeError("output main executable length changed")
+            if not source_has_home_ui:
+                matching_command = next(
+                    command
+                    for command in output_main_info["dylib_load_commands"]
+                    if command["name"] == HOME_UI_LOAD
                 )
-                expected_command_growth = (
-                    output_main_info["sizeofcmds"] - source_main_info["sizeofcmds"]
-                )
+                expected_command_growth = dylib_command_size(HOME_UI_LOAD)
+                if matching_command["cmdsize"] != expected_command_growth:
+                    raise RuntimeError("output Home UI load command size is invalid")
+                if output_main_info["ncmds"] != source_main_info["ncmds"] + 1:
+                    raise RuntimeError("output main did not add exactly one load command")
+                if (
+                    output_main_info["sizeofcmds"]
+                    != source_main_info["sizeofcmds"] + expected_command_growth
+                ):
+                    raise RuntimeError("output main has an invalid sizeofcmds delta")
                 changed = {
                     index
                     for index, (before, after) in enumerate(

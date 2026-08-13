@@ -27,6 +27,45 @@ IMPORT_ARCHIVE = (ROOT / "AMProjExport" / "AMProjImportArchive.m").read_text(
 )
 
 
+class MirroredQuickActionsModel:
+    @staticmethod
+    def matches(root_size, add_frame, candidate_frame, safe_bottom=34):
+        root_width, root_height = root_size
+        add_x, add_y, add_width, add_height = add_frame
+        candidate_x, candidate_y, candidate_width, candidate_height = candidate_frame
+        add_mid_x = add_x + add_width / 2
+        add_mid_y = add_y + add_height / 2
+        candidate_mid_x = candidate_x + candidate_width / 2
+        candidate_mid_y = candidate_y + candidate_height / 2
+        root_mid_x = root_width / 2
+        bottom_edge_y = root_height - max(0, safe_bottom)
+        maximum_bottom_distance = max(44, min(72, add_height * 1.25))
+        if (
+            root_width <= 0
+            or root_height <= 0
+            or add_width <= 0
+            or add_height <= 0
+            or add_mid_x <= root_mid_x + max(24, add_width * 0.5)
+            or abs(bottom_edge_y - (add_y + add_height))
+            > maximum_bottom_distance
+        ):
+            return False
+        expected_x = root_width - add_mid_x
+        horizontal_tolerance = max(8, min(16, add_width * 0.22))
+        vertical_tolerance = max(6, min(14, add_height * 0.18))
+        width_tolerance = max(5, add_width * 0.12)
+        height_tolerance = max(5, add_height * 0.12)
+        return (
+            candidate_mid_x < root_mid_x - max(24, add_width * 0.5)
+            and abs(bottom_edge_y - (candidate_y + candidate_height))
+            <= maximum_bottom_distance
+            and abs(candidate_mid_x - expected_x) <= horizontal_tolerance
+            and abs(candidate_mid_y - add_mid_y) <= vertical_tolerance
+            and abs(candidate_width - add_width) <= width_tolerance
+            and abs(candidate_height - add_height) <= height_tolerance
+        )
+
+
 class CloudSyncSourceTests(unittest.TestCase):
     def test_cloud_build_is_isolated_from_release_and_debug_targets(self):
         cloud_rule = MAKEFILE.split("AMProjExportCloud.dylib:", 1)[1].split(
@@ -46,6 +85,13 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('@"quickActionsButton"', EDITOR)
         self.assertIn("AMEditorFindMirroredQuickActionsControl", EDITOR)
         self.assertIn("AMEditorCollectControls", EDITOR)
+        self.assertIn("bottomEdgeY", EDITOR)
+        self.assertIn("rootView.safeAreaInsets.bottom", EDITOR)
+        self.assertIn("maximumBottomDistance", EDITOR)
+        self.assertIn("fabs(dx) > horizontalTolerance", EDITOR)
+        self.assertIn("fabs(dy) > verticalTolerance", EDITOR)
+        self.assertIn("widthDelta > widthTolerance", EDITOR)
+        self.assertIn("heightDelta > heightTolerance", EDITOR)
         self.assertIn("AMEditorHideView(quickActionsView)", EDITOR)
         self.assertIn("view.hidden = YES", EDITOR)
         self.assertIn("view.userInteractionEnabled = NO", EDITOR)
@@ -58,6 +104,29 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertNotIn("class_getInstanceMethod(UIButton.class", EDITOR)
         self.assertIn("AMEditorCustomizationInstall();", CLOUD)
 
+    def test_mirrored_quick_actions_requires_close_position_and_matching_size(self):
+        root = (390, 844)
+        add = (326, 760, 48, 48)
+        self.assertTrue(
+            MirroredQuickActionsModel.matches(root, add, (16, 760, 48, 48))
+        )
+        self.assertFalse(
+            MirroredQuickActionsModel.matches(root, add, (70, 760, 48, 48))
+        )
+        self.assertFalse(
+            MirroredQuickActionsModel.matches(root, add, (16, 760, 84, 48))
+        )
+        self.assertFalse(
+            MirroredQuickActionsModel.matches(root, add, (16, 500, 48, 48))
+        )
+        self.assertFalse(
+            MirroredQuickActionsModel.matches(
+                root,
+                (326, 526, 48, 48),
+                (16, 526, 48, 48),
+            )
+        )
+
     def test_other_effect_category_uses_its_dedicated_background(self):
         self.assertIn('@"AlightMotion.EffectBrowser"', EDITOR)
         self.assertIn('objc_getClass("_TtC12AlightMotion13EffectBrowser")', EDITOR)
@@ -69,11 +138,15 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('@"BuiltinCategory/thumb"', EDITOR)
         self.assertIn("AMEditorCollectLabels", EDITOR)
         self.assertIn("AMEditorCategoryBackgroundImageView", EDITOR)
+        self.assertIn("AMEditorCategoryCellLabel", EDITOR)
+        self.assertIn('AMEditorViewForKey(cell, @"label")', EDITOR)
+        self.assertIn("AMEditorViewContainsOtherAccessibilityTitle", EDITOR)
         self.assertIn("[target addSubview:imageView]", EDITOR)
         self.assertIn("[cell.contentView insertSubview:imageView atIndex:0]", EDITOR)
         self.assertIn("UIViewContentModeScaleAspectFill", EDITOR)
         self.assertNotIn("indexPath.item == 11", EDITOR)
-        self.assertIn("indexPath.item == itemCount - 1", EDITOR)
+        self.assertNotIn("indexPath.item == itemCount - 1", EDITOR)
+        self.assertNotIn("numberOfItemsInSection", EDITOR)
 
     def test_token_is_stored_only_in_keychain(self):
         self.assertIn("SecItemCopyMatching", CLOUD)

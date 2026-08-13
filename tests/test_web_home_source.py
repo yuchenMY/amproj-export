@@ -68,6 +68,19 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("[self updateAvatar];", SOURCE)
         self.assertNotIn("overlayAvatarEnabled", SOURCE)
 
+    def test_web_account_button_survives_spa_dom_rebuilds(self):
+        self.assertIn("window.__amHomeAccountButtonState", SOURCE)
+        self.assertIn("new MutationObserver", SOURCE)
+        self.assertIn("node.querySelector('#refreshButton')", SOURCE)
+        self.assertIn("attributeFilter:['id','class','disabled'", SOURCE)
+        self.assertIn("state.schedule(force)", SOURCE)
+        self.assertIn("state.observer.disconnect()", SOURCE)
+        self.assertIn("finally{state.observe();}", SOURCE)
+        self.assertIn("current.__amHomeAccountButtonReady===true", SOURCE)
+        self.assertIn("button.__amHomeAvatar=state.avatar", SOURCE)
+        self.assertIn("state.avatar=avatar||''", SOURCE)
+        self.assertIn("else{button.style.padding='';", SOURCE)
+
     def test_ci_publishes_home_ui_binary(self):
         self.assertIn('Path("AMProjExport/AMHomeUI.dylib")', WORKFLOW)
         self.assertIn("AMProjExport/AMHomeUI.dylib", WORKFLOW)
