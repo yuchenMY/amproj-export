@@ -134,10 +134,33 @@ completion、持久化变化和临时包消费全部成立时报告中性完成�
 AMProjExport/AMProjExport.dylib
 AMProjExport/AMProjExportCloud.dylib
 AMProjExport/AMProjExportDebug.dylib
+AMProjExport/AMMeowLoader.dylib
+AMProjExport/AMHomeUI.dylib
 ```
 
 下载名为 `AMProjExport-v44-dylibs` 的 artifact。其中的 `build-metadata.json`
 记录插件版本、commit、Actions run ID 以及每个二进制文件的 SHA-256，注入前可用它确认没有混入旧版本产物。
+
+`AMHomeUI.dylib` 是独立主页模块，不再编译进
+`AMProjExportCloud.dylib`。它负责将 `https://amhome.meowcr.cn/home`
+挂载到 Alight Motion 的 `HomeVC`/`FeedVC`，并通过共享头像缓存和通知
+与 Cloud 账户保持同步。最终 IPA 需要同时包含
+`Frameworks/AMProjExportCloud.dylib` 和 `Frameworks/AMHomeUI.dylib`，主程序分别
+保留唯一强 `LC_LOAD_DYLIB`。因为新增了第六个 dylib，包体必须重新签名安装。
+
+在已有全分类图和编辑器按钮的 IPA 上生成待签包：
+
+```powershell
+python .\package_editor_button_ipa.py `
+  <source.ipa> <output.ipa> `
+  .\AMProjExport\AMProjExportCloud.dylib `
+  .\AMProjExport\AMHomeUI.dylib `
+  <add_layer_button.png> <category_image_directory>
+```
+
+打包器会新增或替换 `AMHomeUI.dylib`，只在 Mach-O header 内追加一条
+HomeUI 加载命令，替换指定按钮和 12 张分类图，并校验其他 IPA 成员的
+字节不变。
 
 ## 从自有 6.2.55 (862) 底包生成唯一 Direct Cloud 包
 

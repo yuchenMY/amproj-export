@@ -2,7 +2,6 @@
 #import "AMCloudPlugins.h"
 #import "AMDebugTransport.h"
 #import "AMEditorCustomization.h"
-#import "AMWebHome.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <QuartzCore/QuartzCore.h>
@@ -17,6 +16,8 @@ static NSString *const AMCloudDeviceKeychainAccount = @"ios-device-id";
 static NSString *const AMCloudErrorDomain = @"com.ayakameow.amproj.cloud";
 static NSString *const AMCloudAccountEntryIdentifier = @"AMCloudAccountEntry";
 static NSString *const AMCloudTokenChangedNotification = @"AMCloudTokenChangedNotification";
+static NSString *const AMCloudAvatarChangedNotification = @"AMCloudAvatarChangedNotification";
+static NSString *const AMHomeUIShowAccountNotification = @"AMHomeUIShowAccountNotification";
 static NSString *const AMCloudAvatarCacheFilename = @"account-avatar.png";
 
 typedef void (^AMCloudResult)(id _Nullable data, NSError * _Nullable error);
@@ -1685,7 +1686,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     }
     AMCloudPluginsInstallBundleHooks();
     AMEditorCustomizationInstall();
-    AMWebHomeInstall();
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
     [NSNotificationCenter.defaultCenter
@@ -1696,6 +1696,9 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         [NSNotificationCenter.defaultCenter
             addObserver:self selector:@selector(pluginTokenChanged:)
                    name:AMCloudTokenChangedNotification object:nil];
+        [NSNotificationCenter.defaultCenter
+            addObserver:self selector:@selector(handleHomeAccountNotification:)
+                   name:AMHomeUIShowAccountNotification object:nil];
         self.pluginSyncTimer = [NSTimer scheduledTimerWithTimeInterval:60.0
             target:self selector:@selector(pluginSyncTimerFired:)
             userInfo:nil repeats:YES];
@@ -1752,6 +1755,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     if (image) {
         self.accountAvatarImage = image;
         [self updateAccountEntryImage];
+        [NSNotificationCenter.defaultCenter
+            postNotificationName:AMCloudAvatarChangedNotification object:nil];
     }
 }
 
@@ -1814,6 +1819,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         NSData *cacheData = UIImagePNGRepresentation(image);
         if (cacheData.length) [cacheData writeToURL:[self accountAvatarCacheURL] options:NSDataWritingAtomic error:nil];
         [self updateAccountEntryImage];
+        [NSNotificationCenter.defaultCenter
+            postNotificationName:AMCloudAvatarChangedNotification object:nil];
         UIViewController *account = self.accountController;
         if ([account respondsToSelector:@selector(reloadCloudData)]) {
             [(AMCloudAccountViewController *)account reloadCloudData];
@@ -1842,6 +1849,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.accountAvatarImage = nil;
     [NSFileManager.defaultManager removeItemAtURL:[self accountAvatarCacheURL] error:nil];
     [self updateAccountEntryImage];
+    [NSNotificationCenter.defaultCenter
+        postNotificationName:AMCloudAvatarChangedNotification object:nil];
 }
 
 - (void)updateAccountEntryImage {
@@ -2742,6 +2751,11 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             @"reason": exception.reason ?: @""
         });
     }
+}
+
+- (void)handleHomeAccountNotification:(NSNotification *)notification {
+    (void)notification;
+    [self showAccountFrom:AMCloudTopController(nil)];
 }
 
 - (void)beginUploadFile:(NSURL *)fileURL title:(NSString *)title

@@ -2,6 +2,6 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-void AMWebHomeInstall(void);
+void AMHomeUIInstall(void);
 
 NS_ASSUME_NONNULL_END

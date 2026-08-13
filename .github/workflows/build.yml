@@ -27,7 +27,7 @@ jobs:
           python3 -m unittest discover -s tests -v
           python3 -m unittest debug_backend.test_server -v
 
-      - name: Build release, cloud, and debug dylibs
+      - name: Build release, cloud, debug, loader, and home UI dylibs
         working-directory: AMProjExport
         run: make
 
@@ -76,6 +76,12 @@ jobs:
           )
           assert "_AMMeowLoaderInit" not in symbols
           print(f"verified AMMeowLoader.dylib: arm64 MH_DYLIB, {loader['ncmds']} load commands")
+          home_ui = verify_dylib_architecture("AMProjExport/AMHomeUI.dylib")
+          home_symbols = subprocess.check_output(
+              ["nm", "-gU", "AMProjExport/AMHomeUI.dylib"], text=True
+          )
+          assert "_AMHomeUIInstall" in home_symbols
+          print(f"verified AMHomeUI.dylib: arm64 MH_DYLIB, {home_ui['ncmds']} load commands")
           PY
 
       - name: Test streaming project archive writer
@@ -130,6 +136,7 @@ jobs:
               Path("AMProjExport/AMProjExportCloud.dylib"),
               Path("AMProjExport/AMProjExportDebug.dylib"),
               Path("AMProjExport/AMMeowLoader.dylib"),
+              Path("AMProjExport/AMHomeUI.dylib"),
           )
           metadata = {
               "plugin_version": os.environ["AMPROJ_RELEASE_VERSION"],
@@ -160,6 +167,7 @@ jobs:
             AMProjExport/AMProjExportCloud.dylib
             AMProjExport/AMProjExportDebug.dylib
             AMProjExport/AMMeowLoader.dylib
+            AMProjExport/AMHomeUI.dylib
 
       - name: Publish Cloud release asset
         env:
@@ -169,6 +177,7 @@ jobs:
           gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$tag" \
             --title "AMProj v${AMPROJ_RELEASE_VERSION} Cloud" \
-            --notes "macOS-built AMProjExportCloud.dylib for commit ${GITHUB_SHA}." \
+            --notes "macOS-built AMProjExportCloud.dylib and AMHomeUI.dylib for commit ${GITHUB_SHA}." \
             build-metadata.json \
-            AMProjExport/AMProjExportCloud.dylib
+            AMProjExport/AMProjExportCloud.dylib \
+            AMProjExport/AMHomeUI.dylib
