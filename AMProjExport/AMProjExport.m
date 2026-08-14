@@ -14256,7 +14256,7 @@ static void amproj_customizeCloudUploadLabelsInView(UIView *view) {
             stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if ([text isEqualToString:@"上传到云端"] ||
             [text isEqualToString:@"Upload to Cloud"]) {
-            label.text = @"保存到 AutFeng Hub";
+            label.text = @"上传到云项目";
         } else if ([text isEqualToString:@"确保您的项目安全！"] ||
                    [text isEqualToString:@"Keep your projects safe!"]) {
             label.text = @"选择性保存为云工程";

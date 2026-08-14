@@ -683,7 +683,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMCloudSyncUploadActivities", HEADER)
         self.assertIn("AMCloudSyncUploadActivities(fileURL", EXPORT)
         self.assertIn("applicationActivities:cloudActivities", EXPORT)
-        self.assertIn('return @"保存到 AutFeng Hub"', CLOUD)
+        self.assertIn('return @"上传到云项目"', CLOUD)
 
     def test_native_cloud_export_saves_to_autfeng_hub_only_when_selected(self):
         self.assertIn("AMCloudSyncBeginUploadFile", HEADER)
@@ -727,9 +727,11 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("amproj_presentDirectShare(request, outputURL)", archive_ready)
 
     def test_native_cloud_export_uses_autfeng_hub_copy(self):
-        self.assertIn('@"保存到 AutFeng Hub"', EXPORT)
+        self.assertIn('@"上传到云项目"', EXPORT)
         self.assertIn('@"选择性保存为云工程"', EXPORT)
-        self.assertIn('@"保存到 AutFeng Hub"', CLOUD)
+        self.assertIn('@"上传到云项目"', CLOUD)
+        self.assertNotIn('@"保存到 AutFeng Hub"', EXPORT)
+        self.assertNotIn('@"保存到 AutFeng Hub"', CLOUD)
         self.assertIn('@"新建云工程"', CLOUD)
         self.assertIn("chooseUploadTarget", CLOUD)
 

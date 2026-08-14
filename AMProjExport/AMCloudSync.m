@@ -1369,7 +1369,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @implementation AMCloudUploadActivity
 
 - (NSString *)activityType { return @"com.ayakameow.amproj.cloud-upload"; }
-- (NSString *)activityTitle { return @"保存到 AutFeng Hub"; }
+- (NSString *)activityTitle { return @"上传到云项目"; }
 - (UIImage *)activityImage {
     if (@available(iOS 13.0, *)) return [UIImage systemImageNamed:@"cloud.and.arrow.up"];
     return nil;
@@ -2898,7 +2898,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 - (void)chooseUploadTarget:(NSArray *)projects fileURL:(NSURL *)fileURL
                       title:(NSString *)title presenter:(UIViewController *)presenter {
     UIViewController *top = AMCloudTopController(presenter);
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"保存到 AutFeng Hub"
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"上传到云项目"
         message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf = self;
     [sheet addAction:[UIAlertAction actionWithTitle:@"新建云工程" style:UIAlertActionStyleDefault
