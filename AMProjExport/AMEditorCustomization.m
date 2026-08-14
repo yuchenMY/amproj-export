@@ -8,6 +8,8 @@
 static void (*AMEditorOriginalProjectEditLayout)(id, SEL) = NULL;
 static UICollectionViewCell *(*AMEditorOriginalEffectBrowserCellForItem)(
     id, SEL, UICollectionView *, NSIndexPath *) = NULL;
+static void (*AMEditorOriginalCategoryCellLayout)(id, SEL) = NULL;
+static void (*AMEditorOriginalEffectPickerMainCellLayout)(id, SEL) = NULL;
 static const void *AMEditorOtherCategoryBackgroundKey =
     &AMEditorOtherCategoryBackgroundKey;
 
@@ -199,6 +201,12 @@ static Class AMEditorCategoryCellClass(void) {
     return cls;
 }
 
+static Class AMEditorEffectPickerMainCellClass(void) {
+    Class cls = NSClassFromString(@"AlightMotion.EffectPickerMainCell");
+    if (!cls) cls = objc_getClass("_TtC12AlightMotion20EffectPickerMainCell");
+    return cls;
+}
+
 static void AMEditorCollectLabels(UIView *view,
                                   NSMutableArray<UILabel *> *labels) {
     if (!view) return;
@@ -218,6 +226,9 @@ static NSString *AMEditorNormalizedTitle(NSString *title) {
 
 static UILabel *AMEditorCategoryCellLabel(UICollectionViewCell *cell) {
     UIView *view = AMEditorViewForKey(cell, @"label");
+    if (![view isKindOfClass:UILabel.class]) {
+        view = AMEditorViewForKey(cell, @"titleLabel");
+    }
     return [view isKindOfClass:UILabel.class] ? (UILabel *)view : nil;
 }
 
@@ -243,7 +254,11 @@ static BOOL AMEditorViewContainsOtherAccessibilityTitle(
 
 static BOOL AMEditorIsOtherCategoryCell(UICollectionViewCell *cell) {
     Class categoryCellClass = AMEditorCategoryCellClass();
-    if (!categoryCellClass || ![cell isKindOfClass:categoryCellClass]) return NO;
+    Class pickerCellClass = AMEditorEffectPickerMainCellClass();
+    BOOL isSupportedCell =
+        (categoryCellClass && [cell isKindOfClass:categoryCellClass]) ||
+        (pickerCellClass && [cell isKindOfClass:pickerCellClass]);
+    if (!isSupportedCell) return NO;
     NSString *otherTitle = [NSBundle.mainBundle
         localizedStringForKey:@"fxcat_other" value:@"Other" table:nil];
     NSMutableSet<NSString *> *knownTitles =
@@ -286,6 +301,11 @@ static void AMEditorCollectImageViews(UIView *view,
 
 static UIImageView *AMEditorCategoryBackgroundImageView(
     UICollectionViewCell *cell) {
+    UIView *thumbnail = AMEditorViewForKey(cell, @"thumbnailImageView");
+    if ([thumbnail isKindOfClass:UIImageView.class]) {
+        return (UIImageView *)thumbnail;
+    }
+
     NSMutableArray<UIImageView *> *imageViews = [NSMutableArray array];
     AMEditorCollectImageViews(cell.contentView, imageViews);
     UIImageView *bestImageView = nil;
@@ -304,7 +324,7 @@ static UIImageView *AMEditorCategoryBackgroundImageView(
     return bestImageView;
 }
 
-static void AMEditorRestoreCategoryCell(UICollectionViewCell *cell) {
+static void AMEditorRemoveOtherCategoryBackground(UICollectionViewCell *cell) {
     UIImageView *installedView = objc_getAssociatedObject(
         cell, AMEditorOtherCategoryBackgroundKey);
     [installedView removeFromSuperview];
@@ -317,13 +337,25 @@ static void AMEditorCustomizeCategoryCell(UICollectionViewCell *cell,
                                           NSIndexPath *indexPath) {
     (void)collectionView;
     (void)indexPath;
-    AMEditorRestoreCategoryCell(cell);
     if (!AMEditorIsOtherCategoryCell(cell)) {
+        AMEditorRemoveOtherCategoryBackground(cell);
         return;
     }
 
     UIImage *image = AMEditorOtherCategoryImage();
     if (!image) return;
+
+    UIImageView *installedView = objc_getAssociatedObject(
+        cell, AMEditorOtherCategoryBackgroundKey);
+    if (installedView.superview) {
+        installedView.image = image;
+        installedView.frame = installedView.superview.bounds;
+        return;
+    }
+    if (installedView) {
+        objc_setAssociatedObject(cell, AMEditorOtherCategoryBackgroundKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 
     UIImageView *target = AMEditorCategoryBackgroundImageView(cell);
     UIView *container = target ?: cell.contentView;
@@ -353,6 +385,24 @@ static UICollectionViewCell *AMEditorEffectBrowserCellForItem(
         : nil;
     AMEditorCustomizeCategoryCell(cell, collectionView, indexPath);
     return cell;
+}
+
+static void AMEditorCategoryCellLayout(id self, SEL selector) {
+    if (AMEditorOriginalCategoryCellLayout) {
+        AMEditorOriginalCategoryCellLayout(self, selector);
+    }
+    if ([self isKindOfClass:UICollectionViewCell.class]) {
+        AMEditorCustomizeCategoryCell((UICollectionViewCell *)self, nil, nil);
+    }
+}
+
+static void AMEditorEffectPickerMainCellLayout(id self, SEL selector) {
+    if (AMEditorOriginalEffectPickerMainCellLayout) {
+        AMEditorOriginalEffectPickerMainCellLayout(self, selector);
+    }
+    if ([self isKindOfClass:UICollectionViewCell.class]) {
+        AMEditorCustomizeCategoryCell((UICollectionViewCell *)self, nil, nil);
+    }
 }
 
 static void AMEditorInstallProjectEditCustomization(void) {
@@ -390,10 +440,48 @@ static void AMEditorInstallEffectBrowserCustomization(void) {
     }
 }
 
+static void AMEditorInstallCategoryCellCustomization(void) {
+    Class cls = AMEditorCategoryCellClass();
+    SEL selector = @selector(layoutSubviews);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!cls || !method || method_getNumberOfArguments(method) != 2) return;
+
+    IMP original = method_getImplementation(method);
+    if (original == (IMP)AMEditorCategoryCellLayout) return;
+    const char *types = method_getTypeEncoding(method);
+    if (!types) return;
+
+    AMEditorOriginalCategoryCellLayout = (void *)original;
+    if (!class_addMethod(cls, selector, (IMP)AMEditorCategoryCellLayout, types)) {
+        method_setImplementation(method, (IMP)AMEditorCategoryCellLayout);
+    }
+}
+
+static void AMEditorInstallEffectPickerMainCellCustomization(void) {
+    Class cls = AMEditorEffectPickerMainCellClass();
+    SEL selector = @selector(layoutSubviews);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!cls || !method || method_getNumberOfArguments(method) != 2) return;
+
+    IMP original = method_getImplementation(method);
+    if (original == (IMP)AMEditorEffectPickerMainCellLayout) return;
+    const char *types = method_getTypeEncoding(method);
+    if (!types) return;
+
+    AMEditorOriginalEffectPickerMainCellLayout = (void *)original;
+    if (!class_addMethod(cls, selector,
+                         (IMP)AMEditorEffectPickerMainCellLayout, types)) {
+        method_setImplementation(method,
+                                 (IMP)AMEditorEffectPickerMainCellLayout);
+    }
+}
+
 void AMEditorCustomizationInstall(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         AMEditorInstallProjectEditCustomization();
         AMEditorInstallEffectBrowserCustomization();
+        AMEditorInstallCategoryCellCustomization();
+        AMEditorInstallEffectPickerMainCellCustomization();
     });
 }

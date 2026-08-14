@@ -132,7 +132,27 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('objc_getClass("_TtC12AlightMotion13EffectBrowser")', EDITOR)
         self.assertIn('@"AlightMotion.CategoryCell"', EDITOR)
         self.assertIn('objc_getClass("_TtC12AlightMotion12CategoryCell")', EDITOR)
+        self.assertIn('@"AlightMotion.EffectPickerMainCell"', EDITOR)
+        self.assertIn(
+            'objc_getClass("_TtC12AlightMotion20EffectPickerMainCell")',
+            EDITOR,
+        )
         self.assertIn('@selector(collectionView:cellForItemAtIndexPath:)', EDITOR)
+        self.assertIn('@selector(layoutSubviews)', EDITOR)
+        self.assertIn("AMEditorOriginalCategoryCellLayout", EDITOR)
+        self.assertIn("AMEditorCategoryCellLayout", EDITOR)
+        self.assertIn("AMEditorInstallCategoryCellCustomization", EDITOR)
+        self.assertIn(
+            "AMEditorInstallCategoryCellCustomization();",
+            EDITOR,
+        )
+        self.assertIn("AMEditorOriginalEffectPickerMainCellLayout", EDITOR)
+        self.assertIn("AMEditorEffectPickerMainCellLayout", EDITOR)
+        self.assertIn("AMEditorInstallEffectPickerMainCellCustomization", EDITOR)
+        self.assertIn(
+            "AMEditorInstallEffectPickerMainCellCustomization();",
+            EDITOR,
+        )
         self.assertIn('@"fxcat_other"', EDITOR)
         self.assertIn('@"ic_category_thumbnail_other"', EDITOR)
         self.assertIn('@"BuiltinCategory/thumb"', EDITOR)
@@ -140,9 +160,12 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMEditorCategoryBackgroundImageView", EDITOR)
         self.assertIn("AMEditorCategoryCellLabel", EDITOR)
         self.assertIn('AMEditorViewForKey(cell, @"label")', EDITOR)
+        self.assertIn('AMEditorViewForKey(cell, @"titleLabel")', EDITOR)
         self.assertIn("AMEditorViewContainsOtherAccessibilityTitle", EDITOR)
+        self.assertIn('AMEditorViewForKey(cell, @"thumbnailImageView")', EDITOR)
         self.assertIn("[target addSubview:imageView]", EDITOR)
         self.assertIn("[cell.contentView insertSubview:imageView atIndex:0]", EDITOR)
+        self.assertIn("installedView.frame = installedView.superview.bounds", EDITOR)
         self.assertIn("UIViewContentModeScaleAspectFill", EDITOR)
         self.assertNotIn("indexPath.item == 11", EDITOR)
         self.assertNotIn("indexPath.item == itemCount - 1", EDITOR)
@@ -557,6 +580,21 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('[body[@"type"] isEqualToString:@"profile"]', CLOUD)
         self.assertIn("[self.manager applyAccountProfile:profile]", CLOUD)
         self.assertIn("[self clearAccountAvatar]", CLOUD)
+        install = CLOUD.split("- (void)installWithImportHandler:", 1)[1].split(
+            "- (void)applicationDidBecomeActive:", 1
+        )[0]
+        self.assertIn("if (startupToken.length)", install)
+        self.assertIn("[self loadCachedAccountAvatar]", install)
+        self.assertIn("[self refreshAccountAvatar]", install)
+        self.assertIn("[self clearAccountAvatar]", install)
+        cached_avatar = CLOUD.split("- (void)loadCachedAccountAvatar", 1)[1].split(
+            "- (UIImage *)circularAvatarImage", 1
+        )[0]
+        self.assertIn("UIImageRenderingModeAlwaysOriginal", cached_avatar)
+        update_entry = CLOUD.split("- (void)updateAccountEntryImage", 1)[1].split(
+            "- (void)pluginSyncTimerFired", 1
+        )[0]
+        self.assertIn("AMCloudAttachVisibleProjectsControllers();", update_entry)
 
     def test_home_ui_load_failure_is_isolated_after_launch(self):
         loader = CLOUD.split("static void AMCloudLoadHomeUI(void)", 1)[1]

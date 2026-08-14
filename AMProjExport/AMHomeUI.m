@@ -5,7 +5,8 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-static NSString *const AMHomeUIURLString = @"https://amhome.meowcr.cn/home";
+static NSString *const AMHomeUIURLString =
+    @"https://amhome.meowcr.cn/home?embed=1&platform=ios";
 static NSString *const AMHomeUIAvatarCacheFilename = @"account-avatar.png";
 static NSString *const AMHomeUIAvatarChangedNotification =
     @"AMCloudAvatarChangedNotification";
@@ -15,21 +16,25 @@ static NSString *const AMHomeUIShowAccountNotification =
     @"AMHomeUIShowAccountNotification";
 
 static const void *AMHomeUIControllerKey = &AMHomeUIControllerKey;
-static const void *AMHomeUIOriginalIMPKey = &AMHomeUIOriginalIMPKey;
 static const void *AMHomeUIOriginalBarImageKey = &AMHomeUIOriginalBarImageKey;
 static const void *AMHomeUIOriginalButtonImageKey =
     &AMHomeUIOriginalButtonImageKey;
+static const void *AMHomeUIOriginalButtonConfigurationKey =
+    &AMHomeUIOriginalButtonConfigurationKey;
+static const void *AMHomeUIOriginalButtonPresentationKey =
+    &AMHomeUIOriginalButtonPresentationKey;
 
 @class AMHomeUIController;
 
 static __weak UIViewController *AMHomeUIEmbeddedHost;
 static AMHomeUIController *AMHomeUIEmbeddedController;
-static AMHomeUIController *AMHomeUIFallbackController;
-static UIWindow *AMHomeUIFallbackWindow;
 static BOOL AMHomeUIAttachLoopRunning;
+static Class AMHomeUIHookedFeedClass;
+static IMP AMHomeUIOriginalFeedViewDidAppear;
 
 static BOOL AMHomeUIAttachToController(UIViewController *controller);
 static void AMHomeUIRefreshAvatarEverywhere(void);
+static void AMHomeUIApplyAvatarToButton(UIButton *button, UIImage *avatar);
 
 typedef NS_ENUM(NSInteger, AMHomeUIControllerKind) {
     AMHomeUIControllerKindNone = 0,
@@ -50,11 +55,14 @@ static AMHomeUIControllerKind AMHomeUIKindForClass(Class cls) {
         return AMHomeUIControllerKindNone;
     }
     NSString *name = NSStringFromClass(cls) ?: @"";
-    NSString *leaf = name.pathExtension.length ? name.pathExtension : name;
-    if ([leaf isEqualToString:@"FeedVC"] || [name hasSuffix:@".FeedVC"]) {
+    if ([name isEqualToString:@"FeedVC"] ||
+        [name isEqualToString:@"AlightMotion.FeedVC"] ||
+        [name isEqualToString:@"_TtC12AlightMotion6FeedVC"]) {
         return AMHomeUIControllerKindFeed;
     }
-    if ([leaf isEqualToString:@"HomeVC"] || [name hasSuffix:@".HomeVC"]) {
+    if ([name isEqualToString:@"HomeVC"] ||
+        [name isEqualToString:@"AlightMotion.HomeVC"] ||
+        [name isEqualToString:@"_TtC12AlightMotion6HomeVC"]) {
         return AMHomeUIControllerKindHome;
     }
     return AMHomeUIControllerKindNone;
@@ -93,8 +101,7 @@ static UIWindow *AMHomeUIKeyWindow(void) {
                 continue;
             }
             for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-                if (window == AMHomeUIFallbackWindow || window.hidden ||
-                    window.alpha <= 0.01) {
+                if (window.hidden || window.alpha <= 0.01) {
                     continue;
                 }
                 if (window.isKeyWindow) return window;
@@ -106,8 +113,7 @@ static UIWindow *AMHomeUIKeyWindow(void) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     for (UIWindow *window in UIApplication.sharedApplication.windows) {
-        if (window == AMHomeUIFallbackWindow || window.hidden ||
-            window.alpha <= 0.01) {
+        if (window.hidden || window.alpha <= 0.01) {
             continue;
         }
         if (window.isKeyWindow) return window;
@@ -167,8 +173,7 @@ static BOOL AMHomeUISelectProjectsTab(void) {
                 continue;
             }
             for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-                if (window != AMHomeUIFallbackWindow && !window.hidden &&
-                    window.alpha > 0.01) {
+                if (!window.hidden && window.alpha > 0.01) {
                     AMHomeUICollectTabControllers(window.rootViewController,
                                                   visited, tabs, 0);
                 }
@@ -200,31 +205,6 @@ static BOOL AMHomeUISelectProjectsTab(void) {
     return YES;
 }
 
-@interface AMHomeUIPassthroughView : UIView
-@end
-
-@implementation AMHomeUIPassthroughView
-
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    return hit == self ? nil : hit;
-}
-
-@end
-
-@interface AMHomeUIOverlayWindow : UIWindow
-@end
-
-@implementation AMHomeUIOverlayWindow
-
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self || hit == self.rootViewController.view) return nil;
-    return hit;
-}
-
-@end
-
 @interface AMHomeUIMessageProxy : NSObject <WKScriptMessageHandler>
 @property(nonatomic, weak) id<WKScriptMessageHandler> target;
 @end
@@ -241,34 +221,20 @@ static BOOL AMHomeUISelectProjectsTab(void) {
 
 @interface AMHomeUIController : UIViewController
     <WKNavigationDelegate, WKScriptMessageHandler>
-@property(nonatomic) BOOL fallbackMode;
-@property(nonatomic) BOOL webVisible;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) UIActivityIndicatorView *activityIndicator;
 @property(nonatomic, strong) UIRefreshControl *refreshControl;
 @property(nonatomic, strong) UIView *errorView;
-@property(nonatomic, strong) UIButton *fallbackToggleButton;
 @property(nonatomic, strong) AMHomeUIMessageProxy *messageProxy;
-- (instancetype)initWithFallbackMode:(BOOL)fallbackMode;
 - (void)updateAvatar;
 @end
 
 @implementation AMHomeUIController
 
-- (instancetype)initWithFallbackMode:(BOOL)fallbackMode {
-    self = [super initWithNibName:nil bundle:nil];
-    if (self) {
-        _fallbackMode = fallbackMode;
-        _webVisible = YES;
-    }
-    return self;
-}
-
 - (void)loadView {
-    self.view = self.fallbackMode ? [AMHomeUIPassthroughView new] : [UIView new];
-    self.view.backgroundColor = self.fallbackMode
-        ? UIColor.clearColor
-        : [UIColor colorWithRed:0.961 green:0.965 blue:0.973 alpha:1.0];
+    self.view = [UIView new];
+    self.view.backgroundColor =
+        [UIColor colorWithRed:0.961 green:0.965 blue:0.973 alpha:1.0];
 }
 
 - (void)viewDidLoad {
@@ -278,6 +244,21 @@ static BOOL AMHomeUISelectProjectsTab(void) {
     self.messageProxy.target = self;
     [configuration.userContentController
         addScriptMessageHandler:self.messageProxy name:@"amnative"];
+    NSString *embeddedStyleScript =
+        @"(function(){var id='am-native-embedded-style';"
+         "if(document.getElementById(id)){return;}"
+         "var style=document.createElement('style');style.id=id;"
+         "style.textContent='.home-header{display:none!important}' +"
+         "'.home-shell{padding-top:16px!important}';"
+         "var install=function(){var root=document.head||document.documentElement;"
+         "if(!root){return false;}root.appendChild(style);"
+         "document.documentElement.setAttribute('data-am-native-embedded','true');"
+         "return true;};if(!install()){document.addEventListener('DOMContentLoaded',install,{once:true});}"
+         "})();";
+    [configuration.userContentController addUserScript:
+        [[WKUserScript alloc] initWithSource:embeddedStyleScript
+                              injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                           forMainFrameOnly:YES]];
     configuration.allowsInlineMediaPlayback = YES;
 
     self.webView = [[WKWebView alloc] initWithFrame:CGRectZero
@@ -324,32 +305,7 @@ static BOOL AMHomeUISelectProjectsTab(void) {
             constraintEqualToAnchor:self.view.centerYAnchor],
     ]];
 
-    if (self.fallbackMode) {
-        self.fallbackToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        self.fallbackToggleButton.translatesAutoresizingMaskIntoConstraints = NO;
-        self.fallbackToggleButton.tintColor = UIColor.whiteColor;
-        self.fallbackToggleButton.backgroundColor =
-            [UIColor colorWithWhite:0.0 alpha:0.62];
-        self.fallbackToggleButton.layer.cornerRadius = 22.0;
-        self.fallbackToggleButton.accessibilityLabel = @"\u5207\u6362\u4e3b\u9875\u548c\u7f16\u8f91\u5668";
-        [self.fallbackToggleButton addTarget:self
-                                      action:@selector(toggleFallbackMode)
-                            forControlEvents:UIControlEventTouchUpInside];
-        [self.view addSubview:self.fallbackToggleButton];
-        [NSLayoutConstraint activateConstraints:@[
-            [self.fallbackToggleButton.widthAnchor constraintEqualToConstant:44.0],
-            [self.fallbackToggleButton.heightAnchor constraintEqualToConstant:44.0],
-            [self.fallbackToggleButton.trailingAnchor
-                constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor
-                               constant:-16.0],
-            [self.fallbackToggleButton.bottomAnchor
-                constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor
-                               constant:-72.0],
-        ]];
-    }
-
     [self updateAvatar];
-    [self updateFallbackVisibility];
     [self loadHome];
 }
 
@@ -382,36 +338,12 @@ static BOOL AMHomeUISelectProjectsTab(void) {
 }
 
 - (void)openNativeEditor {
-    BOOL selected = AMHomeUISelectProjectsTab();
-    if (self.fallbackMode) {
-        self.webVisible = NO;
-        [self updateFallbackVisibility];
-        return;
-    }
-    if (!selected) self.view.hidden = YES;
+    AMHomeUISelectProjectsTab();
 }
 
 - (void)openAccountCenter {
     [NSNotificationCenter.defaultCenter
         postNotificationName:AMHomeUIShowAccountNotification object:nil];
-}
-
-- (void)toggleFallbackMode {
-    self.webVisible = !self.webVisible;
-    [self updateFallbackVisibility];
-}
-
-- (void)updateFallbackVisibility {
-    if (!self.fallbackMode) return;
-    BOOL visible = self.webVisible;
-    self.webView.hidden = !visible;
-    self.errorView.hidden = !visible;
-    if (!visible) [self.activityIndicator stopAnimating];
-    NSString *symbolName = visible ? @"slider.horizontal.3" : @"house.fill";
-    UIImage *image = nil;
-    if (@available(iOS 13.0, *)) image = [UIImage systemImageNamed:symbolName];
-    [self.fallbackToggleButton setImage:image forState:UIControlStateNormal];
-    [self.view bringSubviewToFront:self.fallbackToggleButton];
 }
 
 - (void)updateAvatar {
@@ -480,9 +412,6 @@ static BOOL AMHomeUISelectProjectsTab(void) {
          "state.observe();return state.apply(false);})(%@[0]||'');",
         JSON];
     [self.webView evaluateJavaScript:script completionHandler:nil];
-    if (self.fallbackToggleButton) {
-        [self.view bringSubviewToFront:self.fallbackToggleButton];
-    }
 }
 
 - (void)hideError {
@@ -534,9 +463,6 @@ static BOOL AMHomeUISelectProjectsTab(void) {
         [retry.heightAnchor constraintEqualToConstant:42.0],
     ]];
     self.errorView = errorView;
-    if (self.fallbackToggleButton) {
-        [self.view bringSubviewToFront:self.fallbackToggleButton];
-    }
 }
 
 - (void)webView:(WKWebView *)webView
@@ -623,9 +549,7 @@ static BOOL AMHomeUISelectProjectsTab(void) {
         [self loadHome];
     } else if ([action isEqualToString:@"home"] ||
                [action isEqualToString:@"web"]) {
-        self.webVisible = YES;
         self.view.hidden = NO;
-        [self updateFallbackVisibility];
         [self loadHome];
     }
 }
@@ -636,10 +560,26 @@ static BOOL AMHomeUISelectProjectsTab(void) {
 static BOOL AMHomeUIStringLooksLikeAccount(NSString *value) {
     NSString *text = value.lowercaseString ?: @"";
     for (NSString *term in @[@"account", @"profile", @"person", @"user",
-                             @"\u8d26\u6237", @"\u6211\u7684", @"\u4e2a\u4eba"]) {
+                             @"login", @"sign in", @"\u8d26\u6237",
+                             @"\u767b\u5f55", @"\u767b\u5165",
+                             @"\u6211\u7684", @"\u4e2a\u4eba"]) {
         if ([text containsString:term]) return YES;
     }
     return NO;
+}
+
+static id AMHomeUIAccountControlForController(UIViewController *controller) {
+    SEL selector = NSSelectorFromString(@"accountButton");
+    Method method = controller
+        ? class_getInstanceMethod(controller.class, selector) : NULL;
+    if (!method || method_getNumberOfArguments(method) != 2) return nil;
+    char *returnType = method_copyReturnType(method);
+    BOOL returnsObject = returnType && returnType[0] == '@';
+    free(returnType);
+    if (!returnsObject) return nil;
+    IMP implementation = method_getImplementation(method);
+    return implementation
+        ? ((id (*)(id, SEL))implementation)(controller, selector) : nil;
 }
 
 static void AMHomeUIApplyAvatarToBarItem(UIBarButtonItem *item,
@@ -652,49 +592,96 @@ static void AMHomeUIApplyAvatarToBarItem(UIBarButtonItem *item,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     item.image = avatar ?: (original == NSNull.null ? nil : original);
+    if ([item.customView isKindOfClass:UIButton.class]) {
+        AMHomeUIApplyAvatarToButton((UIButton *)item.customView, avatar);
+    }
 }
 
 static void AMHomeUIApplyAvatarToButton(UIButton *button, UIImage *avatar) {
     if (!button) return;
-    id original = objc_getAssociatedObject(button, AMHomeUIOriginalButtonImageKey);
-    if (!original) {
-        original = [button imageForState:UIControlStateNormal] ?: NSNull.null;
-        objc_setAssociatedObject(button, AMHomeUIOriginalButtonImageKey, original,
+    NSDictionary<NSNumber *, id> *originals =
+        objc_getAssociatedObject(button, AMHomeUIOriginalButtonImageKey);
+    NSArray<NSNumber *> *states = @[
+        @(UIControlStateNormal), @(UIControlStateHighlighted),
+        @(UIControlStateSelected), @(UIControlStateDisabled),
+        @(UIControlStateFocused),
+    ];
+    if (!originals) {
+        NSMutableDictionary<NSNumber *, id> *captured = [NSMutableDictionary dictionary];
+        for (NSNumber *stateValue in states) {
+            UIImage *image = [button imageForState:stateValue.unsignedIntegerValue];
+            captured[stateValue] = image ?: NSNull.null;
+        }
+        originals = captured;
+        objc_setAssociatedObject(button, AMHomeUIOriginalButtonImageKey, originals,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    UIImage *image = avatar ?: (original == NSNull.null ? nil : original);
-    [button setImage:image forState:UIControlStateNormal];
+    NSDictionary<NSString *, NSNumber *> *originalPresentation =
+        objc_getAssociatedObject(button, AMHomeUIOriginalButtonPresentationKey);
+    if (!originalPresentation) {
+        originalPresentation = @{
+            @"contentMode": @(button.imageView.contentMode),
+            @"cornerRadius": @(button.imageView.layer.cornerRadius),
+            @"clipsToBounds": @(button.imageView.clipsToBounds),
+        };
+        objc_setAssociatedObject(button, AMHomeUIOriginalButtonPresentationKey,
+                                 originalPresentation,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (@available(iOS 15.0, *)) {
+        id originalConfiguration = objc_getAssociatedObject(
+            button, AMHomeUIOriginalButtonConfigurationKey);
+        if (!originalConfiguration) {
+            originalConfiguration = button.configuration
+                ? [button.configuration copy] : NSNull.null;
+            objc_setAssociatedObject(button,
+                AMHomeUIOriginalButtonConfigurationKey, originalConfiguration,
+                OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (avatar && button.configuration) {
+            UIButtonConfiguration *configuration = [button.configuration copy];
+            configuration.image = avatar;
+            button.configuration = configuration;
+        } else if (!avatar && originalConfiguration != NSNull.null) {
+            button.configuration = [originalConfiguration copy];
+        }
+    }
+    for (NSNumber *stateValue in states) {
+        id original = originals[stateValue];
+        UIImage *image = avatar ?: (original == NSNull.null ? nil : original);
+        [button setImage:image forState:stateValue.unsignedIntegerValue];
+    }
     if (avatar) {
         button.imageView.contentMode = UIViewContentModeScaleAspectFill;
         button.imageView.layer.cornerRadius =
             MIN(button.bounds.size.width, button.bounds.size.height) * 0.5;
         button.imageView.clipsToBounds = YES;
     } else {
-        button.imageView.layer.cornerRadius = 0;
-        button.imageView.clipsToBounds = NO;
+        button.imageView.contentMode =
+            originalPresentation[@"contentMode"].integerValue;
+        button.imageView.layer.cornerRadius =
+            originalPresentation[@"cornerRadius"].doubleValue;
+        button.imageView.clipsToBounds =
+            originalPresentation[@"clipsToBounds"].boolValue;
     }
 }
 
 static void AMHomeUIFindNativeAccountButton(
     UIView *view, UIWindow *window, NSMutableArray<UIButton *> *matches,
     NSUInteger depth) {
-    if (!view || !window || view.hidden || view.alpha <= 0.01 || depth > 16) {
+    if (!view || !window || view.hidden || view.alpha <= 0.01 || depth > 24) {
         return;
     }
     if ([view isKindOfClass:UIButton.class]) {
         UIButton *button = (UIButton *)view;
         CGRect frame = [button convertRect:button.bounds toView:window];
-        NSString *label = [NSString stringWithFormat:@"%@ %@ %@",
-            button.accessibilityLabel ?: @"",
-            button.accessibilityIdentifier ?: @"",
-            [button titleForState:UIControlStateNormal] ?: @""];
-        BOOL accountLabel = AMHomeUIStringLooksLikeAccount(label);
-        BOOL topRightGeometry = frame.size.width >= 28.0 &&
+        BOOL compactControl = frame.size.width >= 28.0 &&
             frame.size.width <= 76.0 && frame.size.height >= 28.0 &&
-            frame.size.height <= 76.0 && CGRectGetMidX(frame) >
-                CGRectGetWidth(window.bounds) * 0.72 &&
+            frame.size.height <= 76.0;
+        BOOL topRightGeometry = compactControl &&
+            CGRectGetMidX(frame) > CGRectGetWidth(window.bounds) * 0.72 &&
             CGRectGetMinY(frame) < window.safeAreaInsets.top + 110.0;
-        if (accountLabel || topRightGeometry) [matches addObject:button];
+        if (topRightGeometry) [matches addObject:button];
     }
     for (UIView *child in view.subviews) {
         AMHomeUIFindNativeAccountButton(child, window, matches, depth + 1);
@@ -705,51 +692,122 @@ static void AMHomeUIApplyAvatarToNativeController(
     UIViewController *controller) {
     if (!controller) return;
     UIImage *avatar = AMHomeUILoadAvatar();
-    NSArray<UIBarButtonItem *> *items =
-        controller.navigationItem.rightBarButtonItems ?: @[];
-    for (UIBarButtonItem *item in items) {
-        NSString *label = [NSString stringWithFormat:@"%@ %@",
-            item.accessibilityLabel ?: @"",
-            item.accessibilityIdentifier ?: @""];
-        if (items.count == 1 || AMHomeUIStringLooksLikeAccount(label)) {
-            AMHomeUIApplyAvatarToBarItem(item, avatar);
-            if (items.count == 1) break;
+    NSMutableArray<UIViewController *> *controllers = [NSMutableArray array];
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    UIViewController *current = controller;
+    for (NSUInteger depth = 0; current && depth < 16; depth++) {
+        NSValue *identity =
+            [NSValue valueWithPointer:(__bridge const void *)current];
+        if (AMHomeUIKindForClass(current.class) != AMHomeUIControllerKindNone &&
+            ![visited containsObject:identity]) {
+            [visited addObject:identity];
+            [controllers addObject:current];
+        }
+        current = current.parentViewController;
+    }
+    UINavigationController *navigation = controller.navigationController;
+    for (UIViewController *candidate in @[
+        navigation.visibleViewController ?: controller,
+        navigation.topViewController ?: controller,
+    ]) {
+        NSValue *identity =
+            [NSValue valueWithPointer:(__bridge const void *)candidate];
+        if (AMHomeUIKindForClass(candidate.class) !=
+                AMHomeUIControllerKindNone &&
+            ![visited containsObject:identity]) {
+            [visited addObject:identity];
+            [controllers addObject:candidate];
         }
     }
-    UIWindow *window = controller.viewIfLoaded.window;
+    NSMutableArray<UIBarButtonItem *> *labeledBarItems = [NSMutableArray array];
+    NSMutableArray<UIBarButtonItem *> *propertyBarItems = [NSMutableArray array];
+    NSMutableArray<UIButton *> *propertyButtons = [NSMutableArray array];
+    NSMutableSet<NSValue *> *visitedBarItems = [NSMutableSet set];
+    NSMutableSet<NSValue *> *visitedPropertyControls = [NSMutableSet set];
+    for (UIViewController *candidate in controllers) {
+        id accountControl = AMHomeUIAccountControlForController(candidate);
+        if (accountControl) {
+            NSValue *identity = [NSValue valueWithPointer:
+                (__bridge const void *)accountControl];
+            if (![visitedPropertyControls containsObject:identity]) {
+                [visitedPropertyControls addObject:identity];
+                if ([accountControl isKindOfClass:UIButton.class])
+                    [propertyButtons addObject:accountControl];
+                else if ([accountControl isKindOfClass:UIBarButtonItem.class])
+                    [propertyBarItems addObject:accountControl];
+            }
+        }
+        NSArray<UIBarButtonItem *> *items =
+            candidate.navigationItem.rightBarButtonItems ?: @[];
+        for (UIBarButtonItem *item in items) {
+            NSValue *identity =
+                [NSValue valueWithPointer:(__bridge const void *)item];
+            if ([visitedBarItems containsObject:identity]) continue;
+            [visitedBarItems addObject:identity];
+            NSString *label = [NSString stringWithFormat:@"%@ %@ %@",
+                item.accessibilityLabel ?: @"",
+                item.accessibilityIdentifier ?: @"",
+                item.title ?: @""];
+            if (AMHomeUIStringLooksLikeAccount(label))
+                [labeledBarItems addObject:item];
+        }
+    }
+    UIBarButtonItem *barTarget = propertyBarItems.count == 1
+        ? propertyBarItems.firstObject
+        : (propertyBarItems.count == 0 && labeledBarItems.count == 1
+            ? labeledBarItems.firstObject : nil);
+    AMHomeUIApplyAvatarToBarItem(barTarget, avatar);
+
+    UIWindow *window = controller.viewIfLoaded.window ?: AMHomeUIKeyWindow();
     if (!window) return;
+    NSMutableArray<UIView *> *roots = [NSMutableArray array];
+    NSMutableSet<NSValue *> *visitedRoots = [NSMutableSet set];
+    for (UIViewController *candidate in controllers) {
+        UIView *view = candidate.viewIfLoaded;
+        if (!view || view.window != window) continue;
+        NSValue *identity =
+            [NSValue valueWithPointer:(__bridge const void *)view];
+        if (![visitedRoots containsObject:identity]) {
+            [visitedRoots addObject:identity];
+            [roots addObject:view];
+        }
+    }
+    UINavigationBar *navigationBar = navigation.navigationBar;
+    if (navigationBar.window == window) {
+        NSValue *identity =
+            [NSValue valueWithPointer:(__bridge const void *)navigationBar];
+        if (![visitedRoots containsObject:identity]) {
+            [visitedRoots addObject:identity];
+            [roots addObject:navigationBar];
+        }
+    }
     NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
-    AMHomeUIFindNativeAccountButton(controller.viewIfLoaded, window, buttons, 0);
-    UIButton *best = nil;
-    NSInteger bestScore = NSIntegerMin;
+    for (UIView *root in roots) {
+        AMHomeUIFindNativeAccountButton(root, window, buttons, 0);
+    }
+    NSMutableArray<UIButton *> *labeledButtons = [NSMutableArray array];
+    NSMutableSet<NSValue *> *visitedButtons = [NSMutableSet set];
     for (UIButton *button in buttons) {
-        CGRect frame = [button convertRect:button.bounds toView:window];
+        NSValue *identity =
+            [NSValue valueWithPointer:(__bridge const void *)button];
+        if ([visitedButtons containsObject:identity]) continue;
+        [visitedButtons addObject:identity];
         NSString *label = [NSString stringWithFormat:@"%@ %@ %@",
             button.accessibilityLabel ?: @"",
             button.accessibilityIdentifier ?: @"",
             [button titleForState:UIControlStateNormal] ?: @""];
-        NSInteger score = AMHomeUIStringLooksLikeAccount(label) ? 1000 : 0;
-        score += (NSInteger)CGRectGetMinX(frame);
-        score -= (NSInteger)(CGRectGetMinY(frame) * 2.0);
-        if (score > bestScore) {
-            bestScore = score;
-            best = button;
-        }
+        if (AMHomeUIStringLooksLikeAccount(label))
+            [labeledButtons addObject:button];
     }
-    AMHomeUIApplyAvatarToButton(best, avatar);
-}
-
-static IMP AMHomeUIOriginalViewDidAppear(Class cls) {
-    for (Class current = cls; current; current = class_getSuperclass(current)) {
-        NSValue *value =
-            objc_getAssociatedObject((id)current, AMHomeUIOriginalIMPKey);
-        if (value) return value.pointerValue;
-    }
-    return NULL;
+    UIButton *buttonTarget = propertyButtons.count == 1
+        ? propertyButtons.firstObject
+        : (propertyButtons.count == 0 && labeledButtons.count == 1
+            ? labeledButtons.firstObject : nil);
+    AMHomeUIApplyAvatarToButton(buttonTarget, avatar);
 }
 
 static void AMHomeUIViewDidAppear(id self, SEL selector, BOOL animated) {
-    IMP original = AMHomeUIOriginalViewDidAppear(object_getClass(self));
+    IMP original = AMHomeUIOriginalFeedViewDidAppear;
     if (original) ((void (*)(id, SEL, BOOL))original)(self, selector, animated);
     if (![self isKindOfClass:UIViewController.class]) return;
     __weak UIViewController *controller = (UIViewController *)self;
@@ -767,6 +825,7 @@ static void AMHomeUIViewDidAppear(id self, SEL selector, BOOL animated) {
 }
 
 static void AMHomeUIInstallControllerHooks(void) {
+    if (AMHomeUIHookedFeedClass) return;
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     if (!classes || count == 0) {
@@ -776,22 +835,19 @@ static void AMHomeUIInstallControllerHooks(void) {
     SEL selector = @selector(viewDidAppear:);
     for (unsigned int index = 0; index < count; index++) {
         Class cls = classes[index];
-        if (AMHomeUIKindForClass(cls) == AMHomeUIControllerKindNone ||
-            objc_getAssociatedObject((id)cls, AMHomeUIOriginalIMPKey)) {
-            continue;
-        }
+        if (AMHomeUIKindForClass(cls) != AMHomeUIControllerKindFeed) continue;
         Method method = class_getInstanceMethod(cls, selector);
         if (!method || method_getNumberOfArguments(method) != 3) continue;
         IMP original = method_getImplementation(method);
         if (original == (IMP)AMHomeUIViewDidAppear) continue;
-        objc_setAssociatedObject((id)cls, AMHomeUIOriginalIMPKey,
-            [NSValue valueWithPointer:original],
-            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        AMHomeUIHookedFeedClass = cls;
+        AMHomeUIOriginalFeedViewDidAppear = original;
         const char *types = method_getTypeEncoding(method);
         if (!class_addMethod(cls, selector, (IMP)AMHomeUIViewDidAppear, types)) {
             class_replaceMethod(cls, selector, (IMP)AMHomeUIViewDidAppear,
                                 types);
         }
+        break;
     }
     free(classes);
 }
@@ -805,7 +861,7 @@ static void AMHomeUIFindBestController(
     if ([visited containsObject:identity]) return;
     [visited addObject:identity];
     AMHomeUIControllerKind kind = AMHomeUIKindForClass(root.class);
-    if (kind > *bestKind && root.isViewLoaded && root.view.window) {
+    if (kind > *bestKind && root.isViewLoaded) {
         *best = root;
         *bestKind = kind;
     }
@@ -830,27 +886,31 @@ static void AMHomeUIFindBestController(
     }
 }
 
-static void AMHomeUIDismissFallback(void) {
-    if (!AMHomeUIFallbackWindow) return;
-    AMHomeUIFallbackWindow.hidden = YES;
-    AMHomeUIFallbackWindow.rootViewController = nil;
-    AMHomeUIFallbackController = nil;
-    AMHomeUIFallbackWindow = nil;
+static void AMHomeUIAttachEmbeddedView(UIViewController *controller) {
+    UIView *embeddedView = AMHomeUIEmbeddedController.view;
+    if (!controller || !embeddedView || embeddedView.superview == controller.view)
+        return;
+    [embeddedView removeFromSuperview];
+    embeddedView.translatesAutoresizingMaskIntoConstraints = NO;
+    [controller.view addSubview:embeddedView];
+    [NSLayoutConstraint activateConstraints:@[
+        [embeddedView.topAnchor constraintEqualToAnchor:controller.view.topAnchor],
+        [embeddedView.leadingAnchor
+            constraintEqualToAnchor:controller.view.leadingAnchor],
+        [embeddedView.trailingAnchor
+            constraintEqualToAnchor:controller.view.trailingAnchor],
+        [embeddedView.bottomAnchor
+            constraintEqualToAnchor:controller.view.bottomAnchor],
+    ]];
 }
 
 static BOOL AMHomeUIAttachToController(UIViewController *controller) {
-    if (!controller || !controller.isViewLoaded || !controller.view.window) {
+    if (!controller || !controller.isViewLoaded) {
         return NO;
     }
     AMHomeUIControllerKind newKind = AMHomeUIKindForClass(controller.class);
-    if (newKind == AMHomeUIControllerKindNone) return NO;
+    if (newKind != AMHomeUIControllerKindFeed) return NO;
     UIViewController *oldHost = AMHomeUIEmbeddedHost;
-    AMHomeUIControllerKind oldKind = AMHomeUIKindForClass(oldHost.class);
-    if (oldHost && oldHost != controller && oldHost.viewIfLoaded.window &&
-        oldKind >= newKind) {
-        AMHomeUIApplyAvatarToNativeController(oldHost);
-        return YES;
-    }
     if (oldHost != controller) {
         if (AMHomeUIEmbeddedController.parentViewController) {
             [AMHomeUIEmbeddedController willMoveToParentViewController:nil];
@@ -861,34 +921,19 @@ static BOOL AMHomeUIAttachToController(UIViewController *controller) {
             objc_setAssociatedObject(oldHost, AMHomeUIControllerKey, nil,
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        AMHomeUIEmbeddedController =
-            [[AMHomeUIController alloc] initWithFallbackMode:NO];
+        AMHomeUIEmbeddedController = [AMHomeUIController new];
         AMHomeUIEmbeddedHost = controller;
         [controller addChildViewController:AMHomeUIEmbeddedController];
-        AMHomeUIEmbeddedController.view.translatesAutoresizingMaskIntoConstraints = NO;
-        [controller.view addSubview:AMHomeUIEmbeddedController.view];
-        [NSLayoutConstraint activateConstraints:@[
-            [AMHomeUIEmbeddedController.view.topAnchor
-                constraintEqualToAnchor:controller.view.topAnchor],
-            [AMHomeUIEmbeddedController.view.leadingAnchor
-                constraintEqualToAnchor:controller.view.leadingAnchor],
-            [AMHomeUIEmbeddedController.view.trailingAnchor
-                constraintEqualToAnchor:controller.view.trailingAnchor],
-            [AMHomeUIEmbeddedController.view.bottomAnchor
-                constraintEqualToAnchor:controller.view.bottomAnchor],
-        ]];
+        AMHomeUIAttachEmbeddedView(controller);
         [AMHomeUIEmbeddedController didMoveToParentViewController:controller];
         objc_setAssociatedObject(controller, AMHomeUIControllerKey,
                                  AMHomeUIEmbeddedController,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else if (AMHomeUIEmbeddedController.view.superview != controller.view) {
-        [controller.view addSubview:AMHomeUIEmbeddedController.view];
-    }
+    } else AMHomeUIAttachEmbeddedView(controller);
     AMHomeUIEmbeddedController.view.hidden = NO;
     [AMHomeUIEmbeddedController updateAvatar];
     [controller.view bringSubviewToFront:AMHomeUIEmbeddedController.view];
     AMHomeUIApplyAvatarToNativeController(controller);
-    AMHomeUIDismissFallback();
     return YES;
 }
 
@@ -902,33 +947,6 @@ static BOOL AMHomeUIAttach(void) {
     return AMHomeUIAttachToController(best);
 }
 
-static BOOL AMHomeUIShowFallback(void) {
-    if (AMHomeUIFallbackWindow) return YES;
-    UIWindow *appWindow = AMHomeUIKeyWindow();
-    if (!appWindow || !appWindow.rootViewController) return NO;
-    UIWindow *overlay = nil;
-    if (@available(iOS 13.0, *)) {
-        if (appWindow.windowScene) {
-            overlay = [[AMHomeUIOverlayWindow alloc]
-                initWithWindowScene:appWindow.windowScene];
-        }
-    }
-    if (!overlay) {
-        overlay = [[AMHomeUIOverlayWindow alloc] initWithFrame:appWindow.bounds];
-    }
-    overlay.frame = appWindow.bounds;
-    overlay.windowLevel = UIWindowLevelNormal + 1.0;
-    overlay.backgroundColor = UIColor.clearColor;
-    AMHomeUIFallbackController =
-        [[AMHomeUIController alloc] initWithFallbackMode:YES];
-    overlay.rootViewController = AMHomeUIFallbackController;
-    AMHomeUIFallbackWindow = overlay;
-    [overlay makeKeyAndVisible];
-    [appWindow makeKeyWindow];
-    overlay.hidden = NO;
-    return YES;
-}
-
 static void AMHomeUIAttachAttempt(NSUInteger attempt) {
     @try {
         AMHomeUIInstallControllerHooks();
@@ -937,8 +955,8 @@ static void AMHomeUIAttachAttempt(NSUInteger attempt) {
             return;
         }
         if (attempt >= 60) {
-            AMHomeUIShowFallback();
             AMHomeUIAttachLoopRunning = NO;
+            NSLog(@"[AMHomeUI] native HomeVC/FeedVC not found; web home disabled");
             return;
         }
     } @catch (NSException *exception) {
@@ -961,9 +979,29 @@ static void AMHomeUIScheduleAttachAttempts(void) {
 }
 
 static void AMHomeUIRefreshAvatarEverywhere(void) {
-    AMHomeUIApplyAvatarToNativeController(AMHomeUIEmbeddedHost);
+    UIViewController *avatarHost = AMHomeUIEmbeddedHost;
+    if (!avatarHost) {
+        UIWindow *window = AMHomeUIKeyWindow();
+        UIViewController *root = window.rootViewController;
+        UIViewController *best = nil;
+        AMHomeUIControllerKind bestKind = AMHomeUIControllerKindNone;
+        AMHomeUIFindBestController(root, [NSMutableSet set], 0, &best,
+                                   &bestKind);
+        avatarHost = best;
+    }
+    AMHomeUIApplyAvatarToNativeController(avatarHost);
     [AMHomeUIEmbeddedController updateAvatar];
-    [AMHomeUIFallbackController updateAvatar];
+}
+
+static void AMHomeUIScheduleAvatarRefreshes(void) {
+    for (NSNumber *delay in @[@0, @0.2, @0.8, @2.0]) {
+        dispatch_after(dispatch_time(
+                           DISPATCH_TIME_NOW,
+                           (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            AMHomeUIRefreshAvatarEverywhere();
+        });
+    }
 }
 
 static void AMHomeUIActivateSafely(void) {
@@ -1002,7 +1040,7 @@ void AMHomeUIInstall(void) {
                 addObserverForName:name object:nil
                              queue:NSOperationQueue.mainQueue
                         usingBlock:^(__unused NSNotification *notification) {
-                AMHomeUIRefreshAvatarEverywhere();
+                AMHomeUIScheduleAvatarRefreshes();
             }];
         }
         // 动态加载时应用通常已经激活，显式执行首次挂载。

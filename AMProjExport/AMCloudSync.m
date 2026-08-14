@@ -1791,7 +1791,12 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             target:self selector:@selector(pluginSyncTimerFired:)
             userInfo:nil repeats:YES];
         self.pluginSyncTimer.tolerance = 10.0;
-		if (startupToken.length) [self loadCachedAccountAvatar];
+		if (startupToken.length) {
+			[self loadCachedAccountAvatar];
+			[self refreshAccountAvatar];
+		} else {
+			[self clearAccountAvatar];
+		}
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
             [self syncPluginsNow:@"install"];
@@ -1841,7 +1846,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     NSData *data = [NSData dataWithContentsOfURL:[self accountAvatarCacheURL]];
     UIImage *image = data.length ? [UIImage imageWithData:data scale:UIScreen.mainScreen.scale] : nil;
     if (image) {
-        self.accountAvatarImage = image;
+        self.accountAvatarImage =
+            [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
         [self updateAccountEntryImage];
         [NSNotificationCenter.defaultCenter
             postNotificationName:AMCloudAvatarChangedNotification object:nil];
@@ -1942,6 +1948,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 }
 
 - (void)updateAccountEntryImage {
+    AMCloudAttachVisibleProjectsControllers();
     UIViewController *controller = self.lastProjectsController;
     if (controller) [self attachAccountEntryToController:controller];
 }

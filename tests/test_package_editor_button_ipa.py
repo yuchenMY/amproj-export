@@ -269,6 +269,8 @@ class EditorHomePackageTests(unittest.TestCase):
                 source.writestr(packager.CLOUD_PATH, b"old-cloud")
                 source.writestr("Payload/AlightMotion.app/Info.plist", b"plist")
                 for name in packager.CATEGORY_NAMES:
+                    if name == "ic_category_thumbnail_other.png":
+                        continue
                     source.writestr(
                         packager.category_path(name),
                         ("old:" + name).encode(),
@@ -293,6 +295,14 @@ class EditorHomePackageTests(unittest.TestCase):
                 self.assertEqual(output.read(packager.MAIN_PATH), main)
                 self.assertEqual(output.read(packager.CLOUD_PATH), cloud)
                 self.assertEqual(output.read(packager.HOME_UI_PATH), home_ui)
+                self.assertEqual(
+                    output.read(
+                        packager.category_path(
+                            "ic_category_thumbnail_other.png"
+                        )
+                    ),
+                    b"category:ic_category_thumbnail_other.png",
+                )
                 home_info = output.getinfo(packager.HOME_UI_PATH)
                 self.assertEqual(
                     (home_info.external_attr >> 16) & 0xFFFF,
