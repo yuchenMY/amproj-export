@@ -688,20 +688,32 @@ static void AMHomeUIFindNativeAccountButton(
     }
 }
 
+static void AMHomeUIAppendUniqueController(
+    UIViewController *controller, NSMutableArray<UIViewController *> *controllers,
+    NSMutableSet<NSValue *> *visited) {
+    if (!controller) return;
+    NSValue *identity =
+        [NSValue valueWithPointer:(__bridge const void *)controller];
+    if ([visited containsObject:identity]) return;
+    [visited addObject:identity];
+    [controllers addObject:controller];
+}
+
 static void AMHomeUIApplyAvatarToNativeController(
     UIViewController *controller) {
     if (!controller) return;
     UIImage *avatar = AMHomeUILoadAvatar();
-    NSMutableArray<UIViewController *> *controllers = [NSMutableArray array];
-    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    NSMutableArray<UIViewController *> *homeControllers = [NSMutableArray array];
+    NSMutableSet<NSValue *> *visitedHomeControllers = [NSMutableSet set];
+    NSMutableArray<UIViewController *> *accountOwners = [NSMutableArray array];
+    NSMutableSet<NSValue *> *visitedAccountOwners = [NSMutableSet set];
     UIViewController *current = controller;
     for (NSUInteger depth = 0; current && depth < 16; depth++) {
-        NSValue *identity =
-            [NSValue valueWithPointer:(__bridge const void *)current];
-        if (AMHomeUIKindForClass(current.class) != AMHomeUIControllerKindNone &&
-            ![visited containsObject:identity]) {
-            [visited addObject:identity];
-            [controllers addObject:current];
+        AMHomeUIAppendUniqueController(current, accountOwners,
+                                       visitedAccountOwners);
+        if (AMHomeUIKindForClass(current.class) != AMHomeUIControllerKindNone) {
+            AMHomeUIAppendUniqueController(current, homeControllers,
+                                           visitedHomeControllers);
         }
         current = current.parentViewController;
     }
@@ -710,21 +722,26 @@ static void AMHomeUIApplyAvatarToNativeController(
         navigation.visibleViewController ?: controller,
         navigation.topViewController ?: controller,
     ]) {
-        NSValue *identity =
-            [NSValue valueWithPointer:(__bridge const void *)candidate];
+        AMHomeUIAppendUniqueController(candidate, accountOwners,
+                                       visitedAccountOwners);
         if (AMHomeUIKindForClass(candidate.class) !=
-                AMHomeUIControllerKindNone &&
-            ![visited containsObject:identity]) {
-            [visited addObject:identity];
-            [controllers addObject:candidate];
+                AMHomeUIControllerKindNone) {
+            AMHomeUIAppendUniqueController(candidate, homeControllers,
+                                           visitedHomeControllers);
         }
+    }
+    current = navigation;
+    for (NSUInteger depth = 0; current && depth < 16; depth++) {
+        AMHomeUIAppendUniqueController(current, accountOwners,
+                                       visitedAccountOwners);
+        current = current.parentViewController;
     }
     NSMutableArray<UIBarButtonItem *> *labeledBarItems = [NSMutableArray array];
     NSMutableArray<UIBarButtonItem *> *propertyBarItems = [NSMutableArray array];
     NSMutableArray<UIButton *> *propertyButtons = [NSMutableArray array];
     NSMutableSet<NSValue *> *visitedBarItems = [NSMutableSet set];
     NSMutableSet<NSValue *> *visitedPropertyControls = [NSMutableSet set];
-    for (UIViewController *candidate in controllers) {
+    for (UIViewController *candidate in accountOwners) {
         id accountControl = AMHomeUIAccountControlForController(candidate);
         if (accountControl) {
             NSValue *identity = [NSValue valueWithPointer:
@@ -737,6 +754,8 @@ static void AMHomeUIApplyAvatarToNativeController(
                     [propertyBarItems addObject:accountControl];
             }
         }
+    }
+    for (UIViewController *candidate in homeControllers) {
         NSArray<UIBarButtonItem *> *items =
             candidate.navigationItem.rightBarButtonItems ?: @[];
         for (UIBarButtonItem *item in items) {
@@ -752,17 +771,18 @@ static void AMHomeUIApplyAvatarToNativeController(
                 [labeledBarItems addObject:item];
         }
     }
-    UIBarButtonItem *barTarget = propertyBarItems.count == 1
-        ? propertyBarItems.firstObject
-        : (propertyBarItems.count == 0 && labeledBarItems.count == 1
-            ? labeledBarItems.firstObject : nil);
-    AMHomeUIApplyAvatarToBarItem(barTarget, avatar);
+    for (UIBarButtonItem *item in propertyBarItems) {
+        AMHomeUIApplyAvatarToBarItem(item, avatar);
+    }
+    if (propertyBarItems.count == 0 && labeledBarItems.count == 1) {
+        AMHomeUIApplyAvatarToBarItem(labeledBarItems.firstObject, avatar);
+    }
 
     UIWindow *window = controller.viewIfLoaded.window ?: AMHomeUIKeyWindow();
     if (!window) return;
     NSMutableArray<UIView *> *roots = [NSMutableArray array];
     NSMutableSet<NSValue *> *visitedRoots = [NSMutableSet set];
-    for (UIViewController *candidate in controllers) {
+    for (UIViewController *candidate in homeControllers) {
         UIView *view = candidate.viewIfLoaded;
         if (!view || view.window != window) continue;
         NSValue *identity =
@@ -799,11 +819,12 @@ static void AMHomeUIApplyAvatarToNativeController(
         if (AMHomeUIStringLooksLikeAccount(label))
             [labeledButtons addObject:button];
     }
-    UIButton *buttonTarget = propertyButtons.count == 1
-        ? propertyButtons.firstObject
-        : (propertyButtons.count == 0 && labeledButtons.count == 1
-            ? labeledButtons.firstObject : nil);
-    AMHomeUIApplyAvatarToButton(buttonTarget, avatar);
+    for (UIButton *button in propertyButtons) {
+        AMHomeUIApplyAvatarToButton(button, avatar);
+    }
+    if (propertyButtons.count == 0 && labeledButtons.count == 1) {
+        AMHomeUIApplyAvatarToButton(labeledButtons.firstObject, avatar);
+    }
 }
 
 static void AMHomeUIViewDidAppear(id self, SEL selector, BOOL animated) {

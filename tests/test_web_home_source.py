@@ -124,8 +124,15 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("navigation.visibleViewController", SOURCE)
         self.assertIn('NSSelectorFromString(@"accountButton")', SOURCE)
         self.assertIn("method_copyReturnType", SOURCE)
-        self.assertIn("propertyButtons.count == 1", SOURCE)
-        self.assertIn("propertyBarItems.count == 1", SOURCE)
+        self.assertIn("accountOwners", SOURCE)
+        self.assertIn("homeControllers", SOURCE)
+        self.assertIn(
+            "for (UIViewController *candidate in accountOwners)", SOURCE
+        )
+        self.assertIn("for (UIButton *button in propertyButtons)", SOURCE)
+        self.assertIn("for (UIBarButtonItem *item in propertyBarItems)", SOURCE)
+        self.assertIn("propertyButtons.count == 0", SOURCE)
+        self.assertIn("propertyBarItems.count == 0", SOURCE)
         self.assertIn("labeledBarItems.count == 1", SOURCE)
         self.assertIn("labeledButtons.count == 1", SOURCE)
         self.assertNotIn("barItems.count == 1", SOURCE)
@@ -146,10 +153,24 @@ class WebHomeSourceTests(unittest.TestCase):
         native_avatar = SOURCE.split(
             "static void AMHomeUIApplyAvatarToNativeController", 1
         )[1].split("static void AMHomeUIViewDidAppear", 1)[0]
+        ancestor_walk = native_avatar.split(
+            "UIViewController *current = controller;", 1
+        )[1].split("UINavigationController *navigation", 1)[0]
+        self.assertLess(
+            ancestor_walk.index("accountOwners"),
+            ancestor_walk.index("AMHomeUIKindForClass"),
+        )
         self.assertIn("AMHomeUIStringLooksLikeAccount(label)", native_avatar)
         self.assertIn("labeledButtons.count == 1", native_avatar)
         self.assertIn("labeledBarItems.count == 1", native_avatar)
-        self.assertIn("propertyButtons.count == 1", native_avatar)
+        self.assertIn("propertyButtons.count == 0", native_avatar)
+        self.assertIn("propertyBarItems.count == 0", native_avatar)
+        self.assertIn(
+            "for (UIViewController *candidate in accountOwners)", native_avatar
+        )
+        self.assertIn(
+            "for (UIViewController *candidate in homeControllers)", native_avatar
+        )
         self.assertNotIn("uniqueButtons.count == 1", native_avatar)
         self.assertNotIn("items.count == 1", native_avatar)
         self.assertIn('@"login"', SOURCE)
