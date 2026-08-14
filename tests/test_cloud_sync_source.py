@@ -558,6 +558,46 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("[self.manager applyAccountProfile:profile]", CLOUD)
         self.assertIn("[self clearAccountAvatar]", CLOUD)
 
+    def test_home_ui_load_failure_is_isolated_after_launch(self):
+        loader = CLOUD.split("static void AMCloudLoadHomeUI(void)", 1)[1]
+        loader = loader.split("static void AMCloudScheduleHomeUILoad", 1)[0]
+        self.assertIn("if (![NSThread isMainThread])", loader)
+        self.assertIn("NSBundle.mainBundle.privateFrameworksPath", loader)
+        self.assertIn("RTLD_NOW | RTLD_LOCAL", loader)
+        self.assertIn('dlsym(handle, "AMHomeUIInstall")', loader)
+        self.assertIn("AMCloudHomeUIHandle = handle", loader)
+        try_index = loader.index("@try")
+        catch_index = loader.index("@catch (NSException *exception)")
+        for operation in (
+            "NSBundle.mainBundle.privateFrameworksPath",
+            "dlopen(homeUIPath.fileSystemRepresentation",
+            'dlsym(handle, "AMHomeUIInstall")',
+            "install();",
+        ):
+            operation_index = loader.index(operation)
+            self.assertGreater(operation_index, try_index)
+            self.assertLess(operation_index, catch_index)
+        self.assertNotIn("dlclose(", loader)
+        for event in (
+            "cloud.home_ui.missing",
+            "cloud.home_ui.load_begin",
+            "cloud.home_ui.load_failed",
+            "cloud.home_ui.load_succeeded",
+            "cloud.home_ui.symbol_failed",
+            "cloud.home_ui.symbol_resolved",
+            "cloud.home_ui.install_begin",
+            "cloud.home_ui.installed",
+            "cloud.home_ui.exception",
+        ):
+            self.assertIn(f'@"{event}"', loader)
+        install = CLOUD.split("void AMCloudSyncInstall(", 1)[1]
+        install = install.split("void AMCloudAuthorizeFeature", 1)[0]
+        self.assertIn("AMCloudScheduleHomeUILoad();", install)
+        self.assertLess(
+            install.index("installWithImportHandler"),
+            install.index("AMCloudScheduleHomeUILoad();"),
+        )
+
     def test_account_route_emits_immediately_flushable_diagnostic_stages(self):
         self.assertIn("emitCriticalEvent", DEBUG_HEADER)
         self.assertIn("- (void)emitCriticalEvent", DEBUG_SOURCE)
@@ -591,11 +631,15 @@ class CloudSyncSourceTests(unittest.TestCase):
             "cloud.account.view_did_appear",
         ):
             self.assertIn(f'@"{event}"', CLOUD)
-        catch_block = CLOUD.split("} @catch (NSException *exception)", 1)[1].split(
-            "- (void)beginUploadFile", 1
+        manager = CLOUD.split("@implementation AMCloudManager", 1)[1]
+        account_route = manager.split("- (void)showAccountFrom:", 1)[1].split(
+            "- (void)handleHomeAccountNotification", 1
         )[0]
-        self.assertIn('AMCloudDiagnostic(@"cloud.account.exception"', catch_block)
-        self.assertNotIn("showError:", catch_block)
+        self.assertIn("} @catch (NSException *exception)", account_route)
+        self.assertIn(
+            'AMCloudDiagnostic(@"cloud.account.exception"', account_route
+        )
+        self.assertNotIn("showError:", account_route)
 
     def test_export_share_exposes_cloud_upload_activity(self):
         self.assertIn("AMCloudSyncUploadActivities", HEADER)

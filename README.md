@@ -145,9 +145,11 @@ AMProjExport/AMHomeUI.dylib
 `AMProjExportCloud.dylib`。它负责将 `https://amhome.meowcr.cn/home`
 挂载到 Alight Motion 的 `HomeVC`/`FeedVC`，并通过共享头像缓存和通知
 与 Cloud 账户保持同步。最终 IPA 需要同时包含
-`Frameworks/AMProjExportCloud.dylib` 和 `Frameworks/AMHomeUI.dylib`，主程序分别
-保留唯一的 Cloud 强加载和 HomeUI 弱加载。HomeUI 缺失或签名器漏放时会停用主页
-而不是阻止应用启动。因为新增了第六个 dylib，包体必须重新签名安装。
+`Frameworks/AMProjExportCloud.dylib` 和 `Frameworks/AMHomeUI.dylib`。主程序只保留
+既有的 Cloud 强加载，不添加任何 HomeUI 加载命令；Cloud 会在应用完成启动后通过
+`dlopen`/`dlsym` 安装 HomeUI。文件缺失、装载失败、符号缺失或安装异常都会写入
+诊断日志并停用主页，不再让 HomeUI 成为主程序启动依赖。因为新增了第六个 dylib，
+包体仍必须重新签名安装。
 
 在已有全分类图和编辑器按钮的 IPA 上生成待签包：
 
@@ -159,9 +161,10 @@ python .\package_editor_button_ipa.py `
   <add_layer_button.png> <category_image_directory>
 ```
 
-打包器会新增或替换 `AMHomeUI.dylib`，只在 Mach-O header 内追加一条
-HomeUI 弱加载命令，以 `0755` 权限写入动态库，替换指定按钮和 12 张分类图，
-并校验其他 IPA 成员的字节不变。
+打包器会新增或替换 `AMHomeUI.dylib`，以 `0755` 权限写入动态库，替换指定按钮
+和 12 张分类图，并强制校验主程序逐字节不变。输入主程序如残留任何 HomeUI
+加载命令会直接拒绝打包；HomeUI 如包含 `__mod_init_func` / `__init_offsets`
+初始化段或未导出 `_AMHomeUIInstall` 也会拒绝，避免旧包重新引入启动闪退风险。
 
 ## 从自有 6.2.55 (862) 底包生成唯一 Direct Cloud 包
 

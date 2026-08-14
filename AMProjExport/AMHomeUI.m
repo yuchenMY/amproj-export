@@ -767,14 +767,14 @@ static void AMHomeUIViewDidAppear(id self, SEL selector, BOOL animated) {
 }
 
 static void AMHomeUIInstallControllerHooks(void) {
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return;
-    Class __unsafe_unretained *classes =
-        (__unsafe_unretained Class *)calloc((size_t)count, sizeof(Class));
-    if (!classes) return;
-    count = objc_getClassList(classes, count);
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    if (!classes || count == 0) {
+        free(classes);
+        return;
+    }
     SEL selector = @selector(viewDidAppear:);
-    for (int index = 0; index < count; index++) {
+    for (unsigned int index = 0; index < count; index++) {
         Class cls = classes[index];
         if (AMHomeUIKindForClass(cls) == AMHomeUIControllerKindNone ||
             objc_getAssociatedObject((id)cls, AMHomeUIOriginalIMPKey)) {
@@ -930,14 +930,21 @@ static BOOL AMHomeUIShowFallback(void) {
 }
 
 static void AMHomeUIAttachAttempt(NSUInteger attempt) {
-    AMHomeUIInstallControllerHooks();
-    if (AMHomeUIAttach()) {
+    @try {
+        AMHomeUIInstallControllerHooks();
+        if (AMHomeUIAttach()) {
+            AMHomeUIAttachLoopRunning = NO;
+            return;
+        }
+        if (attempt >= 60) {
+            AMHomeUIShowFallback();
+            AMHomeUIAttachLoopRunning = NO;
+            return;
+        }
+    } @catch (NSException *exception) {
         AMHomeUIAttachLoopRunning = NO;
-        return;
-    }
-    if (attempt >= 60) {
-        AMHomeUIShowFallback();
-        AMHomeUIAttachLoopRunning = NO;
+        NSLog(@"[AMHomeUI] attach attempt failed: %@ %@", exception.name,
+              exception.reason ?: @"");
         return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
@@ -961,7 +968,6 @@ static void AMHomeUIRefreshAvatarEverywhere(void) {
 
 static void AMHomeUIActivateSafely(void) {
     @try {
-        AMHomeUIInstallControllerHooks();
         AMHomeUIScheduleAttachAttempts();
         AMHomeUIRefreshAvatarEverywhere();
     } @catch (NSException *exception) {
@@ -983,12 +989,6 @@ void AMHomeUIInstall(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         [NSNotificationCenter.defaultCenter
-            addObserverForName:UIApplicationDidFinishLaunchingNotification
-                        object:nil queue:NSOperationQueue.mainQueue
-                    usingBlock:^(__unused NSNotification *notification) {
-            AMHomeUIScheduleActivation(1.5);
-        }];
-        [NSNotificationCenter.defaultCenter
             addObserverForName:UIApplicationDidBecomeActiveNotification
                         object:nil queue:NSOperationQueue.mainQueue
                     usingBlock:^(__unused NSNotification *notification) {
@@ -1005,12 +1005,7 @@ void AMHomeUIInstall(void) {
                 AMHomeUIRefreshAvatarEverywhere();
             }];
         }
+        // 动态加载时应用通常已经激活，显式执行首次挂载。
+        AMHomeUIScheduleActivation(0.35);
     });
-}
-
-__attribute__((constructor))
-static void AMHomeUIInitialize(void) {
-    @autoreleasepool {
-        AMHomeUIInstall();
-    }
 }

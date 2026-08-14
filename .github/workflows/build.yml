@@ -70,6 +70,10 @@ jobs:
           verify_cloud_stability_contract(
               Path("AMProjExport/AMProjExportCloud.dylib").read_bytes()
           )
+          cloud_dependencies = subprocess.check_output(
+              ["otool", "-L", "AMProjExport/AMProjExportCloud.dylib"], text=True
+          )
+          assert "AMHomeUI.dylib" not in cloud_dependencies
           print("verified AMProjExportCloud.dylib: v44 stability contract")
           loader = verify_dylib_architecture("AMProjExport/AMMeowLoader.dylib")
           symbols = subprocess.check_output(
@@ -82,6 +86,12 @@ jobs:
               ["nm", "-gU", "AMProjExport/AMHomeUI.dylib"], text=True
           )
           assert "_AMHomeUIInstall" in home_symbols
+          assert "_AMHomeUIInstall" in home_ui["external_defined_symbols"]
+          initializer_sections = [
+              section for section in home_ui["sections"]
+              if section["type"] in (0x9, 0x16)
+          ]
+          assert not initializer_sections, initializer_sections
           print(f"verified AMHomeUI.dylib: arm64 MH_DYLIB, {home_ui['ncmds']} load commands")
           PY
 

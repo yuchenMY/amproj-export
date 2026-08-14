@@ -22,16 +22,18 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("-framework CoreGraphics", home_rule)
         self.assertIn("-install_name @rpath/AMHomeUI.dylib", home_rule)
 
-    def test_home_ui_self_installs_without_cloud_linkage(self):
-        self.assertIn("__attribute__((constructor))", SOURCE)
-        self.assertIn("AMHomeUIInstall();", SOURCE)
-        self.assertNotIn(
-            "dispatch_async(dispatch_get_main_queue(), activate)", SOURCE
-        )
-        self.assertIn("UIApplicationDidFinishLaunchingNotification", SOURCE)
-        self.assertIn("AMHomeUIScheduleActivation(1.5)", SOURCE)
+    def test_home_ui_is_explicitly_loaded_after_cloud_bootstrap(self):
+        self.assertNotIn("__attribute__((constructor))", SOURCE)
+        self.assertIn("void AMHomeUIInstall(void)", SOURCE)
+        self.assertNotIn("UIApplicationDidFinishLaunchingNotification", SOURCE)
+        self.assertIn("AMHomeUIScheduleActivation(0.35)", SOURCE)
         self.assertNotIn('#import "AMHomeUI.h"', CLOUD_SYNC)
-        self.assertNotIn("AMHomeUIInstall();", CLOUD_SYNC)
+        self.assertIn("#import <dlfcn.h>", CLOUD_SYNC)
+        self.assertIn("dlopen(homeUIPath.fileSystemRepresentation", CLOUD_SYNC)
+        self.assertIn("RTLD_NOW | RTLD_LOCAL", CLOUD_SYNC)
+        self.assertIn('dlsym(handle, "AMHomeUIInstall")', CLOUD_SYNC)
+        self.assertIn("AMCloudScheduleHomeUILoad();", CLOUD_SYNC)
+        self.assertNotIn("dlclose(", CLOUD_SYNC)
         self.assertNotIn("AMWebHome", CLOUD_SYNC)
 
     def test_web_message_action_is_type_checked_before_string_dispatch(self):
@@ -48,9 +50,19 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("method_getNumberOfArguments(method) != 3", SOURCE)
         self.assertIn("AMHomeUIClassIsViewController", SOURCE)
         self.assertNotIn("[cls isSubclassOfClass:UIViewController.class]", SOURCE)
+        self.assertIn("objc_copyClassList(&count)", SOURCE)
+        self.assertNotIn("objc_getClassList(", SOURCE)
         self.assertIn("dispatch_async(dispatch_get_main_queue(), ^{", SOURCE)
         self.assertIn("AMHomeUIAttachToController", SOURCE)
         self.assertIn("AMHomeUIEmbeddedController.view.hidden = NO;", SOURCE)
+
+    def test_every_attach_retry_has_exception_protection(self):
+        attempt = SOURCE.split(
+            "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
+        )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
+        self.assertIn("@try", attempt)
+        self.assertIn("@catch (NSException *exception)", attempt)
+        self.assertIn("AMHomeUIAttachAttempt(attempt + 1)", attempt)
 
     def test_missing_native_home_has_full_screen_fallback(self):
         self.assertIn("AMHomeUIShowFallback", SOURCE)
@@ -94,6 +106,9 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn('Path("AMProjExport/AMHomeUI.dylib")', WORKFLOW)
         self.assertIn("AMProjExport/AMHomeUI.dylib", WORKFLOW)
         self.assertIn('"_AMHomeUIInstall"', WORKFLOW)
+        self.assertIn('["otool", "-L", "AMProjExport/AMProjExportCloud.dylib"]', WORKFLOW)
+        self.assertIn('section["type"] in (0x9, 0x16)', WORKFLOW)
+        self.assertIn('home_ui["external_defined_symbols"]', WORKFLOW)
 
 
 if __name__ == "__main__":

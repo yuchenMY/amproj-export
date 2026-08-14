@@ -1,10 +1,18 @@
 import struct
+import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
 import inject_dylib
 import package_editor_button_ipa as packager
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PACKAGER_SOURCE = (ROOT / "package_editor_button_ipa.py").read_text(
+    encoding="utf-8"
+)
 
 
 def make_dylib_command(command, name):
@@ -72,189 +80,228 @@ def make_main(load_commands=(), section_payload=b"section-payload"):
     )
 
 
+def make_home_ui_dylib(
+    install_name="@rpath/AMHomeUI.dylib",
+    section_name="__text",
+    section_type=0,
+    symbol_name="_AMHomeUIInstall",
+    include_url=True,
+):
+    section_offset = 0x1000
+    section_size = 8
+    symbol_offset = 0x1010
+    string_table = b"\0" + symbol_name.encode("ascii") + b"\0"
+    string_offset = symbol_offset + 16
+    home_url = b"https://amhome.meowcr.cn/home\0" if include_url else b""
+
+    segment_size = 152
+    segment = struct.pack(
+        "<II16sQQQQIIII",
+        inject_dylib.LC_SEGMENT_64,
+        segment_size,
+        b"__TEXT" + bytes(10),
+        0x100000000,
+        0x2000,
+        0,
+        0x2000,
+        7,
+        5,
+        1,
+        0,
+    )
+    section = struct.pack(
+        "<16s16sQQIIIIIIII",
+        section_name.encode("ascii").ljust(16, b"\0"),
+        b"__TEXT" + bytes(10),
+        0x100000000 + section_offset,
+        section_size,
+        section_offset,
+        2,
+        0,
+        0,
+        section_type,
+        0,
+        0,
+        0,
+    )
+    identifier = make_dylib_command(inject_dylib.LC_ID_DYLIB, install_name)
+    symtab = struct.pack(
+        "<IIIIII",
+        inject_dylib.LC_SYMTAB,
+        24,
+        symbol_offset,
+        1,
+        string_offset,
+        len(string_table),
+    )
+    commands = segment + section + identifier + symtab
+    header = struct.pack(
+        "<IIIIIIII",
+        0xFEEDFACF,
+        inject_dylib.CPU_TYPE_ARM64,
+        0,
+        inject_dylib.MH_DYLIB,
+        3,
+        len(commands),
+        0,
+        0,
+    )
+    prefix = header + commands
+    if len(prefix) > section_offset:
+        raise AssertionError("synthetic Home UI load commands exceed section offset")
+
+    total_size = string_offset + len(string_table) + len(home_url)
+    data = bytearray(max(total_size, section_offset + section_size))
+    data[: len(prefix)] = prefix
+    data[symbol_offset : symbol_offset + 16] = struct.pack(
+        "<IBBHQ",
+        1,
+        inject_dylib.N_EXT | inject_dylib.N_SECT,
+        1,
+        0,
+        0x100000000 + section_offset,
+    )
+    data[string_offset : string_offset + len(string_table)] = string_table
+    if home_url:
+        url_offset = string_offset + len(string_table)
+        data[url_offset : url_offset + len(home_url)] = home_url
+    return bytes(data)
+
+
 class EditorHomePackageTests(unittest.TestCase):
     def test_home_ui_verifier_requires_expected_install_name_and_url(self):
-        binary = b"prefixhttps://amhome.meowcr.cn/homesuffix"
-        with mock.patch.object(
-            inject_dylib,
-            "verify_dylib_architecture",
-            return_value={
-                "id_dylibs": ["@rpath/AMHomeUI.dylib"]
-            },
-        ) as verify:
-            packager.verify_home_ui_binary("AMHomeUI.dylib", binary)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "AMHomeUI.dylib"
 
-            verify.return_value = {
-                "id_dylibs": ["@rpath/Wrong.dylib"]
-            }
+            binary = make_home_ui_dylib()
+            path.write_bytes(binary)
+            packager.verify_home_ui_binary(path, binary)
+
+            binary = make_home_ui_dylib(install_name="@rpath/Wrong.dylib")
+            path.write_bytes(binary)
             with self.assertRaisesRegex(RuntimeError, "install name"):
-                packager.verify_home_ui_binary("AMHomeUI.dylib", binary)
+                packager.verify_home_ui_binary(path, binary)
 
-            verify.return_value = {
-                "id_dylibs": ["@rpath/AMHomeUI.dylib"]
-            }
+            binary = make_home_ui_dylib(include_url=False)
+            path.write_bytes(binary)
             with self.assertRaisesRegex(RuntimeError, "AutFeng home URL"):
-                packager.verify_home_ui_binary("AMHomeUI.dylib", b"wrong")
+                packager.verify_home_ui_binary(path, binary)
 
-    def test_patch_main_adds_one_home_ui_load_and_preserves_payload(self):
-        first_section_offset = 0x1000
-        section_payload = b"section-payload"
-        main = make_main(section_payload=section_payload)
-        source_info = inject_dylib.parse_macho_data(main)
+            binary = make_home_ui_dylib(symbol_name="_WrongInstall")
+            path.write_bytes(binary)
+            with self.assertRaisesRegex(RuntimeError, "export _AMHomeUIInstall"):
+                packager.verify_home_ui_binary(path, binary)
 
-        patched = packager.patch_main_with_home_ui(main)
-        info = inject_dylib.parse_macho_data(patched)
-        command = next(
-            command
-            for command in info["dylib_load_commands"]
-            if command["name"] == packager.HOME_UI_LOAD
+    def test_home_ui_verifier_rejects_both_initializer_section_formats(self):
+        cases = (
+            ("__mod_init_func", inject_dylib.S_MOD_INIT_FUNC_POINTERS),
+            ("__init_offsets", inject_dylib.S_INIT_FUNC_OFFSETS),
         )
-
-        self.assertEqual(len(patched), len(main))
-        self.assertEqual(info["ncmds"], source_info["ncmds"] + 1)
-        self.assertEqual(
-            info["sizeofcmds"],
-            source_info["sizeofcmds"]
-            + packager.dylib_command_size(packager.HOME_UI_LOAD),
-        )
-        self.assertEqual(
-            command["cmdsize"], packager.dylib_command_size(packager.HOME_UI_LOAD)
-        )
-        self.assertEqual(command["cmd"], inject_dylib.LC_LOAD_WEAK_DYLIB)
-        self.assertEqual(info["load_dylibs"], [])
-        self.assertEqual(info["all_load_dylibs"], [packager.HOME_UI_LOAD])
-        self.assertEqual(patched[first_section_offset:], section_payload)
-
-    def test_source_validation_accepts_only_one_weak_home_ui_load(self):
-        weak = make_dylib_command(
-            inject_dylib.LC_LOAD_WEAK_DYLIB, packager.HOME_UI_LOAD
-        )
-        empty_info = inject_dylib.parse_macho_data(make_main())
-        weak_info = inject_dylib.parse_macho_data(make_main((weak,)))
-
-        self.assertFalse(
-            packager.validate_home_ui_loads(
-                empty_info, "source main", allow_missing=True
-            )
-        )
-        self.assertTrue(
-            packager.validate_home_ui_loads(
-                weak_info, "source main", allow_missing=True
-            )
-        )
-
-    def test_source_validation_rejects_non_weak_and_duplicate_loads(self):
-        conflicting_commands = (
-            inject_dylib.LC_LOAD_DYLIB,
-            inject_dylib.LC_REEXPORT_DYLIB,
-            inject_dylib.LC_LAZY_LOAD_DYLIB,
-            inject_dylib.LC_LOAD_UPWARD_DYLIB,
-        )
-        for command in conflicting_commands:
-            with self.subTest(command=command):
-                load = make_dylib_command(command, packager.HOME_UI_LOAD)
-                info = inject_dylib.parse_macho_data(make_main((load,)))
-                with self.assertRaisesRegex(RuntimeError, "exactly one weak"):
-                    packager.validate_home_ui_loads(
-                        info, "source main", allow_missing=True
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "AMHomeUI.dylib"
+            for section_name, section_type in cases:
+                with self.subTest(section_name=section_name):
+                    binary = make_home_ui_dylib(
+                        section_name=section_name,
+                        section_type=section_type,
                     )
+                    path.write_bytes(binary)
+                    with self.assertRaisesRegex(
+                        RuntimeError, "must not contain initializer sections"
+                    ):
+                        packager.verify_home_ui_binary(path, binary)
 
-        weak = make_dylib_command(
-            inject_dylib.LC_LOAD_WEAK_DYLIB, packager.HOME_UI_LOAD
+    def test_main_validation_accepts_no_home_ui_load(self):
+        info = inject_dylib.parse_macho_data(make_main())
+        packager.ensure_no_home_ui_loads(info, "source main")
+
+    def test_main_validation_rejects_every_home_ui_load_kind_and_path(self):
+        cases = (
+            (inject_dylib.LC_LOAD_DYLIB,
+             "@executable_path/Frameworks/AMHomeUI.dylib"),
+            (inject_dylib.LC_LOAD_WEAK_DYLIB, "@rpath/AMHomeUI.dylib"),
+            (inject_dylib.LC_REEXPORT_DYLIB, "/tmp/AMHomeUI.dylib"),
+            (inject_dylib.LC_LAZY_LOAD_DYLIB, "@loader_path/AMHomeUI.dylib"),
+            (inject_dylib.LC_LOAD_UPWARD_DYLIB, "AMHomeUI.dylib"),
         )
-        duplicate_info = inject_dylib.parse_macho_data(make_main((weak, weak)))
-        with self.assertRaisesRegex(RuntimeError, "exactly one weak"):
-            packager.validate_home_ui_loads(
-                duplicate_info, "source main", allow_missing=True
-            )
+        for command, name in cases:
+            with self.subTest(command=command, name=name):
+                load = make_dylib_command(command, name)
+                info = inject_dylib.parse_macho_data(make_main((load,)))
+                with self.assertRaisesRegex(
+                    RuntimeError, "must not contain an AMHomeUI load command"
+                ):
+                    packager.ensure_no_home_ui_loads(info, "source main")
 
-    def test_patch_main_rejects_an_existing_strong_home_ui_load(self):
-        strong = make_dylib_command(
-            inject_dylib.LC_LOAD_DYLIB, packager.HOME_UI_LOAD
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "LC_LOAD_DYLIB"):
-            packager.patch_main_with_home_ui(make_main((strong,)))
-
-    def test_patch_main_rejects_an_existing_weak_home_ui_load(self):
-        weak = make_dylib_command(
-            inject_dylib.LC_LOAD_WEAK_DYLIB, packager.HOME_UI_LOAD
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "already weakly loads"):
-            packager.patch_main_with_home_ui(make_main((weak,)))
+    def test_packager_has_no_main_injection_path(self):
+        self.assertNotIn("insert_load_dylib", PACKAGER_SOURCE)
+        self.assertNotIn("LC_LOAD_WEAK_DYLIB", PACKAGER_SOURCE)
+        self.assertNotIn("patch_main_with_home_ui", PACKAGER_SOURCE)
+        self.assertIn('if output_main != source_main:', PACKAGER_SOURCE)
 
     def test_new_home_ui_zip_member_is_executable(self):
         info = packager.new_zip_info(packager.HOME_UI_PATH, executable=True)
         self.assertEqual((info.external_attr >> 16) & 0xFFFF, 0o100755)
 
-    def test_patch_main_rejects_file_length_changes(self):
-        real_insert = inject_dylib.insert_load_dylib
+    def test_package_preserves_main_and_adds_runtime_home_ui(self):
+        main = make_main()
+        cloud = b"cloud-dylib"
+        home_ui = b"home-ui-dylib"
+        button = b"button-image"
 
-        def insert_and_extend(main_path, dylib_path):
-            result = real_insert(main_path, dylib_path)
-            path = Path(main_path)
-            path.write_bytes(path.read_bytes() + b"\0")
-            return result
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_path = root / "source.ipa"
+            output_path = root / "output.ipa"
+            cloud_path = root / "AMProjExportCloud.dylib"
+            home_ui_path = root / "AMHomeUI.dylib"
+            button_path = root / "button.png"
+            categories = root / "categories"
+            categories.mkdir()
+            cloud_path.write_bytes(cloud)
+            home_ui_path.write_bytes(home_ui)
+            button_path.write_bytes(button)
+            for name in packager.CATEGORY_NAMES:
+                (categories / name).write_bytes(("category:" + name).encode())
 
-        with mock.patch.object(
-            inject_dylib, "insert_load_dylib", side_effect=insert_and_extend
-        ), self.assertRaisesRegex(RuntimeError, "executable length"):
-            packager.patch_main_with_home_ui(make_main())
+            with zipfile.ZipFile(source_path, "w") as source:
+                source.writestr(packager.MAIN_PATH, main)
+                source.writestr(packager.CLOUD_PATH, b"old-cloud")
+                source.writestr("Payload/AlightMotion.app/Info.plist", b"plist")
+                for name in packager.CATEGORY_NAMES:
+                    source.writestr(
+                        packager.category_path(name),
+                        ("old:" + name).encode(),
+                    )
 
-    def test_patch_main_rejects_more_than_one_added_command(self):
-        real_insert = inject_dylib.insert_load_dylib
+            with (
+                mock.patch.object(packager.direct, "verify_cloud_runtime_version"),
+                mock.patch.object(packager.direct, "verify_cloud_stability_contract"),
+                mock.patch.object(packager.direct, "prepare_cloud"),
+                mock.patch.object(packager, "verify_home_ui_binary"),
+            ):
+                packager.package(
+                    source_path,
+                    output_path,
+                    cloud_path,
+                    home_ui_path,
+                    button_path,
+                    categories,
+                )
 
-        def insert_with_extra_command(main_path, dylib_path):
-            result = real_insert(main_path, dylib_path)
-            path = Path(main_path)
-            data = bytearray(path.read_bytes())
-            info = inject_dylib.parse_macho_data(data)
-            command = make_dylib_command(
-                inject_dylib.LC_LOAD_DYLIB, "@rpath/Unexpected.dylib"
-            )
-            start = info["load_commands_end"]
-            data[start : start + len(command)] = command
-            struct.pack_into("<I", data, 16, info["ncmds"] + 1)
-            struct.pack_into(
-                "<I", data, 20, info["sizeofcmds"] + len(command)
-            )
-            path.write_bytes(data)
-            return result
-
-        with mock.patch.object(
-            inject_dylib,
-            "insert_load_dylib",
-            side_effect=insert_with_extra_command,
-        ), self.assertRaisesRegex(RuntimeError, "exactly one load command"):
-            packager.patch_main_with_home_ui(make_main())
-
-    def test_patch_main_rejects_an_unexpected_home_ui_command_size(self):
-        real_insert = inject_dylib.insert_load_dylib
-
-        def insert_with_oversized_command(main_path, dylib_path):
-            result = real_insert(main_path, dylib_path)
-            path = Path(main_path)
-            data = bytearray(path.read_bytes())
-            info = inject_dylib.parse_macho_data(data)
-            command = next(
-                command
-                for command in info["dylib_load_commands"]
-                if command["name"] == packager.HOME_UI_LOAD
-            )
-            struct.pack_into(
-                "<I", data, command["offset"] + 4, command["cmdsize"] + 8
-            )
-            struct.pack_into("<I", data, 20, info["sizeofcmds"] + 8)
-            path.write_bytes(data)
-            return result
-
-        with mock.patch.object(
-            inject_dylib,
-            "insert_load_dylib",
-            side_effect=insert_with_oversized_command,
-        ), self.assertRaisesRegex(RuntimeError, "unexpected size"):
-            packager.patch_main_with_home_ui(make_main())
+            with zipfile.ZipFile(output_path) as output:
+                self.assertEqual(output.read(packager.MAIN_PATH), main)
+                self.assertEqual(output.read(packager.CLOUD_PATH), cloud)
+                self.assertEqual(output.read(packager.HOME_UI_PATH), home_ui)
+                home_info = output.getinfo(packager.HOME_UI_PATH)
+                self.assertEqual(
+                    (home_info.external_attr >> 16) & 0xFFFF,
+                    0o100755,
+                )
+                info = inject_dylib.parse_macho_data(
+                    output.read(packager.MAIN_PATH)
+                )
+                packager.ensure_no_home_ui_loads(info, "output main")
 
 
 if __name__ == "__main__":

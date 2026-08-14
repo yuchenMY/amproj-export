@@ -30,6 +30,7 @@ DEBUG_MODES = ("observe", "placeholder", "full")
 CPU_TYPE_ARM64 = 0x0100000C
 MH_EXECUTE = 0x2
 MH_DYLIB = 0x6
+LC_SYMTAB = 0x2
 LC_LOAD_DYLIB = 0x0C
 LC_ID_DYLIB = 0x0D
 LC_LOAD_WEAK_DYLIB = 0x80000018
@@ -38,6 +39,15 @@ LC_UUID = 0x1B
 LC_REEXPORT_DYLIB = 0x8000001F
 LC_LAZY_LOAD_DYLIB = 0x20
 LC_LOAD_UPWARD_DYLIB = 0x80000023
+SECTION_TYPE = 0x000000FF
+S_MOD_INIT_FUNC_POINTERS = 0x9
+S_INIT_FUNC_OFFSETS = 0x16
+N_STAB = 0xE0
+N_PEXT = 0x10
+N_TYPE = 0x0E
+N_UNDF = 0x00
+N_SECT = 0x0E
+N_EXT = 0x01
 DYLIB_LOAD_COMMAND_NAMES = {
     LC_LOAD_DYLIB: "LC_LOAD_DYLIB",
     LC_LOAD_WEAK_DYLIB: "LC_LOAD_WEAK_DYLIB",
@@ -99,6 +109,8 @@ def parse_macho_data(data, label="<memory>"):
     dylib_load_commands = []
     id_dylibs = []
     macho_uuid = None
+    sections = []
+    symtab = None
     for index in range(ncmds):
         if offset + 8 > commands_end:
             raise ValueError(f"Invalid load command {index} at 0x{offset:x}: {label}")
@@ -114,14 +126,44 @@ def parse_macho_data(data, label="<memory>"):
             if section_offset + (nsects * 80) > offset + cmdsize:
                 raise ValueError(f"Invalid section table at 0x{offset:x}: {label}")
             for _ in range(nsects):
+                section_name_data = data[section_offset : section_offset + 16]
+                segment_name_data = data[section_offset + 16 : section_offset + 32]
+                try:
+                    section_name = section_name_data.split(b"\x00", 1)[0].decode(
+                        "ascii"
+                    )
+                    segment_name = segment_name_data.split(b"\x00", 1)[0].decode(
+                        "ascii"
+                    )
+                except UnicodeDecodeError as error:
+                    raise ValueError(
+                        f"Invalid Mach-O section name at 0x{section_offset:x}: {label}"
+                    ) from error
+                section_size = struct.unpack_from("<Q", data, section_offset + 40)[0]
                 file_offset = struct.unpack_from("<I", data, section_offset + 48)[0]
+                section_flags = struct.unpack_from("<I", data, section_offset + 64)[0]
                 if file_offset:
                     if file_offset > len(data):
                         raise ValueError(
                             f"Mach-O section starts beyond EOF at 0x{file_offset:x}: {label}"
                         )
                     first_section_offset = min(first_section_offset, file_offset)
+                sections.append(
+                    {
+                        "section": section_name,
+                        "segment": segment_name,
+                        "size": section_size,
+                        "offset": file_offset,
+                        "flags": section_flags,
+                        "type": section_flags & SECTION_TYPE,
+                    }
+                )
                 section_offset += 80
+
+        if cmd == LC_SYMTAB:
+            if cmdsize != 24 or symtab is not None:
+                raise ValueError(f"Invalid LC_SYMTAB at 0x{offset:x}: {label}")
+            symtab = struct.unpack_from("<IIII", data, offset + 8)
 
         if cmd in DYLIB_LOAD_COMMAND_NAMES or cmd == LC_ID_DYLIB:
             command_name = (
@@ -180,6 +222,41 @@ def parse_macho_data(data, label="<memory>"):
     if first_section_offset < commands_end:
         raise ValueError(f"Mach-O load commands overlap the first section: {label}")
 
+    external_defined_symbols = []
+    if symtab is not None:
+        symbol_offset, symbol_count, string_offset, string_size = symtab
+        if (
+            symbol_offset + symbol_count * 16 > len(data)
+            or string_offset + string_size > len(data)
+        ):
+            raise ValueError(f"Mach-O symbol table is out of range: {label}")
+        for symbol_index in range(symbol_count):
+            entry_offset = symbol_offset + symbol_index * 16
+            string_index, symbol_type, section_index, _description, _value = (
+                struct.unpack_from("<IBBHQ", data, entry_offset)
+            )
+            if string_index >= string_size:
+                raise ValueError(
+                    f"Mach-O symbol has an invalid string index: {label}"
+                )
+            name_start = string_offset + string_index
+            name_end = data.find(b"\x00", name_start, string_offset + string_size)
+            if name_end < 0:
+                raise ValueError(f"Mach-O symbol name is unterminated: {label}")
+            try:
+                symbol_name = data[name_start:name_end].decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError(f"Mach-O symbol name is not UTF-8: {label}") from error
+            is_external_defined = (
+                not symbol_type & N_STAB
+                and symbol_type & N_EXT
+                and not symbol_type & N_PEXT
+                and symbol_type & N_TYPE == N_SECT
+                and section_index != 0
+            )
+            if is_external_defined and symbol_name:
+                external_defined_symbols.append(symbol_name)
+
     return {
         "path": label,
         "cputype": cputype,
@@ -196,6 +273,8 @@ def parse_macho_data(data, label="<memory>"):
         "dylib_load_commands": dylib_load_commands,
         "id_dylibs": id_dylibs,
         "uuid": macho_uuid,
+        "sections": sections,
+        "external_defined_symbols": external_defined_symbols,
     }
 
 
