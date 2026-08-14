@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import os
+import struct
 import tempfile
 import zipfile
 from pathlib import Path
@@ -57,11 +58,11 @@ def category_path(name):
     return CATEGORY_PREFIX + name
 
 
-def new_zip_info(name):
+def new_zip_info(name, executable=False):
     info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
     info.compress_type = zipfile.ZIP_DEFLATED
     info.create_system = 3
-    info.external_attr = 0o100644 << 16
+    info.external_attr = (0o100755 if executable else 0o100644) << 16
     return info
 
 
@@ -77,18 +78,21 @@ def validate_home_ui_loads(info, context, allow_missing):
     ]
     if not commands and allow_missing:
         return False
-    if len(commands) == 1 and commands[0]["cmd"] == inject_dylib.LC_LOAD_DYLIB:
+    if (
+        len(commands) == 1
+        and commands[0]["cmd"] == inject_dylib.LC_LOAD_WEAK_DYLIB
+    ):
         return True
     found = ", ".join(command["command"] for command in commands) or "none"
     raise RuntimeError(
-        f"{context} must contain exactly one strong AMHomeUI load; found {found}"
+        f"{context} must contain exactly one weak AMHomeUI load; found {found}"
     )
 
 
 def patch_main_with_home_ui(main, home_ui_name="AMHomeUI.dylib"):
     source_info = inject_dylib.parse_macho_data(main, MAIN_PATH)
     if validate_home_ui_loads(source_info, "source main", allow_missing=True):
-        raise RuntimeError("source main already strongly loads AMHomeUI")
+        raise RuntimeError("source main already weakly loads AMHomeUI")
     with tempfile.TemporaryDirectory(prefix="am-home-ui-main-") as temporary_directory:
         main_path = Path(temporary_directory) / "AlightMotion"
         home_ui_path = Path(temporary_directory) / home_ui_name
@@ -96,6 +100,18 @@ def patch_main_with_home_ui(main, home_ui_name="AMHomeUI.dylib"):
         home_ui_path.write_bytes(b"")
         inject_dylib.insert_load_dylib(str(main_path), str(home_ui_path))
         patched = main_path.read_bytes()
+    inserted_info = inject_dylib.parse_macho_data(patched, MAIN_PATH)
+    matching_command = next(
+        command
+        for command in inserted_info["dylib_load_commands"]
+        if command["name"] == HOME_UI_LOAD
+    )
+    patched_data = bytearray(patched)
+    struct.pack_into(
+        "<I", patched_data, matching_command["offset"],
+        inject_dylib.LC_LOAD_WEAK_DYLIB,
+    )
+    patched = bytes(patched_data)
     info = inject_dylib.parse_macho_data(patched, MAIN_PATH)
     validate_home_ui_loads(info, "patched main", allow_missing=False)
     matching_command = next(
@@ -196,7 +212,7 @@ def package(source_path, output_path, dylib_path, home_ui_path, image_path,
             if BUTTON_IMAGE_PATH not in source.namelist():
                 output.writestr(new_zip_info(BUTTON_IMAGE_PATH), image)
             if HOME_UI_PATH not in source.namelist():
-                output.writestr(new_zip_info(HOME_UI_PATH), home_ui)
+                output.writestr(new_zip_info(HOME_UI_PATH, executable=True), home_ui)
             for name, payload in category_images.items():
                 if name not in source.namelist():
                     output.writestr(new_zip_info(name), payload)

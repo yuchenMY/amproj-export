@@ -120,15 +120,17 @@ class EditorHomePackageTests(unittest.TestCase):
         self.assertEqual(
             command["cmdsize"], packager.dylib_command_size(packager.HOME_UI_LOAD)
         )
-        self.assertEqual(info["load_dylibs"], [packager.HOME_UI_LOAD])
+        self.assertEqual(command["cmd"], inject_dylib.LC_LOAD_WEAK_DYLIB)
+        self.assertEqual(info["load_dylibs"], [])
+        self.assertEqual(info["all_load_dylibs"], [packager.HOME_UI_LOAD])
         self.assertEqual(patched[first_section_offset:], section_payload)
 
-    def test_source_validation_accepts_only_one_strong_home_ui_load(self):
-        strong = make_dylib_command(
-            inject_dylib.LC_LOAD_DYLIB, packager.HOME_UI_LOAD
+    def test_source_validation_accepts_only_one_weak_home_ui_load(self):
+        weak = make_dylib_command(
+            inject_dylib.LC_LOAD_WEAK_DYLIB, packager.HOME_UI_LOAD
         )
         empty_info = inject_dylib.parse_macho_data(make_main())
-        strong_info = inject_dylib.parse_macho_data(make_main((strong,)))
+        weak_info = inject_dylib.parse_macho_data(make_main((weak,)))
 
         self.assertFalse(
             packager.validate_home_ui_loads(
@@ -137,13 +139,13 @@ class EditorHomePackageTests(unittest.TestCase):
         )
         self.assertTrue(
             packager.validate_home_ui_loads(
-                strong_info, "source main", allow_missing=True
+                weak_info, "source main", allow_missing=True
             )
         )
 
-    def test_source_validation_rejects_non_strong_and_duplicate_loads(self):
+    def test_source_validation_rejects_non_weak_and_duplicate_loads(self):
         conflicting_commands = (
-            inject_dylib.LC_LOAD_WEAK_DYLIB,
+            inject_dylib.LC_LOAD_DYLIB,
             inject_dylib.LC_REEXPORT_DYLIB,
             inject_dylib.LC_LAZY_LOAD_DYLIB,
             inject_dylib.LC_LOAD_UPWARD_DYLIB,
@@ -152,27 +154,39 @@ class EditorHomePackageTests(unittest.TestCase):
             with self.subTest(command=command):
                 load = make_dylib_command(command, packager.HOME_UI_LOAD)
                 info = inject_dylib.parse_macho_data(make_main((load,)))
-                with self.assertRaisesRegex(RuntimeError, "exactly one strong"):
+                with self.assertRaisesRegex(RuntimeError, "exactly one weak"):
                     packager.validate_home_ui_loads(
                         info, "source main", allow_missing=True
                     )
 
-        strong = make_dylib_command(
-            inject_dylib.LC_LOAD_DYLIB, packager.HOME_UI_LOAD
+        weak = make_dylib_command(
+            inject_dylib.LC_LOAD_WEAK_DYLIB, packager.HOME_UI_LOAD
         )
-        duplicate_info = inject_dylib.parse_macho_data(make_main((strong, strong)))
-        with self.assertRaisesRegex(RuntimeError, "exactly one strong"):
+        duplicate_info = inject_dylib.parse_macho_data(make_main((weak, weak)))
+        with self.assertRaisesRegex(RuntimeError, "exactly one weak"):
             packager.validate_home_ui_loads(
                 duplicate_info, "source main", allow_missing=True
             )
+
+    def test_patch_main_rejects_an_existing_strong_home_ui_load(self):
+        strong = make_dylib_command(
+            inject_dylib.LC_LOAD_DYLIB, packager.HOME_UI_LOAD
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "LC_LOAD_DYLIB"):
+            packager.patch_main_with_home_ui(make_main((strong,)))
 
     def test_patch_main_rejects_an_existing_weak_home_ui_load(self):
         weak = make_dylib_command(
             inject_dylib.LC_LOAD_WEAK_DYLIB, packager.HOME_UI_LOAD
         )
 
-        with self.assertRaisesRegex(RuntimeError, "LC_LOAD_WEAK_DYLIB"):
+        with self.assertRaisesRegex(RuntimeError, "already weakly loads"):
             packager.patch_main_with_home_ui(make_main((weak,)))
+
+    def test_new_home_ui_zip_member_is_executable(self):
+        info = packager.new_zip_info(packager.HOME_UI_PATH, executable=True)
+        self.assertEqual((info.external_attr >> 16) & 0xFFFF, 0o100755)
 
     def test_patch_main_rejects_file_length_changes(self):
         real_insert = inject_dylib.insert_load_dylib

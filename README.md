@@ -146,7 +146,8 @@ AMProjExport/AMHomeUI.dylib
 挂载到 Alight Motion 的 `HomeVC`/`FeedVC`，并通过共享头像缓存和通知
 与 Cloud 账户保持同步。最终 IPA 需要同时包含
 `Frameworks/AMProjExportCloud.dylib` 和 `Frameworks/AMHomeUI.dylib`，主程序分别
-保留唯一强 `LC_LOAD_DYLIB`。因为新增了第六个 dylib，包体必须重新签名安装。
+保留唯一的 Cloud 强加载和 HomeUI 弱加载。HomeUI 缺失或签名器漏放时会停用主页
+而不是阻止应用启动。因为新增了第六个 dylib，包体必须重新签名安装。
 
 在已有全分类图和编辑器按钮的 IPA 上生成待签包：
 
@@ -159,8 +160,8 @@ python .\package_editor_button_ipa.py `
 ```
 
 打包器会新增或替换 `AMHomeUI.dylib`，只在 Mach-O header 内追加一条
-HomeUI 加载命令，替换指定按钮和 12 张分类图，并校验其他 IPA 成员的
-字节不变。
+HomeUI 弱加载命令，以 `0755` 权限写入动态库，替换指定按钮和 12 张分类图，
+并校验其他 IPA 成员的字节不变。
 
 ## 从自有 6.2.55 (862) 底包生成唯一 Direct Cloud 包
 

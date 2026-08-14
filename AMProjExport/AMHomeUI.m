@@ -37,8 +37,16 @@ typedef NS_ENUM(NSInteger, AMHomeUIControllerKind) {
     AMHomeUIControllerKindFeed = 2,
 };
 
+static BOOL AMHomeUIClassIsViewController(Class cls) {
+    Class viewControllerClass = UIViewController.class;
+    for (Class current = cls; current; current = class_getSuperclass(current)) {
+        if (current == viewControllerClass) return YES;
+    }
+    return NO;
+}
+
 static AMHomeUIControllerKind AMHomeUIKindForClass(Class cls) {
-    if (!cls || ![cls isSubclassOfClass:UIViewController.class]) {
+    if (!cls || !AMHomeUIClassIsViewController(cls)) {
         return AMHomeUIControllerKindNone;
     }
     NSString *name = NSStringFromClass(cls) ?: @"";
@@ -744,9 +752,18 @@ static void AMHomeUIViewDidAppear(id self, SEL selector, BOOL animated) {
     IMP original = AMHomeUIOriginalViewDidAppear(object_getClass(self));
     if (original) ((void (*)(id, SEL, BOOL))original)(self, selector, animated);
     if (![self isKindOfClass:UIViewController.class]) return;
-    UIViewController *controller = (UIViewController *)self;
-    AMHomeUIApplyAvatarToNativeController(controller);
-    AMHomeUIAttachToController(controller);
+    __weak UIViewController *controller = (UIViewController *)self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *strongController = controller;
+        if (!strongController) return;
+        @try {
+            AMHomeUIApplyAvatarToNativeController(strongController);
+            AMHomeUIAttachToController(strongController);
+        } @catch (NSException *exception) {
+            NSLog(@"[AMHomeUI] viewDidAppear attach failed: %@ %@",
+                  exception.name, exception.reason ?: @"");
+        }
+    });
 }
 
 static void AMHomeUIInstallControllerHooks(void) {
@@ -764,7 +781,7 @@ static void AMHomeUIInstallControllerHooks(void) {
             continue;
         }
         Method method = class_getInstanceMethod(cls, selector);
-        if (!method) continue;
+        if (!method || method_getNumberOfArguments(method) != 3) continue;
         IMP original = method_getImplementation(method);
         if (original == (IMP)AMHomeUIViewDidAppear) continue;
         objc_setAssociatedObject((id)cls, AMHomeUIOriginalIMPKey,
@@ -942,25 +959,41 @@ static void AMHomeUIRefreshAvatarEverywhere(void) {
     [AMHomeUIFallbackController updateAvatar];
 }
 
+static void AMHomeUIActivateSafely(void) {
+    @try {
+        AMHomeUIInstallControllerHooks();
+        AMHomeUIScheduleAttachAttempts();
+        AMHomeUIRefreshAvatarEverywhere();
+    } @catch (NSException *exception) {
+        AMHomeUIAttachLoopRunning = NO;
+        NSLog(@"[AMHomeUI] activation failed: %@ %@", exception.name,
+              exception.reason ?: @"");
+    }
+}
+
+static void AMHomeUIScheduleActivation(NSTimeInterval delay) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AMHomeUIActivateSafely();
+    });
+}
+
 void AMHomeUIInstall(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        void (^activate)(void) = ^{
-            AMHomeUIInstallControllerHooks();
-            AMHomeUIScheduleAttachAttempts();
-            AMHomeUIRefreshAvatarEverywhere();
-        };
-        for (NSNotificationName name in @[
-            UIApplicationDidFinishLaunchingNotification,
-            UIApplicationDidBecomeActiveNotification,
-        ]) {
-            [NSNotificationCenter.defaultCenter
-                addObserverForName:name object:nil
-                             queue:NSOperationQueue.mainQueue
-                        usingBlock:^(__unused NSNotification *notification) {
-                activate();
-            }];
-        }
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:UIApplicationDidFinishLaunchingNotification
+                        object:nil queue:NSOperationQueue.mainQueue
+                    usingBlock:^(__unused NSNotification *notification) {
+            AMHomeUIScheduleActivation(1.5);
+        }];
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:UIApplicationDidBecomeActiveNotification
+                        object:nil queue:NSOperationQueue.mainQueue
+                    usingBlock:^(__unused NSNotification *notification) {
+            AMHomeUIScheduleActivation(0.35);
+        }];
         for (NSNotificationName name in @[
             AMHomeUIAvatarChangedNotification,
             AMHomeUITokenChangedNotification,
@@ -972,7 +1005,6 @@ void AMHomeUIInstall(void) {
                 AMHomeUIRefreshAvatarEverywhere();
             }];
         }
-        dispatch_async(dispatch_get_main_queue(), activate);
     });
 }
 

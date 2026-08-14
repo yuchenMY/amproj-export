@@ -25,6 +25,11 @@ class WebHomeSourceTests(unittest.TestCase):
     def test_home_ui_self_installs_without_cloud_linkage(self):
         self.assertIn("__attribute__((constructor))", SOURCE)
         self.assertIn("AMHomeUIInstall();", SOURCE)
+        self.assertNotIn(
+            "dispatch_async(dispatch_get_main_queue(), activate)", SOURCE
+        )
+        self.assertIn("UIApplicationDidFinishLaunchingNotification", SOURCE)
+        self.assertIn("AMHomeUIScheduleActivation(1.5)", SOURCE)
         self.assertNotIn('#import "AMHomeUI.h"', CLOUD_SYNC)
         self.assertNotIn("AMHomeUIInstall();", CLOUD_SYNC)
         self.assertNotIn("AMWebHome", CLOUD_SYNC)
@@ -40,6 +45,10 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn('@"FeedVC"', SOURCE)
         self.assertIn("AMHomeUIViewDidAppear", SOURCE)
         self.assertIn("AMHomeUIInstallControllerHooks();", SOURCE)
+        self.assertIn("method_getNumberOfArguments(method) != 3", SOURCE)
+        self.assertIn("AMHomeUIClassIsViewController", SOURCE)
+        self.assertNotIn("[cls isSubclassOfClass:UIViewController.class]", SOURCE)
+        self.assertIn("dispatch_async(dispatch_get_main_queue(), ^{", SOURCE)
         self.assertIn("AMHomeUIAttachToController", SOURCE)
         self.assertIn("AMHomeUIEmbeddedController.view.hidden = NO;", SOURCE)
 
