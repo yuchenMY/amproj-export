@@ -47,39 +47,84 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn(".home-header{display:none!important}", SOURCE)
         self.assertIn("data-am-native-embedded", SOURCE)
 
-    def test_feed_embedding_matches_the_proven_native_host(self):
+    def test_home_embedding_targets_the_current_native_home_host(self):
         self.assertIn("AMHomeUIDirectKindForClass", SOURCE)
         self.assertIn("AMHomeUIClassIsViewController", SOURCE)
+        self.assertIn("AMHomeUIClassIsMainController", SOURCE)
         self.assertNotIn("AMHomeUIInstallControllerHook", SOURCE)
         self.assertNotIn("class_replaceMethod", SOURCE)
         self.assertNotIn("viewDidAppear attach failed", SOURCE)
-        self.assertIn("AMHomeUIAttachToController", SOURCE)
+        self.assertIn("AMHomeUIAttachToHost", SOURCE)
         self.assertIn("AMHomeUIAttach();", SOURCE)
         self.assertIn("AMHomeUIEmbeddedController.view.hidden = NO;", SOURCE)
-        self.assertIn("AMHomeUIControllerKindHome = 1", SOURCE)
-        self.assertIn("AMHomeUIControllerKindFeed = 2", SOURCE)
+        self.assertIn("AMHomeUIControllerKindFeed = 1", SOURCE)
+        self.assertIn("AMHomeUIControllerKindHome = 2", SOURCE)
+        self.assertIn("AMHomeUIControllerKindMain = 3", SOURCE)
+        self.assertIn('AMHomeUIObjectPropertyForController(controller, @"mainView")', SOURCE)
+        self.assertIn('[controller valueForKey:@"mainView"]', SOURCE)
+        self.assertIn("[name containsString:@\"HomeVC\"]", SOURCE)
         self.assertIn("[name containsString:@\"FeedVC\"]", SOURCE)
-        self.assertIn("if (newKind != AMHomeUIControllerKindFeed) return NO;", SOURCE)
-        finder = SOURCE.split("static void AMHomeUIFindBestController", 1)[1].split(
-            "static BOOL AMHomeUIAttachToController", 1
+        self.assertIn("AMHomeUIViewIsVisible", SOURCE)
+        self.assertIn("view.window != window", SOURCE)
+        self.assertIn("current.hidden || current.alpha <= 0.01", SOURCE)
+        self.assertIn("CGRectIntersectsRect(window.bounds, frame)", SOURCE)
+        self.assertIn("AMHomeUIFindBestHostInView", SOURCE)
+        self.assertIn("responder.nextResponder", SOURCE)
+        self.assertIn("AMHomeUIFindBestHostInView(window", SOURCE)
+        finder = SOURCE.split("static void AMHomeUIFindBestHost(", 1)[1].split(
+            "static void AMHomeUIFindBestHostInView", 1
         )[0]
-        attach = SOURCE.split("static BOOL AMHomeUIAttachToController", 2)[2].split(
-            "static BOOL AMHomeUIAttach(void)", 1
+        attach = SOURCE.split("static BOOL AMHomeUIAttachToHost", 2)[2].split(
+            "static AMHomeUIControllerKind AMHomeUIAttach(void)", 1
         )[0]
-        self.assertIn("root.isViewLoaded", finder)
-        self.assertNotIn("CGRectIntersectsRect", finder)
-        self.assertIn("UIView *hostView = controller.viewIfLoaded", attach)
-        self.assertNotIn("!hostView.window", attach)
-        self.assertIn("AMHomeUIAttachEmbeddedView(controller)", attach)
+        self.assertIn("AMHomeUIHostViewForController(root, window)", finder)
+        self.assertIn("hostView && kind > *bestKind", finder)
+        self.assertIn("AMHomeUIEmbeddedHostView", attach)
+        self.assertIn("[controller addChildViewController:AMHomeUIEmbeddedController]", attach)
+        self.assertIn("AMHomeUIAttachEmbeddedView(hostView)", attach)
+        self.assertIn("[hostView bringSubviewToFront:AMHomeUIEmbeddedController.view]", attach)
+        embedded = SOURCE.split("static void AMHomeUIAttachEmbeddedView", 1)[1].split(
+            "static BOOL AMHomeUIAttachToHost", 1
+        )[0]
+        self.assertIn("[hostView addSubview:embeddedView]", embedded)
+        self.assertIn("constraintEqualToAnchor:hostView.topAnchor", embedded)
+        self.assertIn("constraintEqualToAnchor:hostView.bottomAnchor", embedded)
         attempt = SOURCE.split(
             "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
         )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
-        self.assertIn("BOOL attached = AMHomeUIAttach();", attempt)
-        self.assertIn("if (attached)", attempt)
-        self.assertNotIn("if (AMHomeUIAttach())", attempt)
+        self.assertIn("AMHomeUIControllerKind attachedKind = AMHomeUIAttach();", attempt)
+        self.assertIn("attachedKind == AMHomeUIControllerKindMain", attempt)
+        self.assertIn("? 8 : 60", attempt)
+        self.assertIn("AMHomeUIAttachAttempt(attempt + 1)", attempt)
+        self.assertIn("MainVC.mainView not ready", attempt)
         self.assertLess(
-            attempt.index("if (attached)"),
+            attempt.index("AMHomeUIControllerKind attachedKind"),
             attempt.index("if (attempt == 60)"),
+        )
+
+    def test_fallback_embedding_stays_provisional_and_host_changes_are_rechecked(self):
+        attempt = SOURCE.split(
+            "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
+        )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
+        self.assertIn("NSUInteger fastRetryLimit", attempt)
+        self.assertIn("attachedKind == AMHomeUIControllerKindMain", attempt)
+        self.assertIn("? 8 : 60", attempt)
+        self.assertIn("attempt < fastRetryLimit ? 0.25 : 2.0", attempt)
+        self.assertNotIn("if (attachedKind != AMHomeUIControllerKindNone)", attempt)
+        self.assertIn("AMHomeUIAttachAttempt(attempt + 1)", attempt)
+        attach = SOURCE.split("static BOOL AMHomeUIAttachToHost", 2)[2].split(
+            "static AMHomeUIControllerKind AMHomeUIAttach(void)", 1
+        )[0]
+        self.assertIn("AMHomeUIEmbeddedController.parentViewController != controller", attach)
+        self.assertIn("BOOL hostChanged = needsNewController || oldHostView != hostView", attach)
+        cleanup = attach.split("if (needsNewController)", 1)[1].split(
+            "if (oldHost)", 1
+        )[0]
+        self.assertIn("BOOL hadParent", cleanup)
+        self.assertIn("[AMHomeUIEmbeddedController.view removeFromSuperview]", cleanup)
+        self.assertLess(
+            cleanup.index("[AMHomeUIEmbeddedController.view removeFromSuperview]"),
+            cleanup.index("if (hadParent)", cleanup.index("if (hadParent)") + 1),
         )
 
     def test_every_attach_retry_has_exception_protection(self):
@@ -97,7 +142,7 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("UIApplicationStateActive", attempt)
         self.assertIn("if (attempt == 60)", attempt)
         self.assertIn("continuing low-frequency discovery", attempt)
-        self.assertIn("NSTimeInterval retryDelay = attempt < 60 ? 0.25 : 2.0", attempt)
+        self.assertIn("attempt < fastRetryLimit ? 0.25 : 2.0", attempt)
         slow_retry = attempt.split("if (attempt == 60)", 1)[1].split(
             "} @catch", 1
         )[0]
@@ -150,8 +195,8 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("UIView *mainView = mainController.viewIfLoaded", SOURCE)
         self.assertIn("[controller valueForKey:key]", SOURCE)
         self.assertIn("AMHomeUIScheduleAvatarRefreshes", SOURCE)
-        self.assertIn("AMHomeUIFindBestController(root", SOURCE)
-        self.assertIn("avatarHost = best ?: AMHomeUIFindMainController", SOURCE)
+        self.assertIn("AMHomeUIFindBestHost(root, window", SOURCE)
+        self.assertIn("avatarHost = bestController ?: AMHomeUIFindMainController", SOURCE)
         self.assertIn('originalPresentation[@"contentMode"]', SOURCE)
         self.assertIn('originalPresentation[@"cornerRadius"]', SOURCE)
         self.assertIn('originalPresentation[@"clipsToBounds"]', SOURCE)

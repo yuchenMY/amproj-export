@@ -28,19 +28,22 @@ static const void *AMHomeUIAvatarOverlayKey = &AMHomeUIAvatarOverlayKey;
 @class AMHomeUIController;
 
 static __weak UIViewController *AMHomeUIEmbeddedHost;
+static __weak UIView *AMHomeUIEmbeddedHostView;
 static AMHomeUIController *AMHomeUIEmbeddedController;
 static BOOL AMHomeUIAttachLoopRunning;
 
-static BOOL AMHomeUIAttachToController(UIViewController *controller);
-static BOOL AMHomeUIAttach(void);
+static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView);
 static void AMHomeUIRefreshAvatarEverywhere(void);
 static void AMHomeUIApplyAvatarToButton(UIButton *button, UIImage *avatar);
 
 typedef NS_ENUM(NSInteger, AMHomeUIControllerKind) {
     AMHomeUIControllerKindNone = 0,
-    AMHomeUIControllerKindHome = 1,
-    AMHomeUIControllerKindFeed = 2,
+    AMHomeUIControllerKindFeed = 1,
+    AMHomeUIControllerKindHome = 2,
+    AMHomeUIControllerKindMain = 3,
 };
+
+static AMHomeUIControllerKind AMHomeUIAttach(void);
 
 static BOOL AMHomeUIClassIsViewController(Class cls) {
     Class viewControllerClass = UIViewController.class;
@@ -50,14 +53,24 @@ static BOOL AMHomeUIClassIsViewController(Class cls) {
     return NO;
 }
 
+static BOOL AMHomeUIClassIsMainController(Class cls) {
+    NSString *name = cls ? NSStringFromClass(cls) : @"";
+    return [name isEqualToString:@"MainVC"] ||
+        [name hasSuffix:@".MainVC"] ||
+        [name isEqualToString:@"_TtC12AlightMotion6MainVC"];
+}
+
 static AMHomeUIControllerKind AMHomeUIDirectKindForClass(Class cls) {
     if (!cls) return AMHomeUIControllerKindNone;
-    NSString *name = NSStringFromClass(cls) ?: @"";
-    if ([name containsString:@"FeedVC"]) {
-        return AMHomeUIControllerKindFeed;
+    if (AMHomeUIClassIsMainController(cls)) {
+        return AMHomeUIControllerKindMain;
     }
+    NSString *name = NSStringFromClass(cls) ?: @"";
     if ([name containsString:@"HomeVC"]) {
         return AMHomeUIControllerKindHome;
+    }
+    if ([name containsString:@"FeedVC"]) {
+        return AMHomeUIControllerKindFeed;
     }
     return AMHomeUIControllerKindNone;
 }
@@ -75,11 +88,7 @@ static AMHomeUIControllerKind AMHomeUIKindForClass(Class cls) {
 }
 
 static BOOL AMHomeUIIsMainController(UIViewController *controller) {
-    if (!controller) return NO;
-    NSString *name = NSStringFromClass(controller.class) ?: @"";
-    return [name isEqualToString:@"MainVC"] ||
-        [name hasSuffix:@".MainVC"] ||
-        [name isEqualToString:@"_TtC12AlightMotion6MainVC"];
+    return controller && AMHomeUIClassIsMainController(controller.class);
 }
 
 static BOOL AMHomeUIIsTrustedURL(NSURL *url) {
@@ -956,69 +965,151 @@ static void AMHomeUIApplyAvatarToNativeController(
           (unsigned long)uniqueButtons.count);
 }
 
-static void AMHomeUIFindBestController(
-    UIViewController *root, NSMutableSet<NSValue *> *visited, NSUInteger depth,
-    UIViewController *__strong *best, AMHomeUIControllerKind *bestKind) {
-    if (!root || depth > 24) return;
+static BOOL AMHomeUIViewIsVisible(UIView *view, UIWindow *window) {
+    if (!view || !window || view.window != window || CGRectIsEmpty(view.bounds)) {
+        return NO;
+    }
+    for (UIView *current = view; current; current = current.superview) {
+        if (current.hidden || current.alpha <= 0.01) return NO;
+        if (current == window) break;
+    }
+    CGRect frame = [view convertRect:view.bounds toView:window];
+    return !CGRectIsNull(frame) && !CGRectIsInfinite(frame) &&
+        CGRectGetWidth(frame) > 1.0 && CGRectGetHeight(frame) > 1.0 &&
+        CGRectIntersectsRect(window.bounds, frame);
+}
+
+static UIView *AMHomeUIMainContentView(UIViewController *controller) {
+    if (!AMHomeUIIsMainController(controller) || !controller.isViewLoaded) {
+        return nil;
+    }
+    id mainView = AMHomeUIObjectPropertyForController(controller, @"mainView");
+    if (![mainView isKindOfClass:UIView.class]) {
+        @try {
+            mainView = [controller valueForKey:@"mainView"];
+        } @catch (__unused NSException *exception) {
+            mainView = nil;
+        }
+    }
+    return [mainView isKindOfClass:UIView.class] ? mainView : nil;
+}
+
+static UIView *AMHomeUIHostViewForController(UIViewController *controller,
+                                              UIWindow *window) {
+    if (!controller || !controller.isViewLoaded) return nil;
+    AMHomeUIControllerKind kind = AMHomeUIKindForClass(controller.class);
+    UIView *hostView = kind == AMHomeUIControllerKindMain
+        ? AMHomeUIMainContentView(controller) : controller.viewIfLoaded;
+    return AMHomeUIViewIsVisible(hostView, window) ? hostView : nil;
+}
+
+static void AMHomeUIFindBestHost(
+    UIViewController *root, UIWindow *window,
+    NSMutableSet<NSValue *> *visited, NSUInteger depth,
+    UIViewController *__strong *bestController, UIView *__strong *bestHostView,
+    AMHomeUIControllerKind *bestKind) {
+    if (!root || depth > 24 || *bestKind == AMHomeUIControllerKindMain) return;
     NSValue *identity =
         [NSValue valueWithPointer:(__bridge const void *)root];
     if ([visited containsObject:identity]) return;
     [visited addObject:identity];
     AMHomeUIControllerKind kind = AMHomeUIKindForClass(root.class);
-    if (root.isViewLoaded && kind > *bestKind) {
-        *best = root;
+    UIView *hostView = AMHomeUIHostViewForController(root, window);
+    if (hostView && kind > *bestKind) {
+        *bestController = root;
+        *bestHostView = hostView;
         *bestKind = kind;
     }
     for (UIViewController *child in root.childViewControllers) {
-        AMHomeUIFindBestController(child, visited, depth + 1, best, bestKind);
+        AMHomeUIFindBestHost(child, window, visited, depth + 1, bestController,
+                            bestHostView, bestKind);
     }
-    AMHomeUIFindBestController(root.presentedViewController, visited, depth + 1,
-                               best, bestKind);
+    AMHomeUIFindBestHost(root.presentedViewController, window, visited, depth + 1,
+                        bestController, bestHostView, bestKind);
     if ([root isKindOfClass:UINavigationController.class]) {
         for (UIViewController *child in
              ((UINavigationController *)root).viewControllers) {
-            AMHomeUIFindBestController(child, visited, depth + 1, best,
-                                       bestKind);
+            AMHomeUIFindBestHost(child, window, visited, depth + 1,
+                                bestController, bestHostView, bestKind);
         }
     }
     if ([root isKindOfClass:UITabBarController.class]) {
         for (UIViewController *child in
              ((UITabBarController *)root).viewControllers) {
-            AMHomeUIFindBestController(child, visited, depth + 1, best,
-                                       bestKind);
+            AMHomeUIFindBestHost(child, window, visited, depth + 1,
+                                bestController, bestHostView, bestKind);
         }
     }
 }
 
-static void AMHomeUIAttachEmbeddedView(UIViewController *controller) {
+static void AMHomeUIFindBestHostInView(
+    UIView *view, UIWindow *window, NSMutableSet<NSValue *> *visited,
+    NSUInteger depth, UIViewController *__strong *bestController,
+    UIView *__strong *bestHostView, AMHomeUIControllerKind *bestKind) {
+    if (!view || depth > 64 || *bestKind == AMHomeUIControllerKindMain) return;
+    NSValue *identity =
+        [NSValue valueWithPointer:(__bridge const void *)view];
+    if ([visited containsObject:identity]) return;
+    [visited addObject:identity];
+
+    UIResponder *responder = view;
+    for (NSUInteger step = 0; responder && step < 32; step++) {
+        responder = responder.nextResponder;
+        if (![responder isKindOfClass:UIViewController.class]) continue;
+        UIViewController *controller = (UIViewController *)responder;
+        AMHomeUIControllerKind kind = AMHomeUIKindForClass(controller.class);
+        UIView *hostView = AMHomeUIHostViewForController(controller, window);
+        if (hostView && kind > *bestKind) {
+            *bestController = controller;
+            *bestHostView = hostView;
+            *bestKind = kind;
+        }
+        if (*bestKind == AMHomeUIControllerKindMain) return;
+    }
+
+    for (UIView *subview in view.subviews) {
+        AMHomeUIFindBestHostInView(subview, window, visited, depth + 1,
+                                   bestController, bestHostView, bestKind);
+        if (*bestKind == AMHomeUIControllerKindMain) return;
+    }
+}
+
+static void AMHomeUIAttachEmbeddedView(UIView *hostView) {
     UIView *embeddedView = AMHomeUIEmbeddedController.view;
-    if (!controller || !embeddedView || embeddedView.superview == controller.view)
+    if (!hostView || !embeddedView || embeddedView.superview == hostView)
         return;
     [embeddedView removeFromSuperview];
     embeddedView.translatesAutoresizingMaskIntoConstraints = NO;
-    [controller.view addSubview:embeddedView];
+    [hostView addSubview:embeddedView];
     [NSLayoutConstraint activateConstraints:@[
-        [embeddedView.topAnchor constraintEqualToAnchor:controller.view.topAnchor],
+        [embeddedView.topAnchor constraintEqualToAnchor:hostView.topAnchor],
         [embeddedView.leadingAnchor
-            constraintEqualToAnchor:controller.view.leadingAnchor],
+            constraintEqualToAnchor:hostView.leadingAnchor],
         [embeddedView.trailingAnchor
-            constraintEqualToAnchor:controller.view.trailingAnchor],
+            constraintEqualToAnchor:hostView.trailingAnchor],
         [embeddedView.bottomAnchor
-            constraintEqualToAnchor:controller.view.bottomAnchor],
+            constraintEqualToAnchor:hostView.bottomAnchor],
     ]];
 }
 
-static BOOL AMHomeUIAttachToController(UIViewController *controller) {
-    UIView *hostView = controller.viewIfLoaded;
+static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView) {
     if (!controller || !hostView) return NO;
-    AMHomeUIControllerKind newKind = AMHomeUIKindForClass(controller.class);
-    if (newKind != AMHomeUIControllerKindFeed) return NO;
     UIViewController *oldHost = AMHomeUIEmbeddedHost;
-    if (oldHost != controller) {
-        if (AMHomeUIEmbeddedController.parentViewController) {
-            [AMHomeUIEmbeddedController willMoveToParentViewController:nil];
+    UIView *oldHostView = AMHomeUIEmbeddedHostView;
+    BOOL needsNewController = oldHost != controller ||
+        !AMHomeUIEmbeddedController ||
+        AMHomeUIEmbeddedController.parentViewController != controller;
+    BOOL hostChanged = needsNewController || oldHostView != hostView;
+    if (needsNewController) {
+        if (AMHomeUIEmbeddedController) {
+            BOOL hadParent = AMHomeUIEmbeddedController.parentViewController != nil;
+            if (hadParent) {
+                [AMHomeUIEmbeddedController willMoveToParentViewController:nil];
+            }
             [AMHomeUIEmbeddedController.view removeFromSuperview];
-            [AMHomeUIEmbeddedController removeFromParentViewController];
+            if (hadParent) {
+                [AMHomeUIEmbeddedController removeFromParentViewController];
+            }
         }
         if (oldHost) {
             objc_setAssociatedObject(oldHost, AMHomeUIControllerKey, nil,
@@ -1026,32 +1117,43 @@ static BOOL AMHomeUIAttachToController(UIViewController *controller) {
         }
         AMHomeUIEmbeddedController = [AMHomeUIController new];
         AMHomeUIEmbeddedHost = controller;
+        AMHomeUIEmbeddedHostView = hostView;
         [controller addChildViewController:AMHomeUIEmbeddedController];
-        AMHomeUIAttachEmbeddedView(controller);
+        AMHomeUIAttachEmbeddedView(hostView);
         [AMHomeUIEmbeddedController didMoveToParentViewController:controller];
         objc_setAssociatedObject(controller, AMHomeUIControllerKey,
                                  AMHomeUIEmbeddedController,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else AMHomeUIAttachEmbeddedView(controller);
+    } else {
+        AMHomeUIEmbeddedHostView = hostView;
+        AMHomeUIAttachEmbeddedView(hostView);
+    }
     AMHomeUIEmbeddedController.view.hidden = NO;
-    [AMHomeUIEmbeddedController updateAvatar];
-    [controller.view bringSubviewToFront:AMHomeUIEmbeddedController.view];
-    AMHomeUIApplyAvatarToNativeController(controller);
-    if (oldHost != controller) {
-        NSLog(@"[AMHomeUI] embedded into %@",
-              NSStringFromClass(controller.class));
+    [hostView bringSubviewToFront:AMHomeUIEmbeddedController.view];
+    if (hostChanged) {
+        [AMHomeUIEmbeddedController updateAvatar];
+        AMHomeUIApplyAvatarToNativeController(controller);
+        NSLog(@"[AMHomeUI] embedded into %@.%@",
+              NSStringFromClass(controller.class),
+              AMHomeUIIsMainController(controller) ? @"mainView" : @"view");
     }
     return YES;
 }
 
-static BOOL AMHomeUIAttach(void) {
+static AMHomeUIControllerKind AMHomeUIAttach(void) {
     UIWindow *window = AMHomeUIKeyWindow();
-    if (!window.rootViewController) return NO;
-    UIViewController *best = nil;
+    if (!window.rootViewController) return AMHomeUIControllerKindNone;
+    UIViewController *bestController = nil;
+    UIView *bestHostView = nil;
     AMHomeUIControllerKind bestKind = AMHomeUIControllerKindNone;
-    AMHomeUIFindBestController(window.rootViewController,
-                               [NSMutableSet set], 0, &best, &bestKind);
-    return AMHomeUIAttachToController(best);
+    AMHomeUIFindBestHost(window.rootViewController, window, [NSMutableSet set],
+                        0, &bestController, &bestHostView, &bestKind);
+    if (bestKind != AMHomeUIControllerKindMain) {
+        AMHomeUIFindBestHostInView(window, window, [NSMutableSet set], 0,
+                                   &bestController, &bestHostView, &bestKind);
+    }
+    return AMHomeUIAttachToHost(bestController, bestHostView)
+        ? bestKind : AMHomeUIControllerKindNone;
 }
 
 static void AMHomeUIAttachAttempt(NSUInteger attempt) {
@@ -1061,26 +1163,24 @@ static void AMHomeUIAttachAttempt(NSUInteger attempt) {
         return;
     }
     @try {
-        BOOL attached = AMHomeUIAttach();
-        if (attached) {
-            AMHomeUIAttachLoopRunning = NO;
-            return;
-        }
+        AMHomeUIControllerKind attachedKind = AMHomeUIAttach();
         if (attempt == 60) {
-            NSLog(@"[AMHomeUI] FeedVC not ready; continuing low-frequency discovery");
+            NSLog(@"[AMHomeUI] MainVC.mainView not ready; continuing low-frequency discovery");
         }
+        NSUInteger fastRetryLimit = attachedKind == AMHomeUIControllerKindMain
+            ? 8 : 60;
+        NSTimeInterval retryDelay = attempt < fastRetryLimit ? 0.25 : 2.0;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(retryDelay * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            AMHomeUIAttachAttempt(attempt + 1);
+        });
     } @catch (NSException *exception) {
         AMHomeUIAttachLoopRunning = NO;
         NSLog(@"[AMHomeUI] attach attempt failed: %@ %@", exception.name,
               exception.reason ?: @"");
         return;
     }
-    NSTimeInterval retryDelay = attempt < 60 ? 0.25 : 2.0;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                 (int64_t)(retryDelay * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        AMHomeUIAttachAttempt(attempt + 1);
-    });
 }
 
 static void AMHomeUIScheduleAttachAttempts(void) {
@@ -1094,11 +1194,12 @@ static void AMHomeUIRefreshAvatarEverywhere(void) {
     if (!avatarHost) {
         UIWindow *window = AMHomeUIKeyWindow();
         UIViewController *root = window.rootViewController;
-        UIViewController *best = nil;
+        UIViewController *bestController = nil;
+        UIView *bestHostView = nil;
         AMHomeUIControllerKind bestKind = AMHomeUIControllerKindNone;
-        AMHomeUIFindBestController(root, [NSMutableSet set], 0, &best,
-                                   &bestKind);
-        avatarHost = best ?: AMHomeUIFindMainController(
+        AMHomeUIFindBestHost(root, window, [NSMutableSet set], 0,
+                            &bestController, &bestHostView, &bestKind);
+        avatarHost = bestController ?: AMHomeUIFindMainController(
             root, [NSMutableSet set], 0);
     }
     AMHomeUIApplyAvatarToNativeController(avatarHost);
