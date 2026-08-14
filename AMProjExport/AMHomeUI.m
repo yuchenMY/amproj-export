@@ -23,23 +23,28 @@ static const void *AMHomeUIOriginalButtonConfigurationKey =
     &AMHomeUIOriginalButtonConfigurationKey;
 static const void *AMHomeUIOriginalButtonPresentationKey =
     &AMHomeUIOriginalButtonPresentationKey;
+static const void *AMHomeUIAvatarOverlayKey = &AMHomeUIAvatarOverlayKey;
 
 @class AMHomeUIController;
 
 static __weak UIViewController *AMHomeUIEmbeddedHost;
 static AMHomeUIController *AMHomeUIEmbeddedController;
 static BOOL AMHomeUIAttachLoopRunning;
+static Class AMHomeUIHookedHomeClass;
 static Class AMHomeUIHookedFeedClass;
+static IMP AMHomeUIOriginalHomeViewDidAppear;
 static IMP AMHomeUIOriginalFeedViewDidAppear;
 
 static BOOL AMHomeUIAttachToController(UIViewController *controller);
+static BOOL AMHomeUIAttach(void);
+static void AMHomeUIInstallControllerHooks(void);
 static void AMHomeUIRefreshAvatarEverywhere(void);
 static void AMHomeUIApplyAvatarToButton(UIButton *button, UIImage *avatar);
 
 typedef NS_ENUM(NSInteger, AMHomeUIControllerKind) {
     AMHomeUIControllerKindNone = 0,
-    AMHomeUIControllerKindHome = 1,
-    AMHomeUIControllerKindFeed = 2,
+    AMHomeUIControllerKindFeed = 1,
+    AMHomeUIControllerKindHome = 2,
 };
 
 static BOOL AMHomeUIClassIsViewController(Class cls) {
@@ -50,22 +55,40 @@ static BOOL AMHomeUIClassIsViewController(Class cls) {
     return NO;
 }
 
-static AMHomeUIControllerKind AMHomeUIKindForClass(Class cls) {
-    if (!cls || !AMHomeUIClassIsViewController(cls)) {
-        return AMHomeUIControllerKindNone;
-    }
+static AMHomeUIControllerKind AMHomeUIDirectKindForClass(Class cls) {
+    if (!cls) return AMHomeUIControllerKindNone;
     NSString *name = NSStringFromClass(cls) ?: @"";
-    if ([name isEqualToString:@"FeedVC"] ||
-        [name isEqualToString:@"AlightMotion.FeedVC"] ||
-        [name isEqualToString:@"_TtC12AlightMotion6FeedVC"]) {
-        return AMHomeUIControllerKindFeed;
-    }
     if ([name isEqualToString:@"HomeVC"] ||
         [name isEqualToString:@"AlightMotion.HomeVC"] ||
         [name isEqualToString:@"_TtC12AlightMotion6HomeVC"]) {
         return AMHomeUIControllerKindHome;
     }
+    if ([name isEqualToString:@"FeedVC"] ||
+        [name isEqualToString:@"AlightMotion.FeedVC"] ||
+        [name isEqualToString:@"_TtC12AlightMotion6FeedVC"]) {
+        return AMHomeUIControllerKindFeed;
+    }
     return AMHomeUIControllerKindNone;
+}
+
+static AMHomeUIControllerKind AMHomeUIKindForClass(Class cls) {
+    if (!cls || !AMHomeUIClassIsViewController(cls)) {
+        return AMHomeUIControllerKindNone;
+    }
+    for (Class current = cls; current; current = class_getSuperclass(current)) {
+        AMHomeUIControllerKind kind = AMHomeUIDirectKindForClass(current);
+        if (kind != AMHomeUIControllerKindNone) return kind;
+        if (current == UIViewController.class) break;
+    }
+    return AMHomeUIControllerKindNone;
+}
+
+static BOOL AMHomeUIIsMainController(UIViewController *controller) {
+    if (!controller) return NO;
+    NSString *name = NSStringFromClass(controller.class) ?: @"";
+    return [name isEqualToString:@"MainVC"] ||
+        [name isEqualToString:@"AlightMotion.MainVC"] ||
+        [name isEqualToString:@"_TtC12AlightMotion6MainVC"];
 }
 
 static BOOL AMHomeUIIsTrustedURL(NSURL *url) {
@@ -568,8 +591,9 @@ static BOOL AMHomeUIStringLooksLikeAccount(NSString *value) {
     return NO;
 }
 
-static id AMHomeUIAccountControlForController(UIViewController *controller) {
-    SEL selector = NSSelectorFromString(@"accountButton");
+static id AMHomeUIObjectPropertyForController(UIViewController *controller,
+                                               NSString *propertyName) {
+    SEL selector = NSSelectorFromString(propertyName);
     Method method = controller
         ? class_getInstanceMethod(controller.class, selector) : NULL;
     if (!method || method_getNumberOfArguments(method) != 2) return nil;
@@ -580,6 +604,10 @@ static id AMHomeUIAccountControlForController(UIViewController *controller) {
     IMP implementation = method_getImplementation(method);
     return implementation
         ? ((id (*)(id, SEL))implementation)(controller, selector) : nil;
+}
+
+static id AMHomeUIAccountControlForController(UIViewController *controller) {
+    return AMHomeUIObjectPropertyForController(controller, @"accountButton");
 }
 
 static void AMHomeUIApplyAvatarToBarItem(UIBarButtonItem *item,
@@ -664,6 +692,49 @@ static void AMHomeUIApplyAvatarToButton(UIButton *button, UIImage *avatar) {
         button.imageView.clipsToBounds =
             originalPresentation[@"clipsToBounds"].boolValue;
     }
+
+    UIImageView *overlay = objc_getAssociatedObject(button,
+                                                     AMHomeUIAvatarOverlayKey);
+    if (avatar) {
+        if (!overlay) {
+            overlay = [UIImageView new];
+            overlay.translatesAutoresizingMaskIntoConstraints = NO;
+            overlay.userInteractionEnabled = NO;
+            overlay.contentMode = UIViewContentModeScaleAspectFill;
+            overlay.clipsToBounds = YES;
+            overlay.accessibilityIdentifier = @"AMHomeUIAccountAvatar";
+            objc_setAssociatedObject(button, AMHomeUIAvatarOverlayKey, overlay,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (overlay.superview != button) {
+            [overlay removeFromSuperview];
+            [button addSubview:overlay];
+            [NSLayoutConstraint activateConstraints:@[
+                [overlay.topAnchor constraintEqualToAnchor:button.topAnchor
+                                                  constant:3.0],
+                [overlay.leadingAnchor constraintEqualToAnchor:button.leadingAnchor
+                                                      constant:3.0],
+                [overlay.trailingAnchor constraintEqualToAnchor:button.trailingAnchor
+                                                       constant:-3.0],
+                [overlay.bottomAnchor constraintEqualToAnchor:button.bottomAnchor
+                                                     constant:-3.0],
+            ]];
+        }
+        overlay.image = avatar;
+        overlay.hidden = NO;
+        [button layoutIfNeeded];
+        CGFloat diameter = MIN(CGRectGetWidth(overlay.bounds),
+                               CGRectGetHeight(overlay.bounds));
+        if (diameter <= 0.0) {
+            diameter = MAX(0.0, MIN(CGRectGetWidth(button.bounds),
+                                    CGRectGetHeight(button.bounds)) - 6.0);
+        }
+        overlay.layer.cornerRadius = diameter * 0.5;
+        [button bringSubviewToFront:overlay];
+    } else {
+        overlay.image = nil;
+        overlay.hidden = YES;
+    }
 }
 
 static void AMHomeUIFindNativeAccountButton(
@@ -699,14 +770,55 @@ static void AMHomeUIAppendUniqueController(
     [controllers addObject:controller];
 }
 
+static UIViewController *AMHomeUIFindMainController(
+    UIViewController *root, NSMutableSet<NSValue *> *visited, NSUInteger depth) {
+    if (!root || depth > 24) return nil;
+    NSValue *identity =
+        [NSValue valueWithPointer:(__bridge const void *)root];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+    if (AMHomeUIIsMainController(root)) return root;
+    for (UIViewController *child in root.childViewControllers) {
+        UIViewController *match =
+            AMHomeUIFindMainController(child, visited, depth + 1);
+        if (match) return match;
+    }
+    UIViewController *presented = AMHomeUIFindMainController(
+        root.presentedViewController, visited, depth + 1);
+    if (presented) return presented;
+    if ([root isKindOfClass:UINavigationController.class]) {
+        for (UIViewController *child in
+             ((UINavigationController *)root).viewControllers) {
+            UIViewController *match =
+                AMHomeUIFindMainController(child, visited, depth + 1);
+            if (match) return match;
+        }
+    }
+    if ([root isKindOfClass:UITabBarController.class]) {
+        for (UIViewController *child in
+             ((UITabBarController *)root).viewControllers) {
+            UIViewController *match =
+                AMHomeUIFindMainController(child, visited, depth + 1);
+            if (match) return match;
+        }
+    }
+    return nil;
+}
+
 static void AMHomeUIApplyAvatarToNativeController(
     UIViewController *controller) {
+    UIWindow *keyWindow = controller.viewIfLoaded.window ?: AMHomeUIKeyWindow();
+    UIViewController *mainController = AMHomeUIFindMainController(
+        keyWindow.rootViewController, [NSMutableSet set], 0);
+    if (!controller) controller = mainController;
     if (!controller) return;
     UIImage *avatar = AMHomeUILoadAvatar();
     NSMutableArray<UIViewController *> *homeControllers = [NSMutableArray array];
     NSMutableSet<NSValue *> *visitedHomeControllers = [NSMutableSet set];
     NSMutableArray<UIViewController *> *accountOwners = [NSMutableArray array];
     NSMutableSet<NSValue *> *visitedAccountOwners = [NSMutableSet set];
+    AMHomeUIAppendUniqueController(mainController, accountOwners,
+                                   visitedAccountOwners);
     UIViewController *current = controller;
     for (NSUInteger depth = 0; current && depth < 16; depth++) {
         AMHomeUIAppendUniqueController(current, accountOwners,
@@ -778,7 +890,7 @@ static void AMHomeUIApplyAvatarToNativeController(
         AMHomeUIApplyAvatarToBarItem(labeledBarItems.firstObject, avatar);
     }
 
-    UIWindow *window = controller.viewIfLoaded.window ?: AMHomeUIKeyWindow();
+    UIWindow *window = controller.viewIfLoaded.window ?: keyWindow;
     if (!window) return;
     NSMutableArray<UIView *> *roots = [NSMutableArray array];
     NSMutableSet<NSValue *> *visitedRoots = [NSMutableSet set];
@@ -827,17 +939,16 @@ static void AMHomeUIApplyAvatarToNativeController(
     }
 }
 
-static void AMHomeUIViewDidAppear(id self, SEL selector, BOOL animated) {
-    IMP original = AMHomeUIOriginalFeedViewDidAppear;
-    if (original) ((void (*)(id, SEL, BOOL))original)(self, selector, animated);
-    if (![self isKindOfClass:UIViewController.class]) return;
-    __weak UIViewController *controller = (UIViewController *)self;
+static void AMHomeUIControllerDidAppear(UIViewController *controller) {
+    if (!controller) return;
+    __weak UIViewController *weakController = controller;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *strongController = controller;
+        UIViewController *strongController = weakController;
         if (!strongController) return;
         @try {
+            AMHomeUIInstallControllerHooks();
             AMHomeUIApplyAvatarToNativeController(strongController);
-            AMHomeUIAttachToController(strongController);
+            AMHomeUIAttach();
         } @catch (NSException *exception) {
             NSLog(@"[AMHomeUI] viewDidAppear attach failed: %@ %@",
                   exception.name, exception.reason ?: @"");
@@ -845,30 +956,71 @@ static void AMHomeUIViewDidAppear(id self, SEL selector, BOOL animated) {
     });
 }
 
+static void AMHomeUIHomeViewDidAppear(id self, SEL selector, BOOL animated) {
+    IMP original = AMHomeUIOriginalHomeViewDidAppear;
+    if (original) ((void (*)(id, SEL, BOOL))original)(self, selector, animated);
+    if (![self isKindOfClass:UIViewController.class]) return;
+    AMHomeUIControllerDidAppear((UIViewController *)self);
+}
+
+static void AMHomeUIFeedViewDidAppear(id self, SEL selector, BOOL animated) {
+    IMP original = AMHomeUIOriginalFeedViewDidAppear;
+    if (original) ((void (*)(id, SEL, BOOL))original)(self, selector, animated);
+    if (![self isKindOfClass:UIViewController.class]) return;
+    AMHomeUIControllerDidAppear((UIViewController *)self);
+}
+
+static void AMHomeUIInstallControllerHook(Class cls,
+                                           AMHomeUIControllerKind kind) {
+    if (!cls || kind == AMHomeUIControllerKindNone) return;
+    if ((kind == AMHomeUIControllerKindHome && AMHomeUIHookedHomeClass) ||
+        (kind == AMHomeUIControllerKindFeed && AMHomeUIHookedFeedClass)) {
+        return;
+    }
+    SEL selector = @selector(viewDidAppear:);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!method || method_getNumberOfArguments(method) != 3) return;
+    IMP original = method_getImplementation(method);
+    IMP replacement = kind == AMHomeUIControllerKindHome
+        ? (IMP)AMHomeUIHomeViewDidAppear
+        : (IMP)AMHomeUIFeedViewDidAppear;
+    if (original == replacement) return;
+    const char *types = method_getTypeEncoding(method);
+    BOOL installed = class_addMethod(cls, selector, replacement, types);
+    if (!installed) {
+        installed = class_replaceMethod(cls, selector, replacement, types) != NULL;
+    }
+    if (!installed) return;
+    if (kind == AMHomeUIControllerKindHome) {
+        AMHomeUIHookedHomeClass = cls;
+        AMHomeUIOriginalHomeViewDidAppear = original;
+    } else {
+        AMHomeUIHookedFeedClass = cls;
+        AMHomeUIOriginalFeedViewDidAppear = original;
+    }
+}
+
 static void AMHomeUIInstallControllerHooks(void) {
-    if (AMHomeUIHookedFeedClass) return;
+    if (AMHomeUIHookedHomeClass && AMHomeUIHookedFeedClass) return;
+    for (NSString *className in @[
+        @"AlightMotion.HomeVC", @"_TtC12AlightMotion6HomeVC", @"HomeVC",
+        @"AlightMotion.FeedVC", @"_TtC12AlightMotion6FeedVC", @"FeedVC",
+    ]) {
+        Class cls = NSClassFromString(className);
+        AMHomeUIInstallControllerHook(cls, AMHomeUIDirectKindForClass(cls));
+    }
+    if (AMHomeUIHookedHomeClass && AMHomeUIHookedFeedClass) return;
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     if (!classes || count == 0) {
         free(classes);
         return;
     }
-    SEL selector = @selector(viewDidAppear:);
     for (unsigned int index = 0; index < count; index++) {
         Class cls = classes[index];
-        if (AMHomeUIKindForClass(cls) != AMHomeUIControllerKindFeed) continue;
-        Method method = class_getInstanceMethod(cls, selector);
-        if (!method || method_getNumberOfArguments(method) != 3) continue;
-        IMP original = method_getImplementation(method);
-        if (original == (IMP)AMHomeUIViewDidAppear) continue;
-        AMHomeUIHookedFeedClass = cls;
-        AMHomeUIOriginalFeedViewDidAppear = original;
-        const char *types = method_getTypeEncoding(method);
-        if (!class_addMethod(cls, selector, (IMP)AMHomeUIViewDidAppear, types)) {
-            class_replaceMethod(cls, selector, (IMP)AMHomeUIViewDidAppear,
-                                types);
-        }
-        break;
+        AMHomeUIControllerKind kind = AMHomeUIDirectKindForClass(cls);
+        AMHomeUIInstallControllerHook(cls, kind);
+        if (AMHomeUIHookedHomeClass && AMHomeUIHookedFeedClass) break;
     }
     free(classes);
 }
@@ -882,7 +1034,19 @@ static void AMHomeUIFindBestController(
     if ([visited containsObject:identity]) return;
     [visited addObject:identity];
     AMHomeUIControllerKind kind = AMHomeUIKindForClass(root.class);
-    if (kind > *bestKind && root.isViewLoaded) {
+    UIView *view = root.viewIfLoaded;
+    BOOL visible = view.window && !view.hidden && view.alpha > 0.01 &&
+        CGRectGetWidth(view.bounds) > 1.0 && CGRectGetHeight(view.bounds) > 1.0;
+    if (visible) {
+        CGRect frame = [view convertRect:view.bounds toView:view.window];
+        visible = CGRectIntersectsRect(frame, view.window.bounds) &&
+            !CGRectIsEmpty(frame) && !CGRectIsNull(frame);
+    }
+    for (UIView *ancestor = view.superview; visible && ancestor;
+         ancestor = ancestor.superview) {
+        if (ancestor.hidden || ancestor.alpha <= 0.01) visible = NO;
+    }
+    if (visible && kind > *bestKind) {
         *best = root;
         *bestKind = kind;
     }
@@ -926,11 +1090,13 @@ static void AMHomeUIAttachEmbeddedView(UIViewController *controller) {
 }
 
 static BOOL AMHomeUIAttachToController(UIViewController *controller) {
-    if (!controller || !controller.isViewLoaded) {
+    UIView *hostView = controller.viewIfLoaded;
+    if (!controller || !hostView || !hostView.window || hostView.hidden ||
+        hostView.alpha <= 0.01) {
         return NO;
     }
     AMHomeUIControllerKind newKind = AMHomeUIKindForClass(controller.class);
-    if (newKind != AMHomeUIControllerKindFeed) return NO;
+    if (newKind == AMHomeUIControllerKindNone) return NO;
     UIViewController *oldHost = AMHomeUIEmbeddedHost;
     if (oldHost != controller) {
         if (AMHomeUIEmbeddedController.parentViewController) {
@@ -955,6 +1121,10 @@ static BOOL AMHomeUIAttachToController(UIViewController *controller) {
     [AMHomeUIEmbeddedController updateAvatar];
     [controller.view bringSubviewToFront:AMHomeUIEmbeddedController.view];
     AMHomeUIApplyAvatarToNativeController(controller);
+    if (oldHost != controller) {
+        NSLog(@"[AMHomeUI] embedded into %@",
+              NSStringFromClass(controller.class));
+    }
     return YES;
 }
 
@@ -969,16 +1139,20 @@ static BOOL AMHomeUIAttach(void) {
 }
 
 static void AMHomeUIAttachAttempt(NSUInteger attempt) {
+    if (UIApplication.sharedApplication.applicationState !=
+            UIApplicationStateActive) {
+        AMHomeUIAttachLoopRunning = NO;
+        return;
+    }
     @try {
         AMHomeUIInstallControllerHooks();
-        if (AMHomeUIAttach()) {
+        BOOL attached = AMHomeUIAttach();
+        if (attached && AMHomeUIHookedHomeClass) {
             AMHomeUIAttachLoopRunning = NO;
             return;
         }
-        if (attempt >= 60) {
-            AMHomeUIAttachLoopRunning = NO;
-            NSLog(@"[AMHomeUI] native HomeVC/FeedVC not found; web home disabled");
-            return;
+        if (attempt == 60) {
+            NSLog(@"[AMHomeUI] HomeVC not ready; continuing low-frequency discovery");
         }
     } @catch (NSException *exception) {
         AMHomeUIAttachLoopRunning = NO;
@@ -986,8 +1160,9 @@ static void AMHomeUIAttachAttempt(NSUInteger attempt) {
               exception.reason ?: @"");
         return;
     }
+    NSTimeInterval retryDelay = attempt < 60 ? 0.25 : 2.0;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                 (int64_t)(0.25 * NSEC_PER_SEC)),
+                                 (int64_t)(retryDelay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AMHomeUIAttachAttempt(attempt + 1);
     });
@@ -1008,7 +1183,8 @@ static void AMHomeUIRefreshAvatarEverywhere(void) {
         AMHomeUIControllerKind bestKind = AMHomeUIControllerKindNone;
         AMHomeUIFindBestController(root, [NSMutableSet set], 0, &best,
                                    &bestKind);
-        avatarHost = best;
+        avatarHost = best ?: AMHomeUIFindMainController(
+            root, [NSMutableSet set], 0);
     }
     AMHomeUIApplyAvatarToNativeController(avatarHost);
     [AMHomeUIEmbeddedController updateAvatar];

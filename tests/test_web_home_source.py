@@ -55,11 +55,14 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn('@"AlightMotion.FeedVC"', SOURCE)
         self.assertIn('@"_TtC12AlightMotion6HomeVC"', SOURCE)
         self.assertIn('@"_TtC12AlightMotion6FeedVC"', SOURCE)
-        self.assertNotIn("hasSuffix", SOURCE)
-        self.assertIn("AMHomeUIViewDidAppear", SOURCE)
+        self.assertIn("AMHomeUIDirectKindForClass", SOURCE)
+        self.assertIn("AMHomeUIHomeViewDidAppear", SOURCE)
+        self.assertIn("AMHomeUIFeedViewDidAppear", SOURCE)
+        self.assertIn("AMHomeUIHookedHomeClass", SOURCE)
         self.assertIn("AMHomeUIHookedFeedClass", SOURCE)
+        self.assertIn("AMHomeUIOriginalHomeViewDidAppear", SOURCE)
         self.assertIn("AMHomeUIOriginalFeedViewDidAppear", SOURCE)
-        self.assertNotIn("AMHomeUIOriginalViewDidAppear", SOURCE)
+        self.assertNotIn("AMHomeUIViewDidAppear", SOURCE)
         self.assertNotIn("AMHomeUIOriginalIMPKey", SOURCE)
         self.assertIn("AMHomeUIInstallControllerHooks();", SOURCE)
         self.assertIn("method_getNumberOfArguments(method) != 3", SOURCE)
@@ -67,23 +70,46 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertNotIn("[cls isSubclassOfClass:UIViewController.class]", SOURCE)
         self.assertIn("objc_copyClassList(&count)", SOURCE)
         self.assertNotIn("objc_getClassList(", SOURCE)
+        self.assertIn('NSClassFromString(className)', SOURCE)
+        self.assertIn('@"AlightMotion.HomeVC"', SOURCE)
+        self.assertIn('@"_TtC12AlightMotion6HomeVC"', SOURCE)
+        self.assertIn("AMHomeUIInstallControllerHook(cls, kind)", SOURCE)
         self.assertIn("dispatch_async(dispatch_get_main_queue(), ^{", SOURCE)
         self.assertIn("AMHomeUIAttachToController", SOURCE)
+        self.assertIn("AMHomeUIAttach();", SOURCE)
         self.assertIn("AMHomeUIEmbeddedController.view.hidden = NO;", SOURCE)
-        self.assertIn(
-            "if (newKind != AMHomeUIControllerKindFeed) return NO;", SOURCE
-        )
+        self.assertIn("AMHomeUIControllerKindFeed = 1", SOURCE)
+        self.assertIn("AMHomeUIControllerKindHome = 2", SOURCE)
+        self.assertIn("if (newKind == AMHomeUIControllerKindNone) return NO;", SOURCE)
         finder = SOURCE.split("static void AMHomeUIFindBestController", 1)[1].split(
             "static BOOL AMHomeUIAttachToController", 1
         )[0]
         attach = SOURCE.split("static BOOL AMHomeUIAttachToController", 2)[2].split(
             "static BOOL AMHomeUIAttach(void)", 1
         )[0]
-        self.assertIn("root.isViewLoaded", finder)
-        self.assertNotIn("root.view.window", finder)
-        self.assertIn("!controller.isViewLoaded", attach)
-        self.assertNotIn("controller.view.window", attach)
+        self.assertIn("UIView *view = root.viewIfLoaded", finder)
+        self.assertIn("view.window", finder)
+        self.assertIn("CGRectIntersectsRect", finder)
+        self.assertIn("UIView *hostView = controller.viewIfLoaded", attach)
+        self.assertIn("!hostView.window", attach)
         self.assertIn("AMHomeUIAttachEmbeddedView(controller)", attach)
+        attempt = SOURCE.split(
+            "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
+        )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
+        self.assertIn("BOOL attached = AMHomeUIAttach();", attempt)
+        self.assertIn("if (attached && AMHomeUIHookedHomeClass)", attempt)
+        self.assertNotIn("if (AMHomeUIAttach())", attempt)
+        self.assertLess(
+            attempt.index("if (attached && AMHomeUIHookedHomeClass)"),
+            attempt.index("if (attempt == 60)"),
+        )
+        did_appear = SOURCE.split(
+            "static void AMHomeUIControllerDidAppear", 1
+        )[1].split("static void AMHomeUIHomeViewDidAppear", 1)[0]
+        self.assertLess(
+            did_appear.index("AMHomeUIInstallControllerHooks();"),
+            did_appear.index("AMHomeUIAttach();"),
+        )
 
     def test_every_attach_retry_has_exception_protection(self):
         attempt = SOURCE.split(
@@ -94,8 +120,18 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("AMHomeUIAttachAttempt(attempt + 1)", attempt)
 
     def test_missing_native_home_never_creates_a_floating_switcher(self):
-        self.assertIn("if (attempt >= 60)", SOURCE)
-        self.assertIn("native HomeVC/FeedVC not found; web home disabled", SOURCE)
+        attempt = SOURCE.split(
+            "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
+        )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
+        self.assertIn("UIApplicationStateActive", attempt)
+        self.assertIn("if (attempt == 60)", attempt)
+        self.assertIn("continuing low-frequency discovery", attempt)
+        self.assertIn("NSTimeInterval retryDelay = attempt < 60 ? 0.25 : 2.0", attempt)
+        slow_retry = attempt.split("if (attempt == 60)", 1)[1].split(
+            "} @catch", 1
+        )[0]
+        self.assertNotIn("return;", slow_retry)
+        self.assertNotIn("web home disabled", attempt)
         self.assertNotIn("AMHomeUIShowFallback", SOURCE)
         self.assertNotIn("AMHomeUIOverlayWindow", SOURCE)
         self.assertNotIn("fallbackToggleButton", SOURCE)
@@ -122,8 +158,11 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("AMHomeUIFindNativeAccountButton(root, window", SOURCE)
         self.assertIn("current.parentViewController", SOURCE)
         self.assertIn("navigation.visibleViewController", SOURCE)
-        self.assertIn('NSSelectorFromString(@"accountButton")', SOURCE)
+        self.assertIn('AMHomeUIObjectPropertyForController(controller, @"accountButton")', SOURCE)
         self.assertIn("method_copyReturnType", SOURCE)
+        self.assertIn('isEqualToString:@"_TtC12AlightMotion6MainVC"', SOURCE)
+        self.assertIn("AMHomeUIFindMainController", SOURCE)
+        self.assertIn("AMHomeUIAppendUniqueController(mainController", SOURCE)
         self.assertIn("accountOwners", SOURCE)
         self.assertIn("homeControllers", SOURCE)
         self.assertIn(
@@ -139,10 +178,16 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertNotIn("uniqueButtons.count == 1", SOURCE)
         self.assertIn("AMHomeUIScheduleAvatarRefreshes", SOURCE)
         self.assertIn("AMHomeUIFindBestController(root", SOURCE)
-        self.assertIn("avatarHost = best;", SOURCE)
+        self.assertIn("avatarHost = best ?: AMHomeUIFindMainController", SOURCE)
         self.assertIn('originalPresentation[@"contentMode"]', SOURCE)
         self.assertIn('originalPresentation[@"cornerRadius"]', SOURCE)
         self.assertIn('originalPresentation[@"clipsToBounds"]', SOURCE)
+        self.assertIn("AMHomeUIAvatarOverlayKey", SOURCE)
+        self.assertIn('overlay.accessibilityIdentifier = @"AMHomeUIAccountAvatar"', SOURCE)
+        self.assertIn("if (overlay.superview != button)", SOURCE)
+        self.assertIn("[overlay removeFromSuperview]", SOURCE)
+        self.assertIn("overlay.layer.cornerRadius = diameter * 0.5", SOURCE)
+        self.assertIn("[button bringSubviewToFront:overlay]", SOURCE)
         self.assertIn("document.getElementById('refreshButton')", SOURCE)
         self.assertIn("bridge.postMessage({action:'openAccount'})", SOURCE)
         self.assertIn('isEqualToString:@"openAccount"', SOURCE)
@@ -152,7 +197,7 @@ class WebHomeSourceTests(unittest.TestCase):
     def test_avatar_never_replaces_an_unlabeled_top_right_button(self):
         native_avatar = SOURCE.split(
             "static void AMHomeUIApplyAvatarToNativeController", 1
-        )[1].split("static void AMHomeUIViewDidAppear", 1)[0]
+        )[1].split("static void AMHomeUIControllerDidAppear", 1)[0]
         ancestor_walk = native_avatar.split(
             "UIViewController *current = controller;", 1
         )[1].split("UINavigationController *navigation", 1)[0]
