@@ -74,6 +74,13 @@ jobs:
               ["otool", "-L", "AMProjExport/AMProjExportCloud.dylib"], text=True
           )
           assert "AMHomeUI.dylib" not in cloud_dependencies
+          cloud_symbols = subprocess.check_output(
+              ["nm", "-gU", "AMProjExport/AMProjExportCloud.dylib"], text=True
+          )
+          assert "_AMHomeUIInstall" in cloud_symbols
+          assert b"https://amhome.meowcr.cn/home" in Path(
+              "AMProjExport/AMProjExportCloud.dylib"
+          ).read_bytes()
           print("verified AMProjExportCloud.dylib: v44 stability contract")
           loader = verify_dylib_architecture("AMProjExport/AMMeowLoader.dylib")
           symbols = subprocess.check_output(

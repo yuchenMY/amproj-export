@@ -10,29 +10,28 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="ut
 
 
 class WebHomeSourceTests(unittest.TestCase):
-    def test_home_ui_is_a_standalone_dylib(self):
+    def test_home_ui_stays_modular_but_is_linked_into_cloud_runtime(self):
         cloud_rule = MAKEFILE.split("AMProjExportCloud.dylib:", 1)[1].split(
             "AMProjExportDebug.dylib:", 1
         )[0]
         home_rule = MAKEFILE.split("AMHomeUI.dylib:", 1)[1].split("clean:", 1)[0]
-        self.assertNotIn("AMHomeUI.m", cloud_rule)
+        self.assertIn("AMHomeUI.m", cloud_rule)
         self.assertNotIn("AMWebHome.m", cloud_rule)
         self.assertIn("AMHomeUI.m", home_rule)
         self.assertIn("-framework WebKit", home_rule)
         self.assertIn("-framework CoreGraphics", home_rule)
         self.assertIn("-install_name @rpath/AMHomeUI.dylib", home_rule)
 
-    def test_home_ui_is_explicitly_loaded_after_cloud_bootstrap(self):
+    def test_home_ui_is_directly_installed_by_cloud_bootstrap(self):
         self.assertNotIn("__attribute__((constructor))", SOURCE)
         self.assertIn("void AMHomeUIInstall(void)", SOURCE)
         self.assertNotIn("UIApplicationDidFinishLaunchingNotification", SOURCE)
         self.assertIn("AMHomeUIScheduleActivation(0.35)", SOURCE)
-        self.assertNotIn('#import "AMHomeUI.h"', CLOUD_SYNC)
-        self.assertIn("#import <dlfcn.h>", CLOUD_SYNC)
-        self.assertIn("dlopen(homeUIPath.fileSystemRepresentation", CLOUD_SYNC)
-        self.assertIn("RTLD_NOW | RTLD_LOCAL", CLOUD_SYNC)
-        self.assertIn('dlsym(handle, "AMHomeUIInstall")', CLOUD_SYNC)
-        self.assertIn("AMCloudScheduleHomeUILoad();", CLOUD_SYNC)
+        self.assertIn('#import "AMHomeUI.h"', CLOUD_SYNC)
+        self.assertIn("AMHomeUIInstall();", CLOUD_SYNC)
+        self.assertNotIn("#import <dlfcn.h>", CLOUD_SYNC)
+        self.assertNotIn("dlopen(", CLOUD_SYNC)
+        self.assertNotIn("dlsym(", CLOUD_SYNC)
         self.assertNotIn("dlclose(", CLOUD_SYNC)
         self.assertNotIn("AMWebHome", CLOUD_SYNC)
 
@@ -48,67 +47,39 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn(".home-header{display:none!important}", SOURCE)
         self.assertIn("data-am-native-embedded", SOURCE)
 
-    def test_home_and_feed_hooks_restore_late_or_returned_home(self):
-        self.assertIn('@"HomeVC"', SOURCE)
-        self.assertIn('@"FeedVC"', SOURCE)
-        self.assertIn('@"AlightMotion.HomeVC"', SOURCE)
-        self.assertIn('@"AlightMotion.FeedVC"', SOURCE)
-        self.assertIn('@"_TtC12AlightMotion6HomeVC"', SOURCE)
-        self.assertIn('@"_TtC12AlightMotion6FeedVC"', SOURCE)
+    def test_feed_embedding_matches_the_proven_native_host(self):
         self.assertIn("AMHomeUIDirectKindForClass", SOURCE)
-        self.assertIn("AMHomeUIHomeViewDidAppear", SOURCE)
-        self.assertIn("AMHomeUIFeedViewDidAppear", SOURCE)
-        self.assertIn("AMHomeUIHookedHomeClass", SOURCE)
-        self.assertIn("AMHomeUIHookedFeedClass", SOURCE)
-        self.assertIn("AMHomeUIOriginalHomeViewDidAppear", SOURCE)
-        self.assertIn("AMHomeUIOriginalFeedViewDidAppear", SOURCE)
-        self.assertNotIn("AMHomeUIViewDidAppear", SOURCE)
-        self.assertNotIn("AMHomeUIOriginalIMPKey", SOURCE)
-        self.assertIn("AMHomeUIInstallControllerHooks();", SOURCE)
-        self.assertIn("method_getNumberOfArguments(method) != 3", SOURCE)
         self.assertIn("AMHomeUIClassIsViewController", SOURCE)
-        self.assertNotIn("[cls isSubclassOfClass:UIViewController.class]", SOURCE)
-        self.assertIn("objc_copyClassList(&count)", SOURCE)
-        self.assertNotIn("objc_getClassList(", SOURCE)
-        self.assertIn('NSClassFromString(className)', SOURCE)
-        self.assertIn('@"AlightMotion.HomeVC"', SOURCE)
-        self.assertIn('@"_TtC12AlightMotion6HomeVC"', SOURCE)
-        self.assertIn("AMHomeUIInstallControllerHook(cls, kind)", SOURCE)
-        self.assertIn("dispatch_async(dispatch_get_main_queue(), ^{", SOURCE)
+        self.assertNotIn("AMHomeUIInstallControllerHook", SOURCE)
+        self.assertNotIn("class_replaceMethod", SOURCE)
+        self.assertNotIn("viewDidAppear attach failed", SOURCE)
         self.assertIn("AMHomeUIAttachToController", SOURCE)
         self.assertIn("AMHomeUIAttach();", SOURCE)
         self.assertIn("AMHomeUIEmbeddedController.view.hidden = NO;", SOURCE)
-        self.assertIn("AMHomeUIControllerKindFeed = 1", SOURCE)
-        self.assertIn("AMHomeUIControllerKindHome = 2", SOURCE)
-        self.assertIn("if (newKind == AMHomeUIControllerKindNone) return NO;", SOURCE)
+        self.assertIn("AMHomeUIControllerKindHome = 1", SOURCE)
+        self.assertIn("AMHomeUIControllerKindFeed = 2", SOURCE)
+        self.assertIn("[name containsString:@\"FeedVC\"]", SOURCE)
+        self.assertIn("if (newKind != AMHomeUIControllerKindFeed) return NO;", SOURCE)
         finder = SOURCE.split("static void AMHomeUIFindBestController", 1)[1].split(
             "static BOOL AMHomeUIAttachToController", 1
         )[0]
         attach = SOURCE.split("static BOOL AMHomeUIAttachToController", 2)[2].split(
             "static BOOL AMHomeUIAttach(void)", 1
         )[0]
-        self.assertIn("UIView *view = root.viewIfLoaded", finder)
-        self.assertIn("view.window", finder)
-        self.assertIn("CGRectIntersectsRect", finder)
+        self.assertIn("root.isViewLoaded", finder)
+        self.assertNotIn("CGRectIntersectsRect", finder)
         self.assertIn("UIView *hostView = controller.viewIfLoaded", attach)
-        self.assertIn("!hostView.window", attach)
+        self.assertNotIn("!hostView.window", attach)
         self.assertIn("AMHomeUIAttachEmbeddedView(controller)", attach)
         attempt = SOURCE.split(
             "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
         )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
         self.assertIn("BOOL attached = AMHomeUIAttach();", attempt)
-        self.assertIn("if (attached && AMHomeUIHookedHomeClass)", attempt)
+        self.assertIn("if (attached)", attempt)
         self.assertNotIn("if (AMHomeUIAttach())", attempt)
         self.assertLess(
-            attempt.index("if (attached && AMHomeUIHookedHomeClass)"),
+            attempt.index("if (attached)"),
             attempt.index("if (attempt == 60)"),
-        )
-        did_appear = SOURCE.split(
-            "static void AMHomeUIControllerDidAppear", 1
-        )[1].split("static void AMHomeUIHomeViewDidAppear", 1)[0]
-        self.assertLess(
-            did_appear.index("AMHomeUIInstallControllerHooks();"),
-            did_appear.index("AMHomeUIAttach();"),
         )
 
     def test_every_attach_retry_has_exception_protection(self):
@@ -160,7 +131,7 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("navigation.visibleViewController", SOURCE)
         self.assertIn('AMHomeUIObjectPropertyForController(controller, @"accountButton")', SOURCE)
         self.assertIn("method_copyReturnType", SOURCE)
-        self.assertIn('isEqualToString:@"_TtC12AlightMotion6MainVC"', SOURCE)
+        self.assertIn('@"_TtC12AlightMotion6MainVC"', SOURCE)
         self.assertIn("AMHomeUIFindMainController", SOURCE)
         self.assertIn("AMHomeUIAppendUniqueController(mainController", SOURCE)
         self.assertIn("accountOwners", SOURCE)
@@ -175,7 +146,9 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("labeledBarItems.count == 1", SOURCE)
         self.assertIn("labeledButtons.count == 1", SOURCE)
         self.assertNotIn("barItems.count == 1", SOURCE)
-        self.assertNotIn("uniqueButtons.count == 1", SOURCE)
+        self.assertIn("uniqueButtons.count == 1", SOURCE)
+        self.assertIn("UIView *mainView = mainController.viewIfLoaded", SOURCE)
+        self.assertIn("[controller valueForKey:key]", SOURCE)
         self.assertIn("AMHomeUIScheduleAvatarRefreshes", SOURCE)
         self.assertIn("AMHomeUIFindBestController(root", SOURCE)
         self.assertIn("avatarHost = best ?: AMHomeUIFindMainController", SOURCE)
@@ -194,7 +167,7 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("[self updateAvatar];", SOURCE)
         self.assertNotIn("overlayAvatarEnabled", SOURCE)
 
-    def test_avatar_never_replaces_an_unlabeled_top_right_button(self):
+    def test_avatar_prefers_account_metadata_then_unique_main_button(self):
         native_avatar = SOURCE.split(
             "static void AMHomeUIApplyAvatarToNativeController", 1
         )[1].split("static void AMHomeUIControllerDidAppear", 1)[0]
@@ -216,7 +189,8 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn(
             "for (UIViewController *candidate in homeControllers)", native_avatar
         )
-        self.assertNotIn("uniqueButtons.count == 1", native_avatar)
+        self.assertIn("uniqueButtons.count == 1", native_avatar)
+        self.assertIn("UIView *mainView = mainController.viewIfLoaded", native_avatar)
         self.assertNotIn("items.count == 1", native_avatar)
         self.assertIn('@"login"', SOURCE)
         self.assertIn('@"sign in"', SOURCE)
@@ -239,6 +213,7 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("AMProjExport/AMHomeUI.dylib", WORKFLOW)
         self.assertIn('"_AMHomeUIInstall"', WORKFLOW)
         self.assertIn('["otool", "-L", "AMProjExport/AMProjExportCloud.dylib"]', WORKFLOW)
+        self.assertIn('assert "_AMHomeUIInstall" in cloud_symbols', WORKFLOW)
         self.assertIn('section["type"] in (0x9, 0x16)', WORKFLOW)
         self.assertIn('home_ui["external_defined_symbols"]', WORKFLOW)
 

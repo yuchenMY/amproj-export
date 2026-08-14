@@ -2,12 +2,12 @@
 #import "AMCloudPlugins.h"
 #import "AMDebugTransport.h"
 #import "AMEditorCustomization.h"
+#import "AMHomeUI.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <QuartzCore/QuartzCore.h>
 #import <Security/Security.h>
 #import <WebKit/WebKit.h>
-#import <dlfcn.h>
 #import <objc/runtime.h>
 
 static NSString *const AMCloudAPIBase = @"https://am.meowcr.cn/api";
@@ -103,93 +103,6 @@ static NSString *AMCloudClassName(id object) {
 static void AMCloudDiagnostic(NSString *name, NSDictionary *fields) {
     NSLog(@"[AMProjExport] %@ %@", name ?: @"cloud.account", fields ?: @{});
     [[AMDebugTransport shared] emitCriticalEvent:name fields:fields ?: @{}];
-}
-
-typedef void (*AMCloudHomeUIInstallFunction)(void);
-
-static void *AMCloudHomeUIHandle;
-
-static NSString *AMCloudDynamicLoaderError(const char *error) {
-    if (!error) return @"unknown dynamic loader error";
-    NSString *message = [NSString stringWithUTF8String:error];
-    return message.length ? message : @"unreadable dynamic loader error";
-}
-
-static void AMCloudLoadHomeUI(void) {
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            AMCloudLoadHomeUI();
-        });
-        return;
-    }
-    if (AMCloudHomeUIHandle) return;
-
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSString *stage = @"resolve_path";
-        @try {
-            NSString *frameworksPath = NSBundle.mainBundle.privateFrameworksPath;
-            NSString *homeUIPath = [frameworksPath
-                stringByAppendingPathComponent:@"AMHomeUI.dylib"];
-            if (!homeUIPath.length ||
-                ![NSFileManager.defaultManager fileExistsAtPath:homeUIPath]) {
-                AMCloudDiagnostic(@"cloud.home_ui.missing", @{
-                    @"path": homeUIPath ?: @""
-                });
-                return;
-            }
-
-            stage = @"load";
-            AMCloudDiagnostic(@"cloud.home_ui.load_begin", @{
-                @"path": homeUIPath.lastPathComponent ?: @"AMHomeUI.dylib"
-            });
-            dlerror();
-            void *handle = dlopen(homeUIPath.fileSystemRepresentation,
-                                  RTLD_NOW | RTLD_LOCAL);
-            if (!handle) {
-                AMCloudDiagnostic(@"cloud.home_ui.load_failed", @{
-                    @"error": AMCloudDynamicLoaderError(dlerror())
-                });
-                return;
-            }
-
-            // Objective-C image 注册后不能安全卸载，进程存活期间保留 handle。
-            AMCloudHomeUIHandle = handle;
-            AMCloudDiagnostic(@"cloud.home_ui.load_succeeded", @{});
-
-            stage = @"resolve_symbol";
-            dlerror();
-            AMCloudHomeUIInstallFunction install =
-                (AMCloudHomeUIInstallFunction)dlsym(handle, "AMHomeUIInstall");
-            const char *symbolError = dlerror();
-            if (!install || symbolError) {
-                AMCloudDiagnostic(@"cloud.home_ui.symbol_failed", @{
-                    @"error": AMCloudDynamicLoaderError(symbolError)
-                });
-                return;
-            }
-            AMCloudDiagnostic(@"cloud.home_ui.symbol_resolved", @{});
-
-            stage = @"install";
-            AMCloudDiagnostic(@"cloud.home_ui.install_begin", @{});
-            install();
-            AMCloudDiagnostic(@"cloud.home_ui.installed", @{});
-        } @catch (NSException *exception) {
-            AMCloudDiagnostic(@"cloud.home_ui.exception", @{
-                @"stage": stage ?: @"unknown",
-                @"name": exception.name ?: @"NSException",
-                @"reason": exception.reason ?: @""
-            });
-        }
-    });
-}
-
-static void AMCloudScheduleHomeUILoad(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                 (int64_t)(0.75 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        AMCloudLoadHomeUI();
-    });
 }
 
 static NSError *AMCloudError(NSInteger code, NSString *message) {
@@ -1887,8 +1800,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 - (void)applyAccountProfile:(NSDictionary *)profile {
     if (![profile isKindOfClass:NSDictionary.class] || !AMCloudReadToken().length) return;
-    NSString *value = [profile[@"avatarUrl"] isKindOfClass:NSString.class]
-        ? profile[@"avatarUrl"] : @"";
+    id rawValue = profile[@"avatarUrl"] ?: profile[@"avatar_url"];
+    if (![rawValue isKindOfClass:NSString.class]) {
+        NSDictionary *user = [profile[@"user"] isKindOfClass:NSDictionary.class]
+            ? profile[@"user"] : nil;
+        rawValue = user[@"avatarUrl"] ?: user[@"avatar_url"];
+    }
+    NSString *value = [rawValue isKindOfClass:NSString.class] ? rawValue : @"";
     NSURL *URL = [self resolvedAvatarURL:value];
     if (!URL) {
         [self clearAccountAvatar];
@@ -1911,7 +1829,15 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         self.accountAvatarURL = URLText;
         self.accountAvatarImage = image;
         NSData *cacheData = UIImagePNGRepresentation(image);
-        if (cacheData.length) [cacheData writeToURL:[self accountAvatarCacheURL] options:NSDataWritingAtomic error:nil];
+        NSError *cacheError = nil;
+        BOOL cached = cacheData.length && [cacheData
+            writeToURL:[self accountAvatarCacheURL]
+               options:NSDataWritingAtomic error:&cacheError];
+        AMCloudDiagnostic(@"cloud.avatar.cache_write", @{
+            @"success": @(cached),
+            @"bytes": @(cacheData.length),
+            @"error": cacheError.localizedDescription ?: @""
+        });
         [self updateAccountEntryImage];
         [NSNotificationCenter.defaultCenter
             postNotificationName:AMCloudAvatarChangedNotification object:nil];
@@ -3540,7 +3466,8 @@ void AMCloudSyncInstallPluginHooksEarly(void) {
 
 void AMCloudSyncInstall(AMCloudImportHandler importHandler) {
     [[AMCloudManager shared] installWithImportHandler:importHandler];
-    AMCloudScheduleHomeUILoad();
+    AMCloudDiagnostic(@"cloud.home_ui.linked_install", @{});
+    AMHomeUIInstall();
 }
 
 void AMCloudAuthorizeFeature(NSString *feature, UIViewController *presenter,
