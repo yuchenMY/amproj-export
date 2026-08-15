@@ -31,19 +31,16 @@ static void *AMHomeUITabSelectionContext = &AMHomeUITabSelectionContext;
 
 static __weak UIViewController *AMHomeUIEmbeddedHost;
 static __weak UIView *AMHomeUIEmbeddedHostView;
-static __weak UIView *AMHomeUIEmbeddedRegionHostView;
-static __weak UIView *AMHomeUIEmbeddedTopBoundaryView;
-static __weak UIView *AMHomeUIEmbeddedBottomBoundaryView;
 static AMHomeUIController *AMHomeUIEmbeddedController;
 static NSArray<NSLayoutConstraint *> *AMHomeUIEmbeddedConstraints;
 static BOOL AMHomeUIAttachLoopRunning;
 
 static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView);
 static BOOL AMHomeUIEmbeddedConstraintsAreActive(void);
+static UIView *AMHomeUIDirectChildContainingView(UIView *hostView,
+                                                  UIView *descendant);
 static void AMHomeUIRefreshEmbeddedLayerOrder(void);
 static BOOL AMHomeUIEmbeddedLayerOrderNeedsRefresh(void);
-static BOOL AMHomeUIChromeDefinesRegion(UIView *topView, UIView *bottomView,
-                                        UIView *containerView);
 static void AMHomeUIClearEmbeddedAttachment(void);
 static id AMHomeUIMainTabControllerForController(UIViewController *controller);
 static BOOL AMHomeUIViewIsVisible(UIView *view, UIWindow *window);
@@ -487,22 +484,11 @@ static BOOL AMHomeUISelectProjectsTab(void) {
     UIViewController *host = AMHomeUIEmbeddedHost;
     UIView *hostView = AMHomeUIEmbeddedHostView;
     UIView *embeddedView = self.viewIfLoaded;
+    UIWindow *window = hostView.window ?: AMHomeUIKeyWindow();
     BOOL hasValidRegion = AMHomeUIIsMainController(host) && hostView &&
         embeddedView.superview == hostView &&
-        AMHomeUIEmbeddedRegionHostView &&
-        AMHomeUIEmbeddedTopBoundaryView &&
-        AMHomeUIEmbeddedBottomBoundaryView &&
         AMHomeUIEmbeddedConstraintsAreActive() &&
-        (hostView == AMHomeUIEmbeddedRegionHostView ||
-         [hostView isDescendantOfView:AMHomeUIEmbeddedRegionHostView]) &&
-        [AMHomeUIEmbeddedTopBoundaryView
-            isDescendantOfView:AMHomeUIEmbeddedRegionHostView] &&
-        [AMHomeUIEmbeddedBottomBoundaryView
-            isDescendantOfView:AMHomeUIEmbeddedRegionHostView] &&
-        AMHomeUIChromeDefinesRegion(
-            AMHomeUIEmbeddedTopBoundaryView,
-            AMHomeUIEmbeddedBottomBoundaryView,
-            AMHomeUIEmbeddedRegionHostView);
+        AMHomeUIViewIsVisible(hostView, window);
     NSInteger selectedIndex = NSNotFound;
     BOOL selectedIndexKnown = NO;
     BOOL nativeHomeVisible = NO;
@@ -804,6 +790,25 @@ static id AMHomeUIObjectIvarValue(id object, NSString *nameFragment) {
     return nil;
 }
 
+static UITabBarController *AMHomeUIFindEmbeddedTabController(
+    UIViewController *controller, NSMutableSet<NSValue *> *visited,
+    NSUInteger depth) {
+    if (!controller || depth > 8) return nil;
+    NSValue *identity =
+        [NSValue valueWithPointer:(__bridge const void *)controller];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+    if (depth > 0 && [controller isKindOfClass:UITabBarController.class]) {
+        return (UITabBarController *)controller;
+    }
+    for (UIViewController *child in controller.childViewControllers) {
+        UITabBarController *match = AMHomeUIFindEmbeddedTabController(
+            child, visited, depth + 1);
+        if (match) return match;
+    }
+    return nil;
+}
+
 static id AMHomeUIMainTabControllerForController(UIViewController *controller) {
     if (!AMHomeUIIsMainController(controller)) return nil;
     id tabController = AMHomeUIObjectPropertyForController(controller, @"embedTBC");
@@ -814,7 +819,14 @@ static id AMHomeUIMainTabControllerForController(UIViewController *controller) {
             tabController = nil;
         }
     }
-    return tabController ?: AMHomeUIObjectIvarValue(controller, @"embedTBC");
+    if (!tabController) {
+        tabController = AMHomeUIObjectIvarValue(controller, @"embedTBC");
+    }
+    if ([tabController isKindOfClass:UIViewController.class]) {
+        return tabController;
+    }
+    return AMHomeUIFindEmbeddedTabController(
+        controller, [NSMutableSet set], 0) ?: tabController;
 }
 
 static NSInteger AMHomeUISelectedTabIndex(id tabController, BOOL *known) {
@@ -960,16 +972,23 @@ static void AMHomeUICollectNativeHomeMarkers(
     }
 }
 
-static BOOL AMHomeUINativeHomeVisible(UIViewController *controller) {
-    UIView *view = controller.viewIfLoaded;
+static BOOL AMHomeUINativeHomeVisibleInView(UIView *view,
+                                            UIView *excludedView) {
     if (!view || view.hidden || view.alpha <= 0.01 || !view.window) return NO;
     AMHomeUIMarkerMask markers = 0;
-    AMHomeUICollectNativeHomeMarkers(view, view.window, &markers, 0);
+    for (UIView *subview in view.subviews) {
+        if (subview == excludedView) continue;
+        AMHomeUICollectNativeHomeMarkers(subview, view.window, &markers, 0);
+    }
     NSUInteger count = 0;
     for (NSUInteger value = markers; value; value >>= 1) {
         count += value & 1u;
     }
     return count >= 2;
+}
+
+static BOOL AMHomeUINativeHomeVisible(UIViewController *controller) {
+    return AMHomeUINativeHomeVisibleInView(controller.viewIfLoaded, nil);
 }
 
 static BOOL AMHomeUIIsHomeTabSelected(UIViewController *controller,
@@ -990,6 +1009,11 @@ static BOOL AMHomeUIIsHomeTabSelected(UIViewController *controller,
             selectedBranch, [NSMutableSet set], 0);
     BOOL nativeHomeVisible = selectedBranch &&
         AMHomeUINativeHomeVisible(selectedBranch);
+    if (!nativeHomeVisible) {
+        UIView *hostView = AMHomeUIEmbeddedHostView ?: controller.viewIfLoaded;
+        nativeHomeVisible = AMHomeUINativeHomeVisibleInView(
+            hostView, AMHomeUIEmbeddedController.viewIfLoaded);
+    }
     if (selectedIndexOut) *selectedIndexOut = selectedIndex;
     if (indexKnownOut) *indexKnownOut = known;
     if (nativeHomeVisibleOut) *nativeHomeVisibleOut = nativeHomeVisible;
@@ -1380,21 +1404,6 @@ static BOOL AMHomeUIViewIsVisible(UIView *view, UIWindow *window) {
         CGRectIntersectsRect(window.bounds, frame);
 }
 
-static UIView *AMHomeUIMainContentView(UIViewController *controller) {
-    if (!AMHomeUIIsMainController(controller) || !controller.isViewLoaded) {
-        return nil;
-    }
-    id mainView = AMHomeUIObjectPropertyForController(controller, @"mainView");
-    if (![mainView isKindOfClass:UIView.class]) {
-        @try {
-            mainView = [controller valueForKey:@"mainView"];
-        } @catch (__unused NSException *exception) {
-            mainView = nil;
-        }
-    }
-    return [mainView isKindOfClass:UIView.class] ? mainView : nil;
-}
-
 static UIView *AMHomeUIViewPropertyForController(
     UIViewController *controller, NSString *propertyName) {
     id value = AMHomeUIObjectPropertyForController(controller, propertyName);
@@ -1408,45 +1417,67 @@ static UIView *AMHomeUIViewPropertyForController(
     return [value isKindOfClass:UIView.class] ? value : nil;
 }
 
-static UIView *AMHomeUIMainChromeView(UIViewController *controller,
-                                      NSString *propertyName,
-                                      UIView *containerView, UIWindow *window) {
-    UIView *view = AMHomeUIViewPropertyForController(controller, propertyName);
-    if (!view || view == containerView ||
-        ![view isDescendantOfView:containerView] ||
-        !AMHomeUIViewIsVisible(view, window)) {
+static UIView *AMHomeUIMainContentView(UIViewController *controller) {
+    if (!AMHomeUIIsMainController(controller) || !controller.isViewLoaded) {
         return nil;
     }
-    return view;
-}
-
-static UIView *AMHomeUICommonAncestor(UIView *first, UIView *second,
-                                      UIView *limit) {
-    if (!first || !second || !limit) return nil;
-    NSMutableSet<NSValue *> *ancestors = [NSMutableSet set];
-    for (UIView *view = first; view; view = view.superview) {
-        [ancestors addObject:
-            [NSValue valueWithPointer:(__bridge const void *)view]];
-        if (view == limit) break;
+    UIView *controllerView = controller.viewIfLoaded;
+    UIView *mainView =
+        AMHomeUIViewPropertyForController(controller, @"mainView");
+    if (!mainView || (mainView != controllerView &&
+                      ![mainView isDescendantOfView:controllerView])) {
+        mainView = controllerView.subviews.count == 1
+            ? controllerView.subviews.firstObject : controllerView;
     }
-    for (UIView *view = second; view; view = view.superview) {
-        NSValue *identity =
-            [NSValue valueWithPointer:(__bridge const void *)view];
-        if ([ancestors containsObject:identity]) return view;
-        if (view == limit) break;
-    }
-    return nil;
-}
 
-static BOOL AMHomeUIChromeDefinesRegion(UIView *topView, UIView *bottomView,
-                                        UIView *containerView) {
-    if (!topView || !bottomView || !containerView) return NO;
-    CGRect topFrame = [topView convertRect:topView.bounds toView:containerView];
-    CGRect bottomFrame =
-        [bottomView convertRect:bottomView.bounds toView:containerView];
-    return !CGRectIsNull(topFrame) && !CGRectIsInfinite(topFrame) &&
-        !CGRectIsNull(bottomFrame) && !CGRectIsInfinite(bottomFrame) &&
-        CGRectGetMaxY(topFrame) + 1.0 < CGRectGetMinY(bottomFrame);
+    id tabController = AMHomeUIMainTabControllerForController(controller);
+    UIView *tabControllerView =
+        [tabController isKindOfClass:UIViewController.class]
+            ? ((UIViewController *)tabController).viewIfLoaded : nil;
+    UIView *containerView =
+        AMHomeUIDirectChildContainingView(mainView, tabControllerView);
+    if (containerView) return containerView;
+
+    UIView *topBar = AMHomeUIViewPropertyForController(controller, @"topBar");
+    UIView *tabBarView =
+        AMHomeUIViewPropertyForController(controller, @"tabBarView");
+    CGRect topFrame = topBar
+        ? [topBar convertRect:topBar.bounds toView:mainView] : CGRectZero;
+    CGRect bottomFrame = tabBarView
+        ? [tabBarView convertRect:tabBarView.bounds toView:mainView]
+        : CGRectMake(0.0, CGRectGetHeight(mainView.bounds), 0.0, 0.0);
+    CGFloat topEdge = topBar ? CGRectGetMaxY(topFrame) : 0.0;
+    CGFloat bottomEdge = tabBarView
+        ? CGRectGetMinY(bottomFrame) : CGRectGetHeight(mainView.bounds);
+    UIView *bestContainer = nil;
+    CGFloat bestDistance = CGFLOAT_MAX;
+    CGFloat bestArea = 0.0;
+    for (UIView *subview in mainView.subviews) {
+        if (subview == topBar || subview == tabBarView || subview.hidden ||
+            subview.alpha <= 0.01) {
+            continue;
+        }
+        CGRect frame = [subview convertRect:subview.bounds toView:mainView];
+        if (CGRectIsNull(frame) || CGRectIsInfinite(frame) ||
+            CGRectGetWidth(frame) < CGRectGetWidth(mainView.bounds) * 0.7 ||
+            CGRectGetMinY(frame) > topEdge + 4.0 ||
+            CGRectGetMaxY(frame) < bottomEdge - 4.0) {
+            continue;
+        }
+        CGFloat topDelta = CGRectGetMinY(frame) - topEdge;
+        if (topDelta < 0.0) topDelta = -topDelta;
+        CGFloat bottomDelta = CGRectGetMaxY(frame) - bottomEdge;
+        if (bottomDelta < 0.0) bottomDelta = -bottomDelta;
+        CGFloat distance = topDelta + bottomDelta;
+        CGFloat area = CGRectGetWidth(frame) * CGRectGetHeight(frame);
+        if (!bestContainer || distance < bestDistance - 0.5 ||
+            (distance <= bestDistance + 0.5 && area > bestArea)) {
+            bestContainer = subview;
+            bestDistance = distance;
+            bestArea = area;
+        }
+    }
+    return bestContainer;
 }
 
 static UIView *AMHomeUIHostViewForController(UIViewController *controller,
@@ -1614,9 +1645,6 @@ static void AMHomeUIClearEmbeddedAttachment(void) {
         [NSLayoutConstraint deactivateConstraints:AMHomeUIEmbeddedConstraints];
     }
     AMHomeUIEmbeddedConstraints = nil;
-    AMHomeUIEmbeddedRegionHostView = nil;
-    AMHomeUIEmbeddedTopBoundaryView = nil;
-    AMHomeUIEmbeddedBottomBoundaryView = nil;
     if (controller) {
         BOOL hadParent = controller.parentViewController != nil;
         if (hadParent) [controller willMoveToParentViewController:nil];
@@ -1632,15 +1660,10 @@ static void AMHomeUIClearEmbeddedAttachment(void) {
     AMHomeUIEmbeddedController = nil;
 }
 
-static BOOL AMHomeUIAttachEmbeddedView(UIView *hostView, UIView *topBoundaryView,
-                                       UIView *bottomBoundaryView) {
+static BOOL AMHomeUIAttachEmbeddedView(UIView *hostView) {
     UIView *embeddedView = AMHomeUIEmbeddedController.view;
-    if (!hostView || !embeddedView || !topBoundaryView || !bottomBoundaryView) {
-        return NO;
-    }
+    if (!hostView || !embeddedView) return NO;
     BOOL needsLayout = embeddedView.superview != hostView ||
-        AMHomeUIEmbeddedTopBoundaryView != topBoundaryView ||
-        AMHomeUIEmbeddedBottomBoundaryView != bottomBoundaryView ||
         !AMHomeUIEmbeddedConstraintsAreActive();
     if (!needsLayout) return NO;
 
@@ -1655,40 +1678,20 @@ static BOOL AMHomeUIAttachEmbeddedView(UIView *hostView, UIView *topBoundaryView
     }
     embeddedView.clipsToBounds = YES;
     AMHomeUIEmbeddedConstraints = @[
-        [embeddedView.topAnchor constraintEqualToAnchor:topBoundaryView.bottomAnchor],
+        [embeddedView.topAnchor constraintEqualToAnchor:hostView.topAnchor],
         [embeddedView.leadingAnchor
             constraintEqualToAnchor:hostView.leadingAnchor],
         [embeddedView.trailingAnchor
             constraintEqualToAnchor:hostView.trailingAnchor],
-        [embeddedView.bottomAnchor constraintEqualToAnchor:bottomBoundaryView.topAnchor],
+        [embeddedView.bottomAnchor constraintEqualToAnchor:hostView.bottomAnchor],
     ];
     [NSLayoutConstraint activateConstraints:AMHomeUIEmbeddedConstraints];
-    AMHomeUIEmbeddedTopBoundaryView = topBoundaryView;
-    AMHomeUIEmbeddedBottomBoundaryView = bottomBoundaryView;
     AMHomeUIRefreshEmbeddedLayerOrder();
     return YES;
 }
 
 static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView) {
     if (!AMHomeUIIsMainController(controller) || !hostView) {
-        AMHomeUIClearEmbeddedAttachment();
-        return NO;
-    }
-    UIWindow *window = hostView.window ?: AMHomeUIKeyWindow();
-    UIView *controllerView = controller.viewIfLoaded;
-    UIView *topBoundaryView = AMHomeUIMainChromeView(
-        controller, @"topBar", controllerView, window);
-    UIView *bottomBoundaryView = AMHomeUIMainChromeView(
-        controller, @"tabBarView", controllerView, window);
-    UIView *regionHost = AMHomeUICommonAncestor(
-        topBoundaryView, bottomBoundaryView, controllerView);
-    if (regionHost && hostView != regionHost &&
-        ![hostView isDescendantOfView:regionHost]) {
-        regionHost = controllerView;
-    }
-    if (!topBoundaryView || !bottomBoundaryView || !regionHost ||
-        !AMHomeUIChromeDefinesRegion(
-            topBoundaryView, bottomBoundaryView, regionHost)) {
         AMHomeUIClearEmbeddedAttachment();
         return NO;
     }
@@ -1703,10 +1706,8 @@ static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView)
         AMHomeUIEmbeddedController = [AMHomeUIController new];
         AMHomeUIEmbeddedHost = controller;
         AMHomeUIEmbeddedHostView = hostView;
-        AMHomeUIEmbeddedRegionHostView = regionHost;
         [controller addChildViewController:AMHomeUIEmbeddedController];
-        if (!AMHomeUIAttachEmbeddedView(hostView, topBoundaryView,
-                                        bottomBoundaryView)) {
+        if (!AMHomeUIAttachEmbeddedView(hostView)) {
             AMHomeUIClearEmbeddedAttachment();
             return NO;
         }
@@ -1716,9 +1717,7 @@ static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView)
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } else {
         AMHomeUIEmbeddedHostView = hostView;
-        AMHomeUIEmbeddedRegionHostView = regionHost;
-        hostChanged |= AMHomeUIAttachEmbeddedView(
-            hostView, topBoundaryView, bottomBoundaryView);
+        hostChanged |= AMHomeUIAttachEmbeddedView(hostView);
     }
     [AMHomeUIEmbeddedController observeTabController:
         AMHomeUIMainTabControllerForController(controller)];
@@ -1726,12 +1725,9 @@ static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView)
     if (hostChanged) {
         [AMHomeUIEmbeddedController updateAvatar];
         AMHomeUIApplyAvatarToNativeController(controller);
-        NSLog(@"[AMHomeUI] embedded into %@.%@ top=%@ bottom=%@",
+        NSLog(@"[AMHomeUI] embedded into %@.%@",
               NSStringFromClass(controller.class),
-              AMHomeUIIsMainController(controller) ? @"contentRegion" : @"view",
-              topBoundaryView ? NSStringFromClass(topBoundaryView.class) : @"host",
-              bottomBoundaryView
-                  ? NSStringFromClass(bottomBoundaryView.class) : @"host");
+              AMHomeUIIsMainController(controller) ? @"containerView" : @"view");
     }
     return YES;
 }
@@ -1765,7 +1761,7 @@ static void AMHomeUIAttachAttempt(NSUInteger attempt) {
     @try {
         AMHomeUIControllerKind attachedKind = AMHomeUIAttach();
         if (attempt == 60) {
-            NSLog(@"[AMHomeUI] MainVC.mainView not ready; continuing low-frequency discovery");
+            NSLog(@"[AMHomeUI] MainVC.containerView not ready; continuing low-frequency discovery");
         }
         NSTimeInterval retryDelay = attachedKind == AMHomeUIControllerKindMain
             ? 1.0 : (attempt < 60 ? 0.25 : 2.0);
