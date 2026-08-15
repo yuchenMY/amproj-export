@@ -44,8 +44,19 @@ class WebHomeSourceTests(unittest.TestCase):
     def test_embedded_home_keeps_the_native_header_and_tab_bar(self):
         self.assertIn("/home?embed=1&platform=ios", SOURCE)
         self.assertIn("WKUserScriptInjectionTimeAtDocumentStart", SOURCE)
-        self.assertIn(".home-header{display:none!important}", SOURCE)
+        self.assertIn("document.querySelectorAll('.home-header')", SOURCE)
+        self.assertIn("header.hidden=true", SOURCE)
+        self.assertIn("header.setAttribute('aria-hidden','true')", SOURCE)
+        self.assertIn("new MutationObserver(apply)", SOURCE)
+        self.assertIn("childList:true,subtree:true", SOURCE)
         self.assertIn("data-am-native-embedded", SOURCE)
+        self.assertNotIn("document.createElement('style')", SOURCE)
+        self.assertNotIn("style.textContent", SOURCE)
+        self.assertIn("UIUserInterfaceStyleLight", SOURCE)
+        self.assertIn(
+            "self.webView.overrideUserInterfaceStyle = UIUserInterfaceStyleLight",
+            SOURCE,
+        )
 
     def test_home_embedding_targets_the_current_native_home_host(self):
         self.assertIn("AMHomeUIDirectKindForClass", SOURCE)
@@ -56,12 +67,13 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertNotIn("viewDidAppear attach failed", SOURCE)
         self.assertIn("AMHomeUIAttachToHost", SOURCE)
         self.assertIn("AMHomeUIAttach();", SOURCE)
-        self.assertIn("AMHomeUIEmbeddedController.view.hidden = NO;", SOURCE)
         self.assertIn("AMHomeUIControllerKindFeed = 1", SOURCE)
         self.assertIn("AMHomeUIControllerKindHome = 2", SOURCE)
         self.assertIn("AMHomeUIControllerKindMain = 3", SOURCE)
         self.assertIn('AMHomeUIObjectPropertyForController(controller, @"mainView")', SOURCE)
         self.assertIn('[controller valueForKey:@"mainView"]', SOURCE)
+        self.assertIn('controller, @"topBar", hostView, window', SOURCE)
+        self.assertIn('controller, @"tabBarView", hostView, window', SOURCE)
         self.assertIn("[name containsString:@\"HomeVC\"]", SOURCE)
         self.assertIn("[name containsString:@\"FeedVC\"]", SOURCE)
         self.assertIn("AMHomeUIViewIsVisible", SOURCE)
@@ -80,15 +92,26 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("AMHomeUIHostViewForController(root, window)", finder)
         self.assertIn("hostView && kind > *bestKind", finder)
         self.assertIn("AMHomeUIEmbeddedHostView", attach)
+        self.assertIn("!AMHomeUIIsMainController(controller)", attach)
         self.assertIn("[controller addChildViewController:AMHomeUIEmbeddedController]", attach)
-        self.assertIn("AMHomeUIAttachEmbeddedView(hostView)", attach)
-        self.assertIn("[hostView bringSubviewToFront:AMHomeUIEmbeddedController.view]", attach)
-        embedded = SOURCE.split("static void AMHomeUIAttachEmbeddedView", 1)[1].split(
+        self.assertIn("AMHomeUIAttachEmbeddedView(", attach)
+        self.assertIn("AMHomeUIClearEmbeddedAttachment();", attach)
+        self.assertIn("syncTabSelectionVisibility", attach)
+        embedded = SOURCE.split("static BOOL AMHomeUIAttachEmbeddedView", 1)[1].split(
             "static BOOL AMHomeUIAttachToHost", 1
         )[0]
         self.assertIn("[hostView addSubview:embeddedView]", embedded)
-        self.assertIn("constraintEqualToAnchor:hostView.topAnchor", embedded)
-        self.assertIn("constraintEqualToAnchor:hostView.bottomAnchor", embedded)
+        self.assertIn("topBoundaryView.bottomAnchor", embedded)
+        self.assertIn("bottomBoundaryView.topAnchor", embedded)
+        self.assertIn("AMHomeUIEmbeddedConstraints", embedded)
+        self.assertIn("AMHomeUIEmbeddedConstraintsAreActive()", embedded)
+        layer_order = SOURCE.split(
+            "static void AMHomeUIRefreshEmbeddedLayerOrder(void) {", 1
+        )[1].split("static void AMHomeUIClearEmbeddedAttachment", 1)[0]
+        self.assertIn("[hostView bringSubviewToFront:embeddedView]", layer_order)
+        self.assertIn("AMHomeUIDirectChildContainingView", layer_order)
+        self.assertIn("[hostView bringSubviewToFront:topChrome]", layer_order)
+        self.assertIn("[hostView bringSubviewToFront:bottomChrome]", layer_order)
         attempt = SOURCE.split(
             "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
         )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
@@ -102,7 +125,7 @@ class WebHomeSourceTests(unittest.TestCase):
             attempt.index("if (attempt == 60)"),
         )
 
-    def test_fallback_embedding_stays_provisional_and_host_changes_are_rechecked(self):
+    def test_non_main_fallback_is_never_left_visible(self):
         attempt = SOURCE.split(
             "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
         )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
@@ -117,15 +140,46 @@ class WebHomeSourceTests(unittest.TestCase):
         )[0]
         self.assertIn("AMHomeUIEmbeddedController.parentViewController != controller", attach)
         self.assertIn("BOOL hostChanged = needsNewController || oldHostView != hostView", attach)
-        cleanup = attach.split("if (needsNewController)", 1)[1].split(
-            "if (oldHost)", 1
+        self.assertIn("!AMHomeUIIsMainController(controller)", attach)
+        self.assertIn("if (!topBoundaryView || !bottomBoundaryView)", attach)
+        self.assertGreaterEqual(attach.count("AMHomeUIClearEmbeddedAttachment();"), 3)
+        choose_host = SOURCE.split(
+            "static AMHomeUIControllerKind AMHomeUIAttach(void) {", 1
+        )[1].split("static void AMHomeUIAttachAttempt", 1)[0]
+        self.assertIn("if (bestKind != AMHomeUIControllerKindMain)", choose_host)
+        self.assertIn("AMHomeUIClearEmbeddedAttachment();", choose_host)
+        cleanup = SOURCE.split(
+            "static void AMHomeUIClearEmbeddedAttachment(void) {", 1
+        )[1].split("static BOOL AMHomeUIAttachEmbeddedView", 1)[0]
+        self.assertIn("[controller observeTabController:nil]", cleanup)
+        self.assertIn("deactivateConstraints:AMHomeUIEmbeddedConstraints", cleanup)
+        self.assertIn("[controller.viewIfLoaded removeFromSuperview]", cleanup)
+        self.assertIn("[controller removeFromParentViewController]", cleanup)
+
+    def test_home_visibility_tracks_embed_tab_selection(self):
+        self.assertIn('AMHomeUIObjectPropertyForController(controller, @"embedTBC")', SOURCE)
+        self.assertIn('[controller valueForKey:@"embedTBC"]', SOURCE)
+        self.assertIn('AMHomeUIObjectIvarValue(controller, @"embedTBC")', SOURCE)
+        self.assertIn('[tabController valueForKey:@"selectedIndex"]', SOURCE)
+        self.assertIn("selectedIndex == 0", SOURCE)
+        self.assertIn('addObserver:self\n                            forKeyPath:@"selectedIndex"', SOURCE)
+        self.assertIn("AMHomeUITabSelectionContext", SOURCE)
+        visibility = SOURCE.split("- (void)syncTabSelectionVisibility {", 1)[1].split(
+            "- (void)updateAvatar", 1
         )[0]
-        self.assertIn("BOOL hadParent", cleanup)
-        self.assertIn("[AMHomeUIEmbeddedController.view removeFromSuperview]", cleanup)
-        self.assertLess(
-            cleanup.index("[AMHomeUIEmbeddedController.view removeFromSuperview]"),
-            cleanup.index("if (hadParent)", cleanup.index("if (hadParent)") + 1),
-        )
+        self.assertIn("AMHomeUIIsMainController(host)", visibility)
+        self.assertIn("AMHomeUIIsHomeTabSelected(host)", visibility)
+        self.assertIn("AMHomeUIEmbeddedConstraintsAreActive()", visibility)
+        self.assertIn("embeddedView.hidden = !shouldShow", visibility)
+        self.assertIn("AMHomeUIRefreshEmbeddedLayerOrder()", visibility)
+        self.assertNotIn("self.view.hidden = NO", SOURCE)
+
+    def test_inactive_middle_region_constraints_are_rebuilt(self):
+        active_check = SOURCE.split(
+            "static BOOL AMHomeUIEmbeddedConstraintsAreActive(void) {", 1
+        )[1].split("static UIView *AMHomeUIDirectChildContainingView", 1)[0]
+        self.assertIn("AMHomeUIEmbeddedConstraints.count != 4", active_check)
+        self.assertIn("if (!constraint.active) return NO", active_check)
 
     def test_every_attach_retry_has_exception_protection(self):
         attempt = SOURCE.split(

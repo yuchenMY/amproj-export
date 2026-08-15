@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
+#import <string.h>
 
 static NSString *const AMHomeUIURLString =
     @"https://amhome.meowcr.cn/home?embed=1&platform=ios";
@@ -24,15 +25,24 @@ static const void *AMHomeUIOriginalButtonConfigurationKey =
 static const void *AMHomeUIOriginalButtonPresentationKey =
     &AMHomeUIOriginalButtonPresentationKey;
 static const void *AMHomeUIAvatarOverlayKey = &AMHomeUIAvatarOverlayKey;
+static void *AMHomeUITabSelectionContext = &AMHomeUITabSelectionContext;
 
 @class AMHomeUIController;
 
 static __weak UIViewController *AMHomeUIEmbeddedHost;
 static __weak UIView *AMHomeUIEmbeddedHostView;
+static __weak UIView *AMHomeUIEmbeddedTopBoundaryView;
+static __weak UIView *AMHomeUIEmbeddedBottomBoundaryView;
 static AMHomeUIController *AMHomeUIEmbeddedController;
+static NSArray<NSLayoutConstraint *> *AMHomeUIEmbeddedConstraints;
 static BOOL AMHomeUIAttachLoopRunning;
 
 static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView);
+static BOOL AMHomeUIEmbeddedConstraintsAreActive(void);
+static void AMHomeUIRefreshEmbeddedLayerOrder(void);
+static void AMHomeUIClearEmbeddedAttachment(void);
+static id AMHomeUIMainTabControllerForController(UIViewController *controller);
+static BOOL AMHomeUIIsHomeTabSelected(UIViewController *controller);
 static void AMHomeUIRefreshAvatarEverywhere(void);
 static void AMHomeUIApplyAvatarToButton(UIButton *button, UIImage *avatar);
 
@@ -44,6 +54,27 @@ typedef NS_ENUM(NSInteger, AMHomeUIControllerKind) {
 };
 
 static AMHomeUIControllerKind AMHomeUIAttach(void);
+
+static NSString *AMHomeUIEmbeddedPresentationScript(void) {
+    return
+        @"(function(){"
+         "var apply=function(){var root=document.documentElement;"
+         "if(root){root.setAttribute('data-am-native-embedded','true');}"
+         "var headers=document.querySelectorAll('.home-header');"
+         "for(var index=0;index<headers.length;index++){"
+         "var header=headers[index];header.hidden=true;"
+         "header.setAttribute('aria-hidden','true');}};"
+         "var start=function(){apply();"
+         "if(window.__amNativeEmbeddedObserver||!window.MutationObserver){return;}"
+         "var root=document.documentElement;if(!root){return;}"
+         "var observer=new MutationObserver(apply);"
+         "observer.observe(root,{childList:true,subtree:true});"
+         "window.__amNativeEmbeddedObserver=observer;};"
+         "if(document.documentElement){start();}"
+         "else{document.addEventListener('DOMContentLoaded',start,{once:true});}"
+         "document.addEventListener('DOMContentLoaded',apply,{once:true});"
+         "})();";
+}
 
 static BOOL AMHomeUIClassIsViewController(Class cls) {
     Class viewControllerClass = UIViewController.class;
@@ -249,6 +280,11 @@ static BOOL AMHomeUISelectProjectsTab(void) {
 @property(nonatomic, strong) UIRefreshControl *refreshControl;
 @property(nonatomic, strong) UIView *errorView;
 @property(nonatomic, strong) AMHomeUIMessageProxy *messageProxy;
+@property(nonatomic, strong) NSObject *observedTabController;
+@property(nonatomic) BOOL observingTabSelection;
+- (void)applyEmbeddedPresentation;
+- (void)observeTabController:(NSObject *)tabController;
+- (void)syncTabSelectionVisibility;
 - (void)updateAvatar;
 @end
 
@@ -258,6 +294,10 @@ static BOOL AMHomeUISelectProjectsTab(void) {
     self.view = [UIView new];
     self.view.backgroundColor =
         [UIColor colorWithRed:0.961 green:0.965 blue:0.973 alpha:1.0];
+    if (@available(iOS 13.0, *)) {
+        self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+        self.view.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    }
 }
 
 - (void)viewDidLoad {
@@ -267,19 +307,8 @@ static BOOL AMHomeUISelectProjectsTab(void) {
     self.messageProxy.target = self;
     [configuration.userContentController
         addScriptMessageHandler:self.messageProxy name:@"amnative"];
-    NSString *embeddedStyleScript =
-        @"(function(){var id='am-native-embedded-style';"
-         "if(document.getElementById(id)){return;}"
-         "var style=document.createElement('style');style.id=id;"
-         "style.textContent='.home-header{display:none!important}' +"
-         "'.home-shell{padding-top:16px!important}';"
-         "var install=function(){var root=document.head||document.documentElement;"
-         "if(!root){return false;}root.appendChild(style);"
-         "document.documentElement.setAttribute('data-am-native-embedded','true');"
-         "return true;};if(!install()){document.addEventListener('DOMContentLoaded',install,{once:true});}"
-         "})();";
     [configuration.userContentController addUserScript:
-        [[WKUserScript alloc] initWithSource:embeddedStyleScript
+        [[WKUserScript alloc] initWithSource:AMHomeUIEmbeddedPresentationScript()
                               injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                            forMainFrameOnly:YES]];
     configuration.allowsInlineMediaPlayback = YES;
@@ -289,6 +318,9 @@ static BOOL AMHomeUISelectProjectsTab(void) {
     self.webView.translatesAutoresizingMaskIntoConstraints = NO;
     self.webView.navigationDelegate = self;
     self.webView.opaque = NO;
+    if (@available(iOS 13.0, *)) {
+        self.webView.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    }
     self.webView.backgroundColor = [UIColor colorWithRed:0.961
                                                    green:0.965
                                                     blue:0.973
@@ -333,6 +365,7 @@ static BOOL AMHomeUISelectProjectsTab(void) {
 }
 
 - (void)dealloc {
+    [self observeTabController:nil];
     [self.webView.configuration.userContentController
         removeScriptMessageHandlerForName:@"amnative"];
 }
@@ -367,6 +400,78 @@ static BOOL AMHomeUISelectProjectsTab(void) {
 - (void)openAccountCenter {
     [NSNotificationCenter.defaultCenter
         postNotificationName:AMHomeUIShowAccountNotification object:nil];
+}
+
+- (void)applyEmbeddedPresentation {
+    [self.webView evaluateJavaScript:AMHomeUIEmbeddedPresentationScript()
+                   completionHandler:nil];
+}
+
+- (void)observeTabController:(NSObject *)tabController {
+    BOOL sameController = self.observedTabController == tabController;
+    if (sameController &&
+        (!tabController || self.observingTabSelection)) {
+        [self syncTabSelectionVisibility];
+        return;
+    }
+    if (!sameController && self.observingTabSelection &&
+        self.observedTabController) {
+        @try {
+            [self.observedTabController removeObserver:self
+                                            forKeyPath:@"selectedIndex"
+                                               context:AMHomeUITabSelectionContext];
+        } @catch (__unused NSException *exception) {
+        }
+    }
+    if (!sameController) {
+        self.observingTabSelection = NO;
+        self.observedTabController = tabController;
+    }
+    if (tabController && !self.observingTabSelection) {
+        @try {
+            [tabController addObserver:self
+                            forKeyPath:@"selectedIndex"
+                               options:NSKeyValueObservingOptionNew
+                               context:AMHomeUITabSelectionContext];
+            self.observingTabSelection = YES;
+        } @catch (NSException *exception) {
+            NSLog(@"[AMHomeUI] selectedIndex observation unavailable: %@ %@",
+                  exception.name, exception.reason ?: @"");
+        }
+    }
+    [self syncTabSelectionVisibility];
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary<NSKeyValueChangeKey, id> *)change
+                       context:(void *)context {
+    if (context == AMHomeUITabSelectionContext) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self syncTabSelectionVisibility];
+        });
+        return;
+    }
+    [super observeValueForKeyPath:keyPath
+                        ofObject:object
+                          change:change
+                         context:context];
+}
+
+- (void)syncTabSelectionVisibility {
+    UIViewController *host = AMHomeUIEmbeddedHost;
+    UIView *hostView = AMHomeUIEmbeddedHostView;
+    UIView *embeddedView = self.viewIfLoaded;
+    BOOL hasValidRegion = AMHomeUIIsMainController(host) && hostView &&
+        embeddedView.superview == hostView &&
+        AMHomeUIEmbeddedTopBoundaryView &&
+        AMHomeUIEmbeddedBottomBoundaryView &&
+        AMHomeUIEmbeddedConstraintsAreActive() &&
+        [AMHomeUIEmbeddedTopBoundaryView isDescendantOfView:hostView] &&
+        [AMHomeUIEmbeddedBottomBoundaryView isDescendantOfView:hostView];
+    BOOL shouldShow = hasValidRegion && AMHomeUIIsHomeTabSelected(host);
+    embeddedView.hidden = !shouldShow;
+    if (shouldShow) AMHomeUIRefreshEmbeddedLayerOrder();
 }
 
 - (void)updateAvatar {
@@ -495,6 +600,7 @@ static BOOL AMHomeUISelectProjectsTab(void) {
     [self.activityIndicator stopAnimating];
     [self.refreshControl endRefreshing];
     [self hideError];
+    [self applyEmbeddedPresentation];
     [self updateAvatar];
 }
 
@@ -572,8 +678,8 @@ static BOOL AMHomeUISelectProjectsTab(void) {
         [self loadHome];
     } else if ([action isEqualToString:@"home"] ||
                [action isEqualToString:@"web"]) {
-        self.view.hidden = NO;
         [self loadHome];
+        [self syncTabSelectionVisibility];
     }
 }
 
@@ -604,6 +710,75 @@ static id AMHomeUIObjectPropertyForController(UIViewController *controller,
     IMP implementation = method_getImplementation(method);
     return implementation
         ? ((id (*)(id, SEL))implementation)(controller, selector) : nil;
+}
+
+static id AMHomeUIObjectIvarValue(id object, NSString *nameFragment) {
+    if (!object || nameFragment.length == 0) return nil;
+    NSString *needle = nameFragment.lowercaseString;
+    for (Class current = object_getClass(object); current;
+         current = class_getSuperclass(current)) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(current, &count);
+        for (unsigned int index = 0; index < count; index++) {
+            Ivar ivar = ivars[index];
+            const char *name = ivar_getName(ivar);
+            const char *type = ivar_getTypeEncoding(ivar);
+            NSString *ivarName = name ? [NSString stringWithUTF8String:name] : @"";
+            if (type && type[0] == '@' &&
+                [ivarName.lowercaseString containsString:needle]) {
+                id value = object_getIvar(object, ivar);
+                free(ivars);
+                return value;
+            }
+        }
+        free(ivars);
+    }
+    return nil;
+}
+
+static id AMHomeUIMainTabControllerForController(UIViewController *controller) {
+    if (!AMHomeUIIsMainController(controller)) return nil;
+    id tabController = AMHomeUIObjectPropertyForController(controller, @"embedTBC");
+    if (!tabController) {
+        @try {
+            tabController = [controller valueForKey:@"embedTBC"];
+        } @catch (__unused NSException *exception) {
+            tabController = nil;
+        }
+    }
+    return tabController ?: AMHomeUIObjectIvarValue(controller, @"embedTBC");
+}
+
+static NSInteger AMHomeUISelectedTabIndex(id tabController, BOOL *known) {
+    if (known) *known = NO;
+    if (!tabController) return NSNotFound;
+    @try {
+        id value = [tabController valueForKey:@"selectedIndex"];
+        if ([value respondsToSelector:@selector(integerValue)]) {
+            if (known) *known = YES;
+            return [value integerValue];
+        }
+    } @catch (__unused NSException *exception) {
+    }
+
+    SEL selector = NSSelectorFromString(@"selectedIndex");
+    Method method = class_getInstanceMethod(object_getClass(tabController), selector);
+    if (!method || method_getNumberOfArguments(method) != 2) return NSNotFound;
+    char *returnType = method_copyReturnType(method);
+    BOOL returnsInteger = returnType && strchr("cislqCISLQB", returnType[0]);
+    free(returnType);
+    if (!returnsInteger) return NSNotFound;
+    IMP implementation = method_getImplementation(method);
+    if (!implementation) return NSNotFound;
+    if (known) *known = YES;
+    return ((NSInteger (*)(id, SEL))implementation)(tabController, selector);
+}
+
+static BOOL AMHomeUIIsHomeTabSelected(UIViewController *controller) {
+    BOOL known = NO;
+    NSInteger selectedIndex = AMHomeUISelectedTabIndex(
+        AMHomeUIMainTabControllerForController(controller), &known);
+    return known && selectedIndex == 0;
 }
 
 static id AMHomeUIAccountControlForController(UIViewController *controller) {
@@ -994,6 +1169,30 @@ static UIView *AMHomeUIMainContentView(UIViewController *controller) {
     return [mainView isKindOfClass:UIView.class] ? mainView : nil;
 }
 
+static UIView *AMHomeUIViewPropertyForController(
+    UIViewController *controller, NSString *propertyName) {
+    id value = AMHomeUIObjectPropertyForController(controller, propertyName);
+    if (![value isKindOfClass:UIView.class]) {
+        @try {
+            value = [controller valueForKey:propertyName];
+        } @catch (__unused NSException *exception) {
+            value = nil;
+        }
+    }
+    return [value isKindOfClass:UIView.class] ? value : nil;
+}
+
+static UIView *AMHomeUIMainChromeView(UIViewController *controller,
+                                      NSString *propertyName,
+                                      UIView *mainView, UIWindow *window) {
+    UIView *view = AMHomeUIViewPropertyForController(controller, propertyName);
+    if (!view || view == mainView || ![view isDescendantOfView:mainView] ||
+        !AMHomeUIViewIsVisible(view, window)) {
+        return nil;
+    }
+    return view;
+}
+
 static UIView *AMHomeUIHostViewForController(UIViewController *controller,
                                               UIWindow *window) {
     if (!controller || !controller.isViewLoaded) return nil;
@@ -1074,26 +1273,115 @@ static void AMHomeUIFindBestHostInView(
     }
 }
 
-static void AMHomeUIAttachEmbeddedView(UIView *hostView) {
-    UIView *embeddedView = AMHomeUIEmbeddedController.view;
-    if (!hostView || !embeddedView || embeddedView.superview == hostView)
+static BOOL AMHomeUIEmbeddedConstraintsAreActive(void) {
+    if (AMHomeUIEmbeddedConstraints.count != 4) return NO;
+    for (NSLayoutConstraint *constraint in AMHomeUIEmbeddedConstraints) {
+        if (!constraint.active) return NO;
+    }
+    return YES;
+}
+
+static UIView *AMHomeUIDirectChildContainingView(UIView *hostView,
+                                                  UIView *descendant) {
+    if (!hostView || !descendant || descendant == hostView) return nil;
+    UIView *current = descendant;
+    while (current.superview && current.superview != hostView) {
+        current = current.superview;
+    }
+    return current.superview == hostView ? current : nil;
+}
+
+static void AMHomeUIRefreshEmbeddedLayerOrder(void) {
+    UIView *hostView = AMHomeUIEmbeddedHostView;
+    UIView *embeddedView = AMHomeUIEmbeddedController.viewIfLoaded;
+    if (!hostView || embeddedView.superview != hostView || embeddedView.hidden) {
         return;
-    [embeddedView removeFromSuperview];
-    embeddedView.translatesAutoresizingMaskIntoConstraints = NO;
-    [hostView addSubview:embeddedView];
-    [NSLayoutConstraint activateConstraints:@[
-        [embeddedView.topAnchor constraintEqualToAnchor:hostView.topAnchor],
+    }
+    [hostView bringSubviewToFront:embeddedView];
+    UIView *topChrome = AMHomeUIDirectChildContainingView(
+        hostView, AMHomeUIEmbeddedTopBoundaryView);
+    UIView *bottomChrome = AMHomeUIDirectChildContainingView(
+        hostView, AMHomeUIEmbeddedBottomBoundaryView);
+    if (topChrome) [hostView bringSubviewToFront:topChrome];
+    if (bottomChrome && bottomChrome != topChrome) {
+        [hostView bringSubviewToFront:bottomChrome];
+    }
+}
+
+static void AMHomeUIClearEmbeddedAttachment(void) {
+    UIViewController *oldHost = AMHomeUIEmbeddedHost;
+    AMHomeUIController *controller = AMHomeUIEmbeddedController;
+    [controller observeTabController:nil];
+    if (AMHomeUIEmbeddedConstraints.count) {
+        [NSLayoutConstraint deactivateConstraints:AMHomeUIEmbeddedConstraints];
+    }
+    AMHomeUIEmbeddedConstraints = nil;
+    AMHomeUIEmbeddedTopBoundaryView = nil;
+    AMHomeUIEmbeddedBottomBoundaryView = nil;
+    if (controller) {
+        BOOL hadParent = controller.parentViewController != nil;
+        if (hadParent) [controller willMoveToParentViewController:nil];
+        [controller.viewIfLoaded removeFromSuperview];
+        if (hadParent) [controller removeFromParentViewController];
+    }
+    if (oldHost) {
+        objc_setAssociatedObject(oldHost, AMHomeUIControllerKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    AMHomeUIEmbeddedHost = nil;
+    AMHomeUIEmbeddedHostView = nil;
+    AMHomeUIEmbeddedController = nil;
+}
+
+static BOOL AMHomeUIAttachEmbeddedView(UIView *hostView, UIView *topBoundaryView,
+                                       UIView *bottomBoundaryView) {
+    UIView *embeddedView = AMHomeUIEmbeddedController.view;
+    if (!hostView || !embeddedView || !topBoundaryView || !bottomBoundaryView) {
+        return NO;
+    }
+    BOOL needsLayout = embeddedView.superview != hostView ||
+        AMHomeUIEmbeddedTopBoundaryView != topBoundaryView ||
+        AMHomeUIEmbeddedBottomBoundaryView != bottomBoundaryView ||
+        !AMHomeUIEmbeddedConstraintsAreActive();
+    if (!needsLayout) return NO;
+
+    if (AMHomeUIEmbeddedConstraints.count) {
+        [NSLayoutConstraint deactivateConstraints:AMHomeUIEmbeddedConstraints];
+    }
+    if (embeddedView.superview != hostView) {
+        [embeddedView removeFromSuperview];
+        embeddedView.translatesAutoresizingMaskIntoConstraints = NO;
+        [hostView addSubview:embeddedView];
+    }
+    embeddedView.clipsToBounds = YES;
+    AMHomeUIEmbeddedConstraints = @[
+        [embeddedView.topAnchor constraintEqualToAnchor:topBoundaryView.bottomAnchor],
         [embeddedView.leadingAnchor
             constraintEqualToAnchor:hostView.leadingAnchor],
         [embeddedView.trailingAnchor
             constraintEqualToAnchor:hostView.trailingAnchor],
-        [embeddedView.bottomAnchor
-            constraintEqualToAnchor:hostView.bottomAnchor],
-    ]];
+        [embeddedView.bottomAnchor constraintEqualToAnchor:bottomBoundaryView.topAnchor],
+    ];
+    [NSLayoutConstraint activateConstraints:AMHomeUIEmbeddedConstraints];
+    AMHomeUIEmbeddedTopBoundaryView = topBoundaryView;
+    AMHomeUIEmbeddedBottomBoundaryView = bottomBoundaryView;
+    return YES;
 }
 
 static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView) {
-    if (!controller || !hostView) return NO;
+    if (!AMHomeUIIsMainController(controller) || !hostView) {
+        AMHomeUIClearEmbeddedAttachment();
+        return NO;
+    }
+    UIWindow *window = hostView.window ?: AMHomeUIKeyWindow();
+    UIView *topBoundaryView = AMHomeUIMainChromeView(
+        controller, @"topBar", hostView, window);
+    UIView *bottomBoundaryView = AMHomeUIMainChromeView(
+        controller, @"tabBarView", hostView, window);
+    if (!topBoundaryView || !bottomBoundaryView) {
+        AMHomeUIClearEmbeddedAttachment();
+        return NO;
+    }
     UIViewController *oldHost = AMHomeUIEmbeddedHost;
     UIView *oldHostView = AMHomeUIEmbeddedHostView;
     BOOL needsNewController = oldHost != controller ||
@@ -1101,41 +1389,37 @@ static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView)
         AMHomeUIEmbeddedController.parentViewController != controller;
     BOOL hostChanged = needsNewController || oldHostView != hostView;
     if (needsNewController) {
-        if (AMHomeUIEmbeddedController) {
-            BOOL hadParent = AMHomeUIEmbeddedController.parentViewController != nil;
-            if (hadParent) {
-                [AMHomeUIEmbeddedController willMoveToParentViewController:nil];
-            }
-            [AMHomeUIEmbeddedController.view removeFromSuperview];
-            if (hadParent) {
-                [AMHomeUIEmbeddedController removeFromParentViewController];
-            }
-        }
-        if (oldHost) {
-            objc_setAssociatedObject(oldHost, AMHomeUIControllerKey, nil,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
+        AMHomeUIClearEmbeddedAttachment();
         AMHomeUIEmbeddedController = [AMHomeUIController new];
         AMHomeUIEmbeddedHost = controller;
         AMHomeUIEmbeddedHostView = hostView;
         [controller addChildViewController:AMHomeUIEmbeddedController];
-        AMHomeUIAttachEmbeddedView(hostView);
+        if (!AMHomeUIAttachEmbeddedView(hostView, topBoundaryView,
+                                        bottomBoundaryView)) {
+            AMHomeUIClearEmbeddedAttachment();
+            return NO;
+        }
         [AMHomeUIEmbeddedController didMoveToParentViewController:controller];
         objc_setAssociatedObject(controller, AMHomeUIControllerKey,
                                  AMHomeUIEmbeddedController,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } else {
         AMHomeUIEmbeddedHostView = hostView;
-        AMHomeUIAttachEmbeddedView(hostView);
+        hostChanged |= AMHomeUIAttachEmbeddedView(
+            hostView, topBoundaryView, bottomBoundaryView);
     }
-    AMHomeUIEmbeddedController.view.hidden = NO;
-    [hostView bringSubviewToFront:AMHomeUIEmbeddedController.view];
+    [AMHomeUIEmbeddedController observeTabController:
+        AMHomeUIMainTabControllerForController(controller)];
+    [AMHomeUIEmbeddedController syncTabSelectionVisibility];
     if (hostChanged) {
         [AMHomeUIEmbeddedController updateAvatar];
         AMHomeUIApplyAvatarToNativeController(controller);
-        NSLog(@"[AMHomeUI] embedded into %@.%@",
+        NSLog(@"[AMHomeUI] embedded into %@.%@ top=%@ bottom=%@",
               NSStringFromClass(controller.class),
-              AMHomeUIIsMainController(controller) ? @"mainView" : @"view");
+              AMHomeUIIsMainController(controller) ? @"contentRegion" : @"view",
+              topBoundaryView ? NSStringFromClass(topBoundaryView.class) : @"host",
+              bottomBoundaryView
+                  ? NSStringFromClass(bottomBoundaryView.class) : @"host");
     }
     return YES;
 }
@@ -1151,6 +1435,10 @@ static AMHomeUIControllerKind AMHomeUIAttach(void) {
     if (bestKind != AMHomeUIControllerKindMain) {
         AMHomeUIFindBestHostInView(window, window, [NSMutableSet set], 0,
                                    &bestController, &bestHostView, &bestKind);
+    }
+    if (bestKind != AMHomeUIControllerKindMain) {
+        AMHomeUIClearEmbeddedAttachment();
+        return AMHomeUIControllerKindNone;
     }
     return AMHomeUIAttachToHost(bestController, bestHostView)
         ? bestKind : AMHomeUIControllerKindNone;
