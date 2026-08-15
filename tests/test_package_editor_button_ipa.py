@@ -233,6 +233,37 @@ class EditorHomePackageTests(unittest.TestCase):
                 ):
                     packager.ensure_no_home_ui_loads(info, "source main")
 
+    def test_cloud_must_strongly_link_the_single_home_ui_runtime(self):
+        expected = {
+            "command": "LC_LOAD_DYLIB",
+            "name": "@rpath/AMHomeUI.dylib",
+        }
+        packager.ensure_cloud_home_ui_dependency(
+            {"dylib_load_commands": [expected], "external_defined_symbols": []},
+            "Cloud dylib",
+        )
+        invalid_cases = (
+            [],
+            [{"command": "LC_LOAD_WEAK_DYLIB", "name": expected["name"]}],
+            [{"command": "LC_LOAD_DYLIB", "name": "@rpath/Wrong.dylib"}],
+            [expected, expected],
+        )
+        for commands in invalid_cases:
+            with self.subTest(commands=commands), self.assertRaisesRegex(
+                RuntimeError, "must strongly link"
+            ):
+                packager.ensure_cloud_home_ui_dependency(
+                    {"dylib_load_commands": commands}, "Cloud dylib"
+                )
+        with self.assertRaisesRegex(RuntimeError, "must not embed"):
+            packager.ensure_cloud_home_ui_dependency(
+                {
+                    "dylib_load_commands": [expected],
+                    "external_defined_symbols": ["_AMHomeUIInstall"],
+                },
+                "Cloud dylib",
+            )
+
     def test_packager_has_no_main_injection_path(self):
         self.assertNotIn("insert_load_dylib", PACKAGER_SOURCE)
         self.assertNotIn("LC_LOAD_WEAK_DYLIB", PACKAGER_SOURCE)
@@ -280,6 +311,7 @@ class EditorHomePackageTests(unittest.TestCase):
                 mock.patch.object(packager.direct, "verify_cloud_runtime_version"),
                 mock.patch.object(packager.direct, "verify_cloud_stability_contract"),
                 mock.patch.object(packager.direct, "prepare_cloud"),
+                mock.patch.object(packager, "verify_cloud_home_ui_dependency"),
                 mock.patch.object(packager, "verify_home_ui_binary"),
             ):
                 packager.package(

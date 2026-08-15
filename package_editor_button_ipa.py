@@ -86,6 +86,41 @@ def ensure_no_home_ui_loads(info, context):
         )
 
 
+def ensure_cloud_home_ui_dependency(info, context):
+    commands = [
+        command
+        for command in info["dylib_load_commands"]
+        if command["name"].rsplit("/", 1)[-1] == HOME_UI_BASENAME
+    ]
+    expected_name = "@rpath/AMHomeUI.dylib"
+    if len(commands) != 1 or commands[0]["command"] != "LC_LOAD_DYLIB" or (
+        commands[0]["name"] != expected_name
+    ):
+        found = ", ".join(
+            f"{command['command']} {command['name']}" for command in commands
+        ) or "none"
+        raise RuntimeError(
+            f"{context} must strongly link {expected_name} exactly once; found {found}"
+        )
+    forbidden_definitions = {
+        "_AMHomeUIInstall",
+        "_OBJC_CLASS_$_AMHomeUIController",
+        "_OBJC_CLASS_$_AMHomeUIMessageProxy",
+    }
+    duplicates = forbidden_definitions.intersection(
+        info.get("external_defined_symbols", ())
+    )
+    if duplicates:
+        raise RuntimeError(
+            f"{context} must not embed Home UI runtime symbols: {sorted(duplicates)}"
+        )
+
+
+def verify_cloud_home_ui_dependency(dylib_path):
+    info = inject_dylib.verify_dylib_architecture(dylib_path)
+    ensure_cloud_home_ui_dependency(info, "Cloud dylib")
+
+
 def verify_home_ui_binary(home_ui_path, home_ui):
     info = inject_dylib.verify_dylib_architecture(home_ui_path)
     install_names = info.get("id_dylibs", [])
@@ -128,6 +163,7 @@ def package(source_path, output_path, dylib_path, home_ui_path, image_path,
     direct.verify_cloud_runtime_version(dylib)
     direct.verify_cloud_stability_contract(dylib)
     direct.prepare_cloud(dylib)
+    verify_cloud_home_ui_dependency(dylib_path)
     verify_home_ui_binary(home_ui_path, home_ui)
 
     with zipfile.ZipFile(source_path, "r") as source:

@@ -73,12 +73,16 @@ jobs:
           cloud_dependencies = subprocess.check_output(
               ["otool", "-L", "AMProjExport/AMProjExportCloud.dylib"], text=True
           )
-          assert "AMHomeUI.dylib" not in cloud_dependencies
-          cloud_symbols = subprocess.check_output(
+          assert "@rpath/AMHomeUI.dylib" in cloud_dependencies
+          cloud_defined_symbols = subprocess.check_output(
               ["nm", "-gU", "AMProjExport/AMProjExportCloud.dylib"], text=True
           )
+          cloud_symbols = subprocess.check_output(
+              ["nm", "-g", "AMProjExport/AMProjExportCloud.dylib"], text=True
+          )
+          assert "_AMHomeUIInstall" not in cloud_defined_symbols
           assert "_AMHomeUIInstall" in cloud_symbols
-          assert b"https://amhome.meowcr.cn/home" in Path(
+          assert b"https://amhome.meowcr.cn/home" not in Path(
               "AMProjExport/AMProjExportCloud.dylib"
           ).read_bytes()
           print("verified AMProjExportCloud.dylib: v44 stability contract")

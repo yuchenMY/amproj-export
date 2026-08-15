@@ -15,7 +15,8 @@ class WebHomeSourceTests(unittest.TestCase):
             "AMProjExportDebug.dylib:", 1
         )[0]
         home_rule = MAKEFILE.split("AMHomeUI.dylib:", 1)[1].split("clean:", 1)[0]
-        self.assertIn("AMHomeUI.m", cloud_rule)
+        self.assertNotIn("AMHomeUI.m", cloud_rule)
+        self.assertIn("AMHomeUI.dylib", cloud_rule)
         self.assertNotIn("AMWebHome.m", cloud_rule)
         self.assertIn("AMHomeUI.m", home_rule)
         self.assertIn("-framework WebKit", home_rule)
@@ -72,8 +73,10 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("AMHomeUIControllerKindMain = 3", SOURCE)
         self.assertIn('AMHomeUIObjectPropertyForController(controller, @"mainView")', SOURCE)
         self.assertIn('[controller valueForKey:@"mainView"]', SOURCE)
-        self.assertIn('controller, @"topBar", hostView, window', SOURCE)
-        self.assertIn('controller, @"tabBarView", hostView, window', SOURCE)
+        self.assertIn('controller, @"topBar", controllerView, window', SOURCE)
+        self.assertIn('controller, @"tabBarView", controllerView, window', SOURCE)
+        self.assertIn("AMHomeUICommonAncestor", SOURCE)
+        self.assertIn("AMHomeUIChromeDefinesRegion", SOURCE)
         self.assertIn("[name containsString:@\"HomeVC\"]", SOURCE)
         self.assertIn("[name containsString:@\"FeedVC\"]", SOURCE)
         self.assertIn("AMHomeUIViewIsVisible", SOURCE)
@@ -108,16 +111,20 @@ class WebHomeSourceTests(unittest.TestCase):
         layer_order = SOURCE.split(
             "static void AMHomeUIRefreshEmbeddedLayerOrder(void) {", 1
         )[1].split("static void AMHomeUIClearEmbeddedAttachment", 1)[0]
-        self.assertIn("[hostView bringSubviewToFront:embeddedView]", layer_order)
-        self.assertIn("AMHomeUIDirectChildContainingView", layer_order)
-        self.assertIn("[hostView bringSubviewToFront:topChrome]", layer_order)
-        self.assertIn("[hostView bringSubviewToFront:bottomChrome]", layer_order)
+        self.assertIn("AMHomeUINativeContentAnchorView()", layer_order)
+        self.assertIn(
+            "[hostView insertSubview:embeddedView aboveSubview:nativeContentAnchor]",
+            layer_order,
+        )
+        self.assertNotIn("[hostView bringSubviewToFront:embeddedView]", layer_order)
+        self.assertNotIn("bringSubviewToFront:topChrome", layer_order)
+        self.assertNotIn("bringSubviewToFront:bottomChrome", layer_order)
         attempt = SOURCE.split(
             "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
         )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
         self.assertIn("AMHomeUIControllerKind attachedKind = AMHomeUIAttach();", attempt)
         self.assertIn("attachedKind == AMHomeUIControllerKindMain", attempt)
-        self.assertIn("? 8 : 60", attempt)
+        self.assertIn("? 1.0 : (attempt < 60 ? 0.25 : 2.0)", attempt)
         self.assertIn("AMHomeUIAttachAttempt(attempt + 1)", attempt)
         self.assertIn("MainVC.mainView not ready", attempt)
         self.assertLess(
@@ -129,10 +136,8 @@ class WebHomeSourceTests(unittest.TestCase):
         attempt = SOURCE.split(
             "static void AMHomeUIAttachAttempt(NSUInteger attempt) {", 1
         )[1].split("static void AMHomeUIScheduleAttachAttempts", 1)[0]
-        self.assertIn("NSUInteger fastRetryLimit", attempt)
         self.assertIn("attachedKind == AMHomeUIControllerKindMain", attempt)
-        self.assertIn("? 8 : 60", attempt)
-        self.assertIn("attempt < fastRetryLimit ? 0.25 : 2.0", attempt)
+        self.assertIn("? 1.0 : (attempt < 60 ? 0.25 : 2.0)", attempt)
         self.assertNotIn("if (attachedKind != AMHomeUIControllerKindNone)", attempt)
         self.assertIn("AMHomeUIAttachAttempt(attempt + 1)", attempt)
         attach = SOURCE.split("static BOOL AMHomeUIAttachToHost", 2)[2].split(
@@ -141,7 +146,9 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("AMHomeUIEmbeddedController.parentViewController != controller", attach)
         self.assertIn("BOOL hostChanged = needsNewController || oldHostView != hostView", attach)
         self.assertIn("!AMHomeUIIsMainController(controller)", attach)
-        self.assertIn("if (!topBoundaryView || !bottomBoundaryView)", attach)
+        self.assertIn("if (!topBoundaryView || !bottomBoundaryView || !regionHost", attach)
+        self.assertIn("AMHomeUIEmbeddedRegionHostView = regionHost", attach)
+        self.assertNotIn("hostView = regionHost;", attach)
         self.assertGreaterEqual(attach.count("AMHomeUIClearEmbeddedAttachment();"), 3)
         choose_host = SOURCE.split(
             "static AMHomeUIControllerKind AMHomeUIAttach(void) {", 1
@@ -153,8 +160,26 @@ class WebHomeSourceTests(unittest.TestCase):
         )[1].split("static BOOL AMHomeUIAttachEmbeddedView", 1)[0]
         self.assertIn("[controller observeTabController:nil]", cleanup)
         self.assertIn("deactivateConstraints:AMHomeUIEmbeddedConstraints", cleanup)
+        self.assertIn("AMHomeUIEmbeddedRegionHostView = nil", cleanup)
         self.assertIn("[controller.viewIfLoaded removeFromSuperview]", cleanup)
         self.assertIn("[controller removeFromParentViewController]", cleanup)
+
+    def test_native_home_rebuild_cannot_cover_the_embedded_web_view(self):
+        anchor = SOURCE.split(
+            "static UIView *AMHomeUINativeContentAnchorView(void) {", 1
+        )[1].split("static void AMHomeUIRefreshEmbeddedLayerOrder", 1)[0]
+        self.assertIn("AMHomeUISelectedBranchController(tabController)", anchor)
+        self.assertIn("AMHomeUIDirectChildContainingView(hostView, selectedView)", anchor)
+        self.assertIn("AMHomeUICollectNativeHomeMarkers", anchor)
+        self.assertIn("if (subview == embeddedView) continue", anchor)
+
+        layer_order = SOURCE.split(
+            "static BOOL AMHomeUIEmbeddedLayerOrderNeedsRefresh(void) {", 1
+        )[1].split("static void AMHomeUIClearEmbeddedAttachment", 1)[0]
+        self.assertIn("embeddedIndex != nativeContentIndex + 1", layer_order)
+        self.assertNotIn("nativeContentIndex > embeddedIndex", layer_order)
+        self.assertNotIn("AMHomeUIEmbeddedTopBoundaryView", layer_order)
+        self.assertNotIn("AMHomeUIEmbeddedBottomBoundaryView", layer_order)
 
     def test_home_visibility_tracks_embed_tab_selection(self):
         self.assertIn('AMHomeUIObjectPropertyForController(controller, @"embedTBC")', SOURCE)
@@ -162,16 +187,37 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn('AMHomeUIObjectIvarValue(controller, @"embedTBC")', SOURCE)
         self.assertIn('[tabController valueForKey:@"selectedIndex"]', SOURCE)
         self.assertIn("selectedIndex == 0", SOURCE)
+        self.assertIn("AMHomeUISelectedBranchController", SOURCE)
+        self.assertIn("AMHomeUINativeHomeVisible", SOURCE)
+        self.assertNotIn("static NSInteger AMHomeUIDetectedHomeTabIndex", SOURCE)
+        self.assertIn("detectedHomeTabController", SOURCE)
+        self.assertIn("detectedHomeTabIndex = NSNotFound", SOURCE)
+        self.assertIn("AMHomeUINativeHomeVisible(selectedBranch)", SOURCE)
+        self.assertNotIn("AMHomeUINativeHomeVisible(controller)", SOURCE)
+        self.assertNotIn("AMHomeUIDetectedHomeTabIndex = 0", SOURCE)
+        self.assertIn("latest projects", SOURCE)
+        self.assertIn("create new project", SOURCE)
         self.assertIn('addObserver:self\n                            forKeyPath:@"selectedIndex"', SOURCE)
         self.assertIn("AMHomeUITabSelectionContext", SOURCE)
+        observation = SOURCE.split("- (void)observeTabController:", 1)[1].split(
+            "- (void)observeValueForKeyPath", 1
+        )[0]
+        self.assertIn("self.detectedHomeTabController = tabController", observation)
+        self.assertIn("self.detectedHomeTabIndex = NSNotFound", observation)
+        selection = SOURCE.split("static BOOL AMHomeUIIsHomeTabSelected", 2)[2].split(
+            "static id AMHomeUIAccountControlForController", 1
+        )[0]
+        self.assertIn("AMHomeUISelectedBranchController(tabController)", selection)
+        self.assertIn("return known && selectedIndex == 0", selection)
         visibility = SOURCE.split("- (void)syncTabSelectionVisibility {", 1)[1].split(
             "- (void)updateAvatar", 1
         )[0]
         self.assertIn("AMHomeUIIsMainController(host)", visibility)
-        self.assertIn("AMHomeUIIsHomeTabSelected(host)", visibility)
+        self.assertIn("AMHomeUIIsHomeTabSelected(", visibility)
         self.assertIn("AMHomeUIEmbeddedConstraintsAreActive()", visibility)
         self.assertIn("embeddedView.hidden = !shouldShow", visibility)
         self.assertIn("AMHomeUIRefreshEmbeddedLayerOrder()", visibility)
+        self.assertIn("AMHomeUIEmbeddedLayerOrderNeedsRefresh()", visibility)
         self.assertNotIn("self.view.hidden = NO", SOURCE)
 
     def test_inactive_middle_region_constraints_are_rebuilt(self):
@@ -196,7 +242,7 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("UIApplicationStateActive", attempt)
         self.assertIn("if (attempt == 60)", attempt)
         self.assertIn("continuing low-frequency discovery", attempt)
-        self.assertIn("attempt < fastRetryLimit ? 0.25 : 2.0", attempt)
+        self.assertIn("? 1.0 : (attempt < 60 ? 0.25 : 2.0)", attempt)
         slow_retry = attempt.split("if (attempt == 60)", 1)[1].split(
             "} @catch", 1
         )[0]
@@ -312,6 +358,8 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("AMProjExport/AMHomeUI.dylib", WORKFLOW)
         self.assertIn('"_AMHomeUIInstall"', WORKFLOW)
         self.assertIn('["otool", "-L", "AMProjExport/AMProjExportCloud.dylib"]', WORKFLOW)
+        self.assertIn('assert "@rpath/AMHomeUI.dylib" in cloud_dependencies', WORKFLOW)
+        self.assertIn('assert "_AMHomeUIInstall" not in cloud_defined_symbols', WORKFLOW)
         self.assertIn('assert "_AMHomeUIInstall" in cloud_symbols', WORKFLOW)
         self.assertIn('section["type"] in (0x9, 0x16)', WORKFLOW)
         self.assertIn('home_ui["external_defined_symbols"]', WORKFLOW)
