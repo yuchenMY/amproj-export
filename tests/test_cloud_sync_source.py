@@ -200,6 +200,18 @@ class CloudSyncSourceTests(unittest.TestCase):
                 '@"AlightMotion.EffectPickerPersistCollectionView"',
                 '"_TtC12AlightMotion33EffectPickerPersistCollectionView"',
             ),
+            (
+                '@"AlightMotion.EffectPickerCategoryVC"',
+                '"_TtC12AlightMotion22EffectPickerCategoryVC"',
+            ),
+            (
+                '@"AlightMotion.EffectPickerRecommendCollectionView"',
+                '"_TtC12AlightMotion35EffectPickerRecommendCollectionView"',
+            ),
+            (
+                '@"AlightMotion.EffectPickerSearchVC"',
+                '"_TtC12AlightMotion20EffectPickerSearchVC"',
+            ),
         ):
             self.assertIn(class_name, EDITOR)
             self.assertIn(mangled_name, EDITOR)
@@ -223,6 +235,18 @@ class CloudSyncSourceTests(unittest.TestCase):
                 "AMEditorEffectPersistSelection",
                 "AMEditorOriginalEffectPersistSelection",
             ),
+            (
+                "AMEditorEffectCategorySelection",
+                "AMEditorOriginalEffectCategorySelection",
+            ),
+            (
+                "AMEditorEffectRecommendSelection",
+                "AMEditorOriginalEffectRecommendSelection",
+            ),
+            (
+                "AMEditorEffectSearchSelection",
+                "AMEditorOriginalEffectSearchSelection",
+            ),
         )
         for index, (wrapper_name, original_name) in enumerate(wrappers):
             start = EDITOR.index(f"static void {wrapper_name}")
@@ -241,6 +265,9 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMEditorInstallEffectGroupLoginGate();", EDITOR)
         self.assertIn("AMEditorInstallEffectPanelPresetLoginGate();", EDITOR)
         self.assertIn("AMEditorInstallEffectPersistLoginGate();", EDITOR)
+        self.assertIn("AMEditorInstallEffectCategoryLoginGate();", EDITOR)
+        self.assertIn("AMEditorInstallEffectRecommendLoginGate();", EDITOR)
+        self.assertIn("AMEditorInstallEffectSearchLoginGate();", EDITOR)
         self.assertNotIn("AMEditorInstallEffectBrowserLoginGate", EDITOR)
         self.assertNotIn("AMEditorEffectRender", EDITOR)
 

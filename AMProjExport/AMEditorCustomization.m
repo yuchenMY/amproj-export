@@ -17,6 +17,12 @@ static void (*AMEditorOriginalEffectPanelPresetSelection)(
     id, SEL, UITableView *, NSIndexPath *) = NULL;
 static void (*AMEditorOriginalEffectPersistSelection)(
     id, SEL, UICollectionView *, NSIndexPath *) = NULL;
+static void (*AMEditorOriginalEffectCategorySelection)(
+    id, SEL, UICollectionView *, NSIndexPath *) = NULL;
+static void (*AMEditorOriginalEffectRecommendSelection)(
+    id, SEL, UICollectionView *, NSIndexPath *) = NULL;
+static void (*AMEditorOriginalEffectSearchSelection)(
+    id, SEL, UICollectionView *, NSIndexPath *) = NULL;
 static const void *AMEditorOtherCategoryBackgroundKey =
     &AMEditorOtherCategoryBackgroundKey;
 static __weak UIAlertController *AMEditorEffectLoginAlert = nil;
@@ -121,6 +127,36 @@ static void AMEditorEffectPersistSelection(
     if (!AMEditorAllowEffectSelection(self, collectionView, indexPath)) return;
     if (AMEditorOriginalEffectPersistSelection) {
         AMEditorOriginalEffectPersistSelection(
+            self, selector, collectionView, indexPath);
+    }
+}
+
+static void AMEditorEffectCategorySelection(
+    id self, SEL selector, UICollectionView *collectionView,
+    NSIndexPath *indexPath) {
+    if (!AMEditorAllowEffectSelection(self, collectionView, indexPath)) return;
+    if (AMEditorOriginalEffectCategorySelection) {
+        AMEditorOriginalEffectCategorySelection(
+            self, selector, collectionView, indexPath);
+    }
+}
+
+static void AMEditorEffectRecommendSelection(
+    id self, SEL selector, UICollectionView *collectionView,
+    NSIndexPath *indexPath) {
+    if (!AMEditorAllowEffectSelection(self, collectionView, indexPath)) return;
+    if (AMEditorOriginalEffectRecommendSelection) {
+        AMEditorOriginalEffectRecommendSelection(
+            self, selector, collectionView, indexPath);
+    }
+}
+
+static void AMEditorEffectSearchSelection(
+    id self, SEL selector, UICollectionView *collectionView,
+    NSIndexPath *indexPath) {
+    if (!AMEditorAllowEffectSelection(self, collectionView, indexPath)) return;
+    if (AMEditorOriginalEffectSearchSelection) {
+        AMEditorOriginalEffectSearchSelection(
             self, selector, collectionView, indexPath);
     }
 }
@@ -341,6 +377,32 @@ static Class AMEditorEffectPickerPersistCollectionClass(void) {
     if (!cls) {
         cls = objc_getClass(
             "_TtC12AlightMotion33EffectPickerPersistCollectionView");
+    }
+    return cls;
+}
+
+static Class AMEditorEffectPickerCategoryClass(void) {
+    Class cls = NSClassFromString(@"AlightMotion.EffectPickerCategoryVC");
+    if (!cls) {
+        cls = objc_getClass("_TtC12AlightMotion22EffectPickerCategoryVC");
+    }
+    return cls;
+}
+
+static Class AMEditorEffectPickerRecommendCollectionClass(void) {
+    Class cls = NSClassFromString(
+        @"AlightMotion.EffectPickerRecommendCollectionView");
+    if (!cls) {
+        cls = objc_getClass(
+            "_TtC12AlightMotion35EffectPickerRecommendCollectionView");
+    }
+    return cls;
+}
+
+static Class AMEditorEffectPickerSearchClass(void) {
+    Class cls = NSClassFromString(@"AlightMotion.EffectPickerSearchVC");
+    if (!cls) {
+        cls = objc_getClass("_TtC12AlightMotion20EffectPickerSearchVC");
     }
     return cls;
 }
@@ -669,6 +731,60 @@ static void AMEditorInstallEffectPersistLoginGate(void) {
     }
 }
 
+static void AMEditorInstallEffectCategoryLoginGate(void) {
+    Class cls = AMEditorEffectPickerCategoryClass();
+    SEL selector = @selector(collectionView:didSelectItemAtIndexPath:);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!cls || !method || method_getNumberOfArguments(method) != 4) return;
+
+    IMP original = method_getImplementation(method);
+    if (original == (IMP)AMEditorEffectCategorySelection) return;
+    const char *types = method_getTypeEncoding(method);
+    if (!types) return;
+
+    AMEditorOriginalEffectCategorySelection = (void *)original;
+    if (!class_addMethod(cls, selector, (IMP)AMEditorEffectCategorySelection,
+                         types)) {
+        method_setImplementation(method, (IMP)AMEditorEffectCategorySelection);
+    }
+}
+
+static void AMEditorInstallEffectRecommendLoginGate(void) {
+    Class cls = AMEditorEffectPickerRecommendCollectionClass();
+    SEL selector = @selector(collectionView:didSelectItemAtIndexPath:);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!cls || !method || method_getNumberOfArguments(method) != 4) return;
+
+    IMP original = method_getImplementation(method);
+    if (original == (IMP)AMEditorEffectRecommendSelection) return;
+    const char *types = method_getTypeEncoding(method);
+    if (!types) return;
+
+    AMEditorOriginalEffectRecommendSelection = (void *)original;
+    if (!class_addMethod(cls, selector, (IMP)AMEditorEffectRecommendSelection,
+                         types)) {
+        method_setImplementation(method, (IMP)AMEditorEffectRecommendSelection);
+    }
+}
+
+static void AMEditorInstallEffectSearchLoginGate(void) {
+    Class cls = AMEditorEffectPickerSearchClass();
+    SEL selector = @selector(collectionView:didSelectItemAtIndexPath:);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!cls || !method || method_getNumberOfArguments(method) != 4) return;
+
+    IMP original = method_getImplementation(method);
+    if (original == (IMP)AMEditorEffectSearchSelection) return;
+    const char *types = method_getTypeEncoding(method);
+    if (!types) return;
+
+    AMEditorOriginalEffectSearchSelection = (void *)original;
+    if (!class_addMethod(cls, selector, (IMP)AMEditorEffectSearchSelection,
+                         types)) {
+        method_setImplementation(method, (IMP)AMEditorEffectSearchSelection);
+    }
+}
+
 void AMEditorCustomizationInstall(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -679,5 +795,8 @@ void AMEditorCustomizationInstall(void) {
         AMEditorInstallEffectGroupLoginGate();
         AMEditorInstallEffectPanelPresetLoginGate();
         AMEditorInstallEffectPersistLoginGate();
+        AMEditorInstallEffectCategoryLoginGate();
+        AMEditorInstallEffectRecommendLoginGate();
+        AMEditorInstallEffectSearchLoginGate();
     });
 }
