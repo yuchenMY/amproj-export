@@ -1,4 +1,5 @@
 #import "AMEditorCustomization.h"
+#import "AMCloudSync.h"
 
 #import <UIKit/UIKit.h>
 #import <math.h>
@@ -10,8 +11,119 @@ static UICollectionViewCell *(*AMEditorOriginalEffectBrowserCellForItem)(
     id, SEL, UICollectionView *, NSIndexPath *) = NULL;
 static void (*AMEditorOriginalCategoryCellLayout)(id, SEL) = NULL;
 static void (*AMEditorOriginalEffectPickerMainCellLayout)(id, SEL) = NULL;
+static void (*AMEditorOriginalEffectGroupSelection)(
+    id, SEL, UITableView *, NSIndexPath *) = NULL;
+static void (*AMEditorOriginalEffectPanelPresetSelection)(
+    id, SEL, UITableView *, NSIndexPath *) = NULL;
+static void (*AMEditorOriginalEffectPersistSelection)(
+    id, SEL, UICollectionView *, NSIndexPath *) = NULL;
 static const void *AMEditorOtherCategoryBackgroundKey =
     &AMEditorOtherCategoryBackgroundKey;
+static __weak UIAlertController *AMEditorEffectLoginAlert = nil;
+
+static UIViewController *AMEditorViewControllerForObject(id object) {
+    if ([object isKindOfClass:UIViewController.class]) {
+        return (UIViewController *)object;
+    }
+    UIResponder *responder = [object isKindOfClass:UIResponder.class]
+        ? (UIResponder *)object : nil;
+    while (responder) {
+        responder = responder.nextResponder;
+        if ([responder isKindOfClass:UIViewController.class]) {
+            return (UIViewController *)responder;
+        }
+    }
+    return nil;
+}
+
+static UIViewController *AMEditorTopViewController(UIViewController *controller) {
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    while (controller) {
+        NSValue *identity = [NSValue
+            valueWithPointer:(__bridge const void *)controller];
+        if ([visited containsObject:identity]) break;
+        [visited addObject:identity];
+        UIViewController *next = controller.presentedViewController;
+        if (!next && [controller isKindOfClass:UINavigationController.class]) {
+            next = ((UINavigationController *)controller).visibleViewController;
+        }
+        if (!next && [controller isKindOfClass:UITabBarController.class]) {
+            next = ((UITabBarController *)controller).selectedViewController;
+        }
+        if (!next || !next.viewIfLoaded.window) break;
+        controller = next;
+    }
+    return controller.viewIfLoaded.window ? controller : nil;
+}
+
+static void AMEditorDeselectEffectItem(id listView, NSIndexPath *indexPath) {
+    if (!indexPath) return;
+    if ([listView isKindOfClass:UICollectionView.class]) {
+        [(UICollectionView *)listView deselectItemAtIndexPath:indexPath
+                                                    animated:YES];
+    } else if ([listView isKindOfClass:UITableView.class]) {
+        [(UITableView *)listView deselectRowAtIndexPath:indexPath animated:YES];
+    }
+}
+
+static BOOL AMEditorAllowEffectSelection(id owner, id listView,
+                                         NSIndexPath *indexPath) {
+    if (AMCloudSyncHasLoggedInAccount()) return YES;
+    AMEditorDeselectEffectItem(listView, indexPath);
+
+    UIViewController *presenter = AMEditorTopViewController(
+        AMEditorViewControllerForObject(owner));
+    if (!presenter || AMEditorEffectLoginAlert) return NO;
+
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"请先登录"
+        message:@"登录 AyakaMeow 账户后即可使用效果。"
+        preferredStyle:UIAlertControllerStyleAlert];
+    AMEditorEffectLoginAlert = alert;
+    __weak UIViewController *weakPresenter = presenter;
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消"
+        style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
+            AMEditorEffectLoginAlert = nil;
+        }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"去登录"
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            AMEditorEffectLoginAlert = nil;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{
+                AMCloudSyncShowAccountLoginFrom(weakPresenter);
+            });
+        }]];
+    [presenter presentViewController:alert animated:YES completion:nil];
+    return NO;
+}
+
+static void AMEditorEffectGroupSelection(
+    id self, SEL selector, UITableView *tableView, NSIndexPath *indexPath) {
+    if (!AMEditorAllowEffectSelection(self, tableView, indexPath)) return;
+    if (AMEditorOriginalEffectGroupSelection) {
+        AMEditorOriginalEffectGroupSelection(
+            self, selector, tableView, indexPath);
+    }
+}
+
+static void AMEditorEffectPanelPresetSelection(
+    id self, SEL selector, UITableView *tableView, NSIndexPath *indexPath) {
+    if (!AMEditorAllowEffectSelection(self, tableView, indexPath)) return;
+    if (AMEditorOriginalEffectPanelPresetSelection) {
+        AMEditorOriginalEffectPanelPresetSelection(
+            self, selector, tableView, indexPath);
+    }
+}
+
+static void AMEditorEffectPersistSelection(
+    id self, SEL selector, UICollectionView *collectionView,
+    NSIndexPath *indexPath) {
+    if (!AMEditorAllowEffectSelection(self, collectionView, indexPath)) return;
+    if (AMEditorOriginalEffectPersistSelection) {
+        AMEditorOriginalEffectPersistSelection(
+            self, selector, collectionView, indexPath);
+    }
+}
 
 static UIView *AMEditorViewForKey(id controller, NSString *key) {
     if (!controller || !key.length) return nil;
@@ -204,6 +316,32 @@ static Class AMEditorCategoryCellClass(void) {
 static Class AMEditorEffectPickerMainCellClass(void) {
     Class cls = NSClassFromString(@"AlightMotion.EffectPickerMainCell");
     if (!cls) cls = objc_getClass("_TtC12AlightMotion20EffectPickerMainCell");
+    return cls;
+}
+
+static Class AMEditorEffectGroupControllerClass(void) {
+    Class cls = NSClassFromString(@"AlightMotion.EffectGroupController");
+    if (!cls) {
+        cls = objc_getClass("_TtC12AlightMotion21EffectGroupController");
+    }
+    return cls;
+}
+
+static Class AMEditorEffectPickerPanelContentClass(void) {
+    Class cls = NSClassFromString(@"AlightMotion.EffectPickerPanelContentVC");
+    if (!cls) {
+        cls = objc_getClass("_TtC12AlightMotion26EffectPickerPanelContentVC");
+    }
+    return cls;
+}
+
+static Class AMEditorEffectPickerPersistCollectionClass(void) {
+    Class cls = NSClassFromString(
+        @"AlightMotion.EffectPickerPersistCollectionView");
+    if (!cls) {
+        cls = objc_getClass(
+            "_TtC12AlightMotion33EffectPickerPersistCollectionView");
+    }
     return cls;
 }
 
@@ -476,6 +614,61 @@ static void AMEditorInstallEffectPickerMainCellCustomization(void) {
     }
 }
 
+static void AMEditorInstallEffectGroupLoginGate(void) {
+    Class cls = AMEditorEffectGroupControllerClass();
+    SEL selector = @selector(tableView:didSelectRowAtIndexPath:);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!cls || !method || method_getNumberOfArguments(method) != 4) return;
+
+    IMP original = method_getImplementation(method);
+    if (original == (IMP)AMEditorEffectGroupSelection) return;
+    const char *types = method_getTypeEncoding(method);
+    if (!types) return;
+
+    AMEditorOriginalEffectGroupSelection = (void *)original;
+    if (!class_addMethod(cls, selector, (IMP)AMEditorEffectGroupSelection,
+                         types)) {
+        method_setImplementation(method, (IMP)AMEditorEffectGroupSelection);
+    }
+}
+
+static void AMEditorInstallEffectPanelPresetLoginGate(void) {
+    Class cls = AMEditorEffectPickerPanelContentClass();
+    SEL selector = @selector(tableView:didSelectRowAtIndexPath:);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!cls || !method || method_getNumberOfArguments(method) != 4) return;
+
+    IMP original = method_getImplementation(method);
+    if (original == (IMP)AMEditorEffectPanelPresetSelection) return;
+    const char *types = method_getTypeEncoding(method);
+    if (!types) return;
+
+    AMEditorOriginalEffectPanelPresetSelection = (void *)original;
+    if (!class_addMethod(cls, selector,
+                         (IMP)AMEditorEffectPanelPresetSelection, types)) {
+        method_setImplementation(method,
+                                 (IMP)AMEditorEffectPanelPresetSelection);
+    }
+}
+
+static void AMEditorInstallEffectPersistLoginGate(void) {
+    Class cls = AMEditorEffectPickerPersistCollectionClass();
+    SEL selector = @selector(collectionView:didSelectItemAtIndexPath:);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!cls || !method || method_getNumberOfArguments(method) != 4) return;
+
+    IMP original = method_getImplementation(method);
+    if (original == (IMP)AMEditorEffectPersistSelection) return;
+    const char *types = method_getTypeEncoding(method);
+    if (!types) return;
+
+    AMEditorOriginalEffectPersistSelection = (void *)original;
+    if (!class_addMethod(cls, selector, (IMP)AMEditorEffectPersistSelection,
+                         types)) {
+        method_setImplementation(method, (IMP)AMEditorEffectPersistSelection);
+    }
+}
+
 void AMEditorCustomizationInstall(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -483,5 +676,8 @@ void AMEditorCustomizationInstall(void) {
         AMEditorInstallEffectBrowserCustomization();
         AMEditorInstallCategoryCellCustomization();
         AMEditorInstallEffectPickerMainCellCustomization();
+        AMEditorInstallEffectGroupLoginGate();
+        AMEditorInstallEffectPanelPresetLoginGate();
+        AMEditorInstallEffectPersistLoginGate();
     });
 }

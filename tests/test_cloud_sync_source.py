@@ -171,6 +171,79 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertNotIn("indexPath.item == itemCount - 1", EDITOR)
         self.assertNotIn("numberOfItemsInSection", EDITOR)
 
+    def test_effect_addition_requires_login_without_gating_existing_rendering(self):
+        self.assertIn("AMCloudSyncHasLoggedInAccount", HEADER)
+        self.assertIn("AMCloudSyncShowAccountLoginFrom", HEADER)
+        status = CLOUD.split("BOOL AMCloudSyncHasLoggedInAccount", 1)[1].split(
+            "void AMCloudSyncShowAccountLoginFrom", 1
+        )[0]
+        self.assertIn("AMCloudReadToken().length > 0", status)
+        self.assertNotIn("authorizeFeature", status)
+        login_route = CLOUD.split("void AMCloudSyncShowAccountLoginFrom", 1)[1].split(
+            "void AMCloudAuthorizeFeature", 1
+        )[0]
+        self.assertIn("dispatch_get_main_queue()", login_route)
+        self.assertIn("showAccountFrom:top", login_route)
+        self.assertNotIn("showAuthenticationFrom", login_route)
+
+        self.assertIn('#import "AMCloudSync.h"', EDITOR)
+        for class_name, mangled_name in (
+            (
+                '@"AlightMotion.EffectGroupController"',
+                '"_TtC12AlightMotion21EffectGroupController"',
+            ),
+            (
+                '@"AlightMotion.EffectPickerPanelContentVC"',
+                '"_TtC12AlightMotion26EffectPickerPanelContentVC"',
+            ),
+            (
+                '@"AlightMotion.EffectPickerPersistCollectionView"',
+                '"_TtC12AlightMotion33EffectPickerPersistCollectionView"',
+            ),
+        ):
+            self.assertIn(class_name, EDITOR)
+            self.assertIn(mangled_name, EDITOR)
+
+        gate = EDITOR.split("static BOOL AMEditorAllowEffectSelection", 1)[1].split(
+            "static void AMEditorEffectGroupSelection", 1
+        )[0]
+        self.assertIn("AMCloudSyncHasLoggedInAccount()", gate)
+        self.assertIn("AMEditorDeselectEffectItem", gate)
+        self.assertIn("AMCloudSyncShowAccountLoginFrom", gate)
+        self.assertIn('alertControllerWithTitle:@"请先登录"', gate)
+        self.assertNotIn("AMCloudAuthorizeFeature", gate)
+
+        wrappers = (
+            ("AMEditorEffectGroupSelection", "AMEditorOriginalEffectGroupSelection"),
+            (
+                "AMEditorEffectPanelPresetSelection",
+                "AMEditorOriginalEffectPanelPresetSelection",
+            ),
+            (
+                "AMEditorEffectPersistSelection",
+                "AMEditorOriginalEffectPersistSelection",
+            ),
+        )
+        for index, (wrapper_name, original_name) in enumerate(wrappers):
+            start = EDITOR.index(f"static void {wrapper_name}")
+            if index + 1 < len(wrappers):
+                end = EDITOR.index(f"static void {wrappers[index + 1][0]}", start)
+            else:
+                end = EDITOR.index("static UIView *AMEditorViewForKey", start)
+            wrapper = EDITOR[start:end]
+            self.assertIn("if (!AMEditorAllowEffectSelection", wrapper)
+            self.assertIn("return;", wrapper)
+            self.assertLess(
+                wrapper.index("AMEditorAllowEffectSelection"),
+                wrapper.index(original_name),
+            )
+
+        self.assertIn("AMEditorInstallEffectGroupLoginGate();", EDITOR)
+        self.assertIn("AMEditorInstallEffectPanelPresetLoginGate();", EDITOR)
+        self.assertIn("AMEditorInstallEffectPersistLoginGate();", EDITOR)
+        self.assertNotIn("AMEditorInstallEffectBrowserLoginGate", EDITOR)
+        self.assertNotIn("AMEditorEffectRender", EDITOR)
+
     def test_token_is_stored_only_in_keychain(self):
         self.assertIn("SecItemCopyMatching", CLOUD)
         self.assertIn("SecItemUpdate", CLOUD)

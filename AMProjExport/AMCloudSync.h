@@ -13,6 +13,11 @@ FOUNDATION_EXPORT void AMCloudSyncInstallPluginHooksEarly(void);
 FOUNDATION_EXPORT void AMCloudSyncInstall(AMCloudImportHandler importHandler);
 FOUNDATION_EXPORT NSArray<UIActivity *> *AMCloudSyncUploadActivities(
     NSURL *fileURL, NSString *projectTitle, UIViewController *presenter);
+/// 仅判断当前设备是否保存了账户令牌，不检查会员、功能权限或设备授权。
+FOUNDATION_EXPORT BOOL AMCloudSyncHasLoggedInAccount(void);
+/// 打开现有网页账户中心供用户登录，可从任意线程调用。
+FOUNDATION_EXPORT void AMCloudSyncShowAccountLoginFrom(
+    UIViewController * _Nullable presenter);
 /// 将已生成的 .amproj 交给 AutFeng Hub 云工程选择器，由用户选择新建或覆盖工程。
 FOUNDATION_EXPORT void AMCloudSyncBeginUploadFile(
     NSURL *fileURL, NSString *projectTitle, UIViewController *presenter);

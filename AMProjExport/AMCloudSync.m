@@ -3470,6 +3470,22 @@ void AMCloudSyncInstall(AMCloudImportHandler importHandler) {
     AMHomeUIInstall();
 }
 
+BOOL AMCloudSyncHasLoggedInAccount(void) {
+    return AMCloudReadToken().length > 0;
+}
+
+void AMCloudSyncShowAccountLoginFrom(UIViewController *presenter) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMCloudSyncShowAccountLoginFrom(presenter);
+        });
+        return;
+    }
+    UIViewController *top = AMCloudTopController(presenter);
+    if (!top) return;
+    [[AMCloudManager shared] showAccountFrom:top];
+}
+
 void AMCloudAuthorizeFeature(NSString *feature, UIViewController *presenter,
                              AMCloudAuthorizationCompletion completion) {
     if (![NSThread isMainThread]) {
