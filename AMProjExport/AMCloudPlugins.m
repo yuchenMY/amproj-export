@@ -112,6 +112,7 @@ static void *AMCloudPluginsMutationQueueKey = &AMCloudPluginsMutationQueueKey;
 
 static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *extension);
 static BOOL AMCloudPluginsResourceNameIsSafe(NSString *name);
+static NSString *AMCloudPluginsRelativeFilePath(NSURL *fileURL, NSURL *rootURL);
 
 static NSError *AMCloudPluginsValidationError(NSString *message) {
     return [NSError errorWithDomain:AMProjImportArchiveErrorDomain
@@ -289,7 +290,7 @@ static BOOL AMCloudPluginsIsOfficialEffectID(NSString *effectID) {
 
 static BOOL AMCloudPluginsLegacyXMLCanOverrideBundledOfficial(
     NSURL *sourceURL, NSURL *destinationURL, NSURL *bundledURL,
-    NSSet<NSString *> *referencedEffectIDs) {
+    NSSet<NSString *> *targetReferencedEffectIDs) {
     NSError *sourceError = nil;
     NSString *sourceID = AMCloudPluginsEffectIDForXMLURL(sourceURL, &sourceError);
     if (!sourceID.length) return NO;
@@ -306,10 +307,10 @@ static BOOL AMCloudPluginsLegacyXMLCanOverrideBundledOfficial(
         return sourceData.length && bundledData.length &&
             [sourceData isEqualToData:bundledData];
     }
-    // A legacy custom dependency is allowed only when a package XML explicitly
+    // A legacy custom dependency is allowed only when the target XML explicitly
     // references the official effect identity it replaces.
     return AMCloudPluginsIsLegacyCustomEffectID(sourceID) &&
-        [referencedEffectIDs containsObject:bundledID.lowercaseString];
+        [targetReferencedEffectIDs containsObject:bundledID.lowercaseString];
 }
 
 static dispatch_queue_t AMCloudPluginsMutationQueue(void) {
@@ -845,11 +846,10 @@ static NSURL *AMCloudPluginsBundledEffectsURL(void) {
         directory.boolValue ? URL : nil;
 }
 
-static BOOL AMCloudPluginsCopyCatalogDirectory(NSFileManager *manager,
-                                                NSURL *sourceURL,
-                                                NSURL *destinationURL,
-                                                BOOL replaceExisting,
-                                                NSError **error) {
+static BOOL AMCloudPluginsCopyCatalogDirectorySkippingPaths(
+    NSFileManager *manager, NSURL *sourceURL, NSURL *destinationURL,
+    BOOL replaceExisting, NSSet<NSString *> *skipRelativePaths,
+    NSURL *sourceRootURL, NSError **error) {
     NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:sourceURL
         includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 error:error];
     if (!children) return NO;
@@ -861,11 +861,15 @@ static BOOL AMCloudPluginsCopyCatalogDirectory(NSFileManager *manager,
         if (directory.boolValue) {
             if (![manager createDirectoryAtURL:destination withIntermediateDirectories:YES
                                     attributes:nil error:error]) return NO;
-            if (!AMCloudPluginsCopyCatalogDirectory(
-                    manager, source, destination, replaceExisting, error)) return NO;
+            if (!AMCloudPluginsCopyCatalogDirectorySkippingPaths(
+                    manager, source, destination, replaceExisting, skipRelativePaths,
+                    sourceRootURL, error)) return NO;
             continue;
         }
         if ([source.lastPathComponent isEqualToString:@"item.json"]) continue;
+        NSString *relative = AMCloudPluginsRelativeFilePath(source, sourceRootURL);
+        NSString *relativeKey = relative.precomposedStringWithCanonicalMapping.lowercaseString;
+        if (relativeKey.length && [skipRelativePaths containsObject:relativeKey]) continue;
         BOOL destinationExists = NO;
         if (!AMCloudPluginsGetItemExistence(manager, destination, &destinationExists)) return NO;
         if (destinationExists) {
@@ -889,6 +893,15 @@ static BOOL AMCloudPluginsCopyCatalogDirectory(NSFileManager *manager,
         if (![manager copyItemAtURL:source toURL:destination error:error]) return NO;
     }
     return YES;
+}
+
+static BOOL AMCloudPluginsCopyCatalogDirectory(NSFileManager *manager,
+                                                NSURL *sourceURL,
+                                                NSURL *destinationURL,
+                                                BOOL replaceExisting,
+                                                NSError **error) {
+    return AMCloudPluginsCopyCatalogDirectorySkippingPaths(
+        manager, sourceURL, destinationURL, replaceExisting, nil, sourceURL, error);
 }
 
 static NSArray<NSURL *> *AMCloudPluginsRecursiveFiles(NSURL *directoryURL) {
@@ -930,6 +943,7 @@ static NSString *AMCloudPluginsRelativeFilePath(NSURL *fileURL, NSURL *rootURL) 
 static BOOL AMCloudPluginsValidateCatalogItemFiles(
     NSDictionary *plugin, NSURL *versionURL, NSURL *destinationEffectsURL,
     NSURL *bundledEffectsURL, NSMutableDictionary<NSString *, NSURL *> *resourceOwners,
+    NSMutableSet<NSString *> *skipRelativePaths,
     NSError **error) {
     NSURL *sourceEffectsURL = [versionURL URLByAppendingPathComponent:@"BuiltinEffects"
                                                                isDirectory:YES];
@@ -948,7 +962,7 @@ static BOOL AMCloudPluginsValidateCatalogItemFiles(
     BOOL legacyPathOverride = [kind isEqualToString:@"custom_plugin"] &&
         AMCloudPluginsItemAllowsLegacyPathOverride(plugin);
     NSSet<NSString *> *targetReferences = [NSSet set];
-    NSMutableSet<NSString *> *referencedEffectIDs = [NSMutableSet set];
+    NSSet<NSString *> *targetReferencedEffectIDs = [NSSet set];
     if ((legacyPathOverride || [kind isEqualToString:@"builtin_override"]) &&
         targetPath.length) {
         NSURL *targetURL = AMCloudPluginsBuiltinTargetURL(sourceEffectsURL, targetPath);
@@ -959,18 +973,23 @@ static BOOL AMCloudPluginsValidateCatalogItemFiles(
                 @"Legacy plugin target XML resource references are invalid");
             return NO;
         }
+        NSError *effectReferenceError = nil;
+        targetReferencedEffectIDs = AMCloudPluginsReferencedEffectIDsForXMLURL(
+            targetURL, &effectReferenceError);
+        if (!targetReferencedEffectIDs) {
+            if (error) *error = effectReferenceError ?: AMCloudPluginsValidationError(
+                @"Legacy plugin target XML effect references are invalid");
+            return NO;
+        }
     }
     for (NSURL *xmlURL in AMCloudPluginsRecursiveFiles(sourceEffectsURL)) {
         if ([xmlURL.pathExtension caseInsensitiveCompare:@"xml"] != NSOrderedSame) continue;
         NSError *dependencyError = nil;
-        NSSet<NSString *> *ids = AMCloudPluginsReferencedEffectIDsForXMLURL(
-            xmlURL, &dependencyError);
-        if (!ids) {
+        if (!AMCloudPluginsReferencedEffectIDsForXMLURL(xmlURL, &dependencyError)) {
             if (error) *error = dependencyError ?: AMCloudPluginsValidationError(
                 @"Cloud plugin dependency XML is invalid");
             return NO;
         }
-        [referencedEffectIDs unionSet:ids];
     }
     NSFileManager *manager = NSFileManager.defaultManager;
     NSString *destinationRoot = destinationEffectsURL.URLByStandardizingPath.path;
@@ -989,14 +1008,22 @@ static BOOL AMCloudPluginsValidateCatalogItemFiles(
                 @"Cloud plugin item contains an empty or unreadable resource");
             return NO;
         }
+        NSURL *bundledURL = nil;
+        if (bundledEffectsURL) {
+            bundledURL = [[bundledEffectsURL URLByAppendingPathComponent:relative]
+                URLByStandardizingPath];
+        }
+        NSData *bundled = AMCloudPluginsDataAtURL(bundledURL);
+        BOOL baselineIdentical = bundled.length && [bundled isEqualToData:incoming];
         NSURL *ownedURL = resourceOwners[relativeKey];
         NSData *owned = AMCloudPluginsDataAtURL(ownedURL);
-        if (ownedURL && (!owned.length || ![owned isEqualToData:incoming])) {
+        BOOL ownedIdentical = owned.length && [owned isEqualToData:incoming];
+        if (ownedURL && !baselineIdentical &&
+            !ownedIdentical) {
             if (error) *error = AMCloudPluginsValidationError(
                 @"Cloud plugin items contain conflicting resource paths");
             return NO;
         }
-        if (!ownedURL && resourceOwners) resourceOwners[relativeKey] = sourceURL;
         BOOL isXML = [sourceURL.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame;
         BOOL isTarget = [kind isEqualToString:@"builtin_override"] &&
             targetKey.length && [relativeKey isEqualToString:targetKey];
@@ -1018,6 +1045,14 @@ static BOOL AMCloudPluginsValidateCatalogItemFiles(
                 @"Builtin override may contain only its target XML");
             return NO;
         }
+        if (baselineIdentical) {
+            // An unchanged IPA resource is a passive dependency. It must not
+            // become an owner or overwrite a real cloud override from another
+            // catalog item, regardless of catalog ordering.
+            if (skipRelativePaths) [skipRelativePaths addObject:relativeKey];
+            continue;
+        }
+        if (!ownedURL && resourceOwners) resourceOwners[relativeKey] = sourceURL;
         NSURL *destinationURL = [[destinationEffectsURL URLByAppendingPathComponent:relative]
             URLByStandardizingPath];
         NSString *destinationPath = destinationURL.path;
@@ -1025,11 +1060,6 @@ static BOOL AMCloudPluginsValidateCatalogItemFiles(
             if (error) *error = AMCloudPluginsValidationError(
                 @"Cloud plugin item escaped BuiltinEffects");
             return NO;
-        }
-        NSURL *bundledURL = nil;
-        if (bundledEffectsURL) {
-            bundledURL = [[bundledEffectsURL URLByAppendingPathComponent:relative]
-                URLByStandardizingPath];
         }
         BOOL destinationExists = NO;
         if (!AMCloudPluginsGetItemExistence(manager, destinationURL, &destinationExists)) {
@@ -1040,10 +1070,7 @@ static BOOL AMCloudPluginsValidateCatalogItemFiles(
         if (!destinationExists) continue;
         BOOL isLegacyOfficialDependency = legacyPathOverride && isXML && !isTarget &&
             AMCloudPluginsLegacyXMLCanOverrideBundledOfficial(
-                sourceURL, destinationURL, bundledURL, referencedEffectIDs);
-        NSData *bundled = AMCloudPluginsDataAtURL(bundledURL);
-        NSData *existing = AMCloudPluginsDataAtURL(destinationURL);
-        BOOL identical = existing && incoming && [existing isEqualToData:incoming];
+                sourceURL, destinationURL, bundledURL, targetReferencedEffectIDs);
         NSArray<NSString *> *relativeComponents = relative.pathComponents;
         // Legacy effect packages can carry both thumbnails and raster
         // textures under BuiltinEffects/resource. Keep the allow-list narrow
@@ -1058,7 +1085,9 @@ static BOOL AMCloudPluginsValidateCatalogItemFiles(
             isReferencedByTarget && bundled.length;
         BOOL isBuiltinImageReplacement = [kind isEqualToString:@"builtin_override"] &&
             imageReplacement && isReferencedByTarget && bundled.length;
-        if (!identical && !isTarget && !isLegacyPathOverride && !isLegacyOfficialDependency &&
+        BOOL isSharedNewResource = !bundled.length && ownedURL && ownedIdentical;
+        if (!isSharedNewResource && !isTarget && !isLegacyPathOverride &&
+            !isLegacyOfficialDependency &&
             !isBuiltinImageReplacement &&
             !isLegacyImageReplacement) {
             if (error) *error = AMCloudPluginsValidationError(
@@ -1132,11 +1161,13 @@ BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugi
             }
             NSURL *sourceEffects = [versionURL URLByAppendingPathComponent:@"BuiltinEffects"
                                                                isDirectory:YES];
+			NSMutableSet<NSString *> *skipRelativePaths = [NSMutableSet set];
 			if (!AMCloudPluginsValidateCatalogItemFiles(
 					plugin, versionURL, effectsURL, bundledEffectsURL,
-					resourceOwners, &activationError)) break;
-			if (!AMCloudPluginsCopyCatalogDirectory(manager, sourceEffects, effectsURL,
-			                                             YES, &activationError)) break;
+					resourceOwners, skipRelativePaths, &activationError)) break;
+			if (!AMCloudPluginsCopyCatalogDirectorySkippingPaths(
+					manager, sourceEffects, effectsURL, YES, skipRelativePaths,
+					sourceEffects, &activationError)) break;
             NSMutableDictionary *statePlugin = [@{ @"id": pluginID,
                 @"version_id": versionID, @"sha256": sha } mutableCopy];
             NSString *kind = AMCloudPluginsItemKind(plugin);

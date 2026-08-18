@@ -374,6 +374,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('@"catalog_revision"', PLUGINS)
         self.assertIn('@"plugins": statePlugins', PLUGINS)
         self.assertIn("AMCloudPluginsCopyCatalogDirectory", PLUGINS)
+        self.assertIn("AMCloudPluginsCopyCatalogDirectorySkippingPaths", PLUGINS)
         self.assertIn("AMCloudPluginsValidateCatalogItemFiles", PLUGINS)
         self.assertIn("Cloud plugin items contain conflicting resource paths", PLUGINS)
         self.assertIn("Builtin override may contain only its target XML", PLUGINS)
@@ -386,7 +387,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("isLegacyImageReplacement", PLUGINS)
         self.assertIn("isBuiltinImageReplacement", PLUGINS)
         self.assertIn("targetReferences containsObject", PLUGINS)
-        self.assertIn("referencedEffectIDs", PLUGINS)
+        self.assertIn("targetReferencedEffectIDs", PLUGINS)
         self.assertIn("AMCloudPluginsReferencedEffectIDsForXMLURL", PLUGINS)
         self.assertIn("AMCloudPluginsParseEffectData", PLUGINS)
         self.assertIn("narrow root-tag fallback", PLUGINS)
@@ -404,12 +405,86 @@ class CloudSyncSourceTests(unittest.TestCase):
         )[1].split("NSObject *commitLock", 1)[0]
         self.assertLess(
             activation.index("AMCloudPluginsValidateCatalogItemFiles"),
-            activation.index("AMCloudPluginsCopyCatalogDirectory(manager, sourceEffects"),
+            activation.index("AMCloudPluginsCopyCatalogDirectorySkippingPaths"),
         )
         self.assertIn("AMCloudPluginsBundledEffectsURL", PLUGINS)
         self.assertIn("replaceExisting", PLUGINS)
         self.assertIn("Plugin dependency conflict", PLUGINS)
         self.assertIn("installed.count == plugins.count", CLOUD)
+
+    def test_catalog_passive_dependencies_do_not_claim_or_overwrite_paths(self):
+        validator = PLUGINS.split(
+            "static BOOL AMCloudPluginsValidateCatalogItemFiles(", 1
+        )[1].split("BOOL AMCloudPluginsActivateCatalog", 1)[0]
+        self.assertIn(
+            "BOOL baselineIdentical = bundled.length && [bundled isEqualToData:incoming]",
+            validator,
+        )
+        passive_branch = validator.split("if (baselineIdentical) {", 1)[1].split(
+            "if (!ownedURL && resourceOwners)", 1
+        )[0]
+        self.assertIn("[skipRelativePaths addObject:relativeKey]", passive_branch)
+        self.assertNotIn("resourceOwners[relativeKey] =", passive_branch)
+        self.assertLess(
+            validator.index("if (baselineIdentical) {"),
+            validator.index("resourceOwners[relativeKey] = sourceURL"),
+        )
+
+        copier = PLUGINS.split(
+            "static BOOL AMCloudPluginsCopyCatalogDirectorySkippingPaths(", 1
+        )[1].split("static BOOL AMCloudPluginsCopyCatalogDirectory(", 1)[0]
+        self.assertIn("[skipRelativePaths containsObject:relativeKey]", copier)
+
+        activation = PLUGINS.split(
+            "NSMutableArray *statePlugins", 1
+        )[1].split("NSObject *commitLock", 1)[0]
+        self.assertIn("NSMutableSet<NSString *> *skipRelativePaths", activation)
+        self.assertIn("resourceOwners, skipRelativePaths", activation)
+        self.assertIn("skipRelativePaths,\n\t\t\t\t\tsourceEffects", activation)
+
+    def test_non_target_dependencies_require_target_xml_authorization(self):
+        validator = PLUGINS.split(
+            "static BOOL AMCloudPluginsValidateCatalogItemFiles(", 1
+        )[1].split("BOOL AMCloudPluginsActivateCatalog", 1)[0]
+        self.assertIn(
+            "targetReferencedEffectIDs = AMCloudPluginsReferencedEffectIDsForXMLURL(\n"
+            "            targetURL",
+            validator,
+        )
+        self.assertNotIn("[referencedEffectIDs unionSet:", validator)
+        self.assertIn(
+            "bundledURL, targetReferencedEffectIDs)",
+            validator,
+        )
+        self.assertIn(
+            "BOOL isReferencedByTarget = [targetReferences containsObject:relativeKey]",
+            validator,
+        )
+        self.assertIn(
+            "isLegacyImageReplacement = legacyPathOverride && imageReplacement &&\n"
+            "            isReferencedByTarget && bundled.length",
+            validator,
+        )
+        self.assertIn(
+            "isBuiltinImageReplacement = [kind isEqualToString:@\"builtin_override\"] &&\n"
+            "            imageReplacement && isReferencedByTarget && bundled.length",
+            validator,
+        )
+        self.assertIn(
+            "BOOL isSharedNewResource = !bundled.length && ownedURL && ownedIdentical",
+            validator,
+        )
+        self.assertNotIn("BOOL identical = existing", validator)
+        rejection = validator.split(
+            "if (!isSharedNewResource && !isTarget", 1
+        )[1].split("return NO;", 1)[0]
+        for required_gate in (
+            "!isLegacyOfficialDependency",
+            "!isBuiltinImageReplacement",
+            "!isLegacyImageReplacement",
+        ):
+            self.assertIn(required_gate, rejection)
+        self.assertIn("Builtin override may contain only its target XML", validator)
 
     def test_catalog_state_restore_accepts_flattened_item_metadata(self):
         version_helper = PLUGINS.split(
