@@ -27,6 +27,8 @@ static const void *AMEditorOtherCategoryBackgroundKey =
     &AMEditorOtherCategoryBackgroundKey;
 static __weak UIAlertController *AMEditorEffectLoginAlert = nil;
 
+static UIView *AMEditorViewForKey(id controller, NSString *key);
+
 static UIViewController *AMEditorViewControllerForObject(id object) {
     if ([object isKindOfClass:UIViewController.class]) {
         return (UIViewController *)object;
@@ -154,6 +156,15 @@ static void AMEditorEffectRecommendSelection(
 static void AMEditorEffectSearchSelection(
     id self, SEL selector, UICollectionView *collectionView,
     NSIndexPath *indexPath) {
+    UICollectionView *resultCollectionView =
+        (UICollectionView *)AMEditorViewForKey(self, @"resultCollectionView");
+    if (resultCollectionView && collectionView != resultCollectionView) {
+        if (AMEditorOriginalEffectSearchSelection) {
+            AMEditorOriginalEffectSearchSelection(
+                self, selector, collectionView, indexPath);
+        }
+        return;
+    }
     if (!AMEditorAllowEffectSelection(self, collectionView, indexPath)) return;
     if (AMEditorOriginalEffectSearchSelection) {
         AMEditorOriginalEffectSearchSelection(

@@ -257,10 +257,28 @@ class CloudSyncSourceTests(unittest.TestCase):
             wrapper = EDITOR[start:end]
             self.assertIn("if (!AMEditorAllowEffectSelection", wrapper)
             self.assertIn("return;", wrapper)
-            self.assertLess(
-                wrapper.index("AMEditorAllowEffectSelection"),
-                wrapper.index(original_name),
-            )
+            if wrapper_name != "AMEditorEffectSearchSelection":
+                self.assertLess(
+                    wrapper.index("AMEditorAllowEffectSelection"),
+                    wrapper.index(original_name),
+                )
+
+        search_start = EDITOR.index("static void AMEditorEffectSearchSelection")
+        search_end = EDITOR.index("static UIView *AMEditorViewForKey", search_start)
+        search_wrapper = EDITOR[search_start:search_end]
+        self.assertIn('@"resultCollectionView"', search_wrapper)
+        self.assertIn("collectionView != resultCollectionView", search_wrapper)
+        self.assertLess(
+            search_wrapper.index("collectionView != resultCollectionView"),
+            search_wrapper.index("AMEditorAllowEffectSelection"),
+        )
+        self.assertGreaterEqual(
+            search_wrapper.count("AMEditorOriginalEffectSearchSelection"), 4
+        )
+        self.assertGreater(
+            search_wrapper.rindex("AMEditorOriginalEffectSearchSelection"),
+            search_wrapper.index("AMEditorAllowEffectSelection"),
+        )
 
         self.assertIn("AMEditorInstallEffectGroupLoginGate();", EDITOR)
         self.assertIn("AMEditorInstallEffectPanelPresetLoginGate();", EDITOR)
