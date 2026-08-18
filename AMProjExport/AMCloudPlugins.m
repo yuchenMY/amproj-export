@@ -3,6 +3,89 @@
 
 #import <objc/runtime.h>
 
+static NSString *AMCloudPluginsNormalizeEffectResourceReference(NSString *value) {
+    if (![value isKindOfClass:NSString.class]) return nil;
+    NSString *normalized = [value stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!normalized.length || [normalized containsString:@"://"] ||
+        [normalized hasPrefix:@"/"] || [normalized hasPrefix:@"@"]) return nil;
+    normalized = [normalized stringByReplacingOccurrencesOfString:@"\\"
+                                                         withString:@"/"];
+    while ([normalized hasPrefix:@"./"]) {
+        normalized = [normalized substringFromIndex:2];
+    }
+    if ([normalized hasPrefix:@"BuiltinEffects/"]) {
+        normalized = [normalized substringFromIndex:@"BuiltinEffects/".length];
+    }
+    NSArray<NSString *> *parts = normalized.pathComponents;
+    if (parts.count < 2) return nil;
+    for (NSString *part in parts) {
+        if (!part.length || [part isEqualToString:@"."] ||
+            [part isEqualToString:@".."] || [part containsString:@":"]) return nil;
+    }
+    NSString *extension = parts.lastObject.pathExtension.lowercaseString;
+    if (![@[@"png", @"jpg", @"jpeg", @"webp", @"xml"] containsObject:extension]) {
+        return nil;
+    }
+    return [parts componentsJoinedByString:@"/"];
+}
+
+@interface AMCloudPluginsEffectIdentityParser : NSObject <NSXMLParserDelegate>
+@property(nonatomic, copy) NSString *effectID;
+@property(nonatomic) BOOL sawRoot;
+@property(nonatomic) BOOL invalid;
+@property(nonatomic, strong) NSMutableSet<NSString *> *referencedPaths;
+@property(nonatomic, strong) NSMutableSet<NSString *> *referencedEffectIDs;
+@end
+
+static void AMCloudPluginsRecordEffectAttributes(
+    AMCloudPluginsEffectIdentityParser *delegate,
+    NSDictionary<NSString *, NSString *> *attributeDict) {
+    if (!delegate.referencedPaths) delegate.referencedPaths = [NSMutableSet set];
+    if (!delegate.referencedEffectIDs) delegate.referencedEffectIDs = [NSMutableSet set];
+    for (NSString *key in attributeDict) {
+        NSString *value = attributeDict[key];
+        NSString *reference = AMCloudPluginsNormalizeEffectResourceReference(value);
+        if (reference.length) [delegate.referencedPaths addObject:reference.lowercaseString];
+        NSString *normalizedKey = key.lowercaseString;
+        if ([normalizedKey isEqualToString:@"effect"] ||
+            [normalizedKey isEqualToString:@"effectid"] ||
+            [normalizedKey isEqualToString:@"effect_id"]) {
+            NSString *effectID = [value stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (effectID.length && ![effectID containsString:@"://"] &&
+                ![effectID containsString:@"/"]) {
+                [delegate.referencedEffectIDs addObject:effectID.lowercaseString];
+            }
+        }
+    }
+}
+
+@implementation AMCloudPluginsEffectIdentityParser
+
+- (void)parser:(NSXMLParser *)parser
+ didStartElement:(NSString *)elementName
+    namespaceURI:(NSString *)namespaceURI
+      qualifiedName:(NSString *)qName
+      attributes:(NSDictionary<NSString *,NSString *> *)attributeDict {
+    (void)parser;
+    (void)namespaceURI;
+    (void)qName;
+    AMCloudPluginsRecordEffectAttributes(self, attributeDict);
+    if (self.sawRoot) return;
+    self.sawRoot = YES;
+    if ([elementName caseInsensitiveCompare:@"effect"] != NSOrderedSame) {
+        self.invalid = YES;
+        return;
+    }
+    NSString *identifier = [attributeDict[@"id"] isKindOfClass:NSString.class]
+        ? [attributeDict[@"id"] stringByTrimmingCharactersInSet:
+              NSCharacterSet.whitespaceAndNewlineCharacterSet] : nil;
+    if (identifier.length) self.effectID = identifier;
+}
+
+@end
+
 static NSString *const AMCloudPluginsDirectoryName = @"AMCloudPlugins";
 static NSString *const AMCloudPluginsStateName = @"state.json";
 static NSString *const AMCloudPluginsRevocationName = @"AMCloudPlugins.revoked";
@@ -28,6 +111,206 @@ static uint64_t AMCloudActiveAuthorizationGeneration = 0;
 static void *AMCloudPluginsMutationQueueKey = &AMCloudPluginsMutationQueueKey;
 
 static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *extension);
+static BOOL AMCloudPluginsResourceNameIsSafe(NSString *name);
+
+static NSError *AMCloudPluginsValidationError(NSString *message) {
+    return [NSError errorWithDomain:AMProjImportArchiveErrorDomain
+                                code:AMProjImportArchiveErrorInvalidArgument
+                            userInfo:@{NSLocalizedDescriptionKey: message ?: @"Invalid cloud plugin metadata"}];
+}
+
+static NSString *AMCloudPluginsItemKind(NSDictionary *plugin) {
+    NSString *kind = [plugin[@"kind"] isKindOfClass:NSString.class]
+        ? [plugin[@"kind"] lowercaseString] : nil;
+    if (!kind.length) {
+        kind = [plugin[@"type"] isKindOfClass:NSString.class]
+            ? [plugin[@"type"] lowercaseString] : nil;
+    }
+    return kind.length ? kind : @"custom_plugin";
+}
+
+static NSString *AMCloudPluginsItemEffectID(NSDictionary *plugin) {
+    NSString *effectID = [plugin[@"effectId"] isKindOfClass:NSString.class]
+        ? plugin[@"effectId"] : plugin[@"effect_id"];
+    return [effectID isKindOfClass:NSString.class]
+        ? [effectID stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+        : nil;
+}
+
+static NSString *AMCloudPluginsNormalizeBuiltinTargetPath(NSString *targetPath) {
+    if (![targetPath isKindOfClass:NSString.class] || !targetPath.length ||
+        [targetPath hasPrefix:@"/"] || [targetPath hasPrefix:@"\\"]) return nil;
+    NSString *normalized = [targetPath stringByReplacingOccurrencesOfString:@"\\"
+                                                                   withString:@"/"];
+    NSArray<NSString *> *parts = normalized.pathComponents;
+    if (parts.count < 2 || ![parts.firstObject isEqualToString:@"BuiltinEffects"]) return nil;
+    for (NSString *part in parts) {
+        if (!part.length || [part isEqualToString:@"."] || [part isEqualToString:@".."] ||
+            [part containsString:@":"]) return nil;
+    }
+    NSString *filename = parts.lastObject;
+    if ([filename.pathExtension caseInsensitiveCompare:@"xml"] != NSOrderedSame) return nil;
+    return [parts componentsJoinedByString:@"/"];
+}
+
+static NSString *AMCloudPluginsItemTargetPath(NSDictionary *plugin) {
+    NSString *targetPath = [plugin[@"targetPath"] isKindOfClass:NSString.class]
+        ? plugin[@"targetPath"] : plugin[@"target_path"];
+    return AMCloudPluginsNormalizeBuiltinTargetPath(targetPath);
+}
+
+static BOOL AMCloudPluginsItemRestartRequired(NSDictionary *plugin) {
+    return [plugin[@"restartRequired"] boolValue] || [plugin[@"restart_required"] boolValue];
+}
+
+static BOOL AMCloudPluginsItemAllowsLegacyPathOverride(NSDictionary *plugin) {
+    return [plugin[@"legacyPathOverride"] boolValue] ||
+        [plugin[@"legacy_path_override"] boolValue];
+}
+
+static AMCloudPluginsEffectIdentityParser *AMCloudPluginsParseEffectData(
+    NSData *data, NSError **error) {
+    if (!data.length) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Effect XML is empty or unreadable");
+        return nil;
+    }
+    AMCloudPluginsEffectIdentityParser *delegate = [AMCloudPluginsEffectIdentityParser new];
+    NSXMLParser *parser = [[NSXMLParser alloc] initWithData:data];
+    parser.delegate = delegate;
+    parser.shouldProcessNamespaces = NO;
+    parser.shouldResolveExternalEntities = NO;
+    if ([parser parse] && !delegate.invalid && delegate.sawRoot &&
+        delegate.effectID.length) return delegate;
+
+    // A few legacy effect files in the shipped catalog are not XML-well-formed
+    // (usually a missing space between root attributes). Use a deliberately
+    // narrow root-tag fallback so those existing custom effects remain usable;
+    // external entities, declarations, and arbitrary non-effect roots stay
+    // rejected.
+    NSString *source = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!source.length || [source rangeOfString:@"<!DOCTYPE" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [source rangeOfString:@"<!ENTITY" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        if (error && !*error) *error = AMCloudPluginsValidationError(
+            @"Effect XML has no valid root effect id");
+        return nil;
+    }
+    NSRegularExpression *rootExpression = [NSRegularExpression regularExpressionWithPattern:
+        @"<effect(?:\\s|>)" options:NSRegularExpressionCaseInsensitive error:nil];
+    NSTextCheckingResult *rootMatch = [rootExpression firstMatchInString:source
+        options:0 range:NSMakeRange(0, source.length)];
+    if (!rootMatch) {
+        if (error && !*error) *error = AMCloudPluginsValidationError(
+            @"Effect XML has no valid root effect id");
+        return nil;
+    }
+    NSRange closeRange = [source rangeOfString:@">" options:0
+                                          range:NSMakeRange(rootMatch.range.location,
+                                                            source.length - rootMatch.range.location)];
+    if (closeRange.location == NSNotFound) {
+        if (error && !*error) *error = AMCloudPluginsValidationError(
+            @"Effect XML root tag is incomplete");
+        return nil;
+    }
+    NSString *rootTag = [source substringWithRange:NSMakeRange(
+        rootMatch.range.location, closeRange.location + 1 - rootMatch.range.location)];
+    NSRegularExpression *attributeExpression = [NSRegularExpression regularExpressionWithPattern:
+        @"([A-Za-z_][A-Za-z0-9_.:-]*)\\s*=\\s*([\\\"'])([^\\\"']*)\\2"
+        options:0 error:nil];
+    NSArray<NSTextCheckingResult *> *matches = [attributeExpression matchesInString:rootTag
+        options:0 range:NSMakeRange(0, rootTag.length)];
+    NSMutableDictionary<NSString *, NSString *> *attributes = [NSMutableDictionary dictionary];
+    for (NSTextCheckingResult *match in matches) {
+        NSString *key = [rootTag substringWithRange:[match rangeAtIndex:1]];
+        NSString *value = [rootTag substringWithRange:[match rangeAtIndex:3]];
+        attributes[key] = value;
+    }
+    NSString *identifier = nil;
+    for (NSString *key in attributes) {
+        if ([key caseInsensitiveCompare:@"id"] == NSOrderedSame) {
+            identifier = [attributes[key] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            break;
+        }
+    }
+    if (!identifier.length) {
+        if (error && !*error) *error = AMCloudPluginsValidationError(
+            @"Effect XML has no valid root effect id");
+        return nil;
+    }
+    delegate = [AMCloudPluginsEffectIdentityParser new];
+    delegate.sawRoot = YES;
+    delegate.effectID = identifier;
+    AMCloudPluginsRecordEffectAttributes(delegate, attributes);
+    return delegate;
+}
+
+static NSString *AMCloudPluginsEffectIDForXMLURL(NSURL *URL, NSError **error) {
+    NSData *data = URL ? [NSData dataWithContentsOfURL:URL options:0 error:error] : nil;
+    AMCloudPluginsEffectIdentityParser *delegate = AMCloudPluginsParseEffectData(data, error);
+    if (!delegate) return nil;
+    return delegate.effectID;
+}
+
+static NSSet<NSString *> *AMCloudPluginsReferencedPathsForXMLURL(
+    NSURL *URL, NSError **error) {
+    NSData *data = URL ? [NSData dataWithContentsOfURL:URL options:0 error:error] : nil;
+    AMCloudPluginsEffectIdentityParser *delegate = AMCloudPluginsParseEffectData(data, error);
+    if (!delegate) return nil;
+    return delegate.referencedPaths ?: [NSSet set];
+}
+
+static NSSet<NSString *> *AMCloudPluginsReferencedEffectIDsForXMLURL(
+    NSURL *URL, NSError **error) {
+    NSData *data = URL ? [NSData dataWithContentsOfURL:URL options:0 error:error] : nil;
+    AMCloudPluginsEffectIdentityParser *delegate = AMCloudPluginsParseEffectData(data, error);
+    if (!delegate) return nil;
+    return delegate.referencedEffectIDs ?: [NSSet set];
+}
+
+static NSData *AMCloudPluginsDataAtURL(NSURL *URL) {
+    if (!URL) return nil;
+    return [NSData dataWithContentsOfURL:URL options:0 error:nil];
+}
+
+static BOOL AMCloudPluginsIsLegacyCustomEffectID(NSString *effectID) {
+    NSString *normalized = [effectID isKindOfClass:NSString.class]
+        ? [effectID stringByTrimmingCharactersInSet:
+              NSCharacterSet.whitespaceAndNewlineCharacterSet].lowercaseString : nil;
+    return [normalized hasPrefix:@"com.autfeng."];
+}
+
+static BOOL AMCloudPluginsIsOfficialEffectID(NSString *effectID) {
+    NSString *normalized = [effectID isKindOfClass:NSString.class]
+        ? [effectID stringByTrimmingCharactersInSet:
+              NSCharacterSet.whitespaceAndNewlineCharacterSet].lowercaseString : nil;
+    return [normalized hasPrefix:@"com.alightcreative."];
+}
+
+static BOOL AMCloudPluginsLegacyXMLCanOverrideBundledOfficial(
+    NSURL *sourceURL, NSURL *destinationURL, NSURL *bundledURL,
+    NSSet<NSString *> *referencedEffectIDs) {
+    NSError *sourceError = nil;
+    NSString *sourceID = AMCloudPluginsEffectIDForXMLURL(sourceURL, &sourceError);
+    if (!sourceID.length) return NO;
+
+    NSError *bundledError = nil;
+    NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(bundledURL, &bundledError);
+    if (!bundledID.length || !AMCloudPluginsIsOfficialEffectID(bundledID)) return NO;
+    NSData *sourceData = AMCloudPluginsDataAtURL(sourceURL);
+    NSData *bundledData = AMCloudPluginsDataAtURL(bundledURL);
+    (void)destinationURL;
+    if (AMCloudPluginsIsOfficialEffectID(sourceID) &&
+        [sourceID caseInsensitiveCompare:bundledID] == NSOrderedSame) {
+        // An unchanged official dependency is safe and does not alter the IPA.
+        return sourceData.length && bundledData.length &&
+            [sourceData isEqualToData:bundledData];
+    }
+    // A legacy custom dependency is allowed only when a package XML explicitly
+    // references the official effect identity it replaces.
+    return AMCloudPluginsIsLegacyCustomEffectID(sourceID) &&
+        [referencedEffectIDs containsObject:bundledID.lowercaseString];
+}
 
 static dispatch_queue_t AMCloudPluginsMutationQueue(void) {
     static dispatch_queue_t queue = nil;
@@ -140,21 +423,167 @@ static NSURL *AMCloudPluginsCatalogURL(void) {
 static NSString *AMCloudPluginsItemVersionID(NSDictionary *plugin) {
     NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
         ? plugin[@"version"] : nil;
-    return [version[@"id"] isKindOfClass:NSString.class] ? version[@"id"] : nil;
+    NSString *versionID = [version[@"id"] isKindOfClass:NSString.class]
+        ? version[@"id"] : nil;
+    if (!versionID.length) {
+        versionID = [plugin[@"version_id"] isKindOfClass:NSString.class]
+            ? plugin[@"version_id"] : nil;
+    }
+    return versionID;
 }
 
 static NSString *AMCloudPluginsItemSHA(NSDictionary *plugin) {
     NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
         ? plugin[@"version"] : nil;
-    return [version[@"sha256"] isKindOfClass:NSString.class]
-        ? [version[@"sha256"] lowercaseString] : nil;
+    NSString *sha256 = [version[@"sha256"] isKindOfClass:NSString.class]
+        ? version[@"sha256"] : nil;
+    if (!sha256.length) {
+        sha256 = [plugin[@"sha256"] isKindOfClass:NSString.class]
+            ? plugin[@"sha256"] : nil;
+    }
+    return sha256.length ? sha256.lowercaseString : nil;
 }
 
 static BOOL AMCloudPluginsCatalogEntryIsSafe(NSDictionary *plugin) {
     NSString *pluginID = [plugin[@"id"] isKindOfClass:NSString.class] ? plugin[@"id"] : nil;
+    NSString *kind = AMCloudPluginsItemKind(plugin);
+    if (![kind isEqualToString:@"custom_plugin"] &&
+        ![kind isEqualToString:@"builtin_override"]) return NO;
+    if ([kind isEqualToString:@"builtin_override"] &&
+        (!AMCloudPluginsItemEffectID(plugin).length ||
+         !AMCloudPluginsItemTargetPath(plugin).length)) return NO;
+    if ([kind isEqualToString:@"custom_plugin"] &&
+        AMCloudPluginsItemAllowsLegacyPathOverride(plugin) &&
+        (!AMCloudPluginsItemEffectID(plugin).length ||
+         !AMCloudPluginsItemTargetPath(plugin).length)) return NO;
     return AMCloudPluginReleaseIDIsSafe(pluginID) &&
         AMCloudPluginReleaseIDIsSafe(AMCloudPluginsItemVersionID(plugin)) &&
         AMCloudPluginAuthorizationKeyIsSafe(AMCloudPluginsItemSHA(plugin));
+}
+
+static NSURL *AMCloudPluginsBundledEffectsURL(void);
+
+static NSURL *AMCloudPluginsBuiltinTargetURL(NSURL *effectsRoot, NSString *targetPath) {
+    NSString *normalized = AMCloudPluginsNormalizeBuiltinTargetPath(targetPath);
+    if (!effectsRoot || !normalized.length) return nil;
+    NSString *relative = [normalized substringFromIndex:@"BuiltinEffects/".length];
+    NSURL *candidate = [[effectsRoot URLByAppendingPathComponent:relative]
+        URLByStandardizingPath];
+    NSString *rootPath = effectsRoot.URLByStandardizingPath.path;
+    NSString *candidatePath = candidate.path;
+    NSString *prefix = [rootPath stringByAppendingString:@"/"];
+    if (!rootPath.length || !candidatePath.length ||
+        ![candidatePath hasPrefix:prefix]) return nil;
+    NSNumber *regular = nil;
+    if (![candidate getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil] ||
+        !regular.boolValue) return nil;
+    return candidate;
+}
+
+static BOOL AMCloudPluginsValidateBuiltinOverride(NSDictionary *plugin,
+                                                   NSURL *versionURL,
+                                                   NSURL *bundledEffectsURL,
+                                                   NSError **error) {
+    if (![AMCloudPluginsItemKind(plugin) isEqualToString:@"builtin_override"]) return YES;
+    NSString *effectID = AMCloudPluginsItemEffectID(plugin);
+    NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
+    NSURL *bundledURL = AMCloudPluginsBuiltinTargetURL(bundledEffectsURL, targetPath);
+    NSURL *versionEffectsURL = [versionURL URLByAppendingPathComponent:@"BuiltinEffects"
+                                                                  isDirectory:YES];
+    NSURL *cloudURL = AMCloudPluginsBuiltinTargetURL(versionEffectsURL, targetPath);
+    if (!effectID.length || !targetPath.length || !bundledURL || !cloudURL) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Builtin override targetPath is not an existing IPA effect");
+        return NO;
+    }
+    NSError *bundledError = nil;
+    NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(bundledURL, &bundledError);
+    if (!bundledID.length || ![bundledID isEqualToString:effectID]) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Builtin override effectId does not match the bundled IPA effect");
+        return NO;
+    }
+    NSError *cloudError = nil;
+    NSString *cloudID = AMCloudPluginsEffectIDForXMLURL(cloudURL, &cloudError);
+    if (!cloudID.length || ![cloudID isEqualToString:effectID]) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Builtin override XML effect id does not match effectId");
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL AMCloudPluginsValidateLegacyCustomOverride(
+    NSDictionary *plugin, NSURL *versionURL, NSURL *bundledEffectsURL, NSError **error) {
+    if (![AMCloudPluginsItemKind(plugin) isEqualToString:@"custom_plugin"] ||
+        !AMCloudPluginsItemAllowsLegacyPathOverride(plugin)) return YES;
+    NSString *effectID = AMCloudPluginsItemEffectID(plugin);
+    NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
+    NSURL *bundledURL = AMCloudPluginsBuiltinTargetURL(bundledEffectsURL, targetPath);
+    NSURL *sourceURL = AMCloudPluginsBuiltinTargetURL(
+        [versionURL URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES],
+        targetPath);
+    if (!effectID.length || !targetPath.length || !sourceURL) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Legacy plugin override target XML is missing");
+        return NO;
+    }
+    NSError *sourceError = nil;
+    NSString *sourceID = AMCloudPluginsEffectIDForXMLURL(sourceURL, &sourceError);
+    if (!AMCloudPluginsIsLegacyCustomEffectID(sourceID) || !sourceID.length ||
+        [sourceID caseInsensitiveCompare:effectID] != NSOrderedSame) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Legacy plugin override XML effect id does not match metadata");
+        return NO;
+    }
+    if (!bundledURL) return YES;
+    NSError *bundledError = nil;
+    NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(bundledURL, &bundledError);
+    if (!AMCloudPluginsIsOfficialEffectID(bundledID)) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Legacy plugin override target is not an official IPA effect");
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL AMCloudPluginsValidateCatalogIdentity(
+    NSArray<NSDictionary<NSString *, id> *> *plugins,
+    NSURL *bundledEffectsURL, NSURL *itemsRootURL, NSError **error) {
+    NSMutableSet<NSString *> *targetPaths = [NSMutableSet set];
+    NSMutableSet<NSString *> *effectIDs = [NSMutableSet set];
+    for (NSDictionary *plugin in plugins) {
+        NSString *kind = AMCloudPluginsItemKind(plugin);
+        NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
+        NSString *effectID = AMCloudPluginsItemEffectID(plugin);
+        BOOL tracksTarget = targetPath.length > 0 || effectID.length > 0;
+        if (!tracksTarget) continue;
+        NSString *pathKey = targetPath.lowercaseString;
+        NSString *idKey = effectID.lowercaseString;
+        if ((pathKey.length && [targetPaths containsObject:pathKey]) ||
+            (idKey.length && [effectIDs containsObject:idKey])) {
+            if (error) *error = AMCloudPluginsValidationError(
+                @"Conflicting cloud plugin targetPath or effectId");
+            return NO;
+        }
+        if (pathKey.length) [targetPaths addObject:pathKey];
+        if (idKey.length) [effectIDs addObject:idKey];
+        if (![kind isEqualToString:@"builtin_override"] &&
+            !([kind isEqualToString:@"custom_plugin"] &&
+              AMCloudPluginsItemAllowsLegacyPathOverride(plugin))) continue;
+        NSString *pluginID = [plugin[@"id"] isKindOfClass:NSString.class] ? plugin[@"id"] : nil;
+        NSString *versionID = AMCloudPluginsItemVersionID(plugin);
+        NSURL *versionURL = [[[[itemsRootURL URLByAppendingPathComponent:pluginID isDirectory:YES]
+            URLByAppendingPathComponent:@"versions" isDirectory:YES]
+            URLByAppendingPathComponent:versionID isDirectory:YES] URLByStandardizingPath];
+        BOOL valid = [kind isEqualToString:@"builtin_override"]
+            ? AMCloudPluginsValidateBuiltinOverride(plugin, versionURL,
+                                                    bundledEffectsURL, error)
+            : AMCloudPluginsValidateLegacyCustomOverride(plugin, versionURL,
+                                                         bundledEffectsURL, error);
+        if (!valid) return NO;
+    }
+    return YES;
 }
 
 static void AMCloudPluginsSetActiveState(NSDictionary<NSString *, id> *state,
@@ -243,6 +672,20 @@ static BOOL AMCloudPluginsActivatePersistedCatalog(
         ![storedKey isEqualToString:authorizationKey.lowercaseString]) {
         return NO;
     }
+    for (NSDictionary *plugin in plugins) {
+        if (![plugin isKindOfClass:NSDictionary.class] ||
+            !AMCloudPluginsCatalogEntryIsSafe(plugin)) {
+            AMCloudPluginsSetActiveState(nil, nil, 0);
+            return NO;
+        }
+    }
+    NSError *identityError = nil;
+    if (!AMCloudPluginsValidateCatalogIdentity(
+            plugins, AMCloudPluginsBundledEffectsURL(), AMCloudPluginsItemsURL(),
+            &identityError)) {
+        AMCloudPluginsSetActiveState(nil, nil, 0);
+        return NO;
+    }
     NSURL *effectsURL = [AMCloudPluginsCatalogURL()
         URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES];
     NSNumber *directory = nil;
@@ -288,12 +731,39 @@ BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization(
 BOOL AMCloudPluginsInstallItemArchive(NSURL *archiveURL, NSString *pluginID,
                                       NSString *versionID, NSString *sha256,
                                       NSError **error) {
+    return AMCloudPluginsInstallItemArchiveWithMetadata(
+        archiveURL, pluginID, versionID, sha256, nil, error);
+}
+
+BOOL AMCloudPluginsInstallItemArchiveWithMetadata(
+    NSURL *archiveURL, NSString *pluginID, NSString *versionID, NSString *sha256,
+    NSDictionary<NSString *, id> *metadata, NSError **error) {
     if (!archiveURL || !AMCloudPluginReleaseIDIsSafe(pluginID) ||
         !AMCloudPluginReleaseIDIsSafe(versionID) ||
         !AMCloudPluginAuthorizationKeyIsSafe(sha256)) {
         if (error) *error = [NSError errorWithDomain:AMProjImportArchiveErrorDomain
             code:AMProjImportArchiveErrorInvalidArgument
             userInfo:@{NSLocalizedDescriptionKey: @"Cloud plugin item metadata is invalid"}];
+        return NO;
+    }
+    if (metadata && ![metadata isKindOfClass:NSDictionary.class]) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Cloud plugin item metadata must be an object");
+        return NO;
+    }
+    NSString *kind = AMCloudPluginsItemKind(metadata ?: @{});
+    if (![kind isEqualToString:@"custom_plugin"] &&
+        ![kind isEqualToString:@"builtin_override"]) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Cloud plugin item kind is invalid");
+        return NO;
+    }
+    NSString *effectID = AMCloudPluginsItemEffectID(metadata ?: @{});
+    NSString *targetPath = AMCloudPluginsItemTargetPath(metadata ?: @{});
+    if ([kind isEqualToString:@"builtin_override"] &&
+        (!effectID.length || !targetPath.length)) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Builtin override metadata is incomplete");
         return NO;
     }
     __block BOOL installed = NO;
@@ -313,13 +783,40 @@ BOOL AMCloudPluginsInstallItemArchive(NSURL *archiveURL, NSString *pluginID,
             NSUUID.UUID.UUIDString.lowercaseString isDirectory:YES];
         NSDictionary *metrics = nil;
         if (!AMProjExtractPluginArchive(archiveURL, stagingURL, &metrics, &installError)) return;
+
+        NSDictionary *validationPlugin = @{
+            @"id": pluginID,
+            @"version_id": versionID,
+            @"sha256": sha256.lowercaseString,
+            @"kind": kind,
+            @"effect_id": effectID ?: @"",
+            @"target_path": targetPath ?: @""
+        };
+        if ([kind isEqualToString:@"builtin_override"] &&
+            !AMCloudPluginsValidateBuiltinOverride(
+                validationPlugin, stagingURL, AMCloudPluginsBundledEffectsURL(),
+                &installError)) {
+            [manager removeItemAtURL:stagingURL error:nil];
+            return;
+        }
         NSURL *finalURL = [versionsURL URLByAppendingPathComponent:versionID isDirectory:YES];
         [manager removeItemAtURL:finalURL error:nil];
         if (![manager moveItemAtURL:stagingURL toURL:finalURL error:&installError]) return;
-        NSDictionary *metadata = @{ @"plugin_id": pluginID, @"version_id": versionID,
+        NSMutableDictionary *storedMetadata = [@{
+            @"plugin_id": pluginID, @"version_id": versionID,
             @"sha256": sha256.lowercaseString,
-            @"installed_at": @((long long)NSDate.date.timeIntervalSince1970) };
-        NSData *metadataData = [NSJSONSerialization dataWithJSONObject:metadata options:0
+            @"installed_at": @((long long)NSDate.date.timeIntervalSince1970),
+            @"kind": kind
+        } mutableCopy];
+        if (effectID.length) storedMetadata[@"effect_id"] = effectID;
+        if (targetPath.length) storedMetadata[@"target_path"] = targetPath;
+        if (AMCloudPluginsItemAllowsLegacyPathOverride(metadata)) {
+            storedMetadata[@"legacy_path_override"] = @YES;
+        }
+        if (AMCloudPluginsItemRestartRequired(metadata)) {
+            storedMetadata[@"restart_required"] = @YES;
+        }
+        NSData *metadataData = [NSJSONSerialization dataWithJSONObject:storedMetadata options:0
                                                                   error:&installError];
         NSURL *metadataURL = [finalURL URLByAppendingPathComponent:@"item.json"];
         if (!metadataData || ![metadataData writeToURL:metadataURL
@@ -394,6 +891,184 @@ static BOOL AMCloudPluginsCopyCatalogDirectory(NSFileManager *manager,
     return YES;
 }
 
+static NSArray<NSURL *> *AMCloudPluginsRecursiveFiles(NSURL *directoryURL) {
+    if (!directoryURL) return @[];
+    NSArray<NSURL *> *children = [NSFileManager.defaultManager
+        contentsOfDirectoryAtURL:directoryURL
+        includingPropertiesForKeys:@[NSURLIsDirectoryKey, NSURLIsRegularFileKey]
+        options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
+    NSMutableArray<NSURL *> *files = [NSMutableArray array];
+    for (NSURL *URL in children ?: @[]) {
+        NSNumber *isDirectory = nil;
+        NSNumber *isRegular = nil;
+        if (![URL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil] ||
+            ![URL getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:nil]) {
+            continue;
+        }
+        if (isDirectory.boolValue) {
+            [files addObjectsFromArray:AMCloudPluginsRecursiveFiles(URL)];
+        } else if (isRegular.boolValue) {
+            [files addObject:URL];
+        }
+    }
+    [files sortUsingComparator:^NSComparisonResult(NSURL *left, NSURL *right) {
+        return [left.path compare:right.path options:NSCaseInsensitiveSearch];
+    }];
+    return files;
+}
+
+static NSString *AMCloudPluginsRelativeFilePath(NSURL *fileURL, NSURL *rootURL) {
+    NSString *rootPath = rootURL.URLByStandardizingPath.path;
+    NSString *filePath = fileURL.URLByStandardizingPath.path;
+    if (!rootPath.length || !filePath.length) return nil;
+    NSString *prefix = [rootPath stringByAppendingString:@"/"];
+    if (![filePath hasPrefix:prefix]) return nil;
+    NSString *relative = [filePath substringFromIndex:prefix.length];
+    return AMCloudPluginsResourceNameIsSafe(relative) ? relative : nil;
+}
+
+static BOOL AMCloudPluginsValidateCatalogItemFiles(
+    NSDictionary *plugin, NSURL *versionURL, NSURL *destinationEffectsURL,
+    NSURL *bundledEffectsURL, NSMutableDictionary<NSString *, NSURL *> *resourceOwners,
+    NSError **error) {
+    NSURL *sourceEffectsURL = [versionURL URLByAppendingPathComponent:@"BuiltinEffects"
+                                                               isDirectory:YES];
+    NSNumber *sourceDirectory = nil;
+    if (![sourceEffectsURL getResourceValue:&sourceDirectory forKey:NSURLIsDirectoryKey error:nil] ||
+        !sourceDirectory.boolValue) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Cloud plugin item has no BuiltinEffects directory");
+        return NO;
+    }
+    NSString *kind = AMCloudPluginsItemKind(plugin);
+    NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
+    NSString *targetRelative = targetPath.length
+        ? [targetPath substringFromIndex:@"BuiltinEffects/".length] : nil;
+    NSString *targetKey = targetRelative.precomposedStringWithCanonicalMapping.lowercaseString;
+    BOOL legacyPathOverride = [kind isEqualToString:@"custom_plugin"] &&
+        AMCloudPluginsItemAllowsLegacyPathOverride(plugin);
+    NSSet<NSString *> *targetReferences = [NSSet set];
+    NSMutableSet<NSString *> *referencedEffectIDs = [NSMutableSet set];
+    if ((legacyPathOverride || [kind isEqualToString:@"builtin_override"]) &&
+        targetPath.length) {
+        NSURL *targetURL = AMCloudPluginsBuiltinTargetURL(sourceEffectsURL, targetPath);
+        NSError *referenceError = nil;
+        targetReferences = AMCloudPluginsReferencedPathsForXMLURL(targetURL, &referenceError);
+        if (!targetReferences) {
+            if (error) *error = referenceError ?: AMCloudPluginsValidationError(
+                @"Legacy plugin target XML resource references are invalid");
+            return NO;
+        }
+    }
+    for (NSURL *xmlURL in AMCloudPluginsRecursiveFiles(sourceEffectsURL)) {
+        if ([xmlURL.pathExtension caseInsensitiveCompare:@"xml"] != NSOrderedSame) continue;
+        NSError *dependencyError = nil;
+        NSSet<NSString *> *ids = AMCloudPluginsReferencedEffectIDsForXMLURL(
+            xmlURL, &dependencyError);
+        if (!ids) {
+            if (error) *error = dependencyError ?: AMCloudPluginsValidationError(
+                @"Cloud plugin dependency XML is invalid");
+            return NO;
+        }
+        [referencedEffectIDs unionSet:ids];
+    }
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSString *destinationRoot = destinationEffectsURL.URLByStandardizingPath.path;
+    NSString *destinationPrefix = [destinationRoot stringByAppendingString:@"/"];
+    for (NSURL *sourceURL in AMCloudPluginsRecursiveFiles(sourceEffectsURL)) {
+        NSString *relative = AMCloudPluginsRelativeFilePath(sourceURL, sourceEffectsURL);
+        NSString *relativeKey = relative.precomposedStringWithCanonicalMapping.lowercaseString;
+        if (!relative.length || !relativeKey.length) {
+            if (error) *error = AMCloudPluginsValidationError(
+                @"Cloud plugin item contains an unsafe resource path");
+            return NO;
+        }
+        NSData *incoming = AMCloudPluginsDataAtURL(sourceURL);
+        if (!incoming.length) {
+            if (error) *error = AMCloudPluginsValidationError(
+                @"Cloud plugin item contains an empty or unreadable resource");
+            return NO;
+        }
+        NSURL *ownedURL = resourceOwners[relativeKey];
+        NSData *owned = AMCloudPluginsDataAtURL(ownedURL);
+        if (ownedURL && (!owned.length || ![owned isEqualToData:incoming])) {
+            if (error) *error = AMCloudPluginsValidationError(
+                @"Cloud plugin items contain conflicting resource paths");
+            return NO;
+        }
+        if (!ownedURL && resourceOwners) resourceOwners[relativeKey] = sourceURL;
+        BOOL isXML = [sourceURL.pathExtension caseInsensitiveCompare:@"xml"] == NSOrderedSame;
+        BOOL isTarget = [kind isEqualToString:@"builtin_override"] &&
+            targetKey.length && [relativeKey isEqualToString:targetKey];
+        BOOL isLegacyPathOverride = legacyPathOverride && isXML && targetKey.length &&
+            [relativeKey isEqualToString:targetKey];
+        if (isLegacyPathOverride) {
+            NSString *expectedID = AMCloudPluginsItemEffectID(plugin);
+            NSError *sourceError = nil;
+            NSString *sourceID = AMCloudPluginsEffectIDForXMLURL(sourceURL, &sourceError);
+            if (!expectedID.length || !sourceID.length ||
+                [expectedID caseInsensitiveCompare:sourceID] != NSOrderedSame) {
+                if (error) *error = AMCloudPluginsValidationError(
+                    @"Legacy plugin target XML effect id does not match metadata");
+                return NO;
+            }
+        }
+        if ([kind isEqualToString:@"builtin_override"] && isXML && !isTarget) {
+            if (error) *error = AMCloudPluginsValidationError(
+                @"Builtin override may contain only its target XML");
+            return NO;
+        }
+        NSURL *destinationURL = [[destinationEffectsURL URLByAppendingPathComponent:relative]
+            URLByStandardizingPath];
+        NSString *destinationPath = destinationURL.path;
+        if (!destinationPath.length || ![destinationPath hasPrefix:destinationPrefix]) {
+            if (error) *error = AMCloudPluginsValidationError(
+                @"Cloud plugin item escaped BuiltinEffects");
+            return NO;
+        }
+        NSURL *bundledURL = nil;
+        if (bundledEffectsURL) {
+            bundledURL = [[bundledEffectsURL URLByAppendingPathComponent:relative]
+                URLByStandardizingPath];
+        }
+        BOOL destinationExists = NO;
+        if (!AMCloudPluginsGetItemExistence(manager, destinationURL, &destinationExists)) {
+            if (error) *error = AMCloudPluginsValidationError(
+                @"Unable to inspect an existing BuiltinEffects resource");
+            return NO;
+        }
+        if (!destinationExists) continue;
+        BOOL isLegacyOfficialDependency = legacyPathOverride && isXML && !isTarget &&
+            AMCloudPluginsLegacyXMLCanOverrideBundledOfficial(
+                sourceURL, destinationURL, bundledURL, referencedEffectIDs);
+        NSData *bundled = AMCloudPluginsDataAtURL(bundledURL);
+        NSData *existing = AMCloudPluginsDataAtURL(destinationURL);
+        BOOL identical = existing && incoming && [existing isEqualToData:incoming];
+        NSArray<NSString *> *relativeComponents = relative.pathComponents;
+        // Legacy effect packages can carry both thumbnails and raster
+        // textures under BuiltinEffects/resource. Keep the allow-list narrow
+        // to image formats; arbitrary binary/resource replacement remains a
+        // conflict and is rejected.
+        BOOL imageReplacement = !isXML && relativeComponents.count > 1 &&
+            ([sourceURL.pathExtension caseInsensitiveCompare:@"png"] == NSOrderedSame ||
+             [sourceURL.pathExtension caseInsensitiveCompare:@"jpg"] == NSOrderedSame ||
+             [sourceURL.pathExtension caseInsensitiveCompare:@"webp"] == NSOrderedSame);
+        BOOL isReferencedByTarget = [targetReferences containsObject:relativeKey];
+        BOOL isLegacyImageReplacement = legacyPathOverride && imageReplacement &&
+            isReferencedByTarget && bundled.length;
+        BOOL isBuiltinImageReplacement = [kind isEqualToString:@"builtin_override"] &&
+            imageReplacement && isReferencedByTarget && bundled.length;
+        if (!identical && !isTarget && !isLegacyPathOverride && !isLegacyOfficialDependency &&
+            !isBuiltinImageReplacement &&
+            !isLegacyImageReplacement) {
+            if (error) *error = AMCloudPluginsValidationError(
+                @"Cloud plugin items contain conflicting resource paths");
+            return NO;
+        }
+    }
+    return YES;
+}
+
 BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugins,
                                    NSNumber *revision, NSString *authorizationKey,
                                    uint64_t authorizationGeneration,
@@ -428,7 +1103,13 @@ BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugi
 			[manager removeItemAtURL:stagingURL error:nil];
 			return;
 		}
+        if (!AMCloudPluginsValidateCatalogIdentity(
+				plugins, bundledEffectsURL, AMCloudPluginsItemsURL(), &activationError)) {
+			[manager removeItemAtURL:stagingURL error:nil];
+			return;
+		}
         NSMutableArray *statePlugins = [NSMutableArray arrayWithCapacity:plugins.count];
+        NSMutableDictionary<NSString *, NSURL *> *resourceOwners = [NSMutableDictionary dictionary];
         for (NSDictionary *plugin in plugins) {
             NSString *pluginID = plugin[@"id"];
             NSString *versionID = AMCloudPluginsItemVersionID(plugin);
@@ -451,10 +1132,24 @@ BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugi
             }
             NSURL *sourceEffects = [versionURL URLByAppendingPathComponent:@"BuiltinEffects"
                                                                isDirectory:YES];
+			if (!AMCloudPluginsValidateCatalogItemFiles(
+					plugin, versionURL, effectsURL, bundledEffectsURL,
+					resourceOwners, &activationError)) break;
 			if (!AMCloudPluginsCopyCatalogDirectory(manager, sourceEffects, effectsURL,
 			                                             YES, &activationError)) break;
-            [statePlugins addObject:@{ @"id": pluginID, @"version_id": versionID,
-                                       @"sha256": sha }];
+            NSMutableDictionary *statePlugin = [@{ @"id": pluginID,
+                @"version_id": versionID, @"sha256": sha } mutableCopy];
+            NSString *kind = AMCloudPluginsItemKind(plugin);
+            statePlugin[@"kind"] = kind;
+            NSString *effectID = AMCloudPluginsItemEffectID(plugin);
+            NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
+            if (effectID.length) statePlugin[@"effect_id"] = effectID;
+            if (targetPath.length) statePlugin[@"target_path"] = targetPath;
+            if (AMCloudPluginsItemAllowsLegacyPathOverride(plugin)) {
+                statePlugin[@"legacy_path_override"] = @YES;
+            }
+            if (AMCloudPluginsItemRestartRequired(plugin)) statePlugin[@"restart_required"] = @YES;
+            [statePlugins addObject:statePlugin];
         }
         if (activationError) {
             [manager removeItemAtURL:stagingURL error:nil];

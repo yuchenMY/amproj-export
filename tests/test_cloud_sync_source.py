@@ -359,6 +359,7 @@ class CloudSyncSourceTests(unittest.TestCase):
     def test_cloud_plugins_support_per_item_incremental_delivery(self):
         for symbol in (
             "AMCloudPluginsInstallItemArchive",
+            "AMCloudPluginsInstallItemArchiveWithMetadata",
             "AMCloudPluginsActivateCatalog",
         ):
             self.assertIn(symbol, PLUGIN_HEADER)
@@ -373,10 +374,65 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('@"catalog_revision"', PLUGINS)
         self.assertIn('@"plugins": statePlugins', PLUGINS)
         self.assertIn("AMCloudPluginsCopyCatalogDirectory", PLUGINS)
+        self.assertIn("AMCloudPluginsValidateCatalogItemFiles", PLUGINS)
+        self.assertIn("Cloud plugin items contain conflicting resource paths", PLUGINS)
+        self.assertIn("Builtin override may contain only its target XML", PLUGINS)
+        self.assertIn("legacy_path_override", PLUGINS)
+        self.assertIn("AMCloudPluginsItemAllowsLegacyPathOverride", PLUGINS)
+        self.assertIn("AMCloudPluginsLegacyXMLCanOverrideBundledOfficial", PLUGINS)
+        self.assertIn("AMCloudPluginsIsLegacyCustomEffectID", PLUGINS)
+        self.assertIn("AMCloudPluginsIsOfficialEffectID", PLUGINS)
+        self.assertIn("Legacy plugin target XML effect id does not match metadata", PLUGINS)
+        self.assertIn("isLegacyImageReplacement", PLUGINS)
+        self.assertIn("isBuiltinImageReplacement", PLUGINS)
+        self.assertIn("targetReferences containsObject", PLUGINS)
+        self.assertIn("referencedEffectIDs", PLUGINS)
+        self.assertIn("AMCloudPluginsReferencedEffectIDsForXMLURL", PLUGINS)
+        self.assertIn("AMCloudPluginsParseEffectData", PLUGINS)
+        self.assertIn("narrow root-tag fallback", PLUGINS)
+        self.assertIn("AMCloudPluginsIsLegacyCustomEffectID(sourceID)", PLUGINS)
+        self.assertIn("resourceOwners[relativeKey]", PLUGINS)
+        self.assertIn("sourceData isEqualToData:bundledData", PLUGINS)
+        self.assertIn("AMCloudPluginsValidateLegacyCustomOverride", PLUGINS)
+        self.assertIn("Conflicting cloud plugin targetPath or effectId", PLUGINS)
+        self.assertIn("bundledEffectsURL, NSError **error", PLUGINS)
+        self.assertIn("sourceID caseInsensitiveCompare:bundledID", PLUGINS)
+        self.assertIn("isLegacyOfficialDependency", PLUGINS)
+        self.assertIn("legacyPathOverride", CLOUD)
+        activation = PLUGINS.split(
+            "NSMutableArray *statePlugins", 1
+        )[1].split("NSObject *commitLock", 1)[0]
+        self.assertLess(
+            activation.index("AMCloudPluginsValidateCatalogItemFiles"),
+            activation.index("AMCloudPluginsCopyCatalogDirectory(manager, sourceEffects"),
+        )
         self.assertIn("AMCloudPluginsBundledEffectsURL", PLUGINS)
         self.assertIn("replaceExisting", PLUGINS)
         self.assertIn("Plugin dependency conflict", PLUGINS)
         self.assertIn("installed.count == plugins.count", CLOUD)
+
+    def test_catalog_state_restore_accepts_flattened_item_metadata(self):
+        version_helper = PLUGINS.split(
+            "static NSString *AMCloudPluginsItemVersionID", 1
+        )[1].split("static NSString *AMCloudPluginsItemSHA", 1)[0]
+        sha_helper = PLUGINS.split(
+            "static NSString *AMCloudPluginsItemSHA", 1
+        )[1].split("static BOOL AMCloudPluginsCatalogEntryIsSafe", 1)[0]
+        self.assertIn('plugin[@"version_id"]', version_helper)
+        self.assertIn('plugin[@"sha256"]', sha_helper)
+        self.assertIn('version[@"id"]', version_helper)
+        self.assertIn('version[@"sha256"]', sha_helper)
+        self.assertIn("AMCloudPluginsInstallItemArchiveWithMetadata", PLUGINS)
+        self.assertIn(
+            "AMCloudPluginsInstallItemArchiveWithMetadata(\n                archiveURL, pluginID, versionID, sha, plugin",
+            CLOUD,
+        )
+        install = PLUGINS.split(
+            "BOOL AMCloudPluginsInstallItemArchiveWithMetadata", 1
+        )[1].split("static NSURL *AMCloudPluginsBundledEffectsURL", 1)[0]
+        self.assertIn("AMCloudPluginsValidateBuiltinOverride", install)
+        self.assertIn('@"kind": kind', install)
+        self.assertIn('storedMetadata[@"target_path"]', install)
 
     def test_plugin_download_has_visible_start_and_result_alerts(self):
         self.assertIn("beginPluginDownloadNoticeForRelease", CLOUD)

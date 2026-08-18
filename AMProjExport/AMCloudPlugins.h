@@ -54,6 +54,16 @@ FOUNDATION_EXPORT BOOL AMCloudPluginsInstallItemArchive(
     NSError * _Nullable * _Nullable error);
 
 /**
+ 安装带清单元数据的单项插件版本。`kind` 缺省时按 protocol 2 的
+ `custom_plugin` 处理；`builtin_override` 必须同时提供官方 `effectId`
+ 和 `targetPath`，并在激活前与 IPA 内置 BuiltinEffects 清单逐项校验。
+ */
+FOUNDATION_EXPORT BOOL AMCloudPluginsInstallItemArchiveWithMetadata(
+    NSURL *archiveURL, NSString *pluginID, NSString *versionID, NSString *sha256,
+    NSDictionary<NSString *, id> * _Nullable metadata,
+    NSError * _Nullable * _Nullable error);
+
+/**
  按服务端启用清单重建云端覆盖目录。只会复制清单中的插件；停用插件会从覆盖层
  消失，IPA 原版 BuiltinEffects 始终保留。共享依赖文件内容不一致时拒绝激活。
  */

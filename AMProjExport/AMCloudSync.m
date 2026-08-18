@@ -1183,6 +1183,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic) NSUInteger pluginDownloadTotalItems;
 @property(nonatomic) BOOL pluginDownloadNoticeBusy;
 @property(nonatomic) BOOL pluginDownloadNoticeSuppressed;
+@property(nonatomic) BOOL pluginDownloadRequiresRestart;
 @property(nonatomic, strong) UIImage *accountAvatarImage;
 @property(nonatomic, copy) NSString *accountAvatarURL;
 @property(nonatomic, copy) NSString *accountAvatarRequestID;
@@ -2095,8 +2096,28 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         NSString *sha = [version[@"sha256"] isKindOfClass:NSString.class]
             ? [version[@"sha256"] lowercaseString] : nil;
         NSDictionary *local = pluginID.length ? installedByID[pluginID] : nil;
+        NSString *kind = [plugin[@"kind"] isKindOfClass:NSString.class]
+            ? [plugin[@"kind"] lowercaseString] : @"custom_plugin";
+        NSString *effectID = [plugin[@"effectId"] isKindOfClass:NSString.class]
+            ? plugin[@"effectId"] : nil;
+        NSString *targetPath = [plugin[@"targetPath"] isKindOfClass:NSString.class]
+            ? plugin[@"targetPath"] : nil;
+        BOOL legacyPathOverride = [plugin[@"legacyPathOverride"] boolValue] ||
+            [plugin[@"legacy_path_override"] boolValue];
+        NSString *localKind = [local[@"kind"] isKindOfClass:NSString.class]
+            ? [local[@"kind"] lowercaseString] : @"custom_plugin";
+        NSString *localEffectID = [local[@"effect_id"] isKindOfClass:NSString.class]
+            ? local[@"effect_id"] : nil;
+        NSString *localTargetPath = [local[@"target_path"] isKindOfClass:NSString.class]
+            ? local[@"target_path"] : nil;
+        BOOL localLegacyPathOverride = [local[@"legacyPathOverride"] boolValue] ||
+            [local[@"legacy_path_override"] boolValue];
         if (![local[@"version_id"] isEqualToString:versionID] ||
-            ![[local[@"sha256"] lowercaseString] isEqualToString:sha]) {
+            ![[local[@"sha256"] lowercaseString] isEqualToString:sha] ||
+            ![localKind isEqualToString:kind] ||
+            ![localEffectID isEqualToString:effectID] ||
+            ![localTargetPath isEqualToString:targetPath] ||
+            localLegacyPathOverride != legacyPathOverride) {
             [pending addObject:plugin];
 			catalogMatches = NO;
         }
@@ -2112,13 +2133,20 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     }
     if (pending.count > 0) {
         long long totalBytes = 0;
+        BOOL requiresRestart = NO;
         for (NSDictionary *plugin in pending) {
             NSDictionary *version = [plugin[@"version"] isKindOfClass:NSDictionary.class]
                 ? plugin[@"version"] : nil;
             totalBytes += [version[@"sizeBytes"] longLongValue];
+            NSString *kind = [plugin[@"kind"] isKindOfClass:NSString.class]
+                ? [plugin[@"kind"] lowercaseString] : @"custom_plugin";
+            requiresRestart = requiresRestart ||
+                [kind isEqualToString:@"builtin_override"] ||
+                [plugin[@"restartRequired"] boolValue];
         }
         NSDictionary *notice = @{ @"version": [NSString stringWithFormat:@"%lu 个插件",
-            (unsigned long)pending.count], @"sizeBytes": @(totalBytes) };
+            (unsigned long)pending.count], @"sizeBytes": @(totalBytes),
+            @"restartRequired": @(requiresRestart) };
         [self beginPluginDownloadNoticeForRelease:notice operationID:operationID
             token:token authorizationGeneration:authorizationGeneration];
         self.pluginDownloadTotalItems = pending.count;
@@ -2206,8 +2234,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             ? [version[@"sha256"] lowercaseString] : nil;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSError *installError = nil;
-            BOOL installed = AMCloudPluginsInstallItemArchive(
-                archiveURL, pluginID, versionID, sha, &installError);
+            BOOL installed = AMCloudPluginsInstallItemArchiveWithMetadata(
+                archiveURL, pluginID, versionID, sha, plugin, &installError);
             [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:nil];
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!installed) {
@@ -2240,6 +2268,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.pluginDownloadNoticeOperationID = operationID;
     self.pluginDownloadNoticeToken = token;
     self.pluginDownloadNoticeGeneration = authorizationGeneration;
+    self.pluginDownloadRequiresRestart = [release[@"restartRequired"] boolValue] ||
+        [release[@"restart_required"] boolValue];
     self.pluginDownloadNoticeTitle = @"正在下载云端插件";
     self.pluginDownloadNoticeMessage = size.longLongValue > 0
         ? [NSString stringWithFormat:@"已准备下载 %@，下载完成后会自动安装。",
@@ -2318,6 +2348,11 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                                           effectCount]
             : @"插件已经安装，重新打开效果页面即可使用。")
         : (error.localizedDescription ?: @"请检查网络后重新打开软件重试。");
+    if (installed && self.pluginDownloadRequiresRestart) {
+        self.pluginDownloadNoticeMessage = [NSString stringWithFormat:
+            @"BuiltinEffects 云端修复已安装（%@ 个效果），请彻底关闭并重新打开应用后生效。",
+            effectCount ?: @0];
+    }
     self.pluginDownloadCompletedBytes = installed ? self.pluginDownloadExpectedBytes : 0;
     [self.pluginDownloadOverlay removeFromSuperview];
     self.pluginDownloadOverlay = nil;
@@ -2490,6 +2525,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.pluginDownloadNoticeOperationID = nil;
     self.pluginDownloadNoticeToken = nil;
     self.pluginDownloadNoticeGeneration = 0;
+    self.pluginDownloadRequiresRestart = NO;
     self.pluginDownloadNoticeTitle = nil;
     self.pluginDownloadNoticeMessage = nil;
     self.pluginDownloadExpectedBytes = 0;
