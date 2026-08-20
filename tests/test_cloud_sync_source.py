@@ -455,6 +455,25 @@ class CloudSyncSourceTests(unittest.TestCase):
             PLUGINS,
         )
 
+    def test_builtin_override_repairs_ios_compatibility_from_ipa_baseline(self):
+        self.assertIn("rootAttributes", PLUGINS)
+        self.assertIn("AMCloudPluginsRootAttributeForXMLURL", PLUGINS)
+        self.assertIn("AMCloudPluginsEnsureRootAttribute", PLUGINS)
+        self.assertIn("AMCloudPluginsRepairBuiltinCompatibility", PLUGINS)
+        self.assertIn('@"compat"', PLUGINS)
+        self.assertIn('@"maxoverdraw"', PLUGINS)
+        self.assertIn('@"max-overdraw"', PLUGINS)
+        self.assertIn("Builtin override compat does not match the IPA baseline", PLUGINS)
+        self.assertIn("AMCloudPluginsRepairBuiltinCompatibility(cloudURL, bundledURL, error)", PLUGINS)
+        self.assertIn("AMCloudPluginsRepairBuiltinCompatibility(sourceURL, bundledURL, error)", PLUGINS)
+        validation = PLUGINS.split(
+            "static BOOL AMCloudPluginsValidateBuiltinOverride(", 1
+        )[1].split("static BOOL AMCloudPluginsValidateLegacyCustomOverride(", 1)[0]
+        self.assertLess(
+            validation.index("AMCloudPluginsRepairBuiltinCompatibility"),
+            validation.index("AMCloudPluginsEffectIDForXMLURL(cloudURL"),
+        )
+
     def test_catalog_activation_repairs_stale_cached_items_once(self):
         self.assertIn("pluginCatalogRepairAttempted", CLOUD)
         self.assertIn("AMCloudCatalogActivationErrorMayBeStaleCache", CLOUD)

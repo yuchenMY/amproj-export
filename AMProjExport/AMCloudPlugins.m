@@ -35,6 +35,7 @@ static NSString *AMCloudPluginsNormalizeEffectResourceReference(NSString *value)
 @property(nonatomic, copy) NSString *effectID;
 @property(nonatomic) BOOL sawRoot;
 @property(nonatomic) BOOL invalid;
+@property(nonatomic, copy) NSDictionary<NSString *, NSString *> *rootAttributes;
 @property(nonatomic, strong) NSMutableSet<NSString *> *referencedPaths;
 @property(nonatomic, strong) NSMutableSet<NSString *> *referencedEffectIDs;
 @end
@@ -75,6 +76,13 @@ static void AMCloudPluginsRecordEffectAttributes(
     AMCloudPluginsRecordEffectAttributes(self, attributeDict);
     if (self.sawRoot) return;
     self.sawRoot = YES;
+    NSMutableDictionary<NSString *, NSString *> *rootAttributes = [NSMutableDictionary dictionary];
+    for (NSString *key in attributeDict) {
+        NSString *value = [attributeDict[key] isKindOfClass:NSString.class]
+            ? attributeDict[key] : nil;
+        if (value.length) rootAttributes[key.lowercaseString] = value;
+    }
+    self.rootAttributes = rootAttributes;
     if ([elementName caseInsensitiveCompare:@"effect"] != NSOrderedSame) {
         self.invalid = YES;
         return;
@@ -276,6 +284,13 @@ static AMCloudPluginsEffectIdentityParser *AMCloudPluginsParseEffectData(
     delegate = [AMCloudPluginsEffectIdentityParser new];
     delegate.sawRoot = YES;
     delegate.effectID = identifier;
+    NSMutableDictionary<NSString *, NSString *> *rootAttributes = [NSMutableDictionary dictionary];
+    for (NSString *key in attributes) {
+        NSString *value = [attributes[key] isKindOfClass:NSString.class]
+            ? attributes[key] : nil;
+        if (value.length) rootAttributes[key.lowercaseString] = value;
+    }
+    delegate.rootAttributes = rootAttributes;
     AMCloudPluginsRecordEffectAttributes(delegate, attributes);
     return delegate;
 }
@@ -285,6 +300,122 @@ static NSString *AMCloudPluginsEffectIDForXMLURL(NSURL *URL, NSError **error) {
     AMCloudPluginsEffectIdentityParser *delegate = AMCloudPluginsParseEffectData(data, error);
     if (!delegate) return nil;
     return delegate.effectID;
+}
+
+static NSString *AMCloudPluginsRootAttributeForXMLURL(
+    NSURL *URL, NSString *attribute, NSError **error) {
+    NSData *data = URL ? [NSData dataWithContentsOfURL:URL options:0 error:error] : nil;
+    AMCloudPluginsEffectIdentityParser *delegate = AMCloudPluginsParseEffectData(data, error);
+    if (!delegate) return nil;
+    return delegate.rootAttributes[attribute.lowercaseString];
+}
+
+static NSString *AMCloudPluginsEscapeXMLAttributeValue(NSString *value) {
+    if (![value isKindOfClass:NSString.class]) return @"";
+    return [[value stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"]
+        stringByReplacingOccurrencesOfString:@"\"" withString:@"&quot;"];
+}
+
+static BOOL AMCloudPluginsEnsureRootAttribute(
+    NSURL *URL, NSString *attribute, NSString *value, NSError **error) {
+    if (!URL || !attribute.length || !value.length) return YES;
+    NSData *data = [NSData dataWithContentsOfURL:URL options:0 error:error];
+    NSString *source = data.length ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+    if (!source.length) {
+        if (error && !*error) *error = AMCloudPluginsValidationError(
+            @"Builtin override XML is not valid UTF-8");
+        return NO;
+    }
+    NSRegularExpression *rootExpression = [NSRegularExpression regularExpressionWithPattern:
+        @"<effect(?:\\s|>)[^>]*>" options:NSRegularExpressionCaseInsensitive error:nil];
+    NSTextCheckingResult *rootMatch = [rootExpression firstMatchInString:source
+        options:0 range:NSMakeRange(0, source.length)];
+    if (!rootMatch) {
+        if (error && !*error) *error = AMCloudPluginsValidationError(
+            @"Builtin override XML has no effect root");
+        return NO;
+    }
+    NSRange rootRange = rootMatch.range;
+    NSString *rootTag = [source substringWithRange:rootRange];
+    NSString *escaped = AMCloudPluginsEscapeXMLAttributeValue(value);
+    NSString *attributePattern = [NSString stringWithFormat:
+        @"\\b%@\\s*=\\s*(['\\\"])([^'\\\"]*)\\1", attribute];
+    NSRegularExpression *attributeExpression = [NSRegularExpression regularExpressionWithPattern:
+        attributePattern options:NSRegularExpressionCaseInsensitive error:nil];
+    NSTextCheckingResult *attributeMatch = [attributeExpression firstMatchInString:rootTag
+        options:0 range:NSMakeRange(0, rootTag.length)];
+    if (attributeMatch) {
+        NSString *existing = [rootTag substringWithRange:[attributeMatch rangeAtIndex:2]];
+        if ([existing isEqualToString:value]) return YES;
+        NSMutableString *updatedTag = [rootTag mutableCopy];
+        [updatedTag replaceCharactersInRange:[attributeMatch rangeAtIndex:2] withString:escaped];
+        NSMutableString *updated = [source mutableCopy];
+        [updated replaceCharactersInRange:rootRange withString:updatedTag];
+        NSData *updatedData = [updated dataUsingEncoding:NSUTF8StringEncoding];
+        if (![updatedData writeToURL:URL options:NSDataWritingAtomic error:error]) return NO;
+        return YES;
+    }
+    NSMutableString *updatedTag = [rootTag mutableCopy];
+    NSRange closeRange = [updatedTag rangeOfString:@">" options:NSBackwardsSearch];
+    if (closeRange.location == NSNotFound) {
+        if (error && !*error) *error = AMCloudPluginsValidationError(
+            @"Builtin override XML root is incomplete");
+        return NO;
+    }
+    NSUInteger insertion = closeRange.location;
+    if (insertion > 0 && [updatedTag characterAtIndex:insertion - 1] == '/') insertion--;
+    NSString *addition = [NSString stringWithFormat:@" %@=\"%@\"", attribute, escaped];
+    [updatedTag insertString:addition atIndex:insertion];
+    NSMutableString *updated = [source mutableCopy];
+    [updated replaceCharactersInRange:rootRange withString:updatedTag];
+    NSData *updatedData = [updated dataUsingEncoding:NSUTF8StringEncoding];
+    if (![updatedData writeToURL:URL options:NSDataWritingAtomic error:error]) return NO;
+    return YES;
+}
+
+static BOOL AMCloudPluginsRepairBuiltinCompatibility(
+    NSURL *cloudURL, NSURL *bundledURL, NSError **error) {
+    if (!cloudURL || !bundledURL) return YES;
+    NSError *bundledError = nil;
+    NSString *bundledCompat = AMCloudPluginsRootAttributeForXMLURL(
+        bundledURL, @"compat", &bundledError);
+    if (!bundledCompat.length) return YES;
+    NSError *cloudError = nil;
+    NSString *cloudCompat = AMCloudPluginsRootAttributeForXMLURL(
+        cloudURL, @"compat", &cloudError);
+    if (cloudError && !cloudCompat.length) {
+        if (error) *error = cloudError;
+        return NO;
+    }
+    if (cloudCompat.length && ![cloudCompat isEqualToString:bundledCompat]) {
+        if (error) *error = AMCloudPluginsValidationError([NSString stringWithFormat:
+            @"Builtin override compat does not match the IPA baseline (%@ / %@)",
+            cloudCompat, bundledCompat]);
+        return NO;
+    }
+    if (!cloudCompat.length && !AMCloudPluginsEnsureRootAttribute(
+            cloudURL, @"compat", bundledCompat, error)) return NO;
+
+    NSError *bundledOverdrawError = nil;
+    NSString *bundledMaxOverdraw = AMCloudPluginsRootAttributeForXMLURL(
+        bundledURL, @"maxoverdraw", &bundledOverdrawError);
+    if (bundledMaxOverdraw.length) {
+        NSError *cloudMaxOverdrawError = nil;
+        NSString *cloudMaxOverdraw = AMCloudPluginsRootAttributeForXMLURL(
+            cloudURL, @"maxoverdraw", &cloudMaxOverdrawError);
+        if (cloudMaxOverdrawError && !cloudMaxOverdraw.length) {
+            if (error) *error = cloudMaxOverdrawError;
+            return NO;
+        }
+        if (!cloudMaxOverdraw.length) {
+            NSString *legacyMaxOverdraw = AMCloudPluginsRootAttributeForXMLURL(
+                cloudURL, @"max-overdraw", nil);
+            if (!legacyMaxOverdraw.length) legacyMaxOverdraw = bundledMaxOverdraw;
+            if (!AMCloudPluginsEnsureRootAttribute(
+                    cloudURL, @"maxOverdraw", legacyMaxOverdraw, error)) return NO;
+        }
+    }
+    return YES;
 }
 
 static NSSet<NSString *> *AMCloudPluginsReferencedPathsForXMLURL(
@@ -584,6 +715,9 @@ static BOOL AMCloudPluginsValidateBuiltinOverride(NSDictionary *plugin,
             @"Builtin override targetPath is not an existing IPA effect");
         return NO;
     }
+    if (!AMCloudPluginsRepairBuiltinCompatibility(cloudURL, bundledURL, error)) {
+        return NO;
+    }
     NSError *bundledError = nil;
     NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(bundledURL, &bundledError);
     if (!bundledID.length || ![bundledID isEqualToString:effectID]) {
@@ -631,6 +765,9 @@ static BOOL AMCloudPluginsValidateLegacyCustomOverride(
         return NO;
     }
     if (!bundledURL) return YES;
+    if (!AMCloudPluginsRepairBuiltinCompatibility(sourceURL, bundledURL, error)) {
+        return NO;
+    }
     NSError *bundledError = nil;
     NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(bundledURL, &bundledError);
     if (!AMCloudPluginsIsOfficialEffectID(bundledID)) {
