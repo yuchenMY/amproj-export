@@ -1,6 +1,7 @@
 #import "AMCloudPlugins.h"
 #import "AMProjImportArchive.h"
 
+#import <CommonCrypto/CommonDigest.h>
 #import <objc/runtime.h>
 
 static NSString *AMCloudPluginsNormalizeEffectResourceReference(NSString *value) {
@@ -111,13 +112,46 @@ static uint64_t AMCloudActiveAuthorizationGeneration = 0;
 static void *AMCloudPluginsMutationQueueKey = &AMCloudPluginsMutationQueueKey;
 
 static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *extension);
+static NSArray<NSURL *> *AMCloudPluginsRecursiveFiles(NSURL *directoryURL);
+static BOOL AMCloudPluginsCatalogContainsBundledEffects(NSURL *catalogEffectsURL,
+                                                         NSURL *bundledEffectsURL);
 static BOOL AMCloudPluginsResourceNameIsSafe(NSString *name);
 static NSString *AMCloudPluginsRelativeFilePath(NSURL *fileURL, NSURL *rootURL);
+static NSString *AMCloudPluginsItemEffectID(NSDictionary *plugin);
+static NSString *AMCloudPluginsItemTargetPath(NSDictionary *plugin);
+static NSString *AMCloudPluginsItemVersionID(NSDictionary *plugin);
 
 static NSError *AMCloudPluginsValidationError(NSString *message) {
     return [NSError errorWithDomain:AMProjImportArchiveErrorDomain
                                 code:AMProjImportArchiveErrorInvalidArgument
                             userInfo:@{NSLocalizedDescriptionKey: message ?: @"Invalid cloud plugin metadata"}];
+}
+
+static NSString *AMCloudPluginsItemDisplayName(NSDictionary *plugin) {
+    for (NSString *key in @[@"name", @"displayName", @"display_name", @"title"]) {
+        NSString *value = [plugin[key] isKindOfClass:NSString.class] ? plugin[key] : nil;
+        if (value.length) return value;
+    }
+    return nil;
+}
+
+static NSError *AMCloudPluginsValidationErrorForItem(
+    NSString *message, NSDictionary *plugin, NSString *sourceID, NSURL *sourceURL) {
+    NSString *pluginID = [plugin[@"id"] isKindOfClass:NSString.class] ? plugin[@"id"] : nil;
+    NSString *versionID = AMCloudPluginsItemVersionID(plugin);
+    NSString *effectID = AMCloudPluginsItemEffectID(plugin);
+    NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
+    NSString *displayName = AMCloudPluginsItemDisplayName(plugin);
+    NSMutableArray<NSString *> *context = [NSMutableArray array];
+    if (pluginID.length) [context addObject:[NSString stringWithFormat:@"plugin=%@", pluginID]];
+    if (displayName.length) [context addObject:[NSString stringWithFormat:@"name=%@", displayName]];
+    if (versionID.length) [context addObject:[NSString stringWithFormat:@"version=%@", versionID]];
+    if (effectID.length) [context addObject:[NSString stringWithFormat:@"effectId=%@", effectID]];
+    if (targetPath.length) [context addObject:[NSString stringWithFormat:@"targetPath=%@", targetPath]];
+    if (sourceID.length) [context addObject:[NSString stringWithFormat:@"sourceId=%@", sourceID]];
+    if (sourceURL.path.length) [context addObject:[NSString stringWithFormat:@"source=%@", sourceURL.path]];
+    NSString *detail = context.count ? [context componentsJoinedByString:@"; "] : @"no item context";
+    return AMCloudPluginsValidationError([NSString stringWithFormat:@"%@ (%@)", message ?: @"Cloud plugin validation failed", detail]);
 }
 
 static NSString *AMCloudPluginsItemKind(NSDictionary *plugin) {
@@ -274,6 +308,43 @@ static NSData *AMCloudPluginsDataAtURL(NSURL *URL) {
     return [NSData dataWithContentsOfURL:URL options:0 error:nil];
 }
 
+static NSString *AMCloudPluginsBundledEffectsFingerprint(NSURL *effectsURL) {
+    if (!effectsURL) return nil;
+    CC_SHA256_CTX context;
+    CC_SHA256_Init(&context);
+    for (NSURL *fileURL in AMCloudPluginsRecursiveFiles(effectsURL)) {
+        NSString *relative = AMCloudPluginsRelativeFilePath(fileURL, effectsURL);
+        NSData *data = AMCloudPluginsDataAtURL(fileURL);
+        if (!relative.length || !data.length) return nil;
+        NSData *relativeData = [relative dataUsingEncoding:NSUTF8StringEncoding];
+        uint64_t length = data.length;
+        CC_SHA256_Update(&context, relativeData.bytes, (CC_LONG)relativeData.length);
+        CC_SHA256_Update(&context, &length, (CC_LONG)sizeof(length));
+        CC_SHA256_Update(&context, data.bytes, (CC_LONG)data.length);
+    }
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &context);
+    NSMutableString *result = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
+        [result appendFormat:@"%02x", digest[index]];
+    }
+    return result;
+}
+
+static BOOL AMCloudPluginsCatalogContainsBundledEffects(NSURL *catalogEffectsURL,
+                                                         NSURL *bundledEffectsURL) {
+    if (!catalogEffectsURL || !bundledEffectsURL) return NO;
+    for (NSURL *bundledURL in AMCloudPluginsRecursiveFiles(bundledEffectsURL)) {
+        NSString *relative = AMCloudPluginsRelativeFilePath(bundledURL, bundledEffectsURL);
+        if (!relative.length) return NO;
+        NSURL *catalogURL = [catalogEffectsURL URLByAppendingPathComponent:relative];
+        NSNumber *regular = nil;
+        if (![catalogURL getResourceValue:&regular forKey:NSURLIsRegularFileKey
+                                     error:nil] || !regular.boolValue) return NO;
+    }
+    return YES;
+}
+
 static BOOL AMCloudPluginsIsLegacyCustomEffectID(NSString *effectID) {
     NSString *normalized = [effectID isKindOfClass:NSString.class]
         ? [effectID stringByTrimmingCharactersInSet:
@@ -345,6 +416,8 @@ static NSURL *AMCloudPluginsStateURL(void) {
     return [AMCloudPluginsRootURL() URLByAppendingPathComponent:AMCloudPluginsStateName];
 }
 
+static NSURL *AMCloudPluginsCatalogURL(void);
+
 static NSURL *AMCloudPluginsRevocationURL(void) {
     NSURL *support = [NSFileManager.defaultManager
         URLsForDirectory:NSApplicationSupportDirectory
@@ -385,6 +458,20 @@ static BOOL AMCloudPluginsInvalidatePersistedState(NSFileManager *manager) {
     [manager removeItemAtURL:stateURL error:nil];
     return AMCloudPluginsGetItemExistence(manager, stateURL, &stateExists) &&
         !stateExists;
+}
+
+static BOOL AMCloudPluginsInvalidateStaleCatalog(NSFileManager *manager) {
+    if (!manager) return NO;
+    BOOL stateInvalidated = AMCloudPluginsInvalidatePersistedState(manager);
+    NSURL *catalogURL = AMCloudPluginsCatalogURL();
+    NSError *removeError = nil;
+    BOOL catalogRemoved = [manager removeItemAtURL:catalogURL error:&removeError];
+    if (!catalogRemoved && removeError.code == NSFileNoSuchFileError) {
+        catalogRemoved = YES;
+    }
+    BOOL catalogExists = NO;
+    BOOL catalogKnown = AMCloudPluginsGetItemExistence(manager, catalogURL, &catalogExists);
+    return stateInvalidated && catalogKnown && !catalogExists;
 }
 
 static BOOL AMCloudPluginsPersistRevocationMarker(NSFileManager *manager) {
@@ -500,15 +587,19 @@ static BOOL AMCloudPluginsValidateBuiltinOverride(NSDictionary *plugin,
     NSError *bundledError = nil;
     NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(bundledURL, &bundledError);
     if (!bundledID.length || ![bundledID isEqualToString:effectID]) {
-        if (error) *error = AMCloudPluginsValidationError(
-            @"Builtin override effectId does not match the bundled IPA effect");
+        if (error) *error = AMCloudPluginsValidationErrorForItem(
+            [NSString stringWithFormat:@"Builtin override effectId does not match the bundled IPA effect (bundledId=%@)",
+             bundledID ?: (bundledError.localizedDescription ?: @"missing")],
+            plugin, bundledID, bundledURL);
         return NO;
     }
     NSError *cloudError = nil;
     NSString *cloudID = AMCloudPluginsEffectIDForXMLURL(cloudURL, &cloudError);
     if (!cloudID.length || ![cloudID isEqualToString:effectID]) {
-        if (error) *error = AMCloudPluginsValidationError(
-            @"Builtin override XML effect id does not match effectId");
+        if (error) *error = AMCloudPluginsValidationErrorForItem(
+            [NSString stringWithFormat:@"Builtin override XML effect id does not match effectId (sourceId=%@)",
+             cloudID ?: (cloudError.localizedDescription ?: @"missing")],
+            plugin, cloudID, cloudURL);
         return NO;
     }
     return YES;
@@ -533,8 +624,10 @@ static BOOL AMCloudPluginsValidateLegacyCustomOverride(
     NSString *sourceID = AMCloudPluginsEffectIDForXMLURL(sourceURL, &sourceError);
     if (!AMCloudPluginsIsLegacyCustomEffectID(sourceID) || !sourceID.length ||
         [sourceID caseInsensitiveCompare:effectID] != NSOrderedSame) {
-        if (error) *error = AMCloudPluginsValidationError(
-            @"Legacy plugin override XML effect id does not match metadata");
+        NSString *detail = sourceID ?: (sourceError.localizedDescription ?: @"missing");
+        if (error) *error = AMCloudPluginsValidationErrorForItem(
+            [NSString stringWithFormat:@"Legacy plugin override XML effect id does not match metadata (sourceId=%@)", detail],
+            plugin, sourceID, sourceURL);
         return NO;
     }
     if (!bundledURL) return YES;
@@ -646,6 +739,21 @@ static BOOL AMCloudPluginsActivatePersistedState(NSString *releaseID, NSString *
         AMCloudPluginsSetActiveState(nil, nil, 0);
         return NO;
     }
+    NSString *storedFingerprint = [state[@"bundled_effects_fingerprint"] isKindOfClass:NSString.class]
+        ? [state[@"bundled_effects_fingerprint"] lowercaseString] : nil;
+    NSString *currentFingerprint = AMCloudPluginsBundledEffectsFingerprint(
+        AMCloudPluginsBundledEffectsURL());
+    if (!storedFingerprint.length || !currentFingerprint.length ||
+        ![storedFingerprint isEqualToString:currentFingerprint] ||
+        !AMCloudPluginsCatalogContainsBundledEffects(
+            effectsURL, AMCloudPluginsBundledEffectsURL())) {
+        // Legacy release state predates the merged-catalog fingerprint. Do
+        // not restore it after a covered install: it may be a partial effect
+        // directory that hides official XML files shipped by the new IPA.
+        AMCloudPluginsSetActiveState(nil, nil, 0);
+        AMCloudPluginsInvalidateStaleCatalog(manager);
+        return NO;
+    }
     if (authorizationGeneration != AMCloudPluginsAuthorizationGeneration()) return NO;
     AMCloudPluginsSetActiveState(state, effectsURL, authorizationGeneration);
     return YES;
@@ -673,6 +781,30 @@ static BOOL AMCloudPluginsActivatePersistedCatalog(
         ![storedKey isEqualToString:authorizationKey.lowercaseString]) {
         return NO;
     }
+    NSString *storedFingerprint = [state[@"bundled_effects_fingerprint"] isKindOfClass:NSString.class]
+        ? [state[@"bundled_effects_fingerprint"] lowercaseString] : nil;
+    NSString *currentFingerprint = AMCloudPluginsBundledEffectsFingerprint(
+        AMCloudPluginsBundledEffectsURL());
+    if (!storedFingerprint.length || !currentFingerprint.length ||
+        ![storedFingerprint isEqualToString:currentFingerprint]) {
+        // The IPA was replaced while the app data survived (common with a
+        // covered install). Never let the old merged catalog hide resources
+        // from the new IPA; the next manifest sync will rebuild it atomically.
+        AMCloudPluginsSetActiveState(nil, nil, 0);
+        AMCloudPluginsInvalidateStaleCatalog(manager);
+        return NO;
+    }
+    NSURL *persistedEffectsURL = [AMCloudPluginsCatalogURL()
+        URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES];
+    if (!AMCloudPluginsCatalogContainsBundledEffects(
+            persistedEffectsURL, AMCloudPluginsBundledEffectsURL())) {
+        // Older catalogs could contain only cloud-delivered files. The root
+        // NSBundle hook exposes the catalog directory, so any omitted IPA
+        // resource becomes an unresolved effect in existing projects.
+        AMCloudPluginsSetActiveState(nil, nil, 0);
+        AMCloudPluginsInvalidateStaleCatalog(manager);
+        return NO;
+    }
     for (NSDictionary *plugin in plugins) {
         if (![plugin isKindOfClass:NSDictionary.class] ||
             !AMCloudPluginsCatalogEntryIsSafe(plugin)) {
@@ -687,8 +819,7 @@ static BOOL AMCloudPluginsActivatePersistedCatalog(
         AMCloudPluginsSetActiveState(nil, nil, 0);
         return NO;
     }
-    NSURL *effectsURL = [AMCloudPluginsCatalogURL()
-        URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES];
+    NSURL *effectsURL = persistedEffectsURL;
     NSNumber *directory = nil;
     if (![effectsURL getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil] ||
         !directory.boolValue ||
@@ -1035,8 +1166,10 @@ static BOOL AMCloudPluginsValidateCatalogItemFiles(
             NSString *sourceID = AMCloudPluginsEffectIDForXMLURL(sourceURL, &sourceError);
             if (!expectedID.length || !sourceID.length ||
                 [expectedID caseInsensitiveCompare:sourceID] != NSOrderedSame) {
-                if (error) *error = AMCloudPluginsValidationError(
-                    @"Legacy plugin target XML effect id does not match metadata");
+                NSString *detail = sourceID ?: (sourceError.localizedDescription ?: @"missing");
+                if (error) *error = AMCloudPluginsValidationErrorForItem(
+                    [NSString stringWithFormat:@"Legacy plugin target XML effect id does not match metadata (sourceId=%@)", detail],
+                    plugin, sourceID, sourceURL);
                 return NO;
             }
         }
@@ -1206,10 +1339,13 @@ BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugi
                     [manager moveItemAtURL:oldURL toURL:catalogURL error:nil];
                     return;
                 }
+                NSString *bundledFingerprint = AMCloudPluginsBundledEffectsFingerprint(
+                    bundledEffectsURL);
                 NSDictionary *state = @{ @"protocol_version": @2,
                     @"catalog_revision": revision ?: @0,
                     @"authorization_key": authorizationKey.lowercaseString,
                     @"installed_at": @((long long)NSDate.date.timeIntervalSince1970),
+                    @"bundled_effects_fingerprint": bundledFingerprint ?: @"",
                     @"effect_count": @(AMCloudPluginsFiles(
                         [catalogURL URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES],
                         @"xml").count), @"plugins": statePlugins };

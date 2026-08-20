@@ -356,6 +356,35 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("permission_disabled", CLOUD)
         self.assertNotIn("plugin picker", CLOUD.lower())
 
+    def test_plugin_sync_activates_ios_session_before_manifest(self):
+        sync = CLOUD.rsplit("- (void)syncPluginsNow:", 1)[1].split(
+            "- (void)syncPluginCatalog:", 1
+        )[0]
+        self.assertIn("pluginIOSSessionToken", CLOUD)
+        self.assertIn("pluginIOSSessionActivationInFlight", CLOUD)
+        self.assertIn("pluginIOSSessionActivationOperationID", CLOUD)
+        self.assertIn("activateIOSSessionThenSyncPlugins:reason", sync)
+        self.assertLess(
+            sync.index("activateIOSSessionThenSyncPlugins:reason"),
+            sync.index("self.pluginSyncInFlight = YES"),
+        )
+        activation = CLOUD.rsplit(
+            "- (void)activateIOSSessionThenSyncPlugins:", 1
+        )[1].split("- (void)downloadPluginCatalogItems:", 1)[0]
+        self.assertIn("[self.client activateIOSSession", activation)
+        self.assertIn("NSString *operationID = NSUUID.UUID.UUIDString", activation)
+        self.assertIn(
+            "if (![self.pluginIOSSessionActivationOperationID isEqualToString:operationID]) return;",
+            activation,
+        )
+        self.assertIn("self.pluginIOSSessionActivationOperationID = operationID", activation)
+        self.assertIn("self.pluginIOSSessionActivationOperationID = nil", activation)
+        self.assertIn("self.pluginIOSSessionToken = token", activation)
+        self.assertIn("[self syncPluginsNow:@\"session_activation\"]", activation)
+        self.assertIn("cloud.plugins.session_activation_failed", activation)
+        self.assertIn("self.pluginIOSSessionToken = nil", CLOUD)
+        self.assertNotIn("self.pluginSyncPending = YES", activation)
+
     def test_cloud_plugins_support_per_item_incremental_delivery(self):
         for symbol in (
             "AMCloudPluginsInstallItemArchive",
@@ -411,6 +440,63 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("replaceExisting", PLUGINS)
         self.assertIn("Plugin dependency conflict", PLUGINS)
         self.assertIn("installed.count == plugins.count", CLOUD)
+
+    def test_catalog_identity_errors_include_item_context(self):
+        self.assertIn("AMCloudPluginsValidationErrorForItem", PLUGINS)
+        self.assertIn('plugin=%@', PLUGINS)
+        self.assertIn('name=%@', PLUGINS)
+        self.assertIn('version=%@', PLUGINS)
+        self.assertIn('effectId=%@', PLUGINS)
+        self.assertIn('targetPath=%@', PLUGINS)
+        self.assertIn('sourceId=%@', PLUGINS)
+        self.assertIn('source=%@', PLUGINS)
+        self.assertIn(
+            "Legacy plugin override XML effect id does not match metadata (sourceId=%@)",
+            PLUGINS,
+        )
+
+    def test_catalog_activation_repairs_stale_cached_items_once(self):
+        self.assertIn("pluginCatalogRepairAttempted", CLOUD)
+        self.assertIn("AMCloudCatalogActivationErrorMayBeStaleCache", CLOUD)
+        self.assertIn("cloud.plugins.catalog_repair_begin", CLOUD)
+        self.assertIn("cloud.plugins.catalog_repair_retry", CLOUD)
+        self.assertIn("cloud.plugins.catalog_repair_failed", CLOUD)
+        self.assertIn("AMCloudPluginsRemoveAllIf", CLOUD)
+        self.assertIn("self.pluginCatalogRepairAttempted = YES", CLOUD)
+        self.assertIn("[self syncPluginCatalog:plugins revision:revision", CLOUD)
+        repair = CLOUD.split(
+            "if (!activated && !self.pluginCatalogRepairAttempted", 1
+        )[1].split("NSDictionary *newState", 1)[0]
+        self.assertIn("AMCloudAuthMatches(token, authorizationGeneration)", repair)
+        self.assertIn("if (cleared)", repair)
+
+    def test_persisted_catalog_is_invalidated_when_ipa_builtin_effects_change(self):
+        self.assertIn("AMCloudPluginsBundledEffectsFingerprint", PLUGINS)
+        self.assertIn('bundled_effects_fingerprint', PLUGINS)
+        self.assertIn('The IPA was replaced while the app data survived', PLUGINS)
+        self.assertIn("AMCloudPluginsInvalidateStaleCatalog", PLUGINS)
+        self.assertIn("AMCloudPluginsInvalidatePersistedState(manager)", PLUGINS)
+        self.assertIn("removeItemAtURL:catalogURL", PLUGINS)
+        restore = PLUGINS.split(
+            "static BOOL AMCloudPluginsActivatePersistedCatalog", 1
+        )[1].split("BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization", 1)[0]
+        self.assertIn("storedFingerprint", restore)
+        self.assertIn("currentFingerprint", restore)
+        self.assertIn("AMCloudPluginsSetActiveState(nil, nil, 0)", restore)
+        self.assertIn("AMCloudPluginsInvalidateStaleCatalog(manager)", restore)
+        self.assertIn("AMCloudPluginsCatalogContainsBundledEffects", PLUGINS)
+        self.assertIn("Older catalogs could contain only cloud-delivered files", PLUGINS)
+        self.assertIn("persistedEffectsURL", restore)
+        self.assertLess(
+            restore.index("storedFingerprint"),
+            restore.index("for (NSDictionary *plugin in plugins)"),
+        )
+        legacy_restore = PLUGINS.split(
+            "static BOOL AMCloudPluginsActivatePersistedState", 1
+        )[1].split("static BOOL AMCloudPluginsActivatePersistedCatalog", 1)[0]
+        self.assertIn("Legacy release state predates the merged-catalog fingerprint", PLUGINS)
+        self.assertIn("AMCloudPluginsCatalogContainsBundledEffects", legacy_restore)
+        self.assertIn("AMCloudPluginsInvalidateStaleCatalog(manager)", legacy_restore)
 
     def test_catalog_passive_dependencies_do_not_claim_or_overwrite_paths(self):
         validator = PLUGINS.split(
@@ -789,6 +875,18 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("activateIOSSession", CLOUD)
         self.assertIn('forHTTPHeaderField:@"X-AM-Device-ID"', CLOUD)
 
+        account_impl = CLOUD.split(
+            "@implementation AMCloudAccountWebViewController", 1
+        )[1].split("@implementation AMCloudWeakScriptMessageHandler", 1)[0]
+        account = account_impl.split("- (void)viewDidLoad", 1)[1].split(
+            "- (void)loadAccountWebsiteWithToken:", 1
+        )[0]
+        self.assertIn("pluginIOSSessionToken", account)
+        self.assertIn("pluginIOSSessionActivationInFlight", account)
+        self.assertIn(
+            "[self loadAccountWebsiteWithToken:token activationError:nil]", account
+        )
+
         device_identifier = CLOUD.split(
             "static NSString *AMCloudDeviceIdentifier", 1
         )[1].split("static NSString *AMCloudDeviceName", 1)[0]
@@ -1021,6 +1119,12 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("BOOL stillReady", authorization_callback)
         self.assertIn("startAuthorized();", authorization_callback)
         self.assertNotIn("amproj_importAuthorizedGeneration", EXPORT)
+
+    def test_account_summary_renders_ios_membership_term(self):
+        self.assertIn('self.account[@"iosAccess"]', CLOUD)
+        self.assertIn('membershipPermanent', CLOUD)
+        self.assertIn('iOS 月卡', CLOUD)
+        self.assertIn('iOS 永久会员', CLOUD)
 
 
 if __name__ == "__main__":

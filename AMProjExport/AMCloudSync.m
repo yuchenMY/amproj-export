@@ -111,6 +111,20 @@ static NSError *AMCloudError(NSInteger code, NSString *message) {
                                 message.length ? message : @"云服务请求失败"}];
 }
 
+static BOOL AMCloudCatalogActivationErrorMayBeStaleCache(NSError *error) {
+    NSString *message = error.localizedDescription.lowercaseString;
+    if (!message.length) return NO;
+    for (NSString *fragment in @[
+        @"legacy plugin override xml effect id does not match metadata",
+        @"legacy plugin target xml effect id does not match metadata",
+        @"installed plugin item is incomplete",
+        @"builtin override xml effect id does not match effectid"
+    ]) {
+        if ([message containsString:fragment]) return YES;
+    }
+    return NO;
+}
+
 static void AMCloudCompleteOnMain(AMCloudResult completion, id data, NSError *error) {
     if (!completion) return;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1171,6 +1185,10 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic) BOOL pluginSyncInFlight;
 @property(nonatomic) BOOL pluginSyncPending;
 @property(nonatomic, copy) NSString *pluginSyncOperationID;
+@property(nonatomic) BOOL pluginCatalogRepairAttempted;
+@property(nonatomic, copy) NSString *pluginIOSSessionToken;
+@property(nonatomic) BOOL pluginIOSSessionActivationInFlight;
+@property(nonatomic, copy) NSString *pluginIOSSessionActivationOperationID;
 @property(nonatomic, strong) UIView *pluginDownloadOverlay;
 @property(nonatomic, copy) NSString *pluginDownloadNoticeOperationID;
 @property(nonatomic, copy) NSString *pluginDownloadNoticeToken;
@@ -1230,6 +1248,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
                    presenter:(UIViewController *)presenter;
 - (void)reloadAccountControllerIfSupported;
 - (void)syncPluginsNow:(NSString *)reason;
+- (void)activateIOSSessionThenSyncPlugins:(NSString *)reason
+                                    token:(NSString *)token
+                              generation:(uint64_t)generation;
 - (void)finishPluginSyncAllowingPending:(BOOL)allowPending;
 - (void)beginPluginDownloadNoticeForRelease:(NSDictionary *)release
                                 operationID:(NSString *)operationID
@@ -1455,12 +1476,18 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         [self loadAccountWebsiteWithToken:nil activationError:nil];
         return;
     }
+    if ([self.manager.pluginIOSSessionToken isEqualToString:token] ||
+        self.manager.pluginIOSSessionActivationInFlight) {
+        [self loadAccountWebsiteWithToken:token activationError:nil];
+        return;
+    }
     NSString *activationToken = token;
     __weak typeof(self) weakSelf = self;
     [self.manager.client activateIOSSession:^(__unused id data, NSError *error) {
         NSString *activeToken = AMCloudReadToken();
         BOOL activationIsCurrent = [activeToken isEqualToString:activationToken];
         if (!error && activationIsCurrent) {
+            weakSelf.manager.pluginIOSSessionToken = activeToken;
             [weakSelf.manager syncPluginsNow:@"account_activation"];
         }
         NSError *activeError = activationIsCurrent || !activeToken.length ? error : nil;
@@ -1740,6 +1767,9 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.pluginSyncOperationID = nil;
     self.pluginSyncInFlight = NO;
     self.pluginSyncPending = NO;
+    self.pluginIOSSessionToken = nil;
+    self.pluginIOSSessionActivationInFlight = NO;
+    self.pluginIOSSessionActivationOperationID = nil;
     [self cancelPluginDownloadNotice];
 	if (!AMCloudReadToken().length) {
 		[self clearAccountAvatar];
@@ -1912,7 +1942,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         }
         return;
     }
+    if (![self.pluginIOSSessionToken isEqualToString:token]) {
+        [self activateIOSSessionThenSyncPlugins:reason token:token
+                                      generation:authorizationGeneration];
+        return;
+    }
     self.pluginSyncInFlight = YES;
+    self.pluginCatalogRepairAttempted = NO;
     NSString *operationID = NSUUID.UUID.UUIDString;
     self.pluginSyncOperationID = operationID;
     AMCloudDiagnostic(@"cloud.plugins.sync_begin", @{ @"reason": reason ?: @"unknown" });
@@ -2161,18 +2197,59 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             [self finishPluginSyncAllowingPending:downloadError == nil];
             return;
         }
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            NSError *activationError = nil;
-            BOOL activated = AMCloudPluginsActivateCatalog(
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                NSError *activationError = nil;
+                BOOL activated = AMCloudPluginsActivateCatalog(
                 plugins, revision, authorizationKey, authorizationGeneration,
                 ^BOOL(dispatch_block_t commit) {
                     return AMCloudCommitIfAuthMatches(token, authorizationGeneration, commit);
                 }, &activationError);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
-                NSDictionary *newState = activated ? AMCloudPluginsCurrentState() : nil;
-                AMCloudDiagnostic(activated ? @"cloud.plugins.catalog_activated" :
-                    @"cloud.plugins.catalog_activation_failed", @{
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
+                    if (!activated && !self.pluginCatalogRepairAttempted &&
+                        AMCloudCatalogActivationErrorMayBeStaleCache(activationError)) {
+                        self.pluginCatalogRepairAttempted = YES;
+                        NSError *originalError = activationError;
+                        AMCloudDiagnostic(@"cloud.plugins.catalog_repair_begin", @{
+                            @"plugin_count": @(plugins.count),
+                            @"error": originalError.localizedDescription ?: @""
+                        });
+                        [self.pluginDownloadOverlay removeFromSuperview];
+                        self.pluginDownloadOverlay = nil;
+                        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                            BOOL cleared = AMCloudPluginsRemoveAllIf(^BOOL{
+                                return AMCloudAuthMatches(token, authorizationGeneration);
+                            });
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
+                                if (!AMCloudAuthMatches(token, authorizationGeneration)) {
+                                    [self finishPluginDownloadNoticeInstalled:NO state:nil
+                                        error:nil cancelled:YES operationID:operationID];
+                                    [self finishPluginSyncAllowingPending:YES];
+                                    return;
+                                }
+                                if (cleared) {
+                                    AMCloudDiagnostic(@"cloud.plugins.catalog_repair_retry", @{
+                                        @"plugin_count": @(plugins.count)
+                                    });
+                                    [self syncPluginCatalog:plugins revision:revision token:token
+                                        authorizationGeneration:authorizationGeneration
+                                        authorizationKey:authorizationKey operationID:operationID];
+                                    return;
+                                }
+                                AMCloudDiagnostic(@"cloud.plugins.catalog_repair_failed", @{
+                                    @"error": originalError.localizedDescription ?: @""
+                                });
+                                [self finishPluginDownloadNoticeInstalled:NO state:nil
+                                    error:originalError cancelled:NO operationID:operationID];
+                                [self finishPluginSyncAllowingPending:NO];
+                            });
+                        });
+                        return;
+                    }
+                    NSDictionary *newState = activated ? AMCloudPluginsCurrentState() : nil;
+                    AMCloudDiagnostic(activated ? @"cloud.plugins.catalog_activated" :
+                        @"cloud.plugins.catalog_activation_failed", @{
                     @"plugin_count": @(plugins.count),
                     @"error": activationError.localizedDescription ?: @""
                 });
@@ -2181,6 +2258,35 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 [self finishPluginSyncAllowingPending:activated];
             });
         });
+    }];
+}
+
+- (void)activateIOSSessionThenSyncPlugins:(NSString *)reason
+                                    token:(NSString *)token
+                              generation:(uint64_t)generation {
+    if (!token.length || !AMCloudAuthMatches(token, generation)) return;
+    if (self.pluginIOSSessionActivationInFlight) return;
+    NSString *operationID = NSUUID.UUID.UUIDString;
+    self.pluginIOSSessionActivationInFlight = YES;
+    self.pluginIOSSessionActivationOperationID = operationID;
+    __weak typeof(self) weakSelf = self;
+    [self.client activateIOSSession:^(id data, NSError *error) {
+        (void)data;
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if (![self.pluginIOSSessionActivationOperationID isEqualToString:operationID]) return;
+        self.pluginIOSSessionActivationInFlight = NO;
+        self.pluginIOSSessionActivationOperationID = nil;
+        if (!AMCloudAuthMatches(token, generation)) return;
+        if (error) {
+            AMCloudDiagnostic(@"cloud.plugins.session_activation_failed", @{
+                @"reason": reason ?: @"unknown",
+                @"error": error.localizedDescription ?: @""
+            });
+            return;
+        }
+        self.pluginIOSSessionToken = token;
+        [self syncPluginsNow:@"session_activation"];
     }];
 }
 
@@ -3396,11 +3502,30 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 ? self.account[@"username"] : @"";
             NSDictionary *vip = [self.account[@"vip"] isKindOfClass:NSDictionary.class]
                 ? self.account[@"vip"] : nil;
-            NSString *tier = [vip[@"tier"] isKindOfClass:NSString.class]
-                ? [vip[@"tier"] uppercaseString] : @"";
-            cell.detailTextLabel.text = tier.length
-                ? [NSString stringWithFormat:@"%@ · %@", username, tier]
-                : (username.length ? username : @"账户资料尚未加载，可下拉刷新");
+            NSDictionary *iosAccess = [self.account[@"iosAccess"] isKindOfClass:NSDictionary.class]
+                ? self.account[@"iosAccess"] : nil;
+            if (iosAccess) {
+                BOOL member = [iosAccess[@"membershipEnabled"] boolValue];
+                BOOL permanent = [iosAccess[@"membershipPermanent"] boolValue];
+                NSString *membership = member ? (permanent ? @"iOS 永久会员" : @"iOS 月卡") : @"iOS 未授权";
+                NSNumber *days = [iosAccess[@"membershipDaysLeft"] isKindOfClass:NSNumber.class]
+                    ? iosAccess[@"membershipDaysLeft"] : nil;
+                if (member && !permanent && days.integerValue > 0) {
+                    membership = [NSString stringWithFormat:@"%@ · 剩余 %ld 天", membership, (long)days.integerValue];
+                } else if (!member && [iosAccess[@"membershipExpireAtText"] isKindOfClass:NSString.class] &&
+                           [iosAccess[@"membershipExpireAtText"] length]) {
+                    membership = [NSString stringWithFormat:@"iOS 月卡已过期 · %@", iosAccess[@"membershipExpireAtText"]];
+                }
+                cell.detailTextLabel.text = username.length
+                    ? [NSString stringWithFormat:@"%@ · %@", username, membership]
+                    : membership;
+            } else {
+                NSString *tier = [vip[@"tier"] isKindOfClass:NSString.class]
+                    ? [vip[@"tier"] uppercaseString] : @"";
+                cell.detailTextLabel.text = tier.length
+                    ? [NSString stringWithFormat:@"%@ · %@", username, tier]
+                    : (username.length ? username : @"账户资料尚未加载，可下拉刷新");
+            }
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
     } else if (indexPath.section == 1) {
