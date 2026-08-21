@@ -80,12 +80,11 @@ def make_main(load_commands=(), section_payload=b"section-payload"):
     )
 
 
-def make_home_ui_dylib(
-    install_name="@rpath/AMHomeUI.dylib",
-    section_name="__text",
-    section_type=0,
+def make_cloud_dylib(
+    install_name="@rpath/AMProjExportCloud.dylib",
     symbol_name="_AMHomeUIInstall",
     include_url=True,
+    load_commands=(),
 ):
     section_offset = 0x1000
     section_size = 8
@@ -111,7 +110,7 @@ def make_home_ui_dylib(
     )
     section = struct.pack(
         "<16s16sQQIIIIIIII",
-        section_name.encode("ascii").ljust(16, b"\0"),
+        b"__text" + bytes(10),
         b"__TEXT" + bytes(10),
         0x100000000 + section_offset,
         section_size,
@@ -119,7 +118,7 @@ def make_home_ui_dylib(
         2,
         0,
         0,
-        section_type,
+        0,
         0,
         0,
         0,
@@ -134,21 +133,21 @@ def make_home_ui_dylib(
         string_offset,
         len(string_table),
     )
-    commands = segment + section + identifier + symtab
+    commands = segment + section + identifier + b"".join(load_commands) + symtab
     header = struct.pack(
         "<IIIIIIII",
         0xFEEDFACF,
         inject_dylib.CPU_TYPE_ARM64,
         0,
         inject_dylib.MH_DYLIB,
-        3,
+        3 + len(load_commands),
         len(commands),
         0,
         0,
     )
     prefix = header + commands
     if len(prefix) > section_offset:
-        raise AssertionError("synthetic Home UI load commands exceed section offset")
+        raise AssertionError("synthetic Cloud load commands exceed section offset")
 
     total_size = string_offset + len(string_table) + len(home_url)
     data = bytearray(max(total_size, section_offset + section_size))
@@ -169,47 +168,47 @@ def make_home_ui_dylib(
 
 
 class EditorHomePackageTests(unittest.TestCase):
-    def test_home_ui_verifier_requires_expected_install_name_and_url(self):
+    def test_cloud_verifier_requires_embedded_install_symbol_and_url(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
-            path = Path(temporary_directory) / "AMHomeUI.dylib"
+            path = Path(temporary_directory) / "AMProjExportCloud.dylib"
 
-            binary = make_home_ui_dylib()
+            binary = make_cloud_dylib()
             path.write_bytes(binary)
-            packager.verify_home_ui_binary(path, binary)
+            packager.verify_cloud_embedded_home_ui(path)
 
-            binary = make_home_ui_dylib(install_name="@rpath/Wrong.dylib")
-            path.write_bytes(binary)
-            with self.assertRaisesRegex(RuntimeError, "install name"):
-                packager.verify_home_ui_binary(path, binary)
-
-            binary = make_home_ui_dylib(include_url=False)
+            binary = make_cloud_dylib(include_url=False)
             path.write_bytes(binary)
             with self.assertRaisesRegex(RuntimeError, "AutFeng home URL"):
-                packager.verify_home_ui_binary(path, binary)
+                packager.verify_cloud_embedded_home_ui(path)
 
-            binary = make_home_ui_dylib(symbol_name="_WrongInstall")
+            binary = make_cloud_dylib(symbol_name="_WrongInstall")
             path.write_bytes(binary)
-            with self.assertRaisesRegex(RuntimeError, "export _AMHomeUIInstall"):
-                packager.verify_home_ui_binary(path, binary)
+            with self.assertRaisesRegex(RuntimeError, "define _AMHomeUIInstall"):
+                packager.verify_cloud_embedded_home_ui(path)
 
-    def test_home_ui_verifier_rejects_both_initializer_section_formats(self):
+    def test_cloud_verifier_rejects_every_home_ui_load_kind_and_path(self):
         cases = (
-            ("__mod_init_func", inject_dylib.S_MOD_INIT_FUNC_POINTERS),
-            ("__init_offsets", inject_dylib.S_INIT_FUNC_OFFSETS),
+            (
+                inject_dylib.LC_LOAD_DYLIB,
+                "@executable_path/Frameworks/AMHomeUI.dylib",
+            ),
+            (inject_dylib.LC_LOAD_WEAK_DYLIB, "@rpath/AMHomeUI.dylib"),
+            (inject_dylib.LC_REEXPORT_DYLIB, "/tmp/AMHomeUI.dylib"),
+            (inject_dylib.LC_LAZY_LOAD_DYLIB, "@loader_path/AMHomeUI.dylib"),
+            (inject_dylib.LC_LOAD_UPWARD_DYLIB, "AMHomeUI.dylib"),
         )
         with tempfile.TemporaryDirectory() as temporary_directory:
-            path = Path(temporary_directory) / "AMHomeUI.dylib"
-            for section_name, section_type in cases:
-                with self.subTest(section_name=section_name):
-                    binary = make_home_ui_dylib(
-                        section_name=section_name,
-                        section_type=section_type,
+            path = Path(temporary_directory) / "AMProjExportCloud.dylib"
+            for command, name in cases:
+                with self.subTest(command=command, name=name):
+                    binary = make_cloud_dylib(
+                        load_commands=(make_dylib_command(command, name),)
                     )
                     path.write_bytes(binary)
                     with self.assertRaisesRegex(
-                        RuntimeError, "must not contain initializer sections"
+                        RuntimeError, "must not contain an AMHomeUI load command"
                     ):
-                        packager.verify_home_ui_binary(path, binary)
+                        packager.verify_cloud_embedded_home_ui(path)
 
     def test_main_validation_accepts_no_home_ui_load(self):
         info = inject_dylib.parse_macho_data(make_main())
@@ -233,51 +232,18 @@ class EditorHomePackageTests(unittest.TestCase):
                 ):
                     packager.ensure_no_home_ui_loads(info, "source main")
 
-    def test_cloud_must_strongly_link_the_single_home_ui_runtime(self):
-        expected = {
-            "command": "LC_LOAD_DYLIB",
-            "name": "@rpath/AMHomeUI.dylib",
-        }
-        packager.ensure_cloud_home_ui_dependency(
-            {"dylib_load_commands": [expected], "external_defined_symbols": []},
-            "Cloud dylib",
-        )
-        invalid_cases = (
-            [],
-            [{"command": "LC_LOAD_WEAK_DYLIB", "name": expected["name"]}],
-            [{"command": "LC_LOAD_DYLIB", "name": "@rpath/Wrong.dylib"}],
-            [expected, expected],
-        )
-        for commands in invalid_cases:
-            with self.subTest(commands=commands), self.assertRaisesRegex(
-                RuntimeError, "must strongly link"
-            ):
-                packager.ensure_cloud_home_ui_dependency(
-                    {"dylib_load_commands": commands}, "Cloud dylib"
-                )
-        with self.assertRaisesRegex(RuntimeError, "must not embed"):
-            packager.ensure_cloud_home_ui_dependency(
-                {
-                    "dylib_load_commands": [expected],
-                    "external_defined_symbols": ["_AMHomeUIInstall"],
-                },
-                "Cloud dylib",
-            )
-
-    def test_packager_has_no_main_injection_path(self):
+    def test_packager_has_no_main_injection_or_standalone_runtime_path(self):
         self.assertNotIn("insert_load_dylib", PACKAGER_SOURCE)
         self.assertNotIn("LC_LOAD_WEAK_DYLIB", PACKAGER_SOURCE)
         self.assertNotIn("patch_main_with_home_ui", PACKAGER_SOURCE)
+        self.assertNotIn('parser.add_argument("home_ui")', PACKAGER_SOURCE)
+        self.assertNotIn("output.writestr(new_zip_info(HOME_UI_PATH", PACKAGER_SOURCE)
+        self.assertIn("verify_cloud_embedded_home_ui(dylib_path)", PACKAGER_SOURCE)
         self.assertIn('if output_main != source_main:', PACKAGER_SOURCE)
 
-    def test_new_home_ui_zip_member_is_executable(self):
-        info = packager.new_zip_info(packager.HOME_UI_PATH, executable=True)
-        self.assertEqual((info.external_attr >> 16) & 0xFFFF, 0o100755)
-
-    def test_package_preserves_main_and_adds_runtime_home_ui(self):
+    def test_package_preserves_main_and_removes_standalone_home_ui(self):
         main = make_main()
-        cloud = b"cloud-dylib"
-        home_ui = b"home-ui-dylib"
+        cloud = make_cloud_dylib()
         button = b"button-image"
 
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -285,12 +251,10 @@ class EditorHomePackageTests(unittest.TestCase):
             source_path = root / "source.ipa"
             output_path = root / "output.ipa"
             cloud_path = root / "AMProjExportCloud.dylib"
-            home_ui_path = root / "AMHomeUI.dylib"
             button_path = root / "button.png"
             categories = root / "categories"
             categories.mkdir()
             cloud_path.write_bytes(cloud)
-            home_ui_path.write_bytes(home_ui)
             button_path.write_bytes(button)
             for name in packager.CATEGORY_NAMES:
                 (categories / name).write_bytes(("category:" + name).encode())
@@ -298,6 +262,7 @@ class EditorHomePackageTests(unittest.TestCase):
             with zipfile.ZipFile(source_path, "w") as source:
                 source.writestr(packager.MAIN_PATH, main)
                 source.writestr(packager.CLOUD_PATH, b"old-cloud")
+                source.writestr(packager.HOME_UI_PATH, b"stale-home-ui-dylib")
                 source.writestr("Payload/AlightMotion.app/Info.plist", b"plist")
                 for name in packager.CATEGORY_NAMES:
                     if name == "ic_category_thumbnail_other.png":
@@ -311,14 +276,11 @@ class EditorHomePackageTests(unittest.TestCase):
                 mock.patch.object(packager.direct, "verify_cloud_runtime_version"),
                 mock.patch.object(packager.direct, "verify_cloud_stability_contract"),
                 mock.patch.object(packager.direct, "prepare_cloud"),
-                mock.patch.object(packager, "verify_cloud_home_ui_dependency"),
-                mock.patch.object(packager, "verify_home_ui_binary"),
             ):
                 packager.package(
                     source_path,
                     output_path,
                     cloud_path,
-                    home_ui_path,
                     button_path,
                     categories,
                 )
@@ -326,7 +288,7 @@ class EditorHomePackageTests(unittest.TestCase):
             with zipfile.ZipFile(output_path) as output:
                 self.assertEqual(output.read(packager.MAIN_PATH), main)
                 self.assertEqual(output.read(packager.CLOUD_PATH), cloud)
-                self.assertEqual(output.read(packager.HOME_UI_PATH), home_ui)
+                self.assertNotIn(packager.HOME_UI_PATH, output.namelist())
                 self.assertEqual(
                     output.read(
                         packager.category_path(
@@ -335,15 +297,11 @@ class EditorHomePackageTests(unittest.TestCase):
                     ),
                     b"category:ic_category_thumbnail_other.png",
                 )
-                home_info = output.getinfo(packager.HOME_UI_PATH)
-                self.assertEqual(
-                    (home_info.external_attr >> 16) & 0xFFFF,
-                    0o100755,
-                )
                 info = inject_dylib.parse_macho_data(
                     output.read(packager.MAIN_PATH)
                 )
                 packager.ensure_no_home_ui_loads(info, "output main")
+                packager.verify_cloud_embedded_home_ui(cloud_path)
 
 
 if __name__ == "__main__":

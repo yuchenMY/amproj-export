@@ -135,21 +135,15 @@ AMProjExport/AMProjExport.dylib
 AMProjExport/AMProjExportCloud.dylib
 AMProjExport/AMProjExportDebug.dylib
 AMProjExport/AMMeowLoader.dylib
-AMProjExport/AMHomeUI.dylib
 ```
 
 下载名为 `AMProjExport-v44-dylibs` 的 artifact。其中的 `build-metadata.json`
 记录插件版本、commit、Actions run ID 以及每个二进制文件的 SHA-256，注入前可用它确认没有混入旧版本产物。
 
-`AMHomeUI.dylib` 是独立主页模块，不再编译进
-`AMProjExportCloud.dylib`。它负责将 `https://amhome.meowcr.cn/home`
-挂载到 Alight Motion 的 `HomeVC`/`FeedVC`，并通过共享头像缓存和通知
-与 Cloud 账户保持同步。最终 IPA 需要同时包含
-`Frameworks/AMProjExportCloud.dylib` 和 `Frameworks/AMHomeUI.dylib`。主程序只保留
-既有的 Cloud 强加载，不添加任何 HomeUI 加载命令；Cloud 会在应用完成启动后通过
-`dlopen`/`dlsym` 安装 HomeUI。文件缺失、装载失败、符号缺失或安装异常都会写入
-诊断日志并停用主页，不再让 HomeUI 成为主程序启动依赖。因为新增了第六个 dylib，
-包体仍必须重新签名安装。
+主页模块已直接编译进 `AMProjExportCloud.dylib`，由 Cloud 构造器安装到
+Alight Motion 的 `HomeVC`/`FeedVC`。最终 IPA 只保留一个 Cloud dylib，不能再包含
+`Frameworks/AMHomeUI.dylib`，也不能有任何 HomeUI 的加载命令。这样 LCSign 递归签名
+时不会再单独处理主页模块，避免独立 dylib 的签名页校验导致启动闪退。包体仍必须重新签名安装。
 
 在已有全分类图和编辑器按钮的 IPA 上生成待签包：
 
@@ -157,14 +151,26 @@ AMProjExport/AMHomeUI.dylib
 python .\package_editor_button_ipa.py `
   <source.ipa> <output.ipa> `
   .\AMProjExport\AMProjExportCloud.dylib `
-  .\AMProjExport\AMHomeUI.dylib `
   <add_layer_button.png> <category_image_directory>
 ```
 
-打包器会新增或替换 `AMHomeUI.dylib`，以 `0755` 权限写入动态库，替换指定按钮
-和 12 张分类图，并强制校验主程序逐字节不变。输入主程序如残留任何 HomeUI
-加载命令会直接拒绝打包；HomeUI 如包含 `__mod_init_func` / `__init_offsets`
-初始化段或未导出 `_AMHomeUIInstall` 也会拒绝，避免旧包重新引入启动闪退风险。
+打包器会替换内嵌主页模块的 Cloud dylib、删除遗留的 `AMHomeUI.dylib`，替换指定按钮
+和 12 张分类图，并强制校验主程序逐字节不变。Cloud 必须导出 `_AMHomeUIInstall`，且
+主程序和 Cloud 如残留任何 HomeUI 加载命令都会直接拒绝打包。
+
+需要同时修复官方原版效果时，必须使用完整交付入口，而不要单独运行 XML 覆盖工具：
+
+```powershell
+python .\build_862_official_effects_package.py `
+  <source.ipa> <output.ipa> `
+  D:\am\BuiltinEffects `
+  .\AMProjExport\AMProjExportCloud.dylib
+```
+
+该入口仅覆盖基线 IPA 中已有、ID 与路径可核对的 `com.alightcreative...` 原版效果，
+保留额外插件；随后替换嵌入主页模块的 Cloud dylib、删除独立 HomeUI 与旧签名记录。
+它会阻止旧 `void main()` shader 覆盖 AFX2 `shadeFragment()` 修复版，并在最终 IPA 中复核
+所有 `BuiltinEffects` 资源没有被后续步骤改写。
 
 ## 从自有 6.2.55 (862) 底包生成唯一 Direct Cloud 包
 

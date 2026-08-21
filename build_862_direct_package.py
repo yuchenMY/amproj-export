@@ -97,6 +97,7 @@ MAIN_EXECUTABLE = handoff.MAIN_EXECUTABLE
 CLOUD_PATH = handoff.CLOUD_PATH
 CLOUD_PATH_LCSIGN = f"{APP_ROOT}Frameworks/AMProjExport.dylib"
 CLOUD_MEMBER_PATHS = frozenset({CLOUD_PATH, CLOUD_PATH_LCSIGN})
+HOME_UI_PATH = f"{APP_ROOT}Frameworks/AMHomeUI.dylib"
 LOADCONTROL_PATH = handoff.LOADCONTROL_PATH
 AMENHANCER_PATH = handoff.AMENHANCER_PATH
 CYDIA_SUBSTRATE_PATH = handoff.CYDIA_SUBSTRATE_PATH
@@ -601,6 +602,7 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud, enhance
             for name in source_names
             if not handoff._is_stale_signing_entry(name)
             and name != LOADCONTROL_PATH
+            and name != HOME_UI_PATH
             and name not in CLOUD_MEMBER_PATHS
         }
         expected_names.add(output_cloud_path)
@@ -608,6 +610,8 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud, enhance
             raise RuntimeError("output IPA member set changed unexpectedly")
         if LOADCONTROL_PATH in output_names:
             raise RuntimeError("output IPA still contains LoadControl")
+        if HOME_UI_PATH in output_names:
+            raise RuntimeError("output IPA still contains standalone AMHomeUI")
         if output.read(INFO_PLIST) != info:
             raise RuntimeError("output Info.plist differs from prepared identity")
         verify_output_info(info)
@@ -643,6 +647,7 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud, enhance
             MAIN_EXECUTABLE,
             AMENHANCER_PATH,
             LOADCONTROL_PATH,
+            HOME_UI_PATH,
             *CLOUD_MEMBER_PATHS,
         }
         for name in expected_names - changed:
@@ -703,6 +708,7 @@ def build_direct_package(source_path, output_path, cloud_path=None):
             len(source_cloud_paths) > 1
             or any(names.count(path) > 1 for path in CLOUD_MEMBER_PATHS)
             or names.count(LOADCONTROL_PATH) > 1
+            or names.count(HOME_UI_PATH) > 1
         ):
             raise RuntimeError("source IPA contains duplicate loader members")
         info = prepare_output_info(source.read(INFO_PLIST))
@@ -739,7 +745,11 @@ def build_direct_package(source_path, output_path, cloud_path=None):
         ) as output:
             for zip_info in source.infolist():
                 name = zip_info.filename
-                if handoff._is_stale_signing_entry(name) or name == LOADCONTROL_PATH:
+                if (
+                    handoff._is_stale_signing_entry(name)
+                    or name == LOADCONTROL_PATH
+                    or name == HOME_UI_PATH
+                ):
                     continue
                 payload = b"" if zip_info.is_dir() else source.read(zip_info)
                 if name == INFO_PLIST:

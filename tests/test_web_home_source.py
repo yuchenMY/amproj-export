@@ -10,18 +10,14 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="ut
 
 
 class WebHomeSourceTests(unittest.TestCase):
-    def test_home_ui_stays_modular_but_is_linked_into_cloud_runtime(self):
+    def test_home_ui_source_is_compiled_into_cloud_runtime(self):
         cloud_rule = MAKEFILE.split("AMProjExportCloud.dylib:", 1)[1].split(
             "AMProjExportDebug.dylib:", 1
         )[0]
-        home_rule = MAKEFILE.split("AMHomeUI.dylib:", 1)[1].split("clean:", 1)[0]
-        self.assertNotIn("AMHomeUI.m", cloud_rule)
-        self.assertIn("AMHomeUI.dylib", cloud_rule)
+        self.assertIn("AMHomeUI.m", cloud_rule)
+        self.assertNotIn("AMHomeUI.dylib", cloud_rule)
         self.assertNotIn("AMWebHome.m", cloud_rule)
-        self.assertIn("AMHomeUI.m", home_rule)
-        self.assertIn("-framework WebKit", home_rule)
-        self.assertIn("-framework CoreGraphics", home_rule)
-        self.assertIn("-install_name @rpath/AMHomeUI.dylib", home_rule)
+        self.assertNotIn("AMHomeUI.dylib:", MAKEFILE)
 
     def test_home_ui_is_directly_installed_by_cloud_bootstrap(self):
         self.assertNotIn("__attribute__((constructor))", SOURCE)
@@ -363,16 +359,15 @@ class WebHomeSourceTests(unittest.TestCase):
         self.assertIn("state.avatar=avatar||''", SOURCE)
         self.assertIn("else{button.style.padding='';", SOURCE)
 
-    def test_ci_publishes_home_ui_binary(self):
-        self.assertIn('Path("AMProjExport/AMHomeUI.dylib")', WORKFLOW)
-        self.assertIn("AMProjExport/AMHomeUI.dylib", WORKFLOW)
+    def test_ci_builds_home_ui_inside_cloud_binary(self):
+        self.assertIn(
+            'assert not Path("AMProjExport/AMHomeUI.dylib").exists()', WORKFLOW
+        )
         self.assertIn('"_AMHomeUIInstall"', WORKFLOW)
         self.assertIn('["otool", "-L", "AMProjExport/AMProjExportCloud.dylib"]', WORKFLOW)
-        self.assertIn('assert "@rpath/AMHomeUI.dylib" in cloud_dependencies', WORKFLOW)
-        self.assertIn('assert "_AMHomeUIInstall" not in cloud_defined_symbols', WORKFLOW)
-        self.assertIn('assert "_AMHomeUIInstall" in cloud_symbols', WORKFLOW)
-        self.assertIn('section["type"] in (0x9, 0x16)', WORKFLOW)
-        self.assertIn('home_ui["external_defined_symbols"]', WORKFLOW)
+        self.assertIn('assert "@rpath/AMHomeUI.dylib" not in cloud_dependencies', WORKFLOW)
+        self.assertIn('assert "_AMHomeUIInstall" in cloud_defined_symbols', WORKFLOW)
+        self.assertIn('assert b"https://amhome.meowcr.cn/home" in Path(', WORKFLOW)
 
 
 if __name__ == "__main__":
