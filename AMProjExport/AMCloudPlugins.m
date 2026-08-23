@@ -99,20 +99,17 @@ static NSString *const AMCloudPluginsDirectoryName = @"AMCloudPlugins";
 static NSString *const AMCloudPluginsStateName = @"state.json";
 static NSString *const AMCloudPluginsRevocationName = @"AMCloudPlugins.revoked";
 static NSString *const AMCloudBundleHookGuardKey = @"AMCloudBundleHookGuard";
+NSInteger const AMCloudPluginsCatalogProtocolVersion = 4;
 
 typedef NSArray<NSURL *> *(*AMCloudBundleURLsIMP)(id, SEL, NSString *, NSString *);
 typedef NSURL *(*AMCloudBundleURLIMP)(id, SEL, NSString *, NSString *, NSString *);
-typedef NSURL *(*AMCloudBundleURLSimpleIMP)(id, SEL, NSString *, NSString *);
 typedef NSArray<NSString *> *(*AMCloudBundlePathsIMP)(id, SEL, NSString *, NSString *);
 typedef NSString *(*AMCloudBundlePathIMP)(id, SEL, NSString *, NSString *, NSString *);
-typedef NSString *(*AMCloudBundlePathSimpleIMP)(id, SEL, NSString *, NSString *);
 
 static AMCloudBundleURLsIMP AMCloudOriginalBundleURLs = NULL;
 static AMCloudBundleURLIMP AMCloudOriginalBundleURL = NULL;
-static AMCloudBundleURLSimpleIMP AMCloudOriginalBundleURLSimple = NULL;
 static AMCloudBundlePathsIMP AMCloudOriginalBundlePaths = NULL;
 static AMCloudBundlePathIMP AMCloudOriginalBundlePath = NULL;
-static AMCloudBundlePathSimpleIMP AMCloudOriginalBundlePathSimple = NULL;
 static NSURL *AMCloudActiveEffectsURL = nil;
 static NSDictionary<NSString *, id> *AMCloudActiveState = nil;
 static uint64_t AMCloudAuthorizationGeneration = 0;
@@ -128,6 +125,8 @@ static NSString *AMCloudPluginsRelativeFilePath(NSURL *fileURL, NSURL *rootURL);
 static NSString *AMCloudPluginsItemEffectID(NSDictionary *plugin);
 static NSString *AMCloudPluginsItemTargetPath(NSDictionary *plugin);
 static NSString *AMCloudPluginsItemVersionID(NSDictionary *plugin);
+static NSURL *AMCloudPluginsBundledEffectsURL(void);
+static BOOL AMCloudPluginsCustomPluginTargetsBundledEffect(NSDictionary *plugin);
 
 static NSError *AMCloudPluginsValidationError(NSString *message) {
     return [NSError errorWithDomain:AMProjImportArchiveErrorDomain
@@ -668,6 +667,8 @@ static BOOL AMCloudPluginsCatalogEntryIsSafe(NSDictionary *plugin) {
     NSString *kind = AMCloudPluginsItemKind(plugin);
     if (![kind isEqualToString:@"custom_plugin"] &&
         ![kind isEqualToString:@"builtin_override"]) return NO;
+    if ([kind isEqualToString:@"custom_plugin"] &&
+        AMCloudPluginsCustomPluginTargetsBundledEffect(plugin)) return NO;
     if ([kind isEqualToString:@"builtin_override"] &&
         (!AMCloudPluginsItemEffectID(plugin).length ||
          !AMCloudPluginsItemTargetPath(plugin).length)) return NO;
@@ -679,8 +680,6 @@ static BOOL AMCloudPluginsCatalogEntryIsSafe(NSDictionary *plugin) {
         AMCloudPluginReleaseIDIsSafe(AMCloudPluginsItemVersionID(plugin)) &&
         AMCloudPluginAuthorizationKeyIsSafe(AMCloudPluginsItemSHA(plugin));
 }
-
-static NSURL *AMCloudPluginsBundledEffectsURL(void);
 
 static NSURL *AMCloudPluginsBuiltinTargetURL(NSURL *effectsRoot, NSString *targetPath) {
     NSString *normalized = AMCloudPluginsNormalizeBuiltinTargetPath(targetPath);
@@ -697,6 +696,18 @@ static NSURL *AMCloudPluginsBuiltinTargetURL(NSURL *effectsRoot, NSString *targe
     if (![candidate getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil] ||
         !regular.boolValue) return nil;
     return candidate;
+}
+
+// A custom effect may live under BuiltinEffects, but it must not reuse a path
+// that belongs to an IPA-shipped official effect. Older catalogs did exactly
+// that after rewriting their XML ids to com.autfeng..., which makes Alight
+// Motion's native recommendation lookup fall back to an unrelated effect.
+static BOOL AMCloudPluginsCustomPluginTargetsBundledEffect(NSDictionary *plugin) {
+    if (![AMCloudPluginsItemKind(plugin) isEqualToString:@"custom_plugin"]) return NO;
+    NSURL *bundledURL = AMCloudPluginsBuiltinTargetURL(
+        AMCloudPluginsBundledEffectsURL(), AMCloudPluginsItemTargetPath(plugin));
+    NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(bundledURL, nil);
+    return AMCloudPluginsIsOfficialEffectID(bundledID);
 }
 
 static BOOL AMCloudPluginsValidateBuiltinOverride(NSDictionary *plugin,
@@ -787,6 +798,15 @@ static BOOL AMCloudPluginsValidateCatalogIdentity(
         NSString *kind = AMCloudPluginsItemKind(plugin);
         NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
         NSString *effectID = AMCloudPluginsItemEffectID(plugin);
+        if (AMCloudPluginsCustomPluginTargetsBundledEffect(plugin)) {
+            NSURL *bundledURL = AMCloudPluginsBuiltinTargetURL(
+                bundledEffectsURL, targetPath);
+            NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(bundledURL, nil);
+            if (error) *error = AMCloudPluginsValidationErrorForItem(
+                @"Custom plugins may not replace a bundled official effect; publish it as builtin_override with the original official effect id",
+                plugin, bundledID, bundledURL);
+            return NO;
+        }
         BOOL tracksTarget = targetPath.length > 0 || effectID.length > 0;
         if (!tracksTarget) continue;
         NSString *pathKey = targetPath.lowercaseString;
@@ -914,8 +934,14 @@ static BOOL AMCloudPluginsActivatePersistedCatalog(
     NSString *storedKey = [state[@"authorization_key"] isKindOfClass:NSString.class]
         ? [state[@"authorization_key"] lowercaseString] : nil;
     NSArray *plugins = [state[@"plugins"] isKindOfClass:NSArray.class] ? state[@"plugins"] : nil;
-    if (protocol.integerValue != 2 || !plugins ||
+    if (protocol.integerValue != AMCloudPluginsCatalogProtocolVersion || !plugins ||
         ![storedKey isEqualToString:authorizationKey.lowercaseString]) {
+        // A catalog generated by an older overlay implementation can make
+        // native effect discovery resolve every entry through the same cached
+        // resource. Covered installs preserve Application Support, so discard
+        // the old catalog and let the next manifest sync recreate it.
+        AMCloudPluginsSetActiveState(nil, nil, 0);
+        AMCloudPluginsInvalidateStaleCatalog(manager);
         return NO;
     }
     NSString *storedFingerprint = [state[@"bundled_effects_fingerprint"] isKindOfClass:NSString.class]
@@ -977,9 +1003,14 @@ BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization(
         NSDictionary *state = [object isKindOfClass:NSDictionary.class] ? object : nil;
         NSNumber *protocol = [state[@"protocol_version"] isKindOfClass:NSNumber.class]
             ? state[@"protocol_version"] : nil;
-        if (protocol.integerValue == 2) {
+        if (protocol.integerValue == AMCloudPluginsCatalogProtocolVersion) {
             restored = AMCloudPluginsActivatePersistedCatalog(
                 authorizationKey, authorizationGeneration);
+            return;
+        }
+        if (protocol) {
+            AMCloudPluginsSetActiveState(nil, nil, 0);
+            AMCloudPluginsInvalidateStaleCatalog(NSFileManager.defaultManager);
             return;
         }
         NSString *releaseID = [state[@"release_id"] isKindOfClass:NSString.class]
@@ -1035,6 +1066,23 @@ BOOL AMCloudPluginsInstallItemArchiveWithMetadata(
             @"Builtin override metadata is incomplete");
         return NO;
     }
+    NSDictionary *validationPlugin = @{
+        @"id": pluginID,
+        @"version_id": versionID,
+        @"sha256": sha256.lowercaseString,
+        @"kind": kind,
+        @"effect_id": effectID ?: @"",
+        @"target_path": targetPath ?: @""
+    };
+    if (AMCloudPluginsCustomPluginTargetsBundledEffect(validationPlugin)) {
+        NSURL *bundledURL = AMCloudPluginsBuiltinTargetURL(
+            AMCloudPluginsBundledEffectsURL(), targetPath);
+        NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(bundledURL, nil);
+        if (error) *error = AMCloudPluginsValidationErrorForItem(
+            @"Custom plugins may not replace a bundled official effect; publish it as builtin_override with the original official effect id",
+            validationPlugin, bundledID, bundledURL);
+        return NO;
+    }
     __block BOOL installed = NO;
     __block NSError *installError = nil;
     AMCloudPluginsPerformMutation(^{
@@ -1053,14 +1101,6 @@ BOOL AMCloudPluginsInstallItemArchiveWithMetadata(
         NSDictionary *metrics = nil;
         if (!AMProjExtractPluginArchive(archiveURL, stagingURL, &metrics, &installError)) return;
 
-        NSDictionary *validationPlugin = @{
-            @"id": pluginID,
-            @"version_id": versionID,
-            @"sha256": sha256.lowercaseString,
-            @"kind": kind,
-            @"effect_id": effectID ?: @"",
-            @"target_path": targetPath ?: @""
-        };
         if ([kind isEqualToString:@"builtin_override"] &&
             !AMCloudPluginsValidateBuiltinOverride(
                 validationPlugin, stagingURL, AMCloudPluginsBundledEffectsURL(),
@@ -1478,7 +1518,7 @@ BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugi
                 }
                 NSString *bundledFingerprint = AMCloudPluginsBundledEffectsFingerprint(
                     bundledEffectsURL);
-                NSDictionary *state = @{ @"protocol_version": @2,
+                NSDictionary *state = @{ @"protocol_version": @(AMCloudPluginsCatalogProtocolVersion),
                     @"catalog_revision": revision ?: @0,
                     @"authorization_key": authorizationKey.lowercaseString,
                     @"installed_at": @((long long)NSDate.date.timeIntervalSince1970),
@@ -1548,22 +1588,6 @@ static NSURL *AMCloudPluginsActiveDirectoryURL(NSString *subdirectory) {
     return directoryURL;
 }
 
-static NSURL *AMCloudPluginsBuiltinEffectsRootURL(NSString *name,
-                                                   NSString *extension) {
-    if (![name isKindOfClass:NSString.class] || !name.length || extension.length ||
-        [name caseInsensitiveCompare:@"BuiltinEffects"] != NSOrderedSame) return nil;
-    NSURL *effectsURL = nil;
-    @synchronized (NSBundle.class) {
-        if (AMCloudActiveAuthorizationGeneration == AMCloudAuthorizationGeneration) {
-            effectsURL = AMCloudActiveEffectsURL;
-        }
-    }
-    NSNumber *directory = nil;
-    if (![effectsURL getResourceValue:&directory forKey:NSURLIsDirectoryKey error:nil] ||
-        !directory.boolValue) return nil;
-    return effectsURL;
-}
-
 static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *extension) {
     if (!directoryURL) return @[];
     NSArray<NSURL *> *contents = [NSFileManager.defaultManager
@@ -1588,6 +1612,13 @@ static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *exte
     return URLs;
 }
 
+static BOOL AMCloudPluginsShouldUseCloudResource(NSURL *cloudURL, NSURL *bundledURL) {
+    NSData *cloud = AMCloudPluginsDataAtURL(cloudURL);
+    if (!cloud.length) return NO;
+    NSData *bundled = AMCloudPluginsDataAtURL(bundledURL);
+    return !bundled.length || ![cloud isEqualToData:bundled];
+}
+
 static NSArray<NSURL *> *AMCloudPluginsMergeResourceURLs(NSArray<NSURL *> *bundled,
                                                           NSArray<NSURL *> *cloud) {
     if (cloud.count == 0) return bundled ?: @[];
@@ -1600,8 +1631,17 @@ static NSArray<NSURL *> *AMCloudPluginsMergeResourceURLs(NSArray<NSURL *> *bundl
     for (NSURL *URL in bundled ?: @[]) {
         NSString *key = URL.lastPathComponent.precomposedStringWithCanonicalMapping.lowercaseString;
         NSURL *replacement = key.length ? remaining[key] : nil;
-        [merged addObject:replacement ?: URL];
-        if (replacement) [remaining removeObjectForKey:key];
+        if (replacement) {
+            [remaining removeObjectForKey:key];
+            // The catalog contains a complete baseline copy so it can be
+            // rebuilt atomically. Returning that copy for unchanged files
+            // changes the resource root seen by Alight Motion and breaks its
+            // native recommendation cache. Only expose actual overrides.
+            [merged addObject:AMCloudPluginsShouldUseCloudResource(replacement, URL)
+                ? replacement : URL];
+        } else {
+            [merged addObject:URL];
+        }
     }
     NSArray<NSURL *> *newURLs = [remaining.allValues
         sortedArrayUsingComparator:^NSComparisonResult(NSURL *left, NSURL *right) {
@@ -1680,35 +1720,15 @@ static NSURL *AMCloudBundleURLHook(id self, SEL selector, NSString *name,
             ? AMCloudOriginalBundleURL(self, selector, name, extension, subdirectory) : nil;
     }
     @try {
+        NSURL *bundled = AMCloudOriginalBundleURL
+            ? AMCloudOriginalBundleURL(self, selector, name, extension, subdirectory) : nil;
         if (self == NSBundle.mainBundle) {
-            NSURL *root = !subdirectory.length
-                ? AMCloudPluginsBuiltinEffectsRootURL(name, extension) : nil;
-            if (root) return root;
             if (AMCloudPluginsRelativeDirectory(subdirectory)) {
                 NSURL *cloud = AMCloudPluginsResourceURL(name, extension, subdirectory);
-                if (cloud) return cloud;
+                if (AMCloudPluginsShouldUseCloudResource(cloud, bundled)) return cloud;
             }
         }
-        return AMCloudOriginalBundleURL
-            ? AMCloudOriginalBundleURL(self, selector, name, extension, subdirectory) : nil;
-    } @finally {
-        AMCloudPluginsLeaveBundleHook();
-    }
-}
-
-static NSURL *AMCloudBundleURLSimpleHook(id self, SEL selector, NSString *name,
-                                         NSString *extension) {
-    if (!AMCloudPluginsEnterBundleHook()) {
-        return AMCloudOriginalBundleURLSimple
-            ? AMCloudOriginalBundleURLSimple(self, selector, name, extension) : nil;
-    }
-    @try {
-        if (self == NSBundle.mainBundle) {
-            NSURL *root = AMCloudPluginsBuiltinEffectsRootURL(name, extension);
-            if (root) return root;
-        }
-        return AMCloudOriginalBundleURLSimple
-            ? AMCloudOriginalBundleURLSimple(self, selector, name, extension) : nil;
+        return bundled;
     } @finally {
         AMCloudPluginsLeaveBundleHook();
     }
@@ -1750,35 +1770,16 @@ static NSString *AMCloudBundlePathHook(id self, SEL selector, NSString *name,
             ? AMCloudOriginalBundlePath(self, selector, name, extension, subdirectory) : nil;
     }
     @try {
+        NSString *bundled = AMCloudOriginalBundlePath
+            ? AMCloudOriginalBundlePath(self, selector, name, extension, subdirectory) : nil;
         if (self == NSBundle.mainBundle) {
-            NSURL *root = !subdirectory.length
-                ? AMCloudPluginsBuiltinEffectsRootURL(name, extension) : nil;
-            if (root.path.length) return root.path;
             if (AMCloudPluginsRelativeDirectory(subdirectory)) {
                 NSURL *cloud = AMCloudPluginsResourceURL(name, extension, subdirectory);
-                if (cloud.path.length) return cloud.path;
+                NSURL *bundledURL = bundled.length ? [NSURL fileURLWithPath:bundled] : nil;
+                if (AMCloudPluginsShouldUseCloudResource(cloud, bundledURL)) return cloud.path;
             }
         }
-        return AMCloudOriginalBundlePath
-            ? AMCloudOriginalBundlePath(self, selector, name, extension, subdirectory) : nil;
-    } @finally {
-        AMCloudPluginsLeaveBundleHook();
-    }
-}
-
-static NSString *AMCloudBundlePathSimpleHook(id self, SEL selector, NSString *name,
-                                             NSString *extension) {
-    if (!AMCloudPluginsEnterBundleHook()) {
-        return AMCloudOriginalBundlePathSimple
-            ? AMCloudOriginalBundlePathSimple(self, selector, name, extension) : nil;
-    }
-    @try {
-        if (self == NSBundle.mainBundle) {
-            NSString *root = AMCloudPluginsBuiltinEffectsRootURL(name, extension).path;
-            if (root.length) return root;
-        }
-        return AMCloudOriginalBundlePathSimple
-            ? AMCloudOriginalBundlePathSimple(self, selector, name, extension) : nil;
+        return bundled;
     } @finally {
         AMCloudPluginsLeaveBundleHook();
     }
@@ -1805,20 +1806,12 @@ void AMCloudPluginsInstallBundleHooks(void) {
         AMCloudOriginalBundleURL = (AMCloudBundleURLIMP)AMCloudPluginsInstallHook(
             bundleClass, @selector(URLForResource:withExtension:subdirectory:),
             (IMP)AMCloudBundleURLHook);
-        AMCloudOriginalBundleURLSimple =
-            (AMCloudBundleURLSimpleIMP)AMCloudPluginsInstallHook(
-                bundleClass, @selector(URLForResource:withExtension:),
-                (IMP)AMCloudBundleURLSimpleHook);
         AMCloudOriginalBundlePaths = (AMCloudBundlePathsIMP)AMCloudPluginsInstallHook(
             bundleClass, @selector(pathsForResourcesOfType:inDirectory:),
             (IMP)AMCloudBundlePathsHook);
         AMCloudOriginalBundlePath = (AMCloudBundlePathIMP)AMCloudPluginsInstallHook(
             bundleClass, @selector(pathForResource:ofType:inDirectory:),
             (IMP)AMCloudBundlePathHook);
-        AMCloudOriginalBundlePathSimple =
-            (AMCloudBundlePathSimpleIMP)AMCloudPluginsInstallHook(
-                bundleClass, @selector(pathForResource:ofType:),
-                (IMP)AMCloudBundlePathSimpleHook);
     });
 }
 

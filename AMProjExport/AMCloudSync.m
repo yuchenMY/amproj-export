@@ -2158,7 +2158,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 			catalogMatches = NO;
         }
     }
-    BOOL sameRevision = [state[@"protocol_version"] integerValue] == 2 &&
+    BOOL sameRevision = [state[@"protocol_version"] integerValue] ==
+        AMCloudPluginsCatalogProtocolVersion &&
         [state[@"catalog_revision"] longLongValue] == revision.longLongValue;
 	if (pending.count == 0 && sameRevision && catalogMatches) {
         AMCloudDiagnostic(@"cloud.plugins.catalog_up_to_date", @{

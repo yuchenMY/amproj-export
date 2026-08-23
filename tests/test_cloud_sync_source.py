@@ -399,7 +399,9 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('manifest[@"catalogRevision"]', CLOUD)
         self.assertIn('manifest[@"plugins"]', CLOUD)
         self.assertIn('@"/ios/plugins/items/%@/versions/%@/download"', CLOUD)
-        self.assertIn('@"protocol_version": @2', PLUGINS)
+        self.assertIn('AMCloudPluginsCatalogProtocolVersion = 4', PLUGINS)
+        self.assertIn('@"protocol_version": @(AMCloudPluginsCatalogProtocolVersion)', PLUGINS)
+        self.assertIn('AMCloudPluginsCatalogProtocolVersion', PLUGIN_HEADER)
         self.assertIn('@"catalog_revision"', PLUGINS)
         self.assertIn('@"plugins": statePlugins', PLUGINS)
         self.assertIn("AMCloudPluginsCopyCatalogDirectory", PLUGINS)
@@ -440,6 +442,41 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("replaceExisting", PLUGINS)
         self.assertIn("Plugin dependency conflict", PLUGINS)
         self.assertIn("installed.count == plugins.count", CLOUD)
+
+    def test_custom_plugins_cannot_claim_a_bundled_official_effect_path(self):
+        self.assertIn(
+            "AMCloudPluginsCustomPluginTargetsBundledEffect", PLUGINS
+        )
+        helper = PLUGINS.split(
+            "static BOOL AMCloudPluginsCustomPluginTargetsBundledEffect", 1
+        )[1].split("static BOOL AMCloudPluginsValidateBuiltinOverride", 1)[0]
+        self.assertIn('isEqualToString:@"custom_plugin"', helper)
+        self.assertIn("AMCloudPluginsBuiltinTargetURL", helper)
+        self.assertIn("AMCloudPluginsBundledEffectsURL", helper)
+        self.assertIn("AMCloudPluginsEffectIDForXMLURL", helper)
+        self.assertIn("AMCloudPluginsIsOfficialEffectID(bundledID)", helper)
+
+        catalog_entry = PLUGINS.split(
+            "static BOOL AMCloudPluginsCatalogEntryIsSafe", 1
+        )[1].split("static NSURL *AMCloudPluginsBuiltinTargetURL", 1)[0]
+        self.assertIn(
+            "AMCloudPluginsCustomPluginTargetsBundledEffect(plugin)) return NO;",
+            catalog_entry,
+        )
+
+        identity = PLUGINS.split(
+            "static BOOL AMCloudPluginsValidateCatalogIdentity", 1
+        )[1].split("static void AMCloudPluginsSetActiveState", 1)[0]
+        self.assertIn("AMCloudPluginsCustomPluginTargetsBundledEffect", identity)
+        self.assertIn(
+            "Custom plugins may not replace a bundled official effect", identity
+        )
+
+        installer = PLUGINS.split(
+            "BOOL AMCloudPluginsInstallItemArchiveWithMetadata", 1
+        )[1].split("static NSURL *AMCloudPluginsBundledEffectsURL", 1)[0]
+        self.assertIn("AMCloudPluginsCustomPluginTargetsBundledEffect", installer)
+        self.assertIn("return NO;", installer)
 
     def test_catalog_identity_errors_include_item_context(self):
         self.assertIn("AMCloudPluginsValidationErrorForItem", PLUGINS)
@@ -516,6 +553,8 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("Legacy release state predates the merged-catalog fingerprint", PLUGINS)
         self.assertIn("AMCloudPluginsCatalogContainsBundledEffects", legacy_restore)
         self.assertIn("AMCloudPluginsInvalidateStaleCatalog(manager)", legacy_restore)
+        self.assertIn("AMCloudPluginsCatalogProtocolVersion", restore)
+        self.assertIn("AMCloudPluginsInvalidateStaleCatalog(NSFileManager.defaultManager)", PLUGINS)
 
     def test_catalog_passive_dependencies_do_not_claim_or_overwrite_paths(self):
         validator = PLUGINS.split(
@@ -760,24 +799,29 @@ class CloudSyncSourceTests(unittest.TestCase):
         up_to_date_at = manifest.index('AMCloudDiagnostic(@"cloud.plugins.up_to_date"')
         self.assertLess(activate_at, up_to_date_at)
 
-    def test_bundle_hook_overrides_builtin_xml_and_appends_new_effects(self):
+    def test_bundle_hook_overrides_only_changed_resources_and_appends_new_effects(self):
         for selector in (
             "URLsForResourcesWithExtension:subdirectory:",
             "URLForResource:withExtension:subdirectory:",
-            "URLForResource:withExtension:",
             "pathsForResourcesOfType:inDirectory:",
             "pathForResource:ofType:inDirectory:",
-            "pathForResource:ofType:",
         ):
             self.assertIn(selector, PLUGINS)
         self.assertIn('caseInsensitiveCompare:@"BuiltinEffects"', PLUGINS)
         self.assertIn("remaining[key] = URL", PLUGINS)
-        self.assertIn("[merged addObject:replacement ?: URL]", PLUGINS)
+        self.assertIn("AMCloudPluginsShouldUseCloudResource", PLUGINS)
+        self.assertIn("? replacement : URL", PLUGINS)
         self.assertIn("[merged addObjectsFromArray:newURLs]", PLUGINS)
         self.assertIn("contentsOfDirectoryAtURL", PLUGINS)
         self.assertNotIn("enumeratorAtURL", PLUGINS)
         self.assertIn("AMCloudPluginsRelativeDirectory", PLUGINS)
-        self.assertIn("AMCloudPluginsBuiltinEffectsRootURL", PLUGINS)
+        self.assertNotIn("AMCloudPluginsBuiltinEffectsRootURL", PLUGINS)
+        self.assertIn("NSURL *bundled = AMCloudOriginalBundleURL", PLUGINS)
+        self.assertIn("NSString *bundled = AMCloudOriginalBundlePath", PLUGINS)
+        self.assertIn("AMCloudPluginsShouldUseCloudResource(cloud, bundled)", PLUGINS)
+        self.assertIn("AMCloudPluginsShouldUseCloudResource(cloud, bundledURL)", PLUGINS)
+        self.assertNotIn("@selector(URLForResource:withExtension:),", PLUGINS)
+        self.assertNotIn("@selector(pathForResource:ofType:),", PLUGINS)
         self.assertIn("AMCloudBundleHookGuardKey", PLUGINS)
         self.assertIn("AMCloudSyncInstallPluginHooksEarly();", EXPORT)
 

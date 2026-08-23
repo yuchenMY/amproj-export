@@ -4,6 +4,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 typedef BOOL (^AMCloudPluginsCommitGuard)(dispatch_block_t commit);
 
+/**
+ The persisted catalog format. Bump this when the on-disk overlay semantics
+ change so a covered IPA install cannot revive an incompatible catalog.
+ */
+FOUNDATION_EXPORT NSInteger const AMCloudPluginsCatalogProtocolVersion;
+
 /** 更新当前认证代次。代次不一致时，已安装资源会立即停止对 Bundle 可见。 */
 FOUNDATION_EXPORT void AMCloudPluginsSetAuthorizationGeneration(uint64_t generation);
 
