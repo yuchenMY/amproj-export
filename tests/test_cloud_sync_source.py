@@ -399,7 +399,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('manifest[@"catalogRevision"]', CLOUD)
         self.assertIn('manifest[@"plugins"]', CLOUD)
         self.assertIn('@"/ios/plugins/items/%@/versions/%@/download"', CLOUD)
-        self.assertIn('AMCloudPluginsCatalogProtocolVersion = 4', PLUGINS)
+        self.assertIn('AMCloudPluginsCatalogProtocolVersion = 5', PLUGINS)
         self.assertIn('@"protocol_version": @(AMCloudPluginsCatalogProtocolVersion)', PLUGINS)
         self.assertIn('AMCloudPluginsCatalogProtocolVersion', PLUGIN_HEADER)
         self.assertIn('@"catalog_revision"', PLUGINS)
@@ -443,6 +443,38 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("Plugin dependency conflict", PLUGINS)
         self.assertIn("installed.count == plugins.count", CLOUD)
 
+    def test_catalog_deduplicates_root_effect_ids_and_drops_legacy_releases(self):
+        self.assertIn("AMCloudPluginsDedupeCatalogRootEffects", PLUGINS)
+        self.assertIn("Official ids must stay at their IPA filename", PLUGINS)
+        self.assertIn("only exact IDs and paths are conflicts", PLUGINS)
+        self.assertNotIn("AMCloudPluginsOfficialNamespaceAliasID", PLUGINS)
+        self.assertNotIn("namespace-renamed copy of an IPA built-in", PLUGINS)
+        self.assertIn("multiple primary XML files for effect id", PLUGINS)
+        activation = PLUGINS.split(
+            "NSMutableArray *statePlugins", 1
+        )[1].split("NSObject *commitLock", 1)[0]
+        self.assertIn("AMCloudPluginsDedupeCatalogRootEffects", activation)
+        self.assertIn('URLByAppendingPathComponent:@"releases"', PLUGINS)
+        self.assertIn("AMCloudPluginsCatalogProtocolVersion = 5", PLUGINS)
+        legacy_restore = PLUGINS.split(
+            "BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization", 1
+        )[1]
+        self.assertIn("Legacy full-release state predates the per-effect catalog", legacy_restore)
+        self.assertIn('URLByAppendingPathComponent:@"releases"', legacy_restore)
+        legacy_install = PLUGINS.split(
+            "BOOL AMCloudPluginsInstallArchive", 1
+        )[1].split("BOOL AMCloudPluginsRemoveAllIf", 1)[0]
+        self.assertIn("AMCloudPluginsDedupeCatalogRootEffects", legacy_install)
+
+    def test_catalog_failure_clears_legacy_release_state(self):
+        self.assertIn("cloud.plugins.legacy_release_cleared", CLOUD)
+        failure = CLOUD.split("if (!activated) {", 1)[1].split(
+            "NSDictionary *newState", 1
+        )[0]
+        self.assertIn('failedState[@"release_id"]', failure)
+        self.assertIn("AMCloudPluginsRemoveAllIf", failure)
+        self.assertIn("catalog_activation_failed", failure)
+
     def test_custom_plugins_cannot_claim_a_bundled_official_effect_path(self):
         self.assertIn(
             "AMCloudPluginsCustomPluginTargetsBundledEffect", PLUGINS
@@ -468,6 +500,7 @@ class CloudSyncSourceTests(unittest.TestCase):
             "static BOOL AMCloudPluginsValidateCatalogIdentity", 1
         )[1].split("static void AMCloudPluginsSetActiveState", 1)[0]
         self.assertIn("AMCloudPluginsCustomPluginTargetsBundledEffect", identity)
+        self.assertIn("cannot reuse an IPA built-in effect id", identity)
         self.assertIn(
             "Custom plugins may not replace a bundled official effect", identity
         )
@@ -824,6 +857,29 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertNotIn("@selector(pathForResource:ofType:),", PLUGINS)
         self.assertIn("AMCloudBundleHookGuardKey", PLUGINS)
         self.assertIn("AMCloudSyncInstallPluginHooksEarly();", EXPORT)
+
+    def test_bundle_resource_hot_path_uses_bounded_caches_and_invalidates_them(self):
+        self.assertIn("AMCloudPluginsFilesCache", PLUGINS)
+        self.assertIn("AMCloudPluginsResourceDecisionCache", PLUGINS)
+        self.assertIn("cache.countLimit = 256", PLUGINS)
+        self.assertIn("cache.countLimit = 1024", PLUGINS)
+        self.assertIn("AMCloudPluginsClearRuntimeCaches();", PLUGINS)
+        self.assertIn("[AMCloudPluginsFilesCache() removeAllObjects]", PLUGINS)
+        self.assertIn("[AMCloudPluginsResourceDecisionCache() removeAllObjects]", PLUGINS)
+        active_state = PLUGINS.split("static void AMCloudPluginsSetActiveState", 1)[1]
+        active_state = active_state.split("void AMCloudPluginsSetAuthorizationGeneration", 1)[0]
+        self.assertIn("AMCloudPluginsClearRuntimeCaches();", active_state)
+        generation = PLUGINS.split("void AMCloudPluginsSetAuthorizationGeneration", 1)[1]
+        generation = generation.split("static uint64_t AMCloudPluginsAuthorizationGeneration", 1)[0]
+        self.assertIn("AMCloudPluginsClearRuntimeCaches();", generation)
+        files = PLUGINS.split("static NSArray<NSURL *> *AMCloudPluginsFiles", 1)[1]
+        files = files.split("static BOOL AMCloudPluginsShouldUseCloudResource", 1)[0]
+        self.assertIn("objectForKey:cacheKey", files)
+        self.assertIn("setObject:result forKey:cacheKey", files)
+        decision = PLUGINS.split("static BOOL AMCloudPluginsShouldUseCloudResource", 1)[1]
+        decision = decision.split("static NSArray<NSURL *> *AMCloudPluginsMergeResourceURLs", 1)[0]
+        self.assertIn("objectForKey:cacheKey", decision)
+        self.assertIn("setObject:@(useCloud) forKey:cacheKey", decision)
 
     def test_plugin_zip_uses_existing_strict_extractor(self):
         self.assertIn("AMProjExtractPluginArchive", IMPORT_ARCHIVE)

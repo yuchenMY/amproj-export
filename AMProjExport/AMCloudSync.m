@@ -2248,6 +2248,19 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                         });
                         return;
                     }
+                    if (!activated) {
+                        NSDictionary *failedState = AMCloudPluginsCurrentState();
+                        if ([failedState[@"release_id"] isKindOfClass:NSString.class]) {
+                            BOOL clearedLegacyRelease = AMCloudPluginsRemoveAllIf(^BOOL{
+                                return AMCloudAuthMatches(token, authorizationGeneration);
+                            });
+                            if (clearedLegacyRelease) {
+                                AMCloudDiagnostic(@"cloud.plugins.legacy_release_cleared", @{
+                                    @"reason": @"catalog_activation_failed"
+                                });
+                            }
+                        }
+                    }
                     NSDictionary *newState = activated ? AMCloudPluginsCurrentState() : nil;
                     AMCloudDiagnostic(activated ? @"cloud.plugins.catalog_activated" :
                         @"cloud.plugins.catalog_activation_failed", @{

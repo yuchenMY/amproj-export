@@ -99,7 +99,10 @@ static NSString *const AMCloudPluginsDirectoryName = @"AMCloudPlugins";
 static NSString *const AMCloudPluginsStateName = @"state.json";
 static NSString *const AMCloudPluginsRevocationName = @"AMCloudPlugins.revoked";
 static NSString *const AMCloudBundleHookGuardKey = @"AMCloudBundleHookGuard";
-NSInteger const AMCloudPluginsCatalogProtocolVersion = 4;
+// Bump this whenever the merged catalog invariants change. Protocol 4
+// catalogs may contain duplicate XML effect identities and must be rebuilt
+// from the IPA baseline before they are exposed again.
+NSInteger const AMCloudPluginsCatalogProtocolVersion = 5;
 
 typedef NSArray<NSURL *> *(*AMCloudBundleURLsIMP)(id, SEL, NSString *, NSString *);
 typedef NSURL *(*AMCloudBundleURLIMP)(id, SEL, NSString *, NSString *, NSString *);
@@ -115,6 +118,51 @@ static NSDictionary<NSString *, id> *AMCloudActiveState = nil;
 static uint64_t AMCloudAuthorizationGeneration = 0;
 static uint64_t AMCloudActiveAuthorizationGeneration = 0;
 static void *AMCloudPluginsMutationQueueKey = &AMCloudPluginsMutationQueueKey;
+
+// Bundle resource lookups are on the native effect-discovery path and can be
+// repeated dozens of times while the browser is scrolling.  The catalog is
+// immutable between activations, so cache the directory listing and the
+// cloud-vs-IPA comparison until the active state changes.  This avoids doing
+// synchronous file reads on the main thread for every lookup without changing
+// which resource wins.
+static NSCache<NSString *, NSArray<NSURL *> *> *AMCloudPluginsFilesCache(void) {
+    static NSCache<NSString *, NSArray<NSURL *> *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSCache new];
+        cache.countLimit = 256;
+    });
+    return cache;
+}
+
+static NSCache<NSString *, NSNumber *> *AMCloudPluginsResourceDecisionCache(void) {
+    static NSCache<NSString *, NSNumber *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSCache new];
+        cache.countLimit = 1024;
+    });
+    return cache;
+}
+
+static void AMCloudPluginsClearRuntimeCaches(void) {
+    [AMCloudPluginsFilesCache() removeAllObjects];
+    [AMCloudPluginsResourceDecisionCache() removeAllObjects];
+}
+
+static NSString *AMCloudPluginsFilesCacheKey(NSURL *directoryURL,
+                                              NSString *extension) {
+    NSString *path = directoryURL.URLByStandardizingPath.path ?: @"";
+    NSString *suffix = extension.lowercaseString ?: @"";
+    return [NSString stringWithFormat:@"%@|%@", path, suffix];
+}
+
+static NSString *AMCloudPluginsResourceDecisionCacheKey(NSURL *cloudURL,
+                                                         NSURL *bundledURL) {
+    return [NSString stringWithFormat:@"%@\n%@",
+            cloudURL.URLByStandardizingPath.path ?: @"",
+            bundledURL.URLByStandardizingPath.path ?: @""];
+}
 
 static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *extension);
 static NSArray<NSURL *> *AMCloudPluginsRecursiveFiles(NSURL *directoryURL);
@@ -789,15 +837,105 @@ static BOOL AMCloudPluginsValidateLegacyCustomOverride(
     return YES;
 }
 
+// AM enumerates BuiltinEffects by filename, while effect identity lives in
+// the XML root id. A catalog can therefore contain more than one filename
+// for the same effect. Keep the IPA copy as the authority for exact official
+// ids and collapse duplicate custom entries before activation. A custom ID
+// that merely shares an official suffix remains a valid independent plugin;
+// only exact IDs and paths are conflicts.
+static BOOL AMCloudPluginsDedupeCatalogRootEffects(
+    NSURL *catalogEffectsURL, NSURL *bundledEffectsURL,
+    NSArray<NSDictionary<NSString *, id> *> *plugins, NSError **error) {
+    if (!catalogEffectsURL || !bundledEffectsURL) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Cloud plugin catalog effect roots are unavailable");
+        return NO;
+    }
+    NSArray<NSURL *> *bundledFiles = AMCloudPluginsFiles(bundledEffectsURL, @"xml");
+    NSMutableSet<NSString *> *bundledNames = [NSMutableSet set];
+    NSMutableSet<NSString *> *bundledIDs = [NSMutableSet set];
+    for (NSURL *URL in bundledFiles) {
+        NSString *name = URL.lastPathComponent.precomposedStringWithCanonicalMapping.lowercaseString;
+        if (name.length) [bundledNames addObject:name];
+        NSString *effectID = AMCloudPluginsEffectIDForXMLURL(URL, nil);
+        if (effectID.length) [bundledIDs addObject:effectID.lowercaseString];
+    }
+
+    NSMutableSet<NSString *> *targetNames = [NSMutableSet set];
+    for (NSDictionary *plugin in plugins) {
+        NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
+        if (!targetPath.length) continue;
+        NSString *name = targetPath.lastPathComponent.precomposedStringWithCanonicalMapping.lowercaseString;
+        if (name.length) [targetNames addObject:name];
+    }
+
+    NSArray<NSURL *> *catalogFiles = AMCloudPluginsFiles(catalogEffectsURL, @"xml");
+    NSMutableDictionary<NSString *, NSMutableArray<NSURL *> *> *cloudByID = [NSMutableDictionary dictionary];
+    for (NSURL *URL in catalogFiles) {
+        NSString *name = URL.lastPathComponent.precomposedStringWithCanonicalMapping.lowercaseString;
+        if (!name.length || [bundledNames containsObject:name]) continue;
+        NSString *effectID = AMCloudPluginsEffectIDForXMLURL(URL, nil);
+        if (!effectID.length) continue;
+        NSString *key = effectID.lowercaseString;
+        NSMutableArray<NSURL *> *files = cloudByID[key];
+        if (!files) {
+            files = [NSMutableArray array];
+            cloudByID[key] = files;
+        }
+        [files addObject:URL];
+    }
+
+    NSFileManager *manager = NSFileManager.defaultManager;
+    for (NSString *effectID in cloudByID) {
+        NSArray<NSURL *> *files = cloudByID[effectID];
+        if ([bundledIDs containsObject:effectID]) {
+            // Official ids must stay at their IPA filename. A custom entry
+            // using the exact official id is not a second effect.
+            for (NSURL *URL in files) {
+                if (![manager removeItemAtURL:URL error:error]) return NO;
+            }
+            continue;
+        }
+        NSMutableArray<NSURL *> *primaryFiles = [NSMutableArray array];
+        for (NSURL *URL in files) {
+            NSString *name = URL.lastPathComponent.precomposedStringWithCanonicalMapping.lowercaseString;
+            if ([targetNames containsObject:name]) [primaryFiles addObject:URL];
+        }
+        if (primaryFiles.count > 1) {
+            if (error) *error = AMCloudPluginsValidationError(
+                [NSString stringWithFormat:@"Cloud catalog contains multiple primary XML files for effect id %@", effectID]);
+            return NO;
+        }
+        NSURL *keep = primaryFiles.firstObject ?: files.firstObject;
+        for (NSURL *URL in files) {
+            if ([URL isEqual:keep]) continue;
+            if (![manager removeItemAtURL:URL error:error]) return NO;
+        }
+    }
+    return YES;
+}
+
 static BOOL AMCloudPluginsValidateCatalogIdentity(
     NSArray<NSDictionary<NSString *, id> *> *plugins,
     NSURL *bundledEffectsURL, NSURL *itemsRootURL, NSError **error) {
     NSMutableSet<NSString *> *targetPaths = [NSMutableSet set];
     NSMutableSet<NSString *> *effectIDs = [NSMutableSet set];
+    NSMutableSet<NSString *> *bundledEffectIDs = [NSMutableSet set];
+    for (NSURL *URL in AMCloudPluginsFiles(bundledEffectsURL, @"xml")) {
+        NSString *bundledID = AMCloudPluginsEffectIDForXMLURL(URL, nil);
+        if (bundledID.length) [bundledEffectIDs addObject:bundledID.lowercaseString];
+    }
     for (NSDictionary *plugin in plugins) {
         NSString *kind = AMCloudPluginsItemKind(plugin);
         NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
         NSString *effectID = AMCloudPluginsItemEffectID(plugin);
+        if ([kind isEqualToString:@"custom_plugin"] && effectID.length &&
+            [bundledEffectIDs containsObject:effectID.lowercaseString]) {
+            if (error) *error = AMCloudPluginsValidationErrorForItem(
+                @"Custom plugin cannot reuse an IPA built-in effect id; publish it as builtin_override with the original official path",
+                plugin, effectID, nil);
+            return NO;
+        }
         if (AMCloudPluginsCustomPluginTargetsBundledEffect(plugin)) {
             NSURL *bundledURL = AMCloudPluginsBuiltinTargetURL(
                 bundledEffectsURL, targetPath);
@@ -840,6 +978,7 @@ static BOOL AMCloudPluginsValidateCatalogIdentity(
 static void AMCloudPluginsSetActiveState(NSDictionary<NSString *, id> *state,
                                          NSURL *effectsURL,
                                          uint64_t authorizationGeneration) {
+    AMCloudPluginsClearRuntimeCaches();
     @synchronized (NSBundle.class) {
         AMCloudActiveState = [state copy];
         AMCloudActiveEffectsURL = effectsURL;
@@ -849,6 +988,9 @@ static void AMCloudPluginsSetActiveState(NSDictionary<NSString *, id> *state,
 
 void AMCloudPluginsSetAuthorizationGeneration(uint64_t generation) {
     @synchronized (NSBundle.class) {
+        if (AMCloudAuthorizationGeneration != generation) {
+            AMCloudPluginsClearRuntimeCaches();
+        }
         AMCloudAuthorizationGeneration = generation;
     }
 }
@@ -1013,17 +1155,15 @@ BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization(
             AMCloudPluginsInvalidateStaleCatalog(NSFileManager.defaultManager);
             return;
         }
-        NSString *releaseID = [state[@"release_id"] isKindOfClass:NSString.class]
-            ? state[@"release_id"] : nil;
-        NSString *sha256 = [state[@"sha256"] isKindOfClass:NSString.class]
-            ? [state[@"sha256"] lowercaseString] : nil;
-        NSString *storedKey = [state[@"authorization_key"] isKindOfClass:NSString.class]
-            ? [state[@"authorization_key"] lowercaseString] : nil;
-        if (!AMCloudPluginReleaseIDIsSafe(releaseID) ||
-            !AMCloudPluginAuthorizationKeyIsSafe(sha256) ||
-            ![storedKey isEqualToString:authorizationKey.lowercaseString]) return;
-        restored = AMCloudPluginsActivatePersistedState(
-            releaseID, sha256, authorizationKey, authorizationGeneration);
+        // Legacy full-release state predates the per-effect catalog and may
+        // contain duplicate official XML aliases. Never expose it during
+        // startup; the next manifest sync will rebuild a clean catalog (or
+        // leave the IPA baseline active when cloud access is unavailable).
+        NSFileManager *manager = NSFileManager.defaultManager;
+        AMCloudPluginsSetActiveState(nil, nil, 0);
+        AMCloudPluginsInvalidateStaleCatalog(manager);
+        [manager removeItemAtURL:[AMCloudPluginsRootURL()
+            URLByAppendingPathComponent:@"releases" isDirectory:YES] error:nil];
     });
     return restored;
 }
@@ -1492,6 +1632,13 @@ BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugi
             if (AMCloudPluginsItemRestartRequired(plugin)) statePlugin[@"restart_required"] = @YES;
             [statePlugins addObject:statePlugin];
         }
+        if (!activationError && !AMCloudPluginsDedupeCatalogRootEffects(
+                effectsURL, bundledEffectsURL, plugins, &activationError)) {
+            // Keep activation atomic: a malformed historical item must not
+            // leave a partially deduplicated catalog on disk.
+            [manager removeItemAtURL:stagingURL error:nil];
+            return;
+        }
         if (activationError) {
             [manager removeItemAtURL:stagingURL error:nil];
             return;
@@ -1529,11 +1676,17 @@ BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugi
                 NSData *stateData = [NSJSONSerialization dataWithJSONObject:state options:0
                                                                        error:&activationError];
                 if (!stateData || ![stateData writeToURL:AMCloudPluginsStateURL()
-                                                 options:NSDataWritingAtomic error:&activationError]) {
+                                                  options:NSDataWritingAtomic error:&activationError]) {
                     [manager removeItemAtURL:catalogURL error:nil];
                     [manager moveItemAtURL:oldURL toURL:catalogURL error:nil];
                     return;
                 }
+                // The catalog is now authoritative. Remove legacy full
+                // release directories so a stale fallback cannot be reused
+                // after a covered install or a protocol downgrade.
+                NSURL *legacyReleasesURL = [rootURL URLByAppendingPathComponent:@"releases"
+                                                                    isDirectory:YES];
+                [manager removeItemAtURL:legacyReleasesURL error:nil];
                 [manager removeItemAtURL:oldURL error:nil];
                 [manager removeItemAtURL:AMCloudPluginsRevocationURL() error:nil];
                 AMCloudPluginsSetActiveState(state,
@@ -1590,6 +1743,9 @@ static NSURL *AMCloudPluginsActiveDirectoryURL(NSString *subdirectory) {
 
 static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *extension) {
     if (!directoryURL) return @[];
+    NSString *cacheKey = AMCloudPluginsFilesCacheKey(directoryURL, extension);
+    NSArray<NSURL *> *cached = [AMCloudPluginsFilesCache() objectForKey:cacheKey];
+    if (cached) return cached;
     NSArray<NSURL *> *contents = [NSFileManager.defaultManager
         contentsOfDirectoryAtURL:directoryURL
       includingPropertiesForKeys:@[NSURLIsRegularFileKey]
@@ -1609,14 +1765,25 @@ static NSArray<NSURL *> *AMCloudPluginsFiles(NSURL *directoryURL, NSString *exte
         return [left.lastPathComponent compare:right.lastPathComponent
                                         options:NSCaseInsensitiveSearch];
     }];
-    return URLs;
+    NSArray<NSURL *> *result = [URLs copy];
+    [AMCloudPluginsFilesCache() setObject:result forKey:cacheKey];
+    return result;
 }
 
 static BOOL AMCloudPluginsShouldUseCloudResource(NSURL *cloudURL, NSURL *bundledURL) {
+    if (!cloudURL) return NO;
+    NSString *cacheKey = AMCloudPluginsResourceDecisionCacheKey(cloudURL, bundledURL);
+    NSNumber *cached = [AMCloudPluginsResourceDecisionCache() objectForKey:cacheKey];
+    if (cached) return cached.boolValue;
     NSData *cloud = AMCloudPluginsDataAtURL(cloudURL);
-    if (!cloud.length) return NO;
+    if (!cloud.length) {
+        [AMCloudPluginsResourceDecisionCache() setObject:@NO forKey:cacheKey];
+        return NO;
+    }
     NSData *bundled = AMCloudPluginsDataAtURL(bundledURL);
-    return !bundled.length || ![cloud isEqualToData:bundled];
+    BOOL useCloud = !bundled.length || ![cloud isEqualToData:bundled];
+    [AMCloudPluginsResourceDecisionCache() setObject:@(useCloud) forKey:cacheKey];
+    return useCloud;
 }
 
 static NSArray<NSURL *> *AMCloudPluginsMergeResourceURLs(NSArray<NSURL *> *bundled,
@@ -1868,6 +2035,13 @@ BOOL AMCloudPluginsInstallArchive(NSURL *archiveURL, NSString *releaseID,
             URLByAppendingPathComponent:NSUUID.UUID.UUIDString.lowercaseString isDirectory:YES];
         NSDictionary *metrics = nil;
         if (!AMProjExtractPluginArchive(archiveURL, stagingURL, &metrics, &installError)) return;
+        NSURL *stagedEffectsURL = [stagingURL URLByAppendingPathComponent:@"BuiltinEffects"
+                                                                  isDirectory:YES];
+        if (!AMCloudPluginsDedupeCatalogRootEffects(
+                stagedEffectsURL, AMCloudPluginsBundledEffectsURL(), @[], &installError)) {
+            [manager removeItemAtURL:stagingURL error:nil];
+            return;
+        }
 
         NSObject *commitLock = [NSObject new];
         __block BOOL commitInvoked = NO;
