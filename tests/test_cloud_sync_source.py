@@ -399,7 +399,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('manifest[@"catalogRevision"]', CLOUD)
         self.assertIn('manifest[@"plugins"]', CLOUD)
         self.assertIn('@"/ios/plugins/items/%@/versions/%@/download"', CLOUD)
-        self.assertIn('AMCloudPluginsCatalogProtocolVersion = 5', PLUGINS)
+        self.assertIn('AMCloudPluginsCatalogProtocolVersion = 7', PLUGINS)
         self.assertIn('@"protocol_version": @(AMCloudPluginsCatalogProtocolVersion)', PLUGINS)
         self.assertIn('AMCloudPluginsCatalogProtocolVersion', PLUGIN_HEADER)
         self.assertIn('@"catalog_revision"', PLUGINS)
@@ -445,8 +445,11 @@ class CloudSyncSourceTests(unittest.TestCase):
 
     def test_catalog_deduplicates_root_effect_ids_and_drops_legacy_releases(self):
         self.assertIn("AMCloudPluginsDedupeCatalogRootEffects", PLUGINS)
+        self.assertIn("builtinOverridePaths", PLUGINS)
+        self.assertIn("isBuiltinOverride", PLUGINS)
+        self.assertIn("com.autfeng ID is a separate custom plugin", PLUGINS)
         self.assertIn("Official ids must stay at their IPA filename", PLUGINS)
-        self.assertIn("only exact IDs and paths are conflicts", PLUGINS)
+        self.assertIn("A repaired official", PLUGINS)
         self.assertNotIn("AMCloudPluginsOfficialNamespaceAliasID", PLUGINS)
         self.assertNotIn("namespace-renamed copy of an IPA built-in", PLUGINS)
         self.assertIn("multiple primary XML files for effect id", PLUGINS)
@@ -455,7 +458,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         )[1].split("NSObject *commitLock", 1)[0]
         self.assertIn("AMCloudPluginsDedupeCatalogRootEffects", activation)
         self.assertIn('URLByAppendingPathComponent:@"releases"', PLUGINS)
-        self.assertIn("AMCloudPluginsCatalogProtocolVersion = 5", PLUGINS)
+        self.assertIn("AMCloudPluginsCatalogProtocolVersion = 7", PLUGINS)
         legacy_restore = PLUGINS.split(
             "BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization", 1
         )[1]

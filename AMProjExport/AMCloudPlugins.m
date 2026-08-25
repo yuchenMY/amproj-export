@@ -99,10 +99,10 @@ static NSString *const AMCloudPluginsDirectoryName = @"AMCloudPlugins";
 static NSString *const AMCloudPluginsStateName = @"state.json";
 static NSString *const AMCloudPluginsRevocationName = @"AMCloudPlugins.revoked";
 static NSString *const AMCloudBundleHookGuardKey = @"AMCloudBundleHookGuard";
-// Bump this whenever the merged catalog invariants change. Protocol 4
-// catalogs may contain duplicate XML effect identities and must be rebuilt
-// from the IPA baseline before they are exposed again.
-NSInteger const AMCloudPluginsCatalogProtocolVersion = 5;
+// Bump this whenever the merged catalog invariants change. Protocol 6
+// catalogs incorrectly treated some com.autfeng plugins as official aliases;
+// rebuild from the IPA baseline so real custom plugins are exposed again.
+NSInteger const AMCloudPluginsCatalogProtocolVersion = 7;
 
 typedef NSArray<NSURL *> *(*AMCloudBundleURLsIMP)(id, SEL, NSString *, NSString *);
 typedef NSURL *(*AMCloudBundleURLIMP)(id, SEL, NSString *, NSString *, NSString *);
@@ -840,9 +840,11 @@ static BOOL AMCloudPluginsValidateLegacyCustomOverride(
 // AM enumerates BuiltinEffects by filename, while effect identity lives in
 // the XML root id. A catalog can therefore contain more than one filename
 // for the same effect. Keep the IPA copy as the authority for exact official
-// ids and collapse duplicate custom entries before activation. A custom ID
-// that merely shares an official suffix remains a valid independent plugin;
-// only exact IDs and paths are conflicts.
+// ids and collapse duplicate custom entries before activation. Official XML
+// files keep their original com.alightcreative ID/path. A repaired official
+// effect belongs in a builtin_override entry and is kept by that original
+// target path; a com.autfeng ID is a separate custom plugin and remains
+// publishable as long as it does not claim an official path or ID.
 static BOOL AMCloudPluginsDedupeCatalogRootEffects(
     NSURL *catalogEffectsURL, NSURL *bundledEffectsURL,
     NSArray<NSDictionary<NSString *, id> *> *plugins, NSError **error) {
@@ -862,20 +864,31 @@ static BOOL AMCloudPluginsDedupeCatalogRootEffects(
     }
 
     NSMutableSet<NSString *> *targetNames = [NSMutableSet set];
+    NSMutableSet<NSString *> *builtinOverridePaths = [NSMutableSet set];
     for (NSDictionary *plugin in plugins) {
         NSString *targetPath = AMCloudPluginsItemTargetPath(plugin);
         if (!targetPath.length) continue;
         NSString *name = targetPath.lastPathComponent.precomposedStringWithCanonicalMapping.lowercaseString;
         if (name.length) [targetNames addObject:name];
+        if ([AMCloudPluginsItemKind(plugin) isEqualToString:@"builtin_override"]) {
+            NSString *relative = [targetPath substringFromIndex:@"BuiltinEffects/".length];
+            NSString *relativeKey = relative.precomposedStringWithCanonicalMapping.lowercaseString;
+            if (relativeKey.length) [builtinOverridePaths addObject:relativeKey];
+        }
     }
 
     NSArray<NSURL *> *catalogFiles = AMCloudPluginsFiles(catalogEffectsURL, @"xml");
     NSMutableDictionary<NSString *, NSMutableArray<NSURL *> *> *cloudByID = [NSMutableDictionary dictionary];
+    NSFileManager *manager = NSFileManager.defaultManager;
     for (NSURL *URL in catalogFiles) {
         NSString *name = URL.lastPathComponent.precomposedStringWithCanonicalMapping.lowercaseString;
         if (!name.length || [bundledNames containsObject:name]) continue;
         NSString *effectID = AMCloudPluginsEffectIDForXMLURL(URL, nil);
         if (!effectID.length) continue;
+        NSString *relative = AMCloudPluginsRelativeFilePath(URL, catalogEffectsURL);
+        NSString *relativeKey = relative.precomposedStringWithCanonicalMapping.lowercaseString;
+        BOOL isBuiltinOverride = relativeKey.length &&
+            [builtinOverridePaths containsObject:relativeKey];
         NSString *key = effectID.lowercaseString;
         NSMutableArray<NSURL *> *files = cloudByID[key];
         if (!files) {
@@ -885,13 +898,15 @@ static BOOL AMCloudPluginsDedupeCatalogRootEffects(
         [files addObject:URL];
     }
 
-    NSFileManager *manager = NSFileManager.defaultManager;
     for (NSString *effectID in cloudByID) {
         NSArray<NSURL *> *files = cloudByID[effectID];
         if ([bundledIDs containsObject:effectID]) {
             // Official ids must stay at their IPA filename. A custom entry
             // using the exact official id is not a second effect.
             for (NSURL *URL in files) {
+                NSString *relative = AMCloudPluginsRelativeFilePath(URL, catalogEffectsURL);
+                NSString *relativeKey = relative.precomposedStringWithCanonicalMapping.lowercaseString;
+                if ([builtinOverridePaths containsObject:relativeKey]) continue;
                 if (![manager removeItemAtURL:URL error:error]) return NO;
             }
             continue;
