@@ -11,6 +11,7 @@ on:
   push:
     paths:
       - 'AMProjExport/**'
+      - 'AM3D/**'
       - 'AMProjShareExtension/**'
       - 'debug_backend/**'
       - 'inject_dylib.py'
@@ -32,6 +33,18 @@ jobs:
       - name: Build release, cloud, and debug dylibs
         working-directory: AMProjExport
         run: make
+
+      - name: Build AM3D dylib (independent 3D empty-object renderer)
+        working-directory: AM3D
+        run: make
+
+      - name: Test AM3D transform module
+        run: |
+          clang -fobjc-arc -framework Foundation \
+            -IAM3D AM3D/AM3DTransform3D.m \
+            tests/AM3DTransform3DSmoke.m \
+            -o "$RUNNER_TEMP/am3d-smoke"
+          "$RUNNER_TEMP/am3d-smoke"
 
       - name: Build Share Extension
         run: make -C AMProjShareExtension
@@ -66,6 +79,25 @@ jobs:
               }
               assert not missing, f"{path} missing symbols: {sorted(missing)}"
               print(f"verified {path}: arm64 MH_DYLIB, {info['ncmds']} load commands")
+
+          am3d_info = verify_dylib_architecture("AM3D/AM3D.dylib")
+          am3d_symbols = subprocess.check_output(
+              ["nm", "-gU", "AM3D/AM3D.dylib"], text=True
+          )
+          am3d_required = {"_AM3DStart", "_AM3DStop"}
+          am3d_missing = {
+              symbol
+              for symbol in am3d_required
+              if not any(
+                  line.rstrip().endswith(" " + symbol)
+                  for line in am3d_symbols.splitlines()
+              )
+          }
+          assert not am3d_missing, f"AM3D.dylib missing symbols: {sorted(am3d_missing)}"
+          print(
+              f"verified AM3D/AM3D.dylib: arm64 MH_DYLIB, "
+              f"{am3d_info['ncmds']} load commands"
+          )
           PY
 
       - name: Verify Share Extension bundle
@@ -175,6 +207,7 @@ jobs:
             AMProjExport/AMProjExport.dylib
             AMProjExport/AMProjExportCloud.dylib
             AMProjExport/AMProjExportDebug.dylib
+            AM3D/AM3D.dylib
             AMProjShareExtension/build/AMProjShareExtension.appex
             AMProjShareExtension/build/AMProjShareExtension.entitlements
 
@@ -196,17 +229,17 @@ jobs:
             AMProjExport.dylib AMProjExportCloud.dylib AMProjExportDebug.dylib \
             build-metadata.json)
           NOTES=$(cat <<'EOF'
-          AMProjExport v45（空对象 3D 父级控制器导出扩展）
+                    AMProjExport v45（空对象 3D 父级控制器导出扩展）
 
-          - AMProjTransform3D：崩溃安全 3D 数学（欧拉 XYZ / TRS 合成 / 逆矩阵 / NaN-Inf-除零防御）
-          - 场景 XML 导出 3D 数据：图层级 property meow3d.rotation / meow3d.scale / meow3d.enabled
-          - 与 3D_Body_Test_20260826/empty3d 的 Python 模型同一套数据约定
-          - 旧项目格式完全兼容：无 3D 数据时输出与旧版逐字节一致
-          - 3D 数学单元冒烟（tests/AMProjTransform3DSmoke.m）随构建运行
+                    - AMProjTransform3D：崩溃安全 3D 数学（欧拉 XYZ / TRS 合成 / 逆矩阵 / NaN-Inf-除零防御）
+                    - 场景 XML 导出 3D 数据：图层级 property meow3d.rotation / meow3d.scale / meow3d.enabled
+                    - 与 3D_Body_Test_20260826/empty3d 的 Python 模型同一套数据约定
+                    - 旧项目格式完全兼容：无 3D 数据时输出与旧版逐字节一致
+                    - 3D 数学单元冒烟（tests/AMProjTransform3DSmoke.m）随构建运行
 
-          注入命令（Windows，见仓库 README）：
-            python inject_dylib.py <输入.ipa> AMProjExportCloud.dylib <输出.ipa> \
-              --expected-main-uuid <主程序UUID>
+                    注入命令（Windows，见仓库 README）：
+                      python inject_dylib.py <输入.ipa> AMProjExportCloud.dylib <输出.ipa> \
+                        --expected-main-uuid <主程序UUID>
           EOF
           )
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -216,5 +249,63 @@ jobs:
             echo "[+] Creating release $TAG"
             gh release create "$TAG" "$STAGE/AMProjExport-v${VER}-dylibs.zip" \
               --title "AMProjExport v${VER} (3D empty-object export)" \
+              --notes "$NOTES"
+          fi
+
+      - name: Create AM3D Release (independent 3D renderer)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA12="${GITHUB_SHA:0:12}"
+          TAG="am3d-v1-${SHA12}"
+          STAGE="$RUNNER_TEMP/am3d-release-stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          cp AM3D/AM3D.dylib "$STAGE/"
+          python3 - "$STAGE/am3d-metadata.json" <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          dylib = Path("AM3D/AM3D.dylib")
+          metadata = {
+              "plugin_version": "am3d-v1",
+              "commit": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "sha256": {
+                  "AM3D/AM3D.dylib": hashlib.sha256(dylib.read_bytes()).hexdigest()
+              },
+          }
+          Path(sys.argv[1]).write_text(
+              json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          (cd "$STAGE" && zip -q "AM3D-v1.dylib.zip" AM3D.dylib am3d-metadata.json)
+          NOTES=$(cat <<'EOF'
+          AM3D v1 — 独立 3D 空对象渲染桥（真 3D 优先）
+
+          - 完全独立的注入 dylib，不依赖也不修改 AMProjExport / AmHomeUI
+          - CADisplayLink 每帧：探测项目 sceneInfo（ProjectHolder->rootScene->layers）
+            与画布，按 z-order 配对图层；空对象父链 world 矩阵（欧拉 XYZ + TRS）
+            写入子层 CALayer transform；画布 sublayerTransform 加透视 m34
+          - 降级：映射不到真实图层时叠加半透明占位演示（AM3DDemoFallback）
+          - 配置（UserDefaults）：AM3DEnabled / AM3DLog / AM3DPerspective / AM3DDemoFallback
+          - 崩溃安全：全程 @try/@catch，父链深度 64 保护，脏检查避免无谓写入
+
+          注入命令（追加到已有 IPA，不替换其他 dylib）：
+            python inject_dylib.py <输入.ipa> AM3D.dylib <输出.ipa> \
+              --expected-main-uuid <主程序UUID>
+          EOF
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "[*] Release $TAG already exists; uploading assets"
+            gh release upload "$TAG" "$STAGE/AM3D-v1.dylib.zip" --clobber
+          else
+            echo "[+] Creating release $TAG"
+            gh release create "$TAG" "$STAGE/AM3D-v1.dylib.zip" \
+              --title "AM3D v1 (3D empty-object renderer)" \
               --notes "$NOTES"
           fi
