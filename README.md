@@ -8,6 +8,27 @@
 - `AMProjShareExtension.appex`：实验性“导入到 AM”分享扩展。
 - `inject_dylib.py`：Windows IPA 注入、Info.plist 修补和产物验证工具。
 
+## 3D 空对象导出扩展（v45，实验）
+
+`AMProjTransform3D.h/.m` 提供崩溃安全的 3D 变换数学（与
+`3D_Body_Test_20260826/empty3d` 的 Python 模型一一对应），并在场景 XML
+序列化时把图层的 3D 数据写为图层级 property（与 empty3d 同一套数据约定）：
+
+```xml
+<property name="meow3d.rotation" type="vec3" value="15.000000,-30.000000,45.000000" />
+<property name="meow3d.scale"    type="vec3" value="2.000000,2.000000,1.500000" />
+<property name="meow3d.enabled"  type="bool"  value="true" />
+```
+
+- 取值：KVC/ivar 反射 transform 对象的 `rotation3d`/`scale3d`
+  （兼容 `rotation3dValue`/`scale3dValue` 命名），字符串/数组/数值均可；
+- 兼容性：默认值（0,0,0 / 1,1,1）不写出；原生对象没有 3D 字段时
+  输出与旧版完全一致；所有数值经 `amproj3d_*` 安全归一，绝不崩溃；
+- 构建：三个 dylib 目标均包含 `AMProjTransform3D.m`（见 Makefile）；
+- 验证：`tests/AMProjTransform3DSmoke.m` 在 GitHub Actions 上编译运行
+  （2D 退化、正交性、TRS 合成、奇异/除零/NaN 安全、序列化格式）；
+  `tests/test_3d_export_source.py` 做源码级回归断言。
+
 Cloud IPA 直接连接注入时配置的 HTTPS 后端，不显示 Debug 状态条、不轮询远程控制命令、不上传项目文件，也不安装全局 UI、网络或解析诊断 hook。完整 Debug IPA 仍支持本地发现、模式控制和按需产物捕获。两者的后端都不参与文件解析、项目保存或导入控制；连接失败只会缺少日志，不会阻塞导入、导出。
 
 ## `.amproj` 格式

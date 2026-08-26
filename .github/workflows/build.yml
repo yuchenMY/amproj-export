@@ -1,7 +1,7 @@
 name: Build AMProjExport dylibs
 
 env:
-  AMPROJ_RELEASE_VERSION: '38'
+  AMPROJ_RELEASE_VERSION: '45'
 
 on:
   push:
@@ -80,6 +80,14 @@ jobs:
               f"{info['app_group_id']}, arm64 MH_EXECUTE/share-services"
           )
           PY
+
+      - name: Test 3D transform module (empty-object 3D parent controller math)
+        run: |
+          clang -fobjc-arc -framework Foundation \
+            -IAMProjExport AMProjExport/AMProjTransform3D.m \
+            tests/AMProjTransform3DSmoke.m \
+            -o "$RUNNER_TEMP/amproj-3d-smoke"
+          "$RUNNER_TEMP/amproj-3d-smoke"
 
       - name: Test streaming project archive writer
         run: |

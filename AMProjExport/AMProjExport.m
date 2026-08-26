@@ -39,6 +39,7 @@
 #import "AMProjArchiveWriter.h"
 #import "AMProjImportArchive.h"
 #import "AMProjNativeImportBridge.h"
+#import "AMProjTransform3D.h"
 
 static NSString *const kAMProjPluginVersion = @"38";
 
@@ -68,6 +69,7 @@ static NSData* amproj_buildXML(id sceneInfo);
 static NSData* amproj_buildXMLInternal(id sceneInfo, NSMutableSet<NSValue*> *visited,
                                        NSUInteger depth, BOOL includeDeclaration);
 static NSString* amproj_serializeLayer(id layer, NSMutableSet<NSValue*> *visited, NSUInteger depth);
+static void amproj_serializeLayer3DProperties(id layer, id xf, NSMutableString *l);
 static NSString* amproj_tagForType(NSString *type);
 static UIWindow* amproj_keyWindow(void);
 static NSURL* amproj_directExportRoot(void);
@@ -829,6 +831,11 @@ static NSString* amproj_serializeLayer(id layer, NSMutableSet<NSValue*> *visited
             }
         }
 
+        // 3D 扩展属性（图层级 property：meow3d.rotation / meow3d.scale /
+        // meow3d.enabled）。仅当原生对象确实带有 3D 字段时写出，
+        // 无字段时输出与旧版完全一致（向后兼容）。
+        amproj_serializeLayer3DProperties(layer, xf, l);
+
         [l appendFormat:@"</%@>\n", tag];
         [visited removeObject:identity];
         return l;
@@ -849,6 +856,51 @@ static NSString* amproj_tagForType(NSString *type) {
         @"bookmark":@"bookmark"
     };
     return map[type] ?: @"shape";
+}
+
+/**
+ * 序列化图层的 3D 扩展属性（空对象 3D 父级控制器的数据落盘）。
+ *
+ * 数据模型与 empty3d 完全一致（不另造互不兼容的结构）：
+ *   - <property name="meow3d.rotation" type="vec3" value="rx,ry,rz"/>
+ *   - <property name="meow3d.scale"    type="vec3" value="sx,sy,sz"/>
+ *   - <property name="meow3d.enabled"  type="bool"  value="true"/>
+ *
+ * 取值：通过 KVC/ivar 反射读取 transform 对象的 rotation3d/scale3d
+ * （兼容 rotation3dValue/scale3dValue 等命名），值可以是 "x,y,z" 字符串、
+ * NSArray<NSNumber> 或 NSNumber。默认值（0,0,0 / 1,1,1）不写出；
+ * 原生对象没有 3D 字段时整个函数无输出——旧项目导出结果逐字节不变。
+ * 所有取值/解析都经 amproj3d_* 安全归一，绝不崩溃。
+ */
+static void amproj_serializeLayer3DProperties(id layer, id xf, NSMutableString *l) {
+    if (!l) return;
+    @try {
+        if (xf) {
+            id rot3 = am_get(xf, @"rotation3d") ?: am_get(xf, @"rotation3dValue");
+            AMProj3DVec3 r = {0.0, 0.0, 0.0};
+            if (rot3 && amproj3d_parseVec3((__bridge void *)rot3, &r) &&
+                (fabs(r.x) > 1e-9 || fabs(r.y) > 1e-9 || fabs(r.z) > 1e-9)) {
+                char buf[64];
+                amproj3d_formatVec3(r, buf);
+                [l appendFormat:@"<property name=\"meow3d.rotation\" type=\"vec3\" value=\"%s\" />\n", buf];
+            }
+            id scl3 = am_get(xf, @"scale3d") ?: am_get(xf, @"scale3dValue");
+            AMProj3DVec3 s = {1.0, 1.0, 1.0};
+            if (scl3 && amproj3d_parseVec3((__bridge void *)scl3, &s) &&
+                (fabs(s.x - 1.0) > 1e-9 || fabs(s.y - 1.0) > 1e-9 || fabs(s.z - 1.0) > 1e-9)) {
+                char buf[64];
+                amproj3d_formatVec3(s, buf);
+                [l appendFormat:@"<property name=\"meow3d.scale\" type=\"vec3\" value=\"%s\" />\n", buf];
+            }
+        }
+        // 普通图层显式开启 3D 控制器模式（空对象天然开启，无需该属性）
+        id mode = am_get(layer, @"meow3dEnabled");
+        if ([mode respondsToSelector:@selector(boolValue)] && [mode boolValue]) {
+            [l appendString:@"<property name=\"meow3d.enabled\" type=\"bool\" value=\"true\" />\n"];
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[AMProjExport] 3D property serialize error: %@", e);
+    }
 }
 
 static NSData* amproj_placeholderXML(void) {
