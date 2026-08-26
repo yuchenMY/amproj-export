@@ -3,6 +3,10 @@ name: Build AMProjExport dylibs
 env:
   AMPROJ_RELEASE_VERSION: '45'
 
+# 自动发布 GitHub Release 需要写 contents 权限
+permissions:
+  contents: write
+
 on:
   push:
     paths:
@@ -173,3 +177,44 @@ jobs:
             AMProjExport/AMProjExportDebug.dylib
             AMProjShareExtension/build/AMProjShareExtension.appex
             AMProjShareExtension/build/AMProjShareExtension.entitlements
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER="${AMPROJ_RELEASE_VERSION}"
+          SHA12="${GITHUB_SHA:0:12}"
+          TAG="amproj-v${VER}-${SHA12}"
+          STAGE="$RUNNER_TEMP/release-stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          cp AMProjExport/AMProjExport.dylib "$STAGE/"
+          cp AMProjExport/AMProjExportCloud.dylib "$STAGE/"
+          cp AMProjExport/AMProjExportDebug.dylib "$STAGE/"
+          cp build-metadata.json "$STAGE/"
+          (cd "$STAGE" && zip -q "AMProjExport-v${VER}-dylibs.zip" \
+            AMProjExport.dylib AMProjExportCloud.dylib AMProjExportDebug.dylib \
+            build-metadata.json)
+          NOTES=$(cat <<'EOF'
+          AMProjExport v45（空对象 3D 父级控制器导出扩展）
+
+          - AMProjTransform3D：崩溃安全 3D 数学（欧拉 XYZ / TRS 合成 / 逆矩阵 / NaN-Inf-除零防御）
+          - 场景 XML 导出 3D 数据：图层级 property meow3d.rotation / meow3d.scale / meow3d.enabled
+          - 与 3D_Body_Test_20260826/empty3d 的 Python 模型同一套数据约定
+          - 旧项目格式完全兼容：无 3D 数据时输出与旧版逐字节一致
+          - 3D 数学单元冒烟（tests/AMProjTransform3DSmoke.m）随构建运行
+
+          注入命令（Windows，见仓库 README）：
+            python inject_dylib.py <输入.ipa> AMProjExportCloud.dylib <输出.ipa> \
+              --expected-main-uuid <主程序UUID>
+          EOF
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "[*] Release $TAG already exists; uploading assets"
+            gh release upload "$TAG" "$STAGE/AMProjExport-v${VER}-dylibs.zip" --clobber
+          else
+            echo "[+] Creating release $TAG"
+            gh release create "$TAG" "$STAGE/AMProjExport-v${VER}-dylibs.zip" \
+              --title "AMProjExport v${VER} (3D empty-object export)" \
+              --notes "$NOTES"
+          fi

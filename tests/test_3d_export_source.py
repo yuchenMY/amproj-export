@@ -100,6 +100,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("AMProjTransform3DSmoke.m", workflow)
         self.assertIn("amproj-3d-smoke", workflow)
 
+    def test_ci_auto_publishes_release(self):
+        """构建成功后自动创建 GitHub Release 并上传 dylib 包。"""
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("permissions:", workflow)
+        self.assertIn("contents: write", workflow)
+        self.assertIn("Create GitHub Release", workflow)
+        self.assertIn("gh release create", workflow)
+        self.assertIn("amproj-v${VER}-${SHA12}", workflow)  # tag 与现有风格一致
+        self.assertIn("AMProjExport-v${VER}-dylibs.zip", workflow)
+        self.assertIn("AMPROJ_RELEASE_VERSION: '45'", workflow)
+
     def test_smoke_covers_2d_equivalence_and_safety(self):
         smoke = SMOKE.read_text(encoding="utf-8")
         for required in (

@@ -27,7 +27,11 @@
 - 构建：三个 dylib 目标均包含 `AMProjTransform3D.m`（见 Makefile）；
 - 验证：`tests/AMProjTransform3DSmoke.m` 在 GitHub Actions 上编译运行
   （2D 退化、正交性、TRS 合成、奇异/除零/NaN 安全、序列化格式）；
-  `tests/test_3d_export_source.py` 做源码级回归断言。
+  `tests/test_3d_export_source.py` 做源码级回归断言；
+- 发布：构建成功后自动创建 GitHub Release（tag `amproj-v45-<sha12>`，
+  与既有 v44 tag 风格一致），上传 `AMProjExport-v45-dylibs.zip`
+  （三个 dylib + build-metadata.json），可直接从 Release 页面下载；
+  重复 push 同一 tag 时自动补传资源（幂等）。
 
 Cloud IPA 直接连接注入时配置的 HTTPS 后端，不显示 Debug 状态条、不轮询远程控制命令、不上传项目文件，也不安装全局 UI、网络或解析诊断 hook。完整 Debug IPA 仍支持本地发现、模式控制和按需产物捕获。两者的后端都不参与文件解析、项目保存或导入控制；连接失败只会缺少日志，不会阻塞导入、导出。
 
