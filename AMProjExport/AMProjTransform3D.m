@@ -59,8 +59,12 @@ int amproj3d_parseVec3(const void *value, AMProj3DVec3 *out) {
         for (NSUInteger i = 0; i < parts.count; i++) {
             NSString *p = [parts[i] stringByTrimmingCharactersInSet:
                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            vals[i] = p.doubleValue;
-            if (!amproj3d_isFinite(vals[i])) return 0;
+            // doubleValue 对非数字返回 0.0 而非报错，必须用 NSScanner 严格校验
+            NSScanner *scanner = [NSScanner scannerWithString:p];
+            double v = 0.0;
+            if (![scanner scanDouble:&v] || ![scanner isAtEnd]) return 0;
+            if (!amproj3d_isFinite(v)) return 0;
+            vals[i] = v;
         }
         out->x = vals[0];
         out->y = parts.count >= 2 ? vals[1] : vals[0];
