@@ -16,6 +16,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import cloud_payload_contract as cloud_contract
 import build_862_loadcontrol_package as handoff
 import build_862_stable_package as stable
 import home_ui_contract as homeui
@@ -37,10 +38,8 @@ EXPECTED_CYDIA_SUBSTRATE_SHA256 = ""
 EXPECTED_DISPLAY_NAME = "猫鹤AM"
 EXPECTED_BUNDLE_IDENTIFIER = "com.ayakameow.am"
 
-EXPECTED_CLOUD_RUNTIME_MARKER = b"[AMProjExport] ===== Loading v44-cloud ====="
-EXPECTED_CLOUD_STABILITY_MARKER = (
-    b"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback"
-)
+EXPECTED_CLOUD_RUNTIME_MARKER = cloud_contract.EXPECTED_CLOUD_RUNTIME_MARKER
+EXPECTED_CLOUD_STABILITY_MARKER = cloud_contract.EXPECTED_CLOUD_STABILITY_MARKER
 AMENHANCER_STATUS_LABEL = b"AM v59 OK"
 AMENHANCER_STATUS_LABEL_CONTEXT = (
     b"nil\0" + AMENHANCER_STATUS_LABEL + b"\0[AmEnhancer] marker added\n\0"
@@ -77,14 +76,7 @@ AMENHANCER_UI_HOOK_INSTALL_PATCHES = (
 )
 CLOUD_LOAD_LCSIGN = "@executable_path/Frameworks/AMProjExport.dylib"
 CLOUD_LOAD_COMPACT = "@rpath/AMProjExportCloud.dylib"
-EXPECTED_CLOUD_CONTRACT_FUNCTIONS = {
-    "_AMProjV44ReleaseNativeActivityFallbackEnabled": bytes.fromhex(
-        "00008052c0035fd6"
-    ),
-    "_AMProjV44IsDirectProjectPackageOption": bytes.fromhex(
-        "1f1c0071e0179f1ac0035fd6"
-    ),
-}
+EXPECTED_CLOUD_CONTRACT_FUNCTIONS = cloud_contract.EXPECTED_CLOUD_CONTRACT_FUNCTIONS
 
 LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
@@ -304,6 +296,13 @@ def verify_cloud_stability_contract(data):
                 f"Cloud contract function {symbol_name} has unexpected arm64 semantics"
             )
     return True
+
+
+# Keep the historical 862 module's public helpers source-compatible while
+# centralizing the version-neutral Cloud payload contract used by 865.
+verify_cloud_runtime_version = cloud_contract.verify_cloud_runtime_version
+_macho_symbol_code = cloud_contract._macho_symbol_code
+verify_cloud_stability_contract = cloud_contract.verify_cloud_stability_contract
 
 
 def _verify_source_info(data):

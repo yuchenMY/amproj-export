@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Build an LCSign handoff by migrating the verified Cloud feature set to 6.2.58.
 
-The 6.2.55 packagers intentionally pin the old app UUID, version, and native
-import offsets.  This entry point keeps the 6.2.58 application executable and
-resources as the authority, then applies only the portable Cloud load, plist,
-and editor-asset changes.
+The historical 6.2.55 packager intentionally pins a different app UUID, version,
+and native import offsets. This entry point keeps the 6.2.58 application
+executable and resources as the authority, then applies only the portable Cloud
+load, plist, and editor-asset changes. Cloud payload validation lives in the
+version-neutral ``cloud_payload_contract`` module so this lane has no import-time
+dependency on the 6.2.55 packager.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-import build_862_direct_package as cloud_contract
+import cloud_payload_contract as cloud_contract
 import home_ui_contract as homeui
 import inject_dylib
 

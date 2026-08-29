@@ -12,6 +12,7 @@ on:
       - 'AMProjExport/**'
       - 'debug_backend/**'
       - 'inject_dylib.py'
+      - 'cloud_payload_contract.py'
       - 'build_862_direct_package.py'
       - 'build_862_official_effects_package.py'
       - 'build_865_migration_package.py'
@@ -44,7 +45,7 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          from build_862_direct_package import verify_cloud_stability_contract
+          from cloud_payload_contract import verify_cloud_stability_contract
           from inject_dylib import verify_dylib_architecture
 
           required_symbols = {
@@ -53,6 +54,10 @@ jobs:
               "_AMProjInstallNativePackageImportBridge",
               "_AMProjV44IsDirectProjectPackageOption",
               "_AMProjV44ReleaseNativeActivityFallbackEnabled",
+              "_AMProjV865ProjectFlowIsRuntimeSupported",
+              "_AMProjV865ProjectFlowInstall",
+              "_AMProjV865ProjectFlowQueueDownloadedProject",
+              "_AMProjV865ProjectFlowIsProjectPackageController",
           }
           for path in (
               "AMProjExport/AMProjExport.dylib",

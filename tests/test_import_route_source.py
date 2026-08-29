@@ -203,6 +203,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("AMProjExport.dylib", MAKEFILE)
         self.assertIn("AMProjExport/AMProjExport.dylib", WORKFLOW)
         self.assertNotIn("AMProjExportCloud.dylib", WORKFLOW)
+        self.assertIn("cloud_payload_contract.py", WORKFLOW)
+        self.assertIn("from cloud_payload_contract import verify_cloud_stability_contract", WORKFLOW)
         self.assertIn('config[@"BuildIdentifier"]', DEBUG_TRANSPORT_SOURCE)
         self.assertIn('kAMDebugPluginVariant = @"cloud"', DEBUG_TRANSPORT_SOURCE)
         self.assertIn('kAMDebugPluginVariant = @"debug"', DEBUG_TRANSPORT_SOURCE)

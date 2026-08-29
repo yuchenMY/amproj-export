@@ -136,6 +136,9 @@ static NSURL *AMProjV865CopyDocument(NSURL *source, NSString *filename,
 @property(nonatomic, strong) NSURL *stagedURL;
 @property(nonatomic, weak) UIViewController *presenter;
 @property(nonatomic, strong) NSURL *cleanupDirectory;
+@property(nonatomic) BOOL nativeRouteInFlight;
+@property(nonatomic) BOOL fallbackPresented;
+- (void)scheduleCleanup;
 @end
 
 @implementation AMProjV865DocumentBroker
@@ -178,6 +181,40 @@ static NSURL *AMProjV865CopyDocument(NSURL *source, NSString *filename,
 
 @end
 
+static UIViewController *AMProjV865PresenterForBroker(
+    AMProjV865DocumentBroker *broker) {
+    UIViewController *presenter = AMProjV865ForegroundPresenter();
+    if (!presenter || !presenter.viewIfLoaded.window) return nil;
+    broker.presenter = presenter;
+    return presenter;
+}
+
+static BOOL AMProjV865PresentOpenInFallback(
+    AMProjV865DocumentBroker *broker, UIViewController *presenter) {
+    if (!broker || broker.fallbackPresented || !presenter ||
+        !presenter.viewIfLoaded.window || !broker.stagedURL) return NO;
+    broker.fallbackPresented = YES;
+    if (!broker.controller) {
+        broker.controller = [UIDocumentInteractionController
+            interactionControllerWithURL:broker.stagedURL];
+        NSString *extension = broker.stagedURL.pathExtension.lowercaseString;
+        broker.controller.UTI = [extension isEqualToString:@"xml"]
+            ? @"public.xml" : @"com.alightcreative.motion.amproj";
+        broker.controller.delegate = broker;
+    }
+    BOOL presented = [broker.controller presentOpenInMenuFromRect:
+        CGRectMake(CGRectGetMidX(presenter.view.bounds),
+                   CGRectGetMidY(presenter.view.bounds), 1, 1)
+                                                   inView:presenter.view animated:YES];
+    if (!presented) {
+        broker.fallbackPresented = NO;
+        NSLog(@"[AMProjExport] 865 project handoff staged; no Open In target is available");
+    } else {
+        NSLog(@"[AMProjExport] 865 project handoff presented through native Open In fallback");
+    }
+    return presented;
+}
+
 static BOOL AMProjV865PresentStagedDocument(NSURL *stagedURL,
                                             UIViewController *presenter) {
     if (!stagedURL || !presenter || !presenter.viewIfLoaded.window ||
@@ -186,22 +223,36 @@ static BOOL AMProjV865PresentStagedDocument(NSURL *stagedURL,
     broker.stagedURL = stagedURL;
     broker.cleanupDirectory = stagedURL.URLByDeletingLastPathComponent;
     broker.presenter = presenter;
-    broker.controller = [UIDocumentInteractionController interactionControllerWithURL:stagedURL];
-    NSString *extension = stagedURL.pathExtension.lowercaseString;
-    broker.controller.UTI = [extension isEqualToString:@"xml"]
-        ? @"public.xml" : @"com.alightcreative.motion.amproj";
-    broker.controller.delegate = broker;
     objc_setAssociatedObject(presenter, AMProjV865BrokerKey, broker,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    BOOL presented = [broker.controller presentOpenInMenuFromRect:
-        CGRectMake(CGRectGetMidX(presenter.view.bounds), CGRectGetMidY(presenter.view.bounds), 1, 1)
-                                                   inView:presenter.view animated:YES];
-    if (!presented) {
-        NSLog(@"[AMProjExport] 865 project handoff staged; no Open In target is available");
-    } else {
-        NSLog(@"[AMProjExport] 865 project handoff presented through native Open In");
+
+    UIApplication *application = UIApplication.sharedApplication;
+    BOOL canUseNativeRoute = application.applicationState == UIApplicationStateActive &&
+        [application respondsToSelector:
+            @selector(openURL:options:completionHandler:)];
+    if (canUseNativeRoute) {
+        broker.nativeRouteInFlight = YES;
+        NSLog(@"[AMProjExport] 865 project handoff opening through native document URL route: %@",
+              stagedURL.lastPathComponent ?: @"project");
+        [application openURL:stagedURL options:@{}
+            completionHandler:^(BOOL success) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                broker.nativeRouteInFlight = NO;
+                if (success) {
+                    NSLog(@"[AMProjExport] 865 native document URL route accepted: %@",
+                          stagedURL.lastPathComponent ?: @"project");
+                    [broker scheduleCleanup];
+                    return;
+                }
+                UIViewController *fallback = AMProjV865PresenterForBroker(broker);
+                if (!fallback || !AMProjV865PresentOpenInFallback(broker, fallback)) {
+                    NSLog(@"[AMProjExport] 865 native document URL route declined and no fallback presenter is available");
+                }
+            });
+        }];
+        return YES;
     }
-    return YES;
+    return AMProjV865PresentOpenInFallback(broker, presenter);
 }
 
 BOOL AMProjV865ProjectFlowIsProjectPackageController(UIViewController *controller) {
@@ -230,8 +281,14 @@ BOOL AMProjV865ProjectFlowPresentDocument(NSURL *fileURL, NSString *filename,
     void (^presentWhenReady)(void) = ^{
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
-            UIViewController *owner = AMProjV865TopController(presenter) ?:
-                AMProjV865ForegroundPresenter();
+            // The account page is dismissed immediately after the callback.
+            // Prefer the controller that is actually visible now; a stale
+            // presenter would make the handoff look accepted but never show
+            // the document route.
+            UIViewController *owner = AMProjV865ForegroundPresenter();
+            if (!owner && presenter.viewIfLoaded.window) {
+                owner = AMProjV865TopController(presenter);
+            }
             if (!owner) {
                 NSLog(@"[AMProjExport] 865 project handoff staged without a visible presenter");
                 return;

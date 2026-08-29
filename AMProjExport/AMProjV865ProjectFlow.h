@@ -6,8 +6,9 @@ NS_ASSUME_NONNULL_BEGIN
 /*
  * Public-API-only project handoff for Alight Motion 6.2.58 (Build 865).
  * This adapter deliberately does not call private Swift symbols. It keeps a
- * downloaded project alive, then lets UIKit hand it back to the native app
- * document route through the system Open In menu.
+ * downloaded project alive, then asks UIKit to hand the file back to the
+ * running app's registered document route. The system Open In menu remains a
+ * user-driven fallback when the workspace declines the URL.
  */
 FOUNDATION_EXPORT BOOL AMProjV865ProjectFlowIsRuntimeSupported(void);
 FOUNDATION_EXPORT void AMProjV865ProjectFlowInstall(void);

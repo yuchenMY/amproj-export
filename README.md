@@ -45,7 +45,8 @@ document lifecycle。`build_865_migration_package.py` 只在 `Info.plist` 注册
 865 不安装 6.2.55/862 的私有 `PackageImporter` continuation、UIDocumentPicker delegate、
 Scene/URL、ShareNC 或 UIActivity 导出 Hook。云工程下载回调先把已经校验过的文件原子复制到
 `Application Support/AMProjV865ProjectHandoff/<UUID>/`，再通过 UIKit 公开的
-`UIDocumentInteractionController` Open In 菜单交回 865 原生文档链路；临时文件不会被
+`UIApplication openURL:options:completionHandler:` 公开文档路由交回 865 原生文档链路；系统拒绝时再使用
+`UIDocumentInteractionController` Open In 菜单兜底；临时文件不会被
 `AMCloudSync` 的下载清理抢先删除。菜单由系统和 865 自己完成，下载成功不伪装成已经导入，
 必要时用户可按系统提示彻底关闭并重新打开应用。项目包导出只在精确的
 `AlightMotion.ShareProjectPackageVC` 或 `_TtC12AlightMotion21ShareProjectPackageVC`

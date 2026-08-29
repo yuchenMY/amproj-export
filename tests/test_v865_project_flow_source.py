@@ -11,9 +11,16 @@ FLOW = (ROOT / "AMProjExport" / "AMProjV865ProjectFlow.m").read_text(
     encoding="utf-8"
 )
 MAKEFILE = (ROOT / "AMProjExport" / "Makefile").read_text(encoding="utf-8")
+MIGRATION = (ROOT / "build_865_migration_package.py").read_text(encoding="utf-8")
+WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
 
 
 class V865ProjectFlowSourceTests(unittest.TestCase):
+    def test_865_packager_uses_version_neutral_cloud_contract(self):
+        self.assertIn("cloud_payload_contract", MIGRATION)
+        self.assertNotIn("import build_862_direct_package", MIGRATION)
+        self.assertIn("cloud_payload_contract.py", WORKFLOW)
+
     def test_default_865_outputs_keep_the_feature_libraries_separate(self):
         all_rule = MAKEFILE.split("all:", 1)[1].split("\n", 1)[0]
         self.assertIn("AMProjExport.dylib", all_rule)
@@ -42,6 +49,10 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn("AMProjV865ProjectFlowPresentDocument", FLOW_HEADER)
         self.assertIn("UIDocumentInteractionController", FLOW)
         self.assertIn("presentOpenInMenuFromRect", FLOW)
+        self.assertIn("openURL:stagedURL options:@{}", FLOW)
+        self.assertIn("nativeRouteInFlight", FLOW)
+        self.assertIn("native document URL route accepted", FLOW)
+        self.assertIn("native document URL route declined", FLOW)
         self.assertIn("copyItemAtURL:source", FLOW)
         self.assertIn('document.partial', FLOW)
         self.assertIn("moveItemAtURL:temporary", FLOW)
@@ -51,6 +62,18 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertNotIn("objc_msgSend", FLOW)
         self.assertNotIn("selectedExportOptID", FLOW)
         self.assertNotIn("AMProjMainAddress", FLOW)
+
+    def test_865_adapter_has_public_native_url_route_before_open_in_fallback(self):
+        native_route = FLOW[FLOW.index("BOOL canUseNativeRoute") :]
+        self.assertIn("openURL:stagedURL options:@{}", native_route)
+        self.assertIn("if (success)", native_route)
+        self.assertIn("AMProjV865PresentOpenInFallback", native_route)
+
+    def test_865_handoff_resolves_a_current_visible_presenter_after_dismissal(self):
+        handoff = FLOW[FLOW.index("void (^presentWhenReady)") :]
+        current = handoff.index("UIViewController *owner = AMProjV865ForegroundPresenter()")
+        stale_guard = handoff.index("presenter.viewIfLoaded.window", current)
+        self.assertLess(current, stale_guard)
 
     def test_865_adapter_matches_only_the_verified_package_controller(self):
         self.assertIn('AlightMotion.ShareProjectPackageVC', FLOW)
