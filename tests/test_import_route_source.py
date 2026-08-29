@@ -200,8 +200,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn("AMProjShareExtension", BUILD_SCRIPT)
         self.assertNotIn("AMProjShareExtension", WORKFLOW)
         self.assertIn("稳定包只使用主 App 的文档 URL/文件选择器链路", README)
-        self.assertIn("AMProjExportCloud.dylib", MAKEFILE)
-        self.assertIn("AMProjExport/AMProjExportCloud.dylib", WORKFLOW)
+        self.assertIn("AMProjExport.dylib", MAKEFILE)
+        self.assertIn("AMProjExport/AMProjExport.dylib", WORKFLOW)
+        self.assertNotIn("AMProjExportCloud.dylib", WORKFLOW)
         self.assertIn('config[@"BuildIdentifier"]', DEBUG_TRANSPORT_SOURCE)
         self.assertIn('kAMDebugPluginVariant = @"cloud"', DEBUG_TRANSPORT_SOURCE)
         self.assertIn('kAMDebugPluginVariant = @"debug"', DEBUG_TRANSPORT_SOURCE)
@@ -1745,7 +1746,15 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static void amproj_bootstrapAfterLaunch",
             "__attribute__((constructor))",
         )
-        self.assertIn("AMProjInstallNativePackageImportBridge()", bootstrap)
+        legacy_gate = bootstrap.index("if (amproj_runtimeUsesLegacyImportHooks())")
+        bridge_install = bootstrap.index("AMProjInstallNativePackageImportBridge()")
+        disabled_branch = bootstrap.index("} else {", legacy_gate)
+        self.assertLess(legacy_gate, bridge_install)
+        self.assertLess(bridge_install, disabled_branch)
+        self.assertIn(
+            "AMProjRegisterNativePackageImportStarter(nil);",
+            bootstrap[disabled_branch:],
+        )
         self.assertIn("AMProjRegisterNativePackageImportStarter", BRIDGE_HEADER)
         self.assertIn("AMProjNativeImportCompletionThunk", BRIDGE_SOURCE)
         self.assertIn("AMProjFinishNativeBridge(success, error)", BRIDGE_SOURCE)
@@ -2847,8 +2856,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('AMProjNativePackageImportBridgeIsRuntimeSupported()', uses_legacy)
 
     def test_build_865_does_not_install_legacy_native_import_bridge(self):
-        self.assertIn('#define AMPROJ_ENABLE_LEGACY_862 1', BRIDGE_SOURCE)
-        self.assertIn('LEGACY_862 ?= 1', MAKEFILE)
+        self.assertIn('#define AMPROJ_ENABLE_LEGACY_862 0', BRIDGE_SOURCE)
+        self.assertIn('LEGACY_862 ?= 0', MAKEFILE)
         self.assertIn('-DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862)', MAKEFILE)
         supported = source_body(
             BRIDGE_SOURCE,
@@ -2892,57 +2901,49 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('amproj_installNativeProjectPickerHook();', import_hook)
         self.assertGreater(import_hook.index('amproj_installNativeProjectPickerHook();'),
                            import_hook.index('return;'))
-
-    def test_build_865_encrypted_xml_guard_is_reachable_from_native_picker_and_url_callbacks(self):
-        guard = function_body(
-            "static BOOL amproj_rejectLikelyEncryptedXMLSelection865",
-            "static NSString* amproj_normalizedProjectTitle",
+        proxy = function_body(
+            'static void amproj_attachNativeXMLPickerProxy',
+            'static void amproj_presentImportDocumentPicker',
         )
-        self.assertIn('amproj_runtimeIsBuild865()', guard)
-        self.assertIn('readDataOfLength:64 * 1024', guard)
-        self.assertIn('amproj_isLikelyEncryptedXML(prefix, &signal)', guard)
-        self.assertIn('amproj_presentXMLImportError(@"加密 XML 无法导入", NO)', guard)
+        gate = proxy.index('if (!amproj_runtimeUsesLegacyImportHooks())')
+        return_index = proxy.index('return;', gate)
+        picker_check = proxy.index('UIDocumentPickerViewController.class')
+        delegate_write = proxy.index('picker.delegate = proxy')
+        self.assertLess(gate, return_index)
+        self.assertLess(return_index, picker_check)
+        self.assertLess(return_index, delegate_write)
 
+    def test_build_865_does_not_consume_native_picker_or_url_lifecycle(self):
+        self.assertNotIn('amproj_rejectLikelyEncryptedXMLSelection865', SOURCE)
+        self.assertNotIn('amproj_install865ValidationURLHooks', SOURCE)
         picker = function_body(
             "- (void)documentPicker:(UIDocumentPickerViewController *)controller\n    didPickDocumentsAtURLs:",
             "- (void)documentPicker:(UIDocumentPickerViewController *)controller\n    didPickDocumentAtURL:",
         )
-        self.assertIn('amproj_rejectLikelyEncryptedXMLSelection865(', picker)
+        self.assertNotIn('amproj_rejectLikelyEncryptedXMLSelection865(', picker)
         single = function_body(
             "- (void)documentPicker:(UIDocumentPickerViewController *)controller\n    didPickDocumentAtURL:",
             "- (void)documentPickerWasCancelled:",
         )
-        self.assertIn('amproj_rejectLikelyEncryptedXMLSelection865(', single)
+        self.assertNotIn('amproj_rejectLikelyEncryptedXMLSelection865(', single)
 
-        for signature, next_signature, marker in (
+        for signature, next_signature in (
             (
                 'static BOOL hooked_applicationOpenURL',
                 'static NSURL* amproj_projectURLFromUserActivity',
-                'application_open_url_865',
             ),
             (
                 'static BOOL hooked_applicationContinueActivity',
                 'static BOOL hooked_applicationHandleOpenURL',
-                'continue_user_activity_865',
             ),
             (
                 'static void hooked_sceneOpenURLContexts',
                 'static void (*orig_projectsImportAlertViewDidLoad)',
-                'scene_open_url_contexts_865',
             ),
         ):
             body = source_body(SOURCE, signature, next_signature)
-            self.assertIn('amproj_rejectLikelyEncryptedXMLSelection865(', body)
-            self.assertIn(marker, body)
-
-        installer = function_body(
-            'static BOOL amproj_install865ValidationURLHooks',
-            'static void amproj_installProjectsImportAlertHook',
-        )
-        self.assertIn('amproj_installTrackedHook', installer)
-        self.assertIn('hooked_applicationOpenURL', installer)
-        self.assertIn('hooked_sceneOpenURLContexts', installer)
-        self.assertIn('amproj_install865ValidationURLHooks();', SOURCE)
+            self.assertNotIn('amproj_rejectLikelyEncryptedXMLSelection865(', body)
+            self.assertNotIn('_865', body)
 
     def test_build_865_present_hook_keeps_account_replacement_and_forwards_other_presentations(self):
         present = function_body(

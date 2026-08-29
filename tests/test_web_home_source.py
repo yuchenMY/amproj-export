@@ -11,8 +11,8 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="ut
 
 class WebHomeSourceTests(unittest.TestCase):
     def test_home_ui_source_is_built_as_a_standalone_runtime(self):
-        cloud_rule = MAKEFILE.split("AMProjExportCloud.dylib:", 1)[1].split(
-            "AMProjExportDebug.dylib:", 1
+        cloud_rule = MAKEFILE.split("AMProjExport.dylib:", 1)[1].split(
+            "AMProjExportOffline.dylib:", 1
         )[0]
         self.assertNotIn("AMHomeUI.m", cloud_rule)
         self.assertIn("AMHomeUI.dylib", MAKEFILE)
@@ -363,7 +363,8 @@ class WebHomeSourceTests(unittest.TestCase):
     def test_ci_builds_home_ui_as_a_separate_artifact(self):
         self.assertIn('home_ui_path = Path("AMProjExport/AMHomeUI.dylib")', WORKFLOW)
         self.assertIn('"_AMHomeUIInstall"', WORKFLOW)
-        self.assertIn('["otool", "-L", "AMProjExport/AMProjExportCloud.dylib"]', WORKFLOW)
+        self.assertIn('["otool", "-L", "AMProjExport/AMProjExport.dylib"]', WORKFLOW)
+        self.assertNotIn("AMProjExportCloud.dylib", WORKFLOW)
         self.assertIn('assert "@rpath/AMHomeUI.dylib" not in cloud_dependencies', WORKFLOW)
         self.assertIn('assert "_AMHomeUIInstall" not in cloud_defined_symbols', WORKFLOW)
         self.assertIn('assert "_AMHomeUIInstall" in home_ui_symbols', WORKFLOW)

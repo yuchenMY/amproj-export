@@ -8,10 +8,10 @@
 #import <string.h>
 
 #ifndef AMPROJ_ENABLE_LEGACY_862
-// The old bridge targets private 6.2.55/862 symbols. Keep the verified legacy
-// lane available for the shared source tree; runtime version, UUID, and code
-// fingerprints still gate every call. 865 builds therefore never enter it.
-#define AMPROJ_ENABLE_LEGACY_862 1
+// The old bridge targets private 6.2.55/862 symbols. Production builds target
+// 6.2.58/865, so an omitted build flag must fail closed. A historical 862
+// build has to opt in explicitly with AMPROJ_ENABLE_LEGACY_862=1.
+#define AMPROJ_ENABLE_LEGACY_862 0
 #endif
 
 static NSString *const AMProjNativeBridgeErrorDomain =

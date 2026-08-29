@@ -11,7 +11,8 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="ut
 class AMMeowLoaderSourceTests(unittest.TestCase):
     def test_loader_is_our_fixed_single_cloud_entrypoint(self):
         self.assertIn("__attribute__((constructor(101)))", SOURCE)
-        self.assertIn("@executable_path/Frameworks/AMProjExportCloud.dylib", SOURCE)
+        self.assertIn("@executable_path/Frameworks/AMProjExport.dylib", SOURCE)
+        self.assertNotIn("AMProjExportCloud.dylib", SOURCE)
         self.assertIn("dlopen(path, RTLD_NOW | RTLD_LOCAL)", SOURCE)
         self.assertIn("g_attempted", SOURCE)
         self.assertIn("os_log_info", SOURCE)
@@ -20,10 +21,15 @@ class AMMeowLoaderSourceTests(unittest.TestCase):
         self.assertNotIn("sideloader", SOURCE)
         self.assertNotIn("getLinkedBundleIDs", SOURCE)
 
-    def test_makefile_and_ci_build_and_ship_only_our_loader(self):
+    def test_loader_is_explicit_legacy_target_and_not_shipped_for_865(self):
         self.assertIn("AMMeowLoader.dylib", MAKEFILE)
         self.assertIn("AMMeowLoader.c", MAKEFILE)
-        self.assertIn("AMProjExport/AMMeowLoader.dylib", WORKFLOW)
+        default_targets = MAKEFILE.split("all:", 1)[1].splitlines()[0]
+        self.assertNotIn("AMMeowLoader.dylib", default_targets)
+        self.assertIn("legacy-loader: AMMeowLoader.dylib", MAKEFILE)
+        self.assertNotIn("AMProjExport/AMMeowLoader.dylib", WORKFLOW)
+        self.assertIn("AMProjExport/AMProjExport.dylib", WORKFLOW)
+        self.assertNotIn("AMProjExportCloud.dylib", WORKFLOW)
         self.assertNotIn("LoadControl.dylib", MAKEFILE)
         self.assertNotIn("LoadControl.dylib", WORKFLOW)
 

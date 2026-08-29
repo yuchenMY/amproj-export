@@ -18,7 +18,9 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn("AMProjExtractPluginArchive", header)
         makefile = MAKEFILE.read_text(encoding="utf-8")
         self.assertEqual(makefile.count("AMProjZIPWriter.m AMProjImportArchive.m"), 3)
-        self.assertIn("AMProjExportCloud.dylib", makefile)
+        self.assertIn("AMProjExport.dylib", makefile)
+        self.assertIn("AMProjExportOffline.dylib", makefile)
+        self.assertNotIn("AMProjExportCloud.dylib", makefile)
 
     def test_zip_safety_and_integrity_checks_are_present(self):
         source = SOURCE.read_text(encoding="utf-8")

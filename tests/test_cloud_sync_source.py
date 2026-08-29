@@ -68,8 +68,8 @@ class MirroredQuickActionsModel:
 
 class CloudSyncSourceTests(unittest.TestCase):
     def test_cloud_build_is_isolated_from_release_and_debug_targets(self):
-        cloud_rule = MAKEFILE.split("AMProjExportCloud.dylib:", 1)[1].split(
-            "AMProjExportDebug.dylib:", 1
+        cloud_rule = MAKEFILE.split("AMProjExport.dylib:", 1)[1].split(
+            "AMProjExportOffline.dylib:", 1
         )[0]
         self.assertIn("-DAMPROJ_CLOUD_SYNC=1", cloud_rule)
         self.assertIn("AMCloudSync.m", cloud_rule)
@@ -77,6 +77,8 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("AMEditorCustomization.m", cloud_rule)
         self.assertIn("-framework Security", cloud_rule)
         self.assertIn("-framework WebKit", cloud_rule)
+        self.assertIn("-install_name @rpath/AMProjExport.dylib", cloud_rule)
+        self.assertNotIn("AMProjExportCloud.dylib", MAKEFILE)
         self.assertIn("#if AMPROJ_CLOUD_SYNC", EXPORT)
 
     def test_editor_buttons_are_customized_only_on_project_edit_controller(self):

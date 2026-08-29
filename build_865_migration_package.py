@@ -26,7 +26,16 @@ import inject_dylib
 APP_ROOT = "Payload/AlightMotion.app/"
 MAIN_PATH = APP_ROOT + "AlightMotion"
 INFO_PATH = APP_ROOT + "Info.plist"
-CLOUD_PATH = APP_ROOT + "Frameworks/AMProjExportCloud.dylib"
+CLOUD_PATH = APP_ROOT + "Frameworks/AMProjExport.dylib"
+LEGACY_CLOUD_PATH = APP_ROOT + "Frameworks/AMProjExportCloud.dylib"
+CLOUD_BASENAME = "AMProjExport.dylib"
+LEGACY_CLOUD_BASENAME = "AMProjExportCloud.dylib"
+CLOUD_LOAD = "@executable_path/Frameworks/AMProjExport.dylib"
+LEGACY_CLOUD_LOAD = "@executable_path/Frameworks/AMProjExportCloud.dylib"
+# The 865 package loads the Cloud dylib directly.  A previously injected
+# AMMeowLoader would dlopen the same library a second way during startup.
+LOADER_BASENAME = "AMMeowLoader.dylib"
+LOADER_PATH = APP_ROOT + "Frameworks/" + LOADER_BASENAME
 HOME_UI_PATH = APP_ROOT + "Frameworks/AMHomeUI.dylib"
 BUTTON_PATH = APP_ROOT + "autfeng_add_layer_button.png"
 CATEGORY_PREFIX = APP_ROOT + "BuiltinCategory/thumb/"
@@ -76,6 +85,9 @@ def copy_zip_info(
     if executable is None:
         clone.external_attr = info.external_attr
     else:
+        # LCSign extracts the IPA on Darwin. A Windows-created ZIP entry with
+        # a Unix-looking mode is still not reliable for a loadable Mach-O.
+        clone.create_system = 3
         clone.external_attr = (0o100755 if executable else 0o100644) << 16
     return clone
 
@@ -94,6 +106,75 @@ def category_path(name: str) -> str:
 
 def _is_signature_entry(name: str) -> bool:
     return "/_CodeSignature/" in name or name.endswith("/_CodeSignature")
+
+
+def _dylib_loads(info: dict, path: str) -> list[dict]:
+    return [
+        command
+        for command in info["dylib_load_commands"]
+        if command["name"] == path
+    ]
+
+
+def _member_basename(name: str) -> str:
+    return name.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _dylib_loads_by_basename(info: dict, basename: str) -> list[dict]:
+    return [
+        command
+        for command in info["dylib_load_commands"]
+        if _member_basename(command["name"]) == basename
+    ]
+
+
+def _require_canonical_load_path(
+    commands: list[dict], expected_path: str, label: str
+) -> None:
+    unexpected = [command["name"] for command in commands if command["name"] != expected_path]
+    if unexpected:
+        raise RuntimeError(
+            f"{label} contains an unsupported dylib load path: "
+            + ", ".join(sorted(unexpected))
+        )
+
+
+def _loader_loads(info: dict) -> list[dict]:
+    return _dylib_loads_by_basename(info, LOADER_BASENAME)
+
+
+def _reject_loader_loads(info: dict, label: str) -> None:
+    if _loader_loads(info):
+        raise RuntimeError(
+            f"{label} loads {LOADER_BASENAME}; 6.2.58 must load "
+            "AMProjExport.dylib directly"
+        )
+
+
+def _rewrite_legacy_cloud_load(data: bytes, command: dict) -> bytes:
+    """Rename the legacy load inside its existing LC_LOAD_DYLIB storage."""
+    if command["cmd"] != inject_dylib.LC_LOAD_DYLIB:
+        raise RuntimeError("6.2.58 legacy Cloud load is not LC_LOAD_DYLIB")
+    command_offset = command["offset"]
+    command_size = command["cmdsize"]
+    name_offset = int.from_bytes(
+        data[command_offset + 8 : command_offset + 12], "little"
+    )
+    name_start = command_offset + name_offset
+    name_limit = command_offset + command_size
+    expected = LEGACY_CLOUD_LOAD.encode("utf-8") + b"\0"
+    if (
+        name_offset < 24
+        or name_start + len(expected) > name_limit
+        or data[name_start : name_start + len(expected)] != expected
+    ):
+        raise RuntimeError("legacy Cloud load command payload is invalid")
+    replacement = CLOUD_LOAD.encode("utf-8") + b"\0"
+    if len(replacement) > name_limit - name_start:
+        raise RuntimeError("new Cloud load path does not fit legacy command storage")
+    result = bytearray(data)
+    result[name_start:name_limit] = replacement.ljust(name_limit - name_start, b"\0")
+    return bytes(result)
 
 
 def _document_type(plist: dict, uti: str) -> dict | None:
@@ -195,24 +276,33 @@ def prepare_main(data: bytes, include_home_ui: bool = False) -> bytes:
         raise RuntimeError("6.2.58 main executable is not thin arm64 MH_EXECUTE")
     if info["uuid"] != "c8d53b88593d3a4082a11805d1835cd0":
         raise RuntimeError(f"unexpected 6.2.58 main UUID: {info['uuid']}")
+    _reject_loader_loads(info, "6.2.58 main")
     existing_home_ui = homeui.home_ui_loads(info)
     if len(existing_home_ui) > 1:
         raise RuntimeError("6.2.58 main contains duplicate AMHomeUI loads")
     if existing_home_ui:
         homeui.ensure_home_ui_load_contract(info, "6.2.58 main")
-    cloud_loads = [
-        command for command in info["dylib_load_commands"]
-        if command["name"] == "@executable_path/Frameworks/AMProjExportCloud.dylib"
-    ]
+    cloud_loads = _dylib_loads_by_basename(info, CLOUD_BASENAME)
+    legacy_cloud_loads = _dylib_loads_by_basename(info, LEGACY_CLOUD_BASENAME)
+    _require_canonical_load_path(cloud_loads, CLOUD_LOAD, "6.2.58 main")
+    _require_canonical_load_path(
+        legacy_cloud_loads, LEGACY_CLOUD_LOAD, "6.2.58 main"
+    )
+    if len(cloud_loads) > 1 or len(legacy_cloud_loads) > 1:
+        raise RuntimeError("6.2.58 contains duplicate Cloud load commands")
+    if cloud_loads and legacy_cloud_loads:
+        raise RuntimeError("6.2.58 contains both current and legacy Cloud loads")
     if cloud_loads:
-        if len(cloud_loads) != 1 or cloud_loads[0]["cmd"] != inject_dylib.LC_LOAD_DYLIB:
+        if cloud_loads[0]["cmd"] != inject_dylib.LC_LOAD_DYLIB:
             raise RuntimeError("6.2.58 contains a conflicting Cloud load command")
         result = data
+    elif legacy_cloud_loads:
+        result = _rewrite_legacy_cloud_load(data, legacy_cloud_loads[0])
     else:
         with tempfile.TemporaryDirectory(prefix="amproj-865-main-") as directory:
             path = Path(directory) / "AlightMotion"
             path.write_bytes(data)
-            inject_dylib.insert_load_dylib(str(path), "AMProjExportCloud.dylib")
+            inject_dylib.insert_load_dylib(str(path), "AMProjExport.dylib")
             result = path.read_bytes()
 
     if include_home_ui:
@@ -225,12 +315,19 @@ def prepare_main(data: bytes, include_home_ui: bool = False) -> bytes:
                 result = path.read_bytes()
 
     patched = inject_dylib.parse_macho_data(result, "patched 6.2.58 AlightMotion")
-    cloud_loads = [
-        command for command in patched["dylib_load_commands"]
-        if command["name"] == "@executable_path/Frameworks/AMProjExportCloud.dylib"
-    ]
+    _reject_loader_loads(patched, "patched 6.2.58 main")
+    cloud_loads = _dylib_loads_by_basename(patched, CLOUD_BASENAME)
+    legacy_cloud_loads = _dylib_loads_by_basename(
+        patched, LEGACY_CLOUD_BASENAME
+    )
+    _require_canonical_load_path(cloud_loads, CLOUD_LOAD, "patched 6.2.58 main")
+    _require_canonical_load_path(
+        legacy_cloud_loads, LEGACY_CLOUD_LOAD, "patched 6.2.58 main"
+    )
     if len(cloud_loads) != 1 or cloud_loads[0]["cmd"] != inject_dylib.LC_LOAD_DYLIB:
         raise RuntimeError("patched 6.2.58 main does not strongly load Cloud")
+    if legacy_cloud_loads:
+        raise RuntimeError("patched 6.2.58 main still loads legacy Cloud")
     if include_home_ui:
         homeui.ensure_home_ui_load_contract(patched, "patched 6.2.58 main")
     if patched["uuid"] != info["uuid"]:
@@ -240,11 +337,20 @@ def prepare_main(data: bytes, include_home_ui: bool = False) -> bytes:
 
 def verify_cloud(cloud_path: Path) -> bytes:
     data = cloud_path.read_bytes()
-    cloud_contract.verify_cloud_runtime_version(data)
-    cloud_contract.verify_cloud_stability_contract(data)
     info = inject_dylib.parse_macho_data(data, str(cloud_path))
     if info["cputype"] != inject_dylib.CPU_TYPE_ARM64 or info["filetype"] != inject_dylib.MH_DYLIB:
         raise RuntimeError("Cloud dylib must be a thin arm64 MH_DYLIB")
+    expected_install_name = "@rpath/" + CLOUD_BASENAME
+    if len(info["id_dylibs"]) != 1:
+        raise RuntimeError(
+            "Cloud dylib must contain exactly one LC_ID_DYLIB install name"
+        )
+    if info["id_dylibs"][0] != expected_install_name:
+        raise RuntimeError(
+            "Cloud dylib install name must be " + expected_install_name
+        )
+    cloud_contract.verify_cloud_runtime_version(data)
+    cloud_contract.verify_cloud_stability_contract(data)
     homeui.verify_cloud_payload(data, str(cloud_path))
     return data
 
@@ -299,6 +405,33 @@ def package(
         names = source.namelist()
         if len(names) != len(set(names)) or source.testzip() is not None:
             raise RuntimeError("source IPA ZIP validation failed")
+        if any(name.rsplit("/", 1)[-1] == LOADER_BASENAME for name in names):
+            raise RuntimeError(
+                "source IPA contains AMMeowLoader; use a clean 6.2.58 baseline "
+                "instead of loading AMProjExport.dylib twice"
+            )
+        legacy_members = [
+            name for name in names if _member_basename(name) == LEGACY_CLOUD_BASENAME
+        ]
+        noncanonical_legacy_members = [
+            name for name in legacy_members if name != LEGACY_CLOUD_PATH
+        ]
+        if noncanonical_legacy_members:
+            raise RuntimeError(
+                "source IPA contains AMProjExportCloud.dylib outside the canonical "
+                "Frameworks path: " + ", ".join(sorted(noncanonical_legacy_members))
+            )
+        cloud_members = [
+            name for name in names if _member_basename(name) == CLOUD_BASENAME
+        ]
+        noncanonical_cloud_members = [
+            name for name in cloud_members if name != CLOUD_PATH
+        ]
+        if noncanonical_cloud_members:
+            raise RuntimeError(
+                "source IPA contains AMProjExport.dylib outside the canonical "
+                "Frameworks path: " + ", ".join(sorted(noncanonical_cloud_members))
+            )
         if names.count(MAIN_PATH) != 1 or names.count(INFO_PATH) != 1:
             raise RuntimeError("source IPA has an unexpected app layout")
         source_main = source.read(MAIN_PATH)
@@ -322,6 +455,7 @@ def package(
 
         intended = {MAIN_PATH, INFO_PATH, CLOUD_PATH, BUTTON_PATH, *categories}
         stale = {name for name in names if _is_signature_entry(name)}
+        legacy = set(legacy_members)
         if supplied_home_ui is not None:
             intended.add(HOME_UI_PATH)
 
@@ -333,7 +467,7 @@ def package(
             with zipfile.ZipFile(candidate, "w", allowZip64=True) as output:
                 for info in source.infolist():
                     name = info.filename
-                    if name in stale:
+                    if name in stale or name in legacy:
                         continue
                     if name == MAIN_PATH:
                         payload = prepared_main
@@ -382,21 +516,55 @@ def package(
                 output_names = output.namelist()
                 if len(output_names) != len(set(output_names)) or output.testzip() is not None:
                     raise RuntimeError("output IPA ZIP validation failed")
+                if output_names.count(CLOUD_PATH) != 1:
+                    raise RuntimeError("AMProjExport.dylib member missing after migration")
+                if any(
+                    _member_basename(name) == LEGACY_CLOUD_BASENAME
+                    for name in output_names
+                ):
+                    raise RuntimeError("legacy AMProjExportCloud.dylib survived migration")
+                if any(
+                    _member_basename(name) == CLOUD_BASENAME and name != CLOUD_PATH
+                    for name in output_names
+                ):
+                    raise RuntimeError(
+                        "AMProjExport.dylib survived outside the canonical Frameworks path"
+                    )
+                if any(
+                    name.rsplit("/", 1)[-1] == LOADER_BASENAME
+                    for name in output_names
+                ):
+                    raise RuntimeError("AMMeowLoader survived the 6.2.58 migration")
                 if output.read(MAIN_PATH) != prepared_main:
                     raise RuntimeError("main executable migration failed")
                 if output.read(INFO_PATH) != prepared_info:
                     raise RuntimeError("Info.plist migration failed")
                 if output.read(CLOUD_PATH) != cloud:
                     raise RuntimeError("Cloud dylib migration failed")
+                output_main_info = inject_dylib.parse_macho_data(
+                    output.read(MAIN_PATH), MAIN_PATH
+                )
+                if len(_dylib_loads(output_main_info, CLOUD_LOAD)) != 1:
+                    raise RuntimeError("output main does not load AMProjExport.dylib once")
+                if _dylib_loads(output_main_info, LEGACY_CLOUD_LOAD):
+                    raise RuntimeError("output main still loads AMProjExportCloud.dylib")
+                _reject_loader_loads(output_main_info, "output 6.2.58 main")
+                executable_members = {MAIN_PATH, CLOUD_PATH}
                 if supplied_home_ui is not None:
                     if output_names.count(HOME_UI_PATH) != 1:
                         raise RuntimeError("standalone AMHomeUI.dylib missing after migration")
                     if output.read(HOME_UI_PATH) != supplied_home_ui:
                         raise RuntimeError("standalone Home UI migration failed")
-                    output_main_info = inject_dylib.parse_macho_data(
-                        output.read(MAIN_PATH), MAIN_PATH
-                    )
                     homeui.ensure_home_ui_load_contract(output_main_info, "output main")
+                    executable_members.add(HOME_UI_PATH)
+                for name in executable_members:
+                    member_info = output.getinfo(name)
+                    if member_info.create_system != 3:
+                        raise RuntimeError(
+                            f"loadable IPA member lacks Unix ZIP metadata: {name}"
+                        )
+                    if member_info.external_attr >> 16 != 0o100755:
+                        raise RuntimeError(f"loadable IPA member is not 0755: {name}")
                 if output.read(BUTTON_PATH) != button:
                     raise RuntimeError("editor button migration failed")
                 for name, payload in categories.items():
@@ -405,7 +573,7 @@ def package(
                 if any(_is_signature_entry(name) for name in output_names):
                     raise RuntimeError("stale CodeResources survived migration")
 
-                changed = intended | stale
+                changed = intended | stale | legacy
                 for name in set(names) - changed:
                     if source.getinfo(name).is_dir():
                         continue

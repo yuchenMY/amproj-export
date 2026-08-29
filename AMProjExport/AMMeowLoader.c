@@ -18,12 +18,12 @@ static void AMMeowLoaderInit(void) {
     g_attempted = 1;
 
     const char *path =
-        "@executable_path/Frameworks/AMProjExportCloud.dylib";
+        "@executable_path/Frameworks/AMProjExport.dylib";
     g_cloud_handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (g_cloud_handle != NULL) {
         os_log_info(
             OS_LOG_DEFAULT,
-            "AMMeowLoader loaded AMProjExportCloud.dylib"
+            "AMMeowLoader loaded AMProjExport.dylib"
         );
         return;
     }
@@ -31,7 +31,7 @@ static void AMMeowLoaderInit(void) {
     const char *error = dlerror();
     os_log_error(
         OS_LOG_DEFAULT,
-        "AMMeowLoader failed to load AMProjExportCloud.dylib: %{public}s",
+        "AMMeowLoader failed to load AMProjExport.dylib: %{public}s",
         error != NULL ? error : "unknown dlopen error"
     );
 }

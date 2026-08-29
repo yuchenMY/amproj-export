@@ -14,6 +14,7 @@ on:
       - 'inject_dylib.py'
       - 'build_862_direct_package.py'
       - 'build_862_official_effects_package.py'
+      - 'build_865_migration_package.py'
       - 'package_cloud_dylib_ipa.py'
       - 'package_editor_button_ipa.py'
       - 'package_official_builtin_effects_ipa.py'
@@ -33,7 +34,7 @@ jobs:
           python3 -m unittest discover -s tests -v
           python3 -m unittest debug_backend.test_server -v
 
-      - name: Build release, Cloud, debug, loader, and standalone Home UI dylibs
+      - name: Build release, debug, and standalone Home UI dylibs
         working-directory: AMProjExport
         run: make
 
@@ -55,7 +56,6 @@ jobs:
           }
           for path in (
               "AMProjExport/AMProjExport.dylib",
-              "AMProjExport/AMProjExportCloud.dylib",
               "AMProjExport/AMProjExportDebug.dylib",
           ):
               info = verify_dylib_architecture(path)
@@ -73,20 +73,23 @@ jobs:
               assert not missing, f"{path} missing symbols: {sorted(missing)}"
               print(f"verified {path}: arm64 MH_DYLIB, {info['ncmds']} load commands")
           verify_cloud_stability_contract(
-              Path("AMProjExport/AMProjExportCloud.dylib").read_bytes()
+              Path("AMProjExport/AMProjExport.dylib").read_bytes()
           )
           cloud_dependencies = subprocess.check_output(
-              ["otool", "-L", "AMProjExport/AMProjExportCloud.dylib"], text=True
+              ["otool", "-L", "AMProjExport/AMProjExport.dylib"], text=True
+          )
+          assert "@rpath/AMProjExport.dylib" in subprocess.check_output(
+              ["otool", "-D", "AMProjExport/AMProjExport.dylib"], text=True
           )
           assert "@rpath/AMHomeUI.dylib" not in cloud_dependencies
           cloud_defined_symbols = subprocess.check_output(
-              ["nm", "-gU", "AMProjExport/AMProjExportCloud.dylib"], text=True
+              ["nm", "-gU", "AMProjExport/AMProjExport.dylib"], text=True
           )
           assert "_AMHomeUIInstall" not in cloud_defined_symbols
           assert b"https://amhome.meowcr.cn/home" not in Path(
-              "AMProjExport/AMProjExportCloud.dylib"
+              "AMProjExport/AMProjExport.dylib"
           ).read_bytes()
-          print("verified AMProjExportCloud.dylib: standalone Home UI contract")
+          print("verified AMProjExport.dylib: Cloud release and standalone Home UI contract")
           home_ui_path = Path("AMProjExport/AMHomeUI.dylib")
           home_ui_info = verify_dylib_architecture(home_ui_path)
           home_ui_symbols = subprocess.check_output(
@@ -98,12 +101,6 @@ jobs:
               ["otool", "-D", str(home_ui_path)], text=True
           )
           print(f"verified AMHomeUI.dylib: arm64 MH_DYLIB, {home_ui_info['ncmds']} load commands")
-          loader = verify_dylib_architecture("AMProjExport/AMMeowLoader.dylib")
-          symbols = subprocess.check_output(
-              ["nm", "-gU", "AMProjExport/AMMeowLoader.dylib"], text=True
-          )
-          assert "_AMMeowLoaderInit" not in symbols
-          print(f"verified AMMeowLoader.dylib: arm64 MH_DYLIB, {loader['ncmds']} load commands")
           PY
 
       - name: Test streaming project archive writer
@@ -155,9 +152,7 @@ jobs:
 
           artifact_paths = (
               Path("AMProjExport/AMProjExport.dylib"),
-              Path("AMProjExport/AMProjExportCloud.dylib"),
               Path("AMProjExport/AMProjExportDebug.dylib"),
-              Path("AMProjExport/AMMeowLoader.dylib"),
               Path("AMProjExport/AMHomeUI.dylib"),
           )
           metadata = {
@@ -186,9 +181,7 @@ jobs:
           path: |
             build-metadata.json
             AMProjExport/AMProjExport.dylib
-            AMProjExport/AMProjExportCloud.dylib
             AMProjExport/AMProjExportDebug.dylib
-            AMProjExport/AMMeowLoader.dylib
             AMProjExport/AMHomeUI.dylib
 
       - name: Publish Cloud release asset
@@ -199,7 +192,7 @@ jobs:
           gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$tag" \
             --title "AMProj v${AMPROJ_RELEASE_VERSION} Cloud" \
-            --notes "macOS-built AMProjExportCloud.dylib and standalone AMHomeUI.dylib for commit ${GITHUB_SHA}." \
+            --notes "macOS-built AMProjExport.dylib Cloud release and standalone AMHomeUI.dylib for commit ${GITHUB_SHA}." \
             build-metadata.json \
-            AMProjExport/AMProjExportCloud.dylib \
+            AMProjExport/AMProjExport.dylib \
             AMProjExport/AMHomeUI.dylib

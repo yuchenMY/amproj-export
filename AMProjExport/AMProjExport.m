@@ -76,6 +76,7 @@ static UIViewController* amproj_shareVCRecursive(
     UIViewController *controller, NSUInteger depth,
     NSMutableSet<NSValue *> *visited, uint8_t *selectedExportOption);
 static UIViewController* amproj_topViewController(UIViewController *controller);
+static NSString* amproj_currentProjectTitle(UIViewController *shareController);
 static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source);
 
 typedef NS_ENUM(NSInteger, AMProjImportKind) {
@@ -127,9 +128,6 @@ static void amproj_installPresentationHook(void);
 static id<UIDocumentPickerDelegate> amproj_restoreNativeXMLPickerDelegate(
     AMProjNativeXMLPickerProxy *proxy,
     UIDocumentPickerViewController *picker);
-static BOOL amproj_rejectLikelyEncryptedXMLSelection865(
-    NSURL *URL, NSString *source);
-static BOOL amproj_install865ValidationURLHooks(void);
 static NSString* amproj_importedFontFilename(NSString *reference);
 static NSDictionary* amproj_captureImportPersistenceSnapshot(void);
 static void amproj_storeImportProjectTitle(NSString *transactionID,
@@ -1191,58 +1189,6 @@ static BOOL amproj_isLikelyEncryptedXML(NSData *data,
             @"nul_bytes": @(nulCount)
         };
     }
-    return YES;
-}
-
-// Build 865 keeps Alight Motion's own picker/delegate lifecycle.  This small
-// validation-only guard reads a bounded prefix while the picker URL grant is
-// valid, and refuses a clearly encrypted XML payload before AM's parser sees
-// it. It never stages, rewrites, queues, or invokes the private 862 bridge.
-static BOOL amproj_rejectLikelyEncryptedXMLSelection865(
-    NSURL *URL, NSString *source) {
-    if (!amproj_runtimeIsBuild865() || !URL.isFileURL ||
-        ![URL.pathExtension.lowercaseString isEqualToString:@"xml"]) {
-        return NO;
-    }
-
-    BOOL scoped = NO;
-    NSData *prefix = nil;
-    NSFileHandle *handle = nil;
-    @try {
-        scoped = [URL startAccessingSecurityScopedResource];
-        handle = [NSFileHandle fileHandleForReadingAtPath:URL.path];
-        if (handle) prefix = [handle readDataOfLength:64 * 1024];
-    } @catch (__unused NSException *exception) {
-        prefix = nil;
-    } @finally {
-        [handle closeFile];
-        if (scoped) [URL stopAccessingSecurityScopedResource];
-    }
-    if (!prefix.length) return NO;
-
-    // A complete, valid AM scene always wins over the conservative binary
-    // classifier. Truncated text remains excluded by its printable/XML probe.
-    AMProjXMLProbe *probe = nil;
-    @try {
-        probe = amproj_probeXML(prefix);
-    } @catch (__unused NSException *exception) {
-        probe = nil;
-    }
-    if (probe) return NO;
-
-    NSDictionary *signal = nil;
-    if (!amproj_isLikelyEncryptedXML(prefix, &signal)) return NO;
-    amproj_logCriticalEvent(@"import.xml_encrypted_rejected_native", @{
-        @"source": source ?: @"native_picker_865",
-        @"filename": URL.lastPathComponent ?: @"",
-        @"sample_bytes": @(prefix.length),
-        @"category": signal[@"category"] ?: @"binary_high_entropy",
-        @"signal": signal ?: @{}
-    });
-    // Do not offer the same native picker again for a payload that was
-    // positively classified as encrypted; the caller can choose a plaintext
-    // XML explicitly from the app's normal flow.
-    amproj_presentXMLImportError(@"加密 XML 无法导入", NO);
     return YES;
 }
 
@@ -2915,6 +2861,9 @@ static void amproj_startDirectExportWithDestination(
                     });
                     return;
                 }
+                // Keep the destination check on the native export controller.
+                // If an unverified caller reaches this legacy path on 865, it
+                // fails closed instead of taking ownership of the native action.
                 if (uploadToCloud) {
                     uint8_t selectedExportOption = UINT8_MAX;
                     UIViewController *shareVC = amproj_shareVCRecursive(
@@ -5074,15 +5023,6 @@ static void amproj_finishOriginalPickerAsCancelled(
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
     didPickDocumentsAtURLs:(NSArray<NSURL *> *)URLs {
-    if (amproj_runtimeIsBuild865()) {
-        for (NSURL *URL in URLs) {
-            if (amproj_rejectLikelyEncryptedXMLSelection865(
-                    URL, @"native_picker_865")) {
-                (void)amproj_restoreNativeXMLPickerDelegate(self, controller);
-                return;
-            }
-        }
-    }
     if (amproj_routeNativeProjectPicker(
             controller, URLs,
             NSStringFromSelector(@selector(documentPicker:didPickDocumentsAtURLs:)))) {
@@ -5106,11 +5046,6 @@ static void amproj_finishOriginalPickerAsCancelled(
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
     didPickDocumentAtURL:(NSURL *)URL {
-    if (amproj_rejectLikelyEncryptedXMLSelection865(
-            URL, @"native_picker_865")) {
-        (void)amproj_restoreNativeXMLPickerDelegate(self, controller);
-        return;
-    }
     NSArray<NSURL *> *URLs = URL ? @[URL] : @[];
     if (amproj_routeNativeProjectPicker(
             controller, URLs,
@@ -5153,6 +5088,11 @@ static void amproj_finishOriginalPickerAsCancelled(
 @end
 
 static void amproj_attachNativeXMLPickerProxy(UIViewController *controller) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        // 6.2.58 owns the complete document picker/delegate lifecycle.
+        amproj_log865LegacyPathDisabled(@"native_xml_picker_proxy");
+        return;
+    }
     if (![controller isKindOfClass:UIDocumentPickerViewController.class]) return;
     UIDocumentPickerViewController *picker =
         (UIDocumentPickerViewController *)controller;
@@ -11990,8 +11930,6 @@ static BOOL hooked_applicationOpenURL(id self, SEL _cmd, UIApplication *applicat
         @"extension": URL.pathExtension.lowercaseString ?: @"",
         @"scheme": URL.scheme ?: @""
     });
-    if (amproj_rejectLikelyEncryptedXMLSelection865(
-            URL, @"application_open_url_865")) return YES;
     if (amproj_handleImportCommandURL(URL, @"application_open_url_command")) return YES;
     if (amproj_captureSystemProjectURL(URL, @"application_open_url", options)) {
         return YES;
@@ -12512,8 +12450,6 @@ static BOOL hooked_applicationContinueActivity(id self, SEL _cmd, UIApplication 
         @"activity_type": activity.activityType ?: @"",
         @"extension": URL.pathExtension.lowercaseString ?: @""
     });
-    if (amproj_rejectLikelyEncryptedXMLSelection865(
-            URL, @"continue_user_activity_865")) return YES;
     if (amproj_handleImportCommandURL(URL, @"continue_user_activity_command")) return YES;
     if (amproj_captureSystemProjectURL(URL, @"continue_user_activity", options)) {
         return YES;
@@ -12544,8 +12480,6 @@ static BOOL hooked_applicationHandleOpenURL(id self, SEL _cmd,
         @"delegate": NSStringFromClass([self class]) ?: @"",
         @"extension": URL.pathExtension.lowercaseString ?: @""
     });
-    if (amproj_rejectLikelyEncryptedXMLSelection865(
-            URL, @"application_handle_open_url_865")) return YES;
     if (amproj_handleImportCommandURL(URL, @"application_handle_open_url_command")) return YES;
     if (amproj_captureSystemProjectURL(URL, @"application_handle_open_url", nil)) {
         return YES;
@@ -12578,8 +12512,6 @@ static BOOL hooked_applicationLegacyOpenURL(id self, SEL _cmd, UIApplication *ap
         @"extension": URL.pathExtension.lowercaseString ?: @"",
         @"source_application": sourceApplication ?: @""
     });
-    if (amproj_rejectLikelyEncryptedXMLSelection865(
-            URL, @"application_legacy_open_url_865")) return YES;
     NSDictionary *options = sourceApplication.length
         ? @{@"source_application": sourceApplication} : nil;
     if (amproj_handleImportCommandURL(URL, @"application_legacy_open_url_command")) return YES;
@@ -12759,11 +12691,6 @@ static void hooked_sceneOpenURLContexts(id self, SEL _cmd, UIScene *scene,
         }
         if (!URL) {
             if (context) [passthroughContexts addObject:context];
-            continue;
-        }
-        if (amproj_rejectLikelyEncryptedXMLSelection865(
-                URL, @"scene_open_url_contexts_865")) {
-            consumedCount++;
             continue;
         }
         if (amproj_handleImportCommandURL(URL, @"scene_open_url_contexts_command") ||
@@ -15360,18 +15287,6 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         return;
     }
 #endif
-    if (amproj_runtimeIsBuild865() &&
-        [controller isKindOfClass:UIDocumentPickerViewController.class]) {
-        // 865 uses AM's picker unchanged; the proxy only rejects a clearly
-        // encrypted XML prefix and otherwise forwards every delegate callback.
-        @try { amproj_attachNativeXMLPickerProxy(controller); }
-        @catch (NSException *exception) {
-            amproj_logCriticalEvent(@"import.picker_validation_proxy_exception", @{
-                @"name": exception.name ?: @"NSException",
-                @"reason": exception.reason ?: @""
-            });
-        }
-    }
     if (!amproj_runtimeUsesLegacyImportHooks()) {
         if (amproj_isIPAFireWelcome(controller)) {
             // Some signed 6.2.58 packages present the IPAFire welcome screen
@@ -16441,94 +16356,6 @@ static BOOL amproj_installDeclaredURLHooks(void) {
     return modernInstalled || handleInstalled || legacyInstalled;
 }
 
-// Build 865 gets only a passthrough URL validator. Unlike the legacy import
-// hook this does not stage files, inspect private controllers, or alter launch
-// options; it consumes only a positively classified encrypted XML and forwards
-// every other callback to Alight Motion's original implementation.
-static BOOL amproj_install865ValidationURLHooks(void) {
-    if (!amproj_runtimeIsBuild865()) return NO;
-
-    Class declaredClass = amproj_declaredAppDelegateClass();
-    id delegate = UIApplication.sharedApplication.delegate;
-    Class runtimeClass = delegate ? object_getClass(delegate) : Nil;
-    Class classes[2] = {declaredClass, runtimeClass};
-    BOOL installed = NO;
-    for (NSUInteger index = 0; index < 2; index++) {
-        Class cls = classes[index];
-        if (!cls || (index == 1 && cls == classes[0])) continue;
-
-        Method modern = class_getInstanceMethod(
-            cls, @selector(application:openURL:options:));
-        if (modern) {
-            BOOL changed = NO;
-            installed |= amproj_installTrackedHook(
-                cls, @selector(application:openURL:options:),
-                (IMP)hooked_applicationOpenURL, 5,
-                amproj_openURLHooks,
-                sizeof(amproj_openURLHooks) / sizeof(amproj_openURLHooks[0]),
-                &changed);
-        }
-        Method activity = class_getInstanceMethod(
-            cls, @selector(application:continueUserActivity:restorationHandler:));
-        if (activity) {
-            BOOL changed = NO;
-            installed |= amproj_installTrackedHook(
-                cls, @selector(application:continueUserActivity:restorationHandler:),
-                (IMP)hooked_applicationContinueActivity, 5,
-                amproj_continueActivityHooks,
-                sizeof(amproj_continueActivityHooks) /
-                    sizeof(amproj_continueActivityHooks[0]),
-                &changed);
-        }
-        SEL handleSelector = NSSelectorFromString(@"application:handleOpenURL:");
-        Method handle = class_getInstanceMethod(cls, handleSelector);
-        if (handle) {
-            BOOL changed = NO;
-            installed |= amproj_installTrackedHook(
-                cls, handleSelector, (IMP)hooked_applicationHandleOpenURL, 4,
-                amproj_handleOpenURLHooks,
-                sizeof(amproj_handleOpenURLHooks) /
-                    sizeof(amproj_handleOpenURLHooks[0]),
-                &changed);
-        }
-        SEL legacySelector = NSSelectorFromString(
-            @"application:openURL:sourceApplication:annotation:");
-        Method legacy = class_getInstanceMethod(cls, legacySelector);
-        if (legacy) {
-            BOOL changed = NO;
-            installed |= amproj_installTrackedHook(
-                cls, legacySelector, (IMP)hooked_applicationLegacyOpenURL, 6,
-                amproj_legacyOpenURLHooks,
-                sizeof(amproj_legacyOpenURLHooks) /
-                    sizeof(amproj_legacyOpenURLHooks[0]),
-                &changed);
-        }
-    }
-
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            id sceneDelegate = scene.delegate;
-            Class cls = sceneDelegate ? object_getClass(sceneDelegate) : Nil;
-            if (!cls) continue;
-            SEL selector = NSSelectorFromString(@"scene:openURLContexts:");
-            if (!class_getInstanceMethod(cls, selector)) continue;
-            BOOL changed = NO;
-            installed |= amproj_installTrackedHook(
-                cls, selector, (IMP)hooked_sceneOpenURLContexts, 4,
-                amproj_sceneOpenURLHooks,
-                sizeof(amproj_sceneOpenURLHooks) /
-                    sizeof(amproj_sceneOpenURLHooks[0]),
-                &changed);
-        }
-    }
-    amproj_debugEvent(@"import.865_validation_hooks", @{
-        @"installed": @(installed),
-        @"declared_class": declaredClass ? NSStringFromClass(declaredClass) : @"",
-        @"runtime_class": runtimeClass ? NSStringFromClass(runtimeClass) : @""
-    });
-    return installed;
-}
-
 static void amproj_installProjectsImportAlertHook(void) {
     static dispatch_once_t onceToken;
     Class cls = NSClassFromString(@"AlightMotion.ProjectsImportAlert");
@@ -17061,7 +16888,9 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                     });
                 }
             });
-        if (AMProjNativePackageImportBridgeIsRuntimeSupported()) {
+        // The private PackageImporter adapter belongs solely to the verified
+        // 6.2.55/862 lane. Build 865 delegates project documents to AM itself.
+        if (amproj_runtimeUsesLegacyImportHooks()) {
             AMProjInstallNativePackageImportBridge();
         } else {
             amproj_log865LegacyPathDisabled(@"native_package_bridge");
@@ -17157,11 +16986,6 @@ static void AMProjExportInit(void) {
         AMCloudSyncInstallPluginHooksEarly();
 #endif
         amproj_restorePhotoAlbumMode();
-        if (amproj_runtimeIsBuild865()) {
-            // Install only the non-invasive URL validator; all legacy import
-            // staging and private bridge hooks remain disabled on 865.
-            amproj_install865ValidationURLHooks();
-        }
 
         // ObjC classes are registered before image constructors. Installing only
         // this AppDelegate hook here avoids touching UIApplication or UIKit UI.
@@ -17195,14 +17019,10 @@ static void AMProjExportInit(void) {
             // creates the media browser, so their demo preset cannot win a
             // constructor-order race.
             amproj_restorePhotoAlbumMode();
-            if (amproj_runtimeIsBuild865()) {
-                amproj_install865ValidationURLHooks();
-            }
-            // Install only the app/scene delivery hooks here. UIKit presentation
-            // hook must be present here because AM can present its startup
+            // UIKit's presentation hook must be present here because AM can
+            // present its startup
             // PaywallLoadingScreenView before DidFinishLaunching. Do not consume
-            // launchOptions here: notification URLs may lack the delegate
-            // callback's temporary sandbox extension.
+            // launch URLs here: Build 865 owns its own document lifecycle.
             amproj_installPresentationHook();
             amproj_installImportHook();
             amproj_scheduleIPAFireWelcomeSuppression(@"will_finish_launching");
@@ -17226,9 +17046,6 @@ static void AMProjExportInit(void) {
             amproj_startStartupPaywallRescue();
             amproj_schedulePaywallScan(nil, @"did_become_active");
             amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active");
-            if (amproj_runtimeIsBuild865()) {
-                amproj_install865ValidationURLHooks();
-            }
             if (amproj_runtimeUsesLegacyImportHooks()) {
                 // The launch URL is the current user action. Consume its deferred
                 // candidate first; only then inspect stale app-owned Inbox files.
@@ -17266,8 +17083,6 @@ static void AMProjExportInit(void) {
                     ? notification.object : nil;
                 if (amproj_runtimeUsesLegacyImportHooks()) {
                     amproj_installSceneImportHook(scene.delegate);
-                } else if (amproj_runtimeIsBuild865()) {
-                    amproj_install865ValidationURLHooks();
                 } else {
                     amproj_log865LegacyPathDisabled(@"scene_connect_import_hook");
                 }
