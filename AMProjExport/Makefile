@@ -17,16 +17,16 @@ LDLIBS = -framework Foundation -framework UIKit -framework QuartzCore \
 
 all: AMProjExport.dylib AMProjExportDebug.dylib AMHomeUI.dylib
 
-AMProjExport.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m AMDebugTransport.h AMCloudSync.m AMCloudSync.h AMCloudPlugins.m AMCloudPlugins.h AMEditorCustomization.m AMEditorCustomization.h
-	$(CC) $(CFLAGS) -DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862) -DAMPROJ_TELEMETRY=1 -DAMPROJ_CLOUD_SYNC=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m AMCloudSync.m AMCloudPlugins.m AMEditorCustomization.m $(LDLIBS) -framework Security -framework WebKit -install_name @rpath/AMProjExport.dylib
+AMProjExport.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S AMProjV865ProjectFlow.m AMProjV865ProjectFlow.h AMDebugTransport.m AMDebugTransport.h AMCloudSync.m AMCloudSync.h AMCloudPlugins.m AMCloudPlugins.h AMEditorCustomization.m AMEditorCustomization.h
+	$(CC) $(CFLAGS) -DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862) -DAMPROJ_TELEMETRY=1 -DAMPROJ_CLOUD_SYNC=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMProjV865ProjectFlow.m AMDebugTransport.m AMCloudSync.m AMCloudPlugins.m AMEditorCustomization.m $(LDLIBS) -framework Security -framework WebKit -install_name @rpath/AMProjExport.dylib
 	@ls -la $@
 
-AMProjExportOffline.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S
-	$(CC) $(CFLAGS) -DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862) -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S $(LDLIBS) -install_name @rpath/AMProjExportOffline.dylib
+AMProjExportOffline.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S AMProjV865ProjectFlow.m AMProjV865ProjectFlow.h
+	$(CC) $(CFLAGS) -DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862) -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMProjV865ProjectFlow.m $(LDLIBS) -install_name @rpath/AMProjExportOffline.dylib
 	@ls -la $@
 
-AMProjExportDebug.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m AMDebugTransport.h
-	$(CC) $(CFLAGS) -DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862) -DAMPROJ_DEBUG=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMDebugTransport.m $(LDLIBS)
+AMProjExportDebug.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S AMProjV865ProjectFlow.m AMProjV865ProjectFlow.h AMDebugTransport.m AMDebugTransport.h
+	$(CC) $(CFLAGS) -DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862) -DAMPROJ_DEBUG=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMProjV865ProjectFlow.m AMDebugTransport.m $(LDLIBS)
 	@ls -la $@
 
 AMMeowLoader.dylib: AMMeowLoader.c

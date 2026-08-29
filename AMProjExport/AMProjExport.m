@@ -39,6 +39,7 @@
 #import "AMProjArchiveWriter.h"
 #import "AMProjImportArchive.h"
 #import "AMProjNativeImportBridge.h"
+#import "AMProjV865ProjectFlow.h"
 
 #if AMPROJ_CLOUD_SYNC
 #import "AMCloudSync.h"
@@ -11310,6 +11311,25 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLSafely(
 static BOOL amproj_importCloudPackage(NSURL *URL, NSString *filename,
                                       NSURL *cleanupURL) {
     if (!URL.isFileURL) return NO;
+    if (amproj_runtimeIsBuild865()) {
+        // Cloud downloads on 865 use the public UIKit document handoff. The
+        // adapter copies the verified file before AMCloudSync removes its
+        // temporary download directory, then lets Alight Motion receive it
+        // through the normal system document route.
+        BOOL queued = AMProjV865ProjectFlowQueueDownloadedProject(
+            URL, filename.length ? filename : @"project.amproj");
+        amproj_debugEvent(@"cloud.import_865_handoff", @{
+            @"accepted": @(queued),
+            @"filename": filename ?: @"",
+            @"native_document_route": @YES,
+            @"legacy_862_bridge": @NO
+        });
+        return queued;
+    }
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"cloud_project_import");
+        return NO;
+    }
     BOOL prepared = NO;
     NSDictionary *options = @{
         @"AMProjOriginalFilename": filename.length ? filename : @"project.amproj",
@@ -15300,6 +15320,31 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             if (completion) dispatch_async(dispatch_get_main_queue(), completion);
             return;
         }
+        // Build 865 has a different private ShareVC ABI, but its concrete
+        // project-package controller is stable enough to use as a semantic
+        // boundary.  The adapter performs no selector/ivar calls; it only
+        // decides whether our already-generated .amproj exporter should own
+        // this presentation.  All other controllers remain native.
+        if (amproj_runtimeIsBuild865() &&
+            AMProjV865ProjectFlowIsProjectPackageController(controller)) {
+            NSString *mode = amproj_exportMode();
+            if (![mode isEqualToString:@"observe"] &&
+                [self isKindOfClass:UIViewController.class]) {
+                UIViewController *presenter = (UIViewController *)self;
+                NSString *title = amproj_currentProjectTitle(presenter);
+                void (^originalCompletion)(void) = [completion copy];
+                amproj_logCriticalEvent(@"865.project_export_entry", @{
+                    @"controller": NSStringFromClass(controller.class) ?: @"",
+                    @"destination": @"share_sheet",
+                    @"native_private_abi": @NO
+                });
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    amproj_startDirectExport(
+                        presenter, controller, animated, originalCompletion, title);
+                });
+                return;
+            }
+        }
         // The account presentation replacement remains active above. All
         // other controllers, including document pickers, XML import alerts,
         // and activity sheets, must use the native lifecycle exactly once.
@@ -16811,6 +16856,9 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
         if (amproj_mainThread == MACH_PORT_NULL) amproj_mainThread = mach_thread_self();
 #endif
         amproj_installPresentationHook();
+        if (amproj_runtimeIsBuild865()) {
+            AMProjV865ProjectFlowInstall();
+        }
         amproj_armPaywallStartupFallback();
         amproj_startStartupPaywallRescue();
         amproj_installImportHook();
@@ -16889,25 +16937,13 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
             AMProjRegisterNativePackageImportStarter(nil);
         }
 #if AMPROJ_CLOUD_SYNC
-        AMCloudImportHandler cloudImportHandler = nil;
-        if (!amproj_runtimeUsesLegacyImportHooks()) {
-            // Cloud account/avatar/plugin synchronization stays enabled. The
-            // old cloud-project importer is intentionally unavailable until
-            // a matching legacy ABI is verified, so fail closed without touching the
-            // native PackageImporter or an old delegate.
-            cloudImportHandler = ^BOOL(__unused NSURL *URL,
-                                       __unused NSString *filename,
-                                       __unused NSURL *cleanupURL) {
-                amproj_log865LegacyPathDisabled(@"cloud_project_import");
-                return NO;
-            };
-        } else {
-            cloudImportHandler = ^BOOL(NSURL *URL, NSString *filename,
-                                       NSURL *cleanupURL) {
-                return amproj_importCloudPackage(URL, filename, cleanupURL);
-            };
-        }
-        AMCloudSyncInstall(cloudImportHandler);
+        // The same cloud callback is used for both supported lanes.  The
+        // handler itself selects the exact 865 public handoff or the verified
+        // 862 private bridge; no old bridge is ever reachable on 865.
+        AMCloudSyncInstall(^BOOL(NSURL *URL, NSString *filename,
+                                 NSURL *cleanupURL) {
+            return amproj_importCloudPackage(URL, filename, cleanupURL);
+        });
 #endif
 
         NSString *startupTrigger = [trigger copy] ?: @"unknown";

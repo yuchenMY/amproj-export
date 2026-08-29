@@ -43,10 +43,14 @@ document lifecycle。`build_865_migration_package.py` 只在 `Info.plist` 注册
 应用内文件选择器仍由 865 自己完成，已有的 Swift 文档状态和工程引用不会被第二个消费者改写。
 
 865 不安装 6.2.55/862 的私有 `PackageImporter` continuation、UIDocumentPicker delegate、
-Scene/URL、ShareNC 或 UIActivity 导出 Hook。当前源码没有经过 865 ABI 验证的专用入口，
-因此不能为了“恢复入口”复用旧地址；云工程下载回调在 865 上保持 fail-closed，避免把下载缓存
-伪装成已经导入。要实现云工程下载后自动导入，必须先取得并验证 865 的真实类、selector、参数
-和 completion，再单独增加 865 适配器。
+Scene/URL、ShareNC 或 UIActivity 导出 Hook。云工程下载回调先把已经校验过的文件原子复制到
+`Application Support/AMProjV865ProjectHandoff/<UUID>/`，再通过 UIKit 公开的
+`UIDocumentInteractionController` Open In 菜单交回 865 原生文档链路；临时文件不会被
+`AMCloudSync` 的下载清理抢先删除。菜单由系统和 865 自己完成，下载成功不伪装成已经导入，
+必要时用户可按系统提示彻底关闭并重新打开应用。项目包导出只在精确的
+`AlightMotion.ShareProjectPackageVC` 或 `_TtC12AlightMotion21ShareProjectPackageVC`
+控制器边界触发已有 `.amproj` 导出器，其他 XML、媒体和文档回调继续交给 865 原生实现。
+6.2.55/862 的私有 bridge 仅作为历史兼容路径保留，任何版本不匹配都会被禁用，不能用于 865。
 
 ### 865 迁移打包
 

@@ -3030,20 +3030,19 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             bootstrap.index('amproj_debugEvent(@"bootstrap.ready"'),
         )
 
-    def test_build_865_cloud_project_callback_fails_closed_without_legacy_import(self):
+    def test_build_865_cloud_project_callback_uses_public_handoff(self):
         bootstrap = function_body(
             'static void amproj_bootstrapAfterLaunch',
             '__attribute__((constructor))',
         )
-        handler_start = bootstrap.index('AMCloudImportHandler cloudImportHandler')
+        handler_start = bootstrap.index('AMCloudSyncInstall(^BOOL(NSURL *URL, NSString *filename,')
         handler = bootstrap[handler_start:]
-        disabled_start = handler.index('if (!amproj_runtimeUsesLegacyImportHooks())')
-        else_start = handler.index('} else {', disabled_start)
-        disabled_branch = handler[disabled_start:else_start]
-        self.assertNotIn('amproj_importCloudPackage', disabled_branch)
-        self.assertIn('amproj_log865LegacyPathDisabled(@"cloud_project_import")', disabled_branch)
-        self.assertIn('return NO;', disabled_branch)
-        self.assertIn('return amproj_importCloudPackage(URL, filename, cleanupURL);', handler[else_start:])
+        self.assertIn('AMCloudSyncInstall(^BOOL(NSURL *URL, NSString *filename,', handler)
+        self.assertIn('return amproj_importCloudPackage(URL, filename, cleanupURL);', handler)
+        cloud = SOURCE[SOURCE.index('static BOOL amproj_importCloudPackage') :]
+        self.assertIn('if (amproj_runtimeIsBuild865())', cloud)
+        self.assertIn('AMProjV865ProjectFlowQueueDownloadedProject', cloud)
+        self.assertIn('amproj_runtimeUsesLegacyImportHooks()', cloud)
 
     def test_encrypted_xml_is_rejected_before_packaging_and_queueing(self):
         body = function_body(
