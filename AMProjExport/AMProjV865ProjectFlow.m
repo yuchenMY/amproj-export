@@ -224,8 +224,12 @@ BOOL AMProjV865ProjectFlowPresentDocument(NSURL *fileURL, NSString *filename,
         NSLog(@"[AMProjExport] 865 project handoff rejected: %@", error.localizedDescription);
         return NO;
     }
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+    // AMCloudSync dismisses its account controller immediately after the
+    // import callback returns. Defer the UIKit handoff until that dismissal
+    // has completed, then resolve the current foreground presenter on main.
+    void (^presentWhenReady)(void) = ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
             UIViewController *owner = AMProjV865TopController(presenter) ?:
                 AMProjV865ForegroundPresenter();
             if (!owner) {
@@ -234,14 +238,13 @@ BOOL AMProjV865ProjectFlowPresentDocument(NSURL *fileURL, NSString *filename,
             }
             (void)AMProjV865PresentStagedDocument(stagedURL, owner);
         });
-        return YES;
+    };
+    if ([NSThread isMainThread]) {
+        presentWhenReady();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), presentWhenReady);
     }
-    UIViewController *owner = AMProjV865TopController(presenter) ?: AMProjV865ForegroundPresenter();
-    if (!owner) {
-        NSLog(@"[AMProjExport] 865 project handoff staged without a visible presenter");
-        return YES;
-    }
-    return AMProjV865PresentStagedDocument(stagedURL, owner);
+    return YES;
 }
 
 BOOL AMProjV865ProjectFlowQueueDownloadedProject(NSURL *fileURL, NSString *filename) {
