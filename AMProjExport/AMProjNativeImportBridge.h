@@ -22,6 +22,12 @@ FOUNDATION_EXPORT void AMProjRegisterNativePackageImportStarter(
 FOUNDATION_EXPORT void AMProjRegisterNativePackageImportEventHandler(
     AMProjNativePackageImportEventHandler _Nullable handler);
 
+// The native PackageImporter bridge relies on a private, build-specific ABI.
+// Returns YES only when the explicitly enabled legacy ABI has been verified
+// against the running Alight Motion executable. The 6.2.58 (865) build uses
+// Alight Motion's own document importer and therefore returns NO.
+FOUNDATION_EXPORT BOOL AMProjNativePackageImportBridgeIsRuntimeSupported(void);
+
 FOUNDATION_EXPORT void AMProjInstallNativePackageImportBridge(void);
 
 // Returns YES when an active local import consumed the native failure.

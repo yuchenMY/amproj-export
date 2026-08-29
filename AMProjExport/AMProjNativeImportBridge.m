@@ -7,6 +7,13 @@
 #import <stdlib.h>
 #import <string.h>
 
+#ifndef AMPROJ_ENABLE_LEGACY_862
+// The old bridge targets private 6.2.55/862 symbols. Keep the verified legacy
+// lane available for the shared source tree; runtime version, UUID, and code
+// fingerprints still gate every call. 865 builds therefore never enter it.
+#define AMPROJ_ENABLE_LEGACY_862 1
+#endif
+
 static NSString *const AMProjNativeBridgeErrorDomain =
     @"com.amproj.import.native-bridge";
 
@@ -260,6 +267,15 @@ static const struct mach_header_64 *AMProjMainHeader(void) {
 }
 
 static BOOL AMProjMainExecutableMatches(NSError **error) {
+#if !AMPROJ_ENABLE_LEGACY_862
+    if (error) *error = AMProjNativeBridgeError(
+        100,
+        @"The native PackageImporter bridge is disabled for Alight Motion 6.2.58 (865)",
+        @{ @"bundle_version":
+               [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"",
+           @"bridge": @"legacy_862" });
+    return NO;
+#else
     static const uint8_t expectedUUID[16] = {
         0x01, 0xb7, 0x30, 0x17, 0x1a, 0x6e, 0x3b, 0x17,
         0x8f, 0x59, 0xc2, 0x74, 0x62, 0xde, 0xa5, 0x63,
@@ -319,6 +335,31 @@ static BOOL AMProjMainExecutableMatches(NSError **error) {
         return NO;
     }
     return YES;
+#endif
+}
+
+BOOL AMProjNativePackageImportBridgeIsRuntimeSupported(void) {
+    NSBundle *bundle = NSBundle.mainBundle;
+    NSString *version = [bundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    NSString *build = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"];
+
+    // 6.2.58/865 has a different private importer ABI. It must always use
+    // Alight Motion's own document picker until a separately verified bridge
+    // is available for that build.
+    if ([version isEqualToString:@"6.2.58"] &&
+        [build isEqualToString:@"865"]) {
+        return NO;
+    }
+#if !AMPROJ_ENABLE_LEGACY_862
+    return NO;
+#else
+    if (![version isEqualToString:@"6.2.55"] ||
+        ![build isEqualToString:@"862"]) {
+        return NO;
+    }
+    NSError *compatibilityError = nil;
+    return AMProjMainExecutableMatches(&compatibilityError);
+#endif
 }
 
 static void *AMProjMainAddress(uintptr_t preferredAddress) {
@@ -674,9 +715,11 @@ static BOOL AMProjStartNativePackageImport(
         return NO;
     }
 
-    NSError *compatibilityError = nil;
-    if (!AMProjMainExecutableMatches(&compatibilityError)) {
-        if (error) *error = compatibilityError;
+    if (!AMProjNativePackageImportBridgeIsRuntimeSupported()) {
+        if (error) *error = AMProjNativeBridgeError(
+            100,
+            @"The native PackageImporter bridge is unavailable for this Alight Motion build",
+            @{ @"bridge": @"legacy_862" });
         return NO;
     }
 
@@ -915,13 +958,15 @@ static BOOL AMProjStartNativePackageImport(
 void AMProjInstallNativePackageImportBridge(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSError *compatibilityError = nil;
-        BOOL compatible = AMProjMainExecutableMatches(&compatibilityError);
-        NSLog(@"[AMProjExport] Native PackageImporter bridge: %@%@",
-              compatible ? @"ready" : @"incompatible",
-              compatibilityError.localizedDescription.length
-                  ? [@" - " stringByAppendingString:compatibilityError.localizedDescription]
-                  : @"");
+        // Never register the old starter on 6.2.58/865 (or any unverified
+        // build). Registering it would expose 6.2.55 private ABI calls to the
+        // system picker and can crash before Alight Motion handles the URL.
+        if (!AMProjNativePackageImportBridgeIsRuntimeSupported()) {
+            NSLog(@"[AMProjExport] Native PackageImporter bridge: disabled for current build");
+            AMProjRegisterNativePackageImportStarter(nil);
+            return;
+        }
+        NSLog(@"[AMProjExport] Native PackageImporter bridge: ready (verified legacy ABI)");
         AMProjRegisterNativePackageImportStarter(
             ^BOOL(NSURL *packageURL, NSString *originalName,
                   AMProjNativePackageImportCompletion completion,

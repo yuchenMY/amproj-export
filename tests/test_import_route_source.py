@@ -1409,12 +1409,13 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
     def test_v44_manual_deletion_stays_outside_plugin_hooks(self):
         present = function_body("static void hooked_presentVC", "#if AMPROJ_DEBUG")
-        guard = present[:present.index("UIDocumentPickerViewController.class")]
-        self.assertIn("UIAlertController.class", guard)
-        self.assertIn("amproj_hasPluginManagedImportAlertContext", guard)
-        self.assertIn("orig_presentVC(self, _cmd, controller, animated, completion)", guard)
-        self.assertNotIn("amproj_startupPaywallPresentationDecision", guard)
-        self.assertNotIn("amproj_isSharePackageController", guard)
+        gate_start = present.index("if (!amproj_runtimeUsesLegacyImportHooks())")
+        pre_gate = present[:gate_start]
+        self.assertNotIn("amproj_startupPaywallPresentationDecision", pre_gate)
+        self.assertNotIn("amproj_isSharePackageController", pre_gate)
+        self.assertIn("UIAlertController.class", present)
+        self.assertIn("amproj_hasPluginManagedImportAlertContext", present)
+        self.assertIn("orig_presentVC(self, _cmd, controller, animated, completion)", present)
 
         view_load = function_body(
             "static void hooked_projectsImportAlertViewDidLoad",
@@ -2821,6 +2822,279 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertGreaterEqual(body.count("return AMProjIncomingURLFailed;"), 2)
         self.assertNotRegex(body, re.compile(r"return\s+(YES|NO);"))
         self.assertIn("amproj_prepareCopiedArchive", body)
+
+    def test_build_865_identity_is_exact_version_and_build_pair(self):
+        identity = function_body(
+            "static BOOL amproj_runtimeIsBuild865",
+            "static BOOL amproj_runtimeUsesLegacyImportHooks",
+        )
+        self.assertIn('CFBundleShortVersionString', identity)
+        self.assertIn('CFBundleVersion', identity)
+        self.assertIn('[shortVersion isEqualToString:@"6.2.58"]', identity)
+        self.assertIn('[buildVersion isEqualToString:@"865"]', identity)
+        self.assertIn('return [shortVersion isEqualToString:@"6.2.58"] &&', identity)
+
+        legacy = function_body(
+            "static BOOL amproj_runtimeIsLegacy862",
+            "static void amproj_log865LegacyPathDisabled",
+        )
+        self.assertIn('[shortVersion isEqualToString:@"6.2.55"]', legacy)
+        self.assertIn('[buildVersion isEqualToString:@"862"]', legacy)
+        uses_legacy = function_body(
+            "static BOOL amproj_runtimeUsesLegacyImportHooks",
+            "static void amproj_log865LegacyPathDisabled",
+        )
+        self.assertIn('AMProjNativePackageImportBridgeIsRuntimeSupported()', uses_legacy)
+
+    def test_build_865_does_not_install_legacy_native_import_bridge(self):
+        self.assertIn('#define AMPROJ_ENABLE_LEGACY_862 1', BRIDGE_SOURCE)
+        self.assertIn('LEGACY_862 ?= 1', MAKEFILE)
+        self.assertIn('-DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862)', MAKEFILE)
+        supported = source_body(
+            BRIDGE_SOURCE,
+            'BOOL AMProjNativePackageImportBridgeIsRuntimeSupported(void)',
+            'static void *AMProjMainAddress',
+        )
+        self.assertIn('[version isEqualToString:@"6.2.58"]', supported)
+        self.assertIn('[build isEqualToString:@"865"]', supported)
+        self.assertIn('return NO;', supported)
+
+        installer_start = BRIDGE_SOURCE.index(
+            'void AMProjInstallNativePackageImportBridge(void)'
+        )
+        installer = BRIDGE_SOURCE[installer_start:]
+        self.assertIn('AMProjNativePackageImportBridgeIsRuntimeSupported()', installer)
+        disabled = installer[installer.index('if (!AMProjNativePackageImportBridgeIsRuntimeSupported())'):]
+        self.assertIn('AMProjRegisterNativePackageImportStarter(nil);', disabled)
+        self.assertLess(
+            disabled.index('AMProjRegisterNativePackageImportStarter(nil);'),
+            disabled.index('AMProjRegisterNativePackageImportStarter(\n'),
+        )
+
+    def test_build_865_import_and_picker_hooks_return_before_swizzling(self):
+        picker = function_body(
+            'static void amproj_installNativeProjectPickerHook(void)',
+            'static void amproj_installImportHook(void)',
+        )
+        import_hook = function_body(
+            'static void amproj_installImportHook(void)',
+            'static void amproj_installShareExportHook(void)',
+        )
+        for body, marker in (
+            (picker, 'amproj_log865LegacyPathDisabled(@"native_document_picker")'),
+            (import_hook, 'amproj_log865LegacyPathDisabled(@"import_hooks")'),
+        ):
+            gate = body.index('if (!amproj_runtimeUsesLegacyImportHooks())')
+            marker_index = body.index(marker, gate)
+            return_index = body.index('return;', marker_index)
+            self.assertLess(gate, marker_index)
+            self.assertLess(marker_index, return_index)
+        self.assertIn('amproj_installNativeProjectPickerHook();', import_hook)
+        self.assertGreater(import_hook.index('amproj_installNativeProjectPickerHook();'),
+                           import_hook.index('return;'))
+
+    def test_build_865_encrypted_xml_guard_is_reachable_from_native_picker_and_url_callbacks(self):
+        guard = function_body(
+            "static BOOL amproj_rejectLikelyEncryptedXMLSelection865",
+            "static NSString* amproj_normalizedProjectTitle",
+        )
+        self.assertIn('amproj_runtimeIsBuild865()', guard)
+        self.assertIn('readDataOfLength:64 * 1024', guard)
+        self.assertIn('amproj_isLikelyEncryptedXML(prefix, &signal)', guard)
+        self.assertIn('amproj_presentXMLImportError(@"加密 XML 无法导入", NO)', guard)
+
+        picker = function_body(
+            "- (void)documentPicker:(UIDocumentPickerViewController *)controller\n    didPickDocumentsAtURLs:",
+            "- (void)documentPicker:(UIDocumentPickerViewController *)controller\n    didPickDocumentAtURL:",
+        )
+        self.assertIn('amproj_rejectLikelyEncryptedXMLSelection865(', picker)
+        single = function_body(
+            "- (void)documentPicker:(UIDocumentPickerViewController *)controller\n    didPickDocumentAtURL:",
+            "- (void)documentPickerWasCancelled:",
+        )
+        self.assertIn('amproj_rejectLikelyEncryptedXMLSelection865(', single)
+
+        for signature, next_signature, marker in (
+            (
+                'static BOOL hooked_applicationOpenURL',
+                'static NSURL* amproj_projectURLFromUserActivity',
+                'application_open_url_865',
+            ),
+            (
+                'static BOOL hooked_applicationContinueActivity',
+                'static BOOL hooked_applicationHandleOpenURL',
+                'continue_user_activity_865',
+            ),
+            (
+                'static void hooked_sceneOpenURLContexts',
+                'static void (*orig_projectsImportAlertViewDidLoad)',
+                'scene_open_url_contexts_865',
+            ),
+        ):
+            body = source_body(SOURCE, signature, next_signature)
+            self.assertIn('amproj_rejectLikelyEncryptedXMLSelection865(', body)
+            self.assertIn(marker, body)
+
+        installer = function_body(
+            'static BOOL amproj_install865ValidationURLHooks',
+            'static void amproj_installProjectsImportAlertHook',
+        )
+        self.assertIn('amproj_installTrackedHook', installer)
+        self.assertIn('hooked_applicationOpenURL', installer)
+        self.assertIn('hooked_sceneOpenURLContexts', installer)
+        self.assertIn('amproj_install865ValidationURLHooks();', SOURCE)
+
+    def test_build_865_present_hook_keeps_account_replacement_and_forwards_other_presentations(self):
+        present = function_body(
+            'static void hooked_presentVC',
+            '#if AMPROJ_DEBUG',
+        )
+        account = present.index('AMCloudSyncReplacementForNativeAccountPresentation')
+        gate = present.index('if (!amproj_runtimeUsesLegacyImportHooks())')
+        forwarding = present.index(
+            'orig_presentVC(self, _cmd, controller, animated, completion)', gate
+        )
+        self.assertLess(account, gate)
+        self.assertLess(gate, forwarding)
+        self.assertIn('AMCloudSyncInstallPluginHooksEarly();', SOURCE)
+        self.assertIn('AMCloudSyncReplacementForNativeAccountPush', SOURCE)
+
+    def test_build_865_suppresses_signed_welcome_screen_without_touching_account_page(self):
+        detector = source_body(
+            SOURCE,
+            'static BOOL amproj_IPAFireTextMatches',
+            'static BOOL amproj_IPAFireViewContainsMarker',
+        )
+        welcome_detector = function_body(
+            'static BOOL amproj_isIPAFireWelcome',
+            'static void amproj_dismissIPAFireWelcomeIfPresented',
+        )
+        self.assertIn('instant certificates', detector)
+        self.assertIn('more apps', detector)
+        self.assertIn('cracked by blatant', detector)
+        self.assertIn('amproj_IPAFireAppendViewText', SOURCE)
+        self.assertIn('amproj_IPAFireFindOverlayView', SOURCE)
+        self.assertIn('viewIfLoaded', welcome_detector)
+        dismiss = function_body(
+            'static void amproj_dismissIPAFireWelcomeIfPresented',
+            '// A self-signed build can leave StoreKit',
+        )
+        self.assertIn('dismissViewControllerAnimated:NO', dismiss)
+        present = function_body(
+            'static void hooked_presentVC',
+            '#if AMPROJ_DEBUG',
+        )
+        account = present.index('AMCloudSyncReplacementForNativeAccountPresentation')
+        welcome = present.index('amproj_isIPAFireWelcome')
+        forward = present.index(
+            'orig_presentVC(self, _cmd, controller, animated, wrappedCompletion)'
+        )
+        self.assertLess(account, welcome)
+        self.assertLess(welcome, forward)
+        self.assertIn('amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active")', SOURCE)
+        self.assertIn('amproj_IPAFireHideRootViewTemporarily', SOURCE)
+        self.assertIn('for (NSNumber *delay in @[@0.05, @0.25, @0.60, @0.75,', SOURCE)
+        self.assertIn('@1.25, @1.75, @2.50, @3.50])', SOURCE)
+        self.assertIn('UIWindowDidBecomeKeyNotification', SOURCE)
+
+    def test_build_865_does_not_scan_inboxes_or_replay_deferred_urls(self):
+        for signature, marker in (
+            (
+                'static void amproj_scanLocalImportInboxes',
+                'amproj_log865LegacyPathDisabled(@"local_import_inbox_scan")',
+            ),
+            (
+                'static void amproj_retryDeferredLaunchImportCandidates',
+                'amproj_log865LegacyPathDisabled(@"deferred_launch_import")',
+            ),
+        ):
+            body = function_body(
+                signature,
+                'static void amproj_retryDeferredLaunchImportCandidates'
+                if signature.startswith('static void amproj_scanLocalImportInboxes')
+                else 'static BOOL amproj_captureSystemProjectURL',
+            )
+            gate = body.index('if (!amproj_runtimeUsesLegacyImportHooks())')
+            marker_index = body.index(marker, gate)
+            self.assertLess(marker_index, body.index('return;', marker_index))
+        bootstrap = function_body(
+            'static void amproj_bootstrapAfterLaunch',
+            '__attribute__((constructor))',
+        )
+        self.assertIn('if (amproj_runtimeUsesLegacyImportHooks())', bootstrap)
+        self.assertIn('amproj_log865LegacyPathDisabled(@"bootstrap_import_scan")', bootstrap)
+        self.assertLess(
+            bootstrap.index('amproj_log865LegacyPathDisabled(@"bootstrap_import_scan")'),
+            bootstrap.index('amproj_debugEvent(@"bootstrap.ready"'),
+        )
+
+    def test_build_865_cloud_project_callback_fails_closed_without_legacy_import(self):
+        bootstrap = function_body(
+            'static void amproj_bootstrapAfterLaunch',
+            '__attribute__((constructor))',
+        )
+        handler_start = bootstrap.index('AMCloudImportHandler cloudImportHandler')
+        handler = bootstrap[handler_start:]
+        disabled_start = handler.index('if (!amproj_runtimeUsesLegacyImportHooks())')
+        else_start = handler.index('} else {', disabled_start)
+        disabled_branch = handler[disabled_start:else_start]
+        self.assertNotIn('amproj_importCloudPackage', disabled_branch)
+        self.assertIn('amproj_log865LegacyPathDisabled(@"cloud_project_import")', disabled_branch)
+        self.assertIn('return NO;', disabled_branch)
+        self.assertIn('return amproj_importCloudPackage(URL, filename, cleanupURL);', handler[else_start:])
+
+    def test_encrypted_xml_is_rejected_before_packaging_and_queueing(self):
+        body = function_body(
+            'static void amproj_prepareCopiedXML',
+            'static void amproj_prepareCopiedArchive',
+        )
+        probe = body.index('probe = data.length ? amproj_probeXML(data) : nil;')
+        valid = body.index('BOOL valid = probe != nil;', probe)
+        encrypted = body.index('BOOL likelyEncrypted = !valid', valid)
+        reject = body.index('if (likelyEncrypted)', encrypted)
+        zip_create = body.index('AMProjZIPWriteProjectArchive(', reject)
+        queue = body.index('amproj_queuePreparedImport(', zip_create)
+        self.assertLess(probe, valid)
+        self.assertLess(valid, encrypted)
+        self.assertLess(encrypted, reject)
+        self.assertLess(reject, zip_create)
+        self.assertLess(zip_create, queue)
+        self.assertIn('XML 导入失败', body)
+        self.assertIn('加密 XML 无法导入', body)
+
+    def test_encrypted_xml_telemetry_contains_only_bounded_metadata(self):
+        body = function_body(
+            'static void amproj_prepareCopiedXML',
+            'static void amproj_prepareCopiedArchive',
+        )
+        start = body.index('amproj_debugEvent(@"import.xml_encrypted_rejected"')
+        end = body.index('amproj_releaseImportTransaction(transactionID, NO);', start)
+        telemetry = body[start:end]
+        for forbidden in ('data', 'UTF8', 'prefix', 'preview', 'base64', 'hex'):
+            self.assertNotIn(forbidden, telemetry)
+        for allowed in ('transaction_id', 'source', 'filename', 'bytes', 'category', 'signal'):
+            self.assertIn(allowed, telemetry)
+
+    def test_encrypted_xml_classifier_excludes_archives_and_valid_text_probe(self):
+        classifier = function_body(
+            'static BOOL amproj_isLikelyEncryptedXML',
+            'static NSString* amproj_normalizedProjectTitle',
+        )
+        for signature in (
+            'zipLocal', 'gzip', 'sevenZip', 'rar', 'xz', 'bplist',
+            'png', 'jpeg', 'gif', 'pdf',
+        ):
+            self.assertIn(signature, classifier)
+        self.assertIn('if (first == \'<\' || first == \'{\' || first == \'[\') return NO;', classifier)
+        self.assertIn('if (nulCount > sampleLength / 4) return NO;', classifier)
+        body = function_body(
+            'static void amproj_prepareCopiedXML',
+            'static void amproj_prepareCopiedArchive',
+        )
+        self.assertLess(
+            body.index('probe = data.length ? amproj_probeXML(data) : nil;'),
+            body.index('BOOL likelyEncrypted = !valid'),
+        )
 
 
 if __name__ == "__main__":

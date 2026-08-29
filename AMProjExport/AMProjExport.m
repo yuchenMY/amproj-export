@@ -66,6 +66,7 @@ extern BOOL AMProjV44IsDirectProjectPackageOption(uint8_t selectedExportOption);
 #endif
 
 // Forward declarations
+@class AMProjNativeXMLPickerProxy;
 typedef NS_ENUM(NSInteger, AMProjIncomingURLResult) {
     AMProjIncomingURLNotRecognized = 0,
     AMProjIncomingURLAccepted,
@@ -75,6 +76,7 @@ static UIViewController* amproj_shareVCRecursive(
     UIViewController *controller, NSUInteger depth,
     NSMutableSet<NSValue *> *visited, uint8_t *selectedExportOption);
 static UIViewController* amproj_topViewController(UIViewController *controller);
+static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source);
 
 typedef NS_ENUM(NSInteger, AMProjImportKind) {
     AMProjImportKindPackage = 0,
@@ -121,6 +123,13 @@ static Class amproj_declaredAppDelegateClass(void);
 static void amproj_installApplicationDelegateHook(void);
 static void amproj_installShareExportHook(void);
 static void amproj_installNavigationExportHook(void);
+static void amproj_installPresentationHook(void);
+static id<UIDocumentPickerDelegate> amproj_restoreNativeXMLPickerDelegate(
+    AMProjNativeXMLPickerProxy *proxy,
+    UIDocumentPickerViewController *picker);
+static BOOL amproj_rejectLikelyEncryptedXMLSelection865(
+    NSURL *URL, NSString *source);
+static BOOL amproj_install865ValidationURLHooks(void);
 static NSString* amproj_importedFontFilename(NSString *reference);
 static NSDictionary* amproj_captureImportPersistenceSnapshot(void);
 static void amproj_storeImportProjectTitle(NSString *transactionID,
@@ -156,6 +165,57 @@ static void amproj_debugEvent(NSString *name, NSDictionary *fields) {
 static void amproj_logCriticalEvent(NSString *name, NSDictionary *fields) {
     NSLog(@"[AMProjExport] %@ %@", name ?: @"event", fields ?: @{});
     amproj_debugEvent(name, fields);
+}
+
+// The native import/export hooks below were reverse-engineered against the
+// 6.2.55 (862) private ABI.  6.2.58 (865) must use AM's own document and
+// activity paths until a matching ABI has been verified.  Keep this check
+// exact so a missing or unexpected bundle version never opts into the 865
+// safety path accidentally, and leave the 862 behavior unchanged.
+static BOOL amproj_runtimeIsBuild865(void) {
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary ?: @{};
+    NSString *shortVersion = [info[@"CFBundleShortVersionString"]
+        isKindOfClass:NSString.class] ? info[@"CFBundleShortVersionString"] : nil;
+    NSString *buildVersion = [info[@"CFBundleVersion"]
+        isKindOfClass:NSString.class] ? info[@"CFBundleVersion"] : nil;
+    return [shortVersion isEqualToString:@"6.2.58"] &&
+        [buildVersion isEqualToString:@"865"];
+}
+
+static BOOL amproj_runtimeIsLegacy862(void) {
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary ?: @{};
+    NSString *shortVersion = [info[@"CFBundleShortVersionString"]
+        isKindOfClass:NSString.class] ? info[@"CFBundleShortVersionString"] : nil;
+    NSString *buildVersion = [info[@"CFBundleVersion"]
+        isKindOfClass:NSString.class] ? info[@"CFBundleVersion"] : nil;
+    return [shortVersion isEqualToString:@"6.2.55"] &&
+        [buildVersion isEqualToString:@"862"];
+}
+
+static BOOL amproj_runtimeUsesLegacyImportHooks(void) {
+    // The legacy lane is allowed only for the exact ABI that was verified in
+    // the 6.2.55 package. Unknown or missing bundle metadata fails closed.
+    return amproj_runtimeIsLegacy862() &&
+        AMProjNativePackageImportBridgeIsRuntimeSupported();
+}
+
+static void amproj_log865LegacyPathDisabled(NSString *component) {
+    static NSObject *lock;
+    static dispatch_once_t lockOnce;
+    dispatch_once(&lockOnce, ^{ lock = [NSObject new]; });
+    @synchronized (lock) {
+        static NSMutableSet<NSString *> *logged;
+        static dispatch_once_t setOnce;
+        dispatch_once(&setOnce, ^{ logged = [NSMutableSet set]; });
+        NSString *name = component.length ? component : @"legacy_import_export";
+        if ([logged containsObject:name]) return;
+        [logged addObject:name];
+        amproj_logCriticalEvent(@"runtime.865_legacy_path_disabled", @{
+            @"component": name,
+            @"short_version": NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"",
+            @"bundle_version": NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"] ?: @""
+        });
+    }
 }
 
 // AmEnhancer keeps its media-demo state in these standalone preferences.  Keep
@@ -1000,6 +1060,190 @@ static AMProjXMLProbe* amproj_probeXML(NSData *xmlData) {
     parser.delegate = probe;
     BOOL parsed = [parser parse];
     return parsed && probe.validRoot && !probe.parseError ? probe : nil;
+}
+
+static BOOL amproj_dataStartsWithBytes(const uint8_t *bytes, NSUInteger length,
+                                       const uint8_t *signature,
+                                       NSUInteger signatureLength) {
+    return bytes && signature && length >= signatureLength &&
+        memcmp(bytes, signature, signatureLength) == 0;
+}
+
+// Encryption output is intentionally classified only when it is clearly a
+// binary, high-entropy payload. Text encodings (including base64/hex), other
+// XML documents, and known archive/media formats must continue through the
+// normal invalid-XML path so that this guard cannot mislabel user files.
+static BOOL amproj_isLikelyEncryptedXML(NSData *data,
+                                        NSDictionary **signalOut) {
+    if (signalOut) *signalOut = nil;
+    if (![data isKindOfClass:NSData.class] || data.length < 32) return NO;
+
+    const uint8_t *bytes = data.bytes;
+    const NSUInteger length = data.length;
+    static const uint8_t zipLocal[] = {0x50, 0x4b, 0x03, 0x04};
+    static const uint8_t zipEmpty[] = {0x50, 0x4b, 0x05, 0x06};
+    static const uint8_t zipSpanned[] = {0x50, 0x4b, 0x07, 0x08};
+    static const uint8_t gzip[] = {0x1f, 0x8b};
+    static const uint8_t sevenZip[] = {0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c};
+    static const uint8_t rar[] = {0x52, 0x61, 0x72, 0x21};
+    static const uint8_t xz[] = {0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00};
+    static const uint8_t bplist[] = {0x62, 0x70, 0x6c, 0x69, 0x73, 0x74};
+    static const uint8_t png[] = {0x89, 0x50, 0x4e, 0x47};
+    static const uint8_t jpeg[] = {0xff, 0xd8, 0xff};
+    static const uint8_t gif[] = {0x47, 0x49, 0x46, 0x38};
+    static const uint8_t pdf[] = {0x25, 0x50, 0x44, 0x46};
+    if (amproj_dataStartsWithBytes(bytes, length, zipLocal, sizeof(zipLocal)) ||
+        amproj_dataStartsWithBytes(bytes, length, zipEmpty, sizeof(zipEmpty)) ||
+        amproj_dataStartsWithBytes(bytes, length, zipSpanned, sizeof(zipSpanned)) ||
+        amproj_dataStartsWithBytes(bytes, length, gzip, sizeof(gzip)) ||
+        amproj_dataStartsWithBytes(bytes, length, sevenZip, sizeof(sevenZip)) ||
+        amproj_dataStartsWithBytes(bytes, length, rar, sizeof(rar)) ||
+        amproj_dataStartsWithBytes(bytes, length, xz, sizeof(xz)) ||
+        amproj_dataStartsWithBytes(bytes, length, bplist, sizeof(bplist)) ||
+        amproj_dataStartsWithBytes(bytes, length, png, sizeof(png)) ||
+        amproj_dataStartsWithBytes(bytes, length, jpeg, sizeof(jpeg)) ||
+        amproj_dataStartsWithBytes(bytes, length, gif, sizeof(gif)) ||
+        amproj_dataStartsWithBytes(bytes, length, pdf, sizeof(pdf))) {
+        return NO;
+    }
+
+    // A BOM identifies a text encoding. The alternating-NUL check also keeps
+    // BOM-less UTF-16/UTF-32 XML out of the binary classifier.
+    if ((length >= 2 && ((bytes[0] == 0xff && bytes[1] == 0xfe) ||
+                         (bytes[0] == 0xfe && bytes[1] == 0xff))) ||
+        (length >= 4 && ((bytes[0] == 0x00 && bytes[1] == 0x00 &&
+                          bytes[2] == 0xfe && bytes[3] == 0xff) ||
+                         (bytes[0] == 0xff && bytes[1] == 0xfe &&
+                          bytes[2] == 0x00 && bytes[3] == 0x00)))) {
+        return NO;
+    }
+
+    NSString *utf8 = [[NSString alloc] initWithData:data
+                                            encoding:NSUTF8StringEncoding];
+    NSString *trimmed = [utf8 stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmed.length) {
+        unichar first = [trimmed characterAtIndex:0];
+        // XML, JSON, and HTML (including truncated documents) are text input,
+        // even when their syntax is invalid and amproj_probeXML rejects them.
+        if (first == '<' || first == '{' || first == '[') return NO;
+
+        BOOL onlyBase64 = YES;
+        BOOL onlyHex = YES;
+        NSUInteger significant = 0;
+        for (NSUInteger index = 0; index < trimmed.length; index++) {
+            unichar character = [trimmed characterAtIndex:index];
+            if ([[NSCharacterSet whitespaceAndNewlineCharacterSet]
+                    characterIsMember:character]) continue;
+            significant++;
+            BOOL base64 = (character >= 'A' && character <= 'Z') ||
+                (character >= 'a' && character <= 'z') ||
+                (character >= '0' && character <= '9') ||
+                character == '+' || character == '/' || character == '=';
+            BOOL hex = (character >= '0' && character <= '9') ||
+                (character >= 'a' && character <= 'f') ||
+                (character >= 'A' && character <= 'F');
+            if (!base64) onlyBase64 = NO;
+            if (!hex) onlyHex = NO;
+        }
+        if (significant >= 32 && (onlyBase64 || (onlyHex && (significant % 2) == 0))) {
+            return NO;
+        }
+    }
+
+    const NSUInteger sampleLength = MIN(length, (NSUInteger)65536);
+    NSUInteger counts[256] = {0};
+    NSUInteger nonText = 0;
+    NSUInteger nulCount = 0;
+    for (NSUInteger index = 0; index < sampleLength; index++) {
+        uint8_t value = bytes[index];
+        counts[value]++;
+        if (value == 0) nulCount++;
+        BOOL printable = (value == '\t' || value == '\n' || value == '\r' ||
+                          (value >= 0x20 && value <= 0x7e));
+        if (!printable) nonText++;
+    }
+
+    // Repeated and UTF-16-like payloads are not ciphertext.
+    if (nulCount > sampleLength / 4) return NO;
+    NSUInteger unique = 0;
+    for (NSUInteger index = 0; index < 256; index++) {
+        if (counts[index]) unique++;
+    }
+    if (unique <= 2) return NO;
+
+    double entropy = 0.0;
+    for (NSUInteger index = 0; index < 256; index++) {
+        if (!counts[index]) continue;
+        double probability = (double)counts[index] / (double)sampleLength;
+        entropy -= probability * log2(probability);
+    }
+    double nonTextRatio = (double)nonText / (double)sampleLength;
+    if (entropy < 5.5 || nonTextRatio < 0.20) return NO;
+
+    if (signalOut) {
+        *signalOut = @{
+            @"category": @"binary_high_entropy",
+            @"sample_bytes": @(sampleLength),
+            @"unique_bytes": @(unique),
+            @"entropy": @(entropy),
+            @"nontext_ratio": @(nonTextRatio),
+            @"nul_bytes": @(nulCount)
+        };
+    }
+    return YES;
+}
+
+// Build 865 keeps Alight Motion's own picker/delegate lifecycle.  This small
+// validation-only guard reads a bounded prefix while the picker URL grant is
+// valid, and refuses a clearly encrypted XML payload before AM's parser sees
+// it. It never stages, rewrites, queues, or invokes the private 862 bridge.
+static BOOL amproj_rejectLikelyEncryptedXMLSelection865(
+    NSURL *URL, NSString *source) {
+    if (!amproj_runtimeIsBuild865() || !URL.isFileURL ||
+        ![URL.pathExtension.lowercaseString isEqualToString:@"xml"]) {
+        return NO;
+    }
+
+    BOOL scoped = NO;
+    NSData *prefix = nil;
+    NSFileHandle *handle = nil;
+    @try {
+        scoped = [URL startAccessingSecurityScopedResource];
+        handle = [NSFileHandle fileHandleForReadingAtPath:URL.path];
+        if (handle) prefix = [handle readDataOfLength:64 * 1024];
+    } @catch (__unused NSException *exception) {
+        prefix = nil;
+    } @finally {
+        [handle closeFile];
+        if (scoped) [URL stopAccessingSecurityScopedResource];
+    }
+    if (!prefix.length) return NO;
+
+    // A complete, valid AM scene always wins over the conservative binary
+    // classifier. Truncated text remains excluded by its printable/XML probe.
+    AMProjXMLProbe *probe = nil;
+    @try {
+        probe = amproj_probeXML(prefix);
+    } @catch (__unused NSException *exception) {
+        probe = nil;
+    }
+    if (probe) return NO;
+
+    NSDictionary *signal = nil;
+    if (!amproj_isLikelyEncryptedXML(prefix, &signal)) return NO;
+    amproj_logCriticalEvent(@"import.xml_encrypted_rejected_native", @{
+        @"source": source ?: @"native_picker_865",
+        @"filename": URL.lastPathComponent ?: @"",
+        @"sample_bytes": @(prefix.length),
+        @"category": signal[@"category"] ?: @"binary_high_entropy",
+        @"signal": signal ?: @{}
+    });
+    // Do not offer the same native picker again for a payload that was
+    // positively classified as encrypted; the caller can choose a plaintext
+    // XML explicitly from the app's normal flow.
+    amproj_presentXMLImportError(@"加密 XML 无法导入", NO);
+    return YES;
 }
 
 static NSString* amproj_normalizedProjectTitle(NSString *title) {
@@ -4731,6 +4975,12 @@ static NSURL *amproj_singleNativePickerProjectURL(
 static BOOL amproj_routeNativeProjectPicker(
     UIDocumentPickerViewController *picker, NSArray<NSURL *> *URLs,
     NSString *selectorName) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        // Non-legacy builds keep the picker delegate owned by Alight Motion.
+        // Returning NO lets the validation proxy forward the callback once.
+        amproj_log865LegacyPathDisabled(@"native_picker_route");
+        return NO;
+    }
     AMProjImportKind kind = AMProjImportKindPackage;
     NSURL *selectedURL =
         [amproj_singleNativePickerProjectURL(URLs, &kind) copy];
@@ -4824,6 +5074,15 @@ static void amproj_finishOriginalPickerAsCancelled(
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
     didPickDocumentsAtURLs:(NSArray<NSURL *> *)URLs {
+    if (amproj_runtimeIsBuild865()) {
+        for (NSURL *URL in URLs) {
+            if (amproj_rejectLikelyEncryptedXMLSelection865(
+                    URL, @"native_picker_865")) {
+                (void)amproj_restoreNativeXMLPickerDelegate(self, controller);
+                return;
+            }
+        }
+    }
     if (amproj_routeNativeProjectPicker(
             controller, URLs,
             NSStringFromSelector(@selector(documentPicker:didPickDocumentsAtURLs:)))) {
@@ -4847,6 +5106,11 @@ static void amproj_finishOriginalPickerAsCancelled(
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
     didPickDocumentAtURL:(NSURL *)URL {
+    if (amproj_rejectLikelyEncryptedXMLSelection865(
+            URL, @"native_picker_865")) {
+        (void)amproj_restoreNativeXMLPickerDelegate(self, controller);
+        return;
+    }
     NSArray<NSURL *> *URLs = URL ? @[URL] : @[];
     if (amproj_routeNativeProjectPicker(
             controller, URLs,
@@ -5099,11 +5363,25 @@ static void amproj_prepareCopiedXML(NSURL *XMLURL, NSURL *directoryURL,
                                          options:NSDataReadingMappedIfSafe
                                            error:&readError]
                 : nil;
+            // Probe the original bytes first. NSXMLParser handles the XML
+            // declaration/BOM itself, so forcing UTF-8 here would reject
+            // otherwise valid UTF-16/UTF-32 project documents.
+            AMProjXMLProbe *probe = nil;
+            NSString *probeException = nil;
+            @try {
+                probe = data.length ? amproj_probeXML(data) : nil;
+            } @catch (NSException *exception) {
+                // Encrypted/binary payloads must never turn parser diagnostics
+                // into an uncaught exception on the serial import worker.
+                probeException = exception.name ?: @"NSException";
+            }
+            BOOL valid = probe != nil;
+            NSDictionary *encryptionSignal = nil;
+            BOOL likelyEncrypted = !valid &&
+                amproj_isLikelyEncryptedXML(data, &encryptionSignal);
             NSString *UTF8 = data.length
                 ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
                 : nil;
-            AMProjXMLProbe *probe = UTF8.length ? amproj_probeXML(data) : nil;
-            BOOL valid = probe != nil;
             amproj_debugEvent(@"import.xml_validate", @{
                 @"success": @(valid),
                 @"transaction_id": transactionID ?: @"",
@@ -5114,8 +5392,38 @@ static void amproj_prepareCopiedXML(NSURL *XMLURL, NSURL *directoryURL,
                 @"root_scene": @(probe.validRoot),
                 @"title": probe.title ?: @"",
                 @"layers": @(probe.layerCount),
+                @"likely_encrypted": @(likelyEncrypted),
+                @"probe_exception": probeException ?: @"",
                 @"error": readError.localizedDescription ?: @""
             });
+            if (likelyEncrypted) {
+                AMProjImportTransaction *failed =
+                    amproj_importTransactionForID(transactionID);
+                NSString *fingerprint = [failed.fingerprint copy];
+                NSString *message = @"加密 XML 无法导入";
+
+                // Keep this branch before ZIP creation, queueing, or any
+                // native/private bridge callback. Only bounded metadata is
+                // recorded; XML bytes and content previews never leave RAM.
+                amproj_debugEvent(@"import.xml_encrypted_rejected", @{
+                    @"transaction_id": transactionID ?: @"",
+                    @"source": sourceSnapshot,
+                    @"filename": nameSnapshot,
+                    @"bytes": size ?: @0,
+                    @"category": encryptionSignal[@"category"] ?: @"binary_high_entropy",
+                    @"signal": encryptionSignal ?: @{}
+                });
+                amproj_releaseImportTransaction(transactionID, NO);
+                [NSFileManager.defaultManager removeItemAtURL:directorySnapshot error:nil];
+                amproj_writeImportBreadcrumb(transactionID, fingerprint, @"failed",
+                                             sourceSnapshot, nil, nil, message);
+                if (!silentErrors) {
+                    amproj_showImportStatusForTransaction(message, YES, transactionID);
+                    amproj_presentImportErrorOfferingPickerWithTitle(
+                        message, @"XML 导入失败", NO);
+                }
+                return;
+            }
             if (!valid) {
                 AMProjImportTransaction *failed =
                     amproj_importTransactionForID(transactionID);
@@ -5486,6 +5794,10 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
 }
 
 static void amproj_activateNextPendingImport(void) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"pending_import_activation");
+        return;
+    }
     if (!amproj_pendingImportQueue.count) return;
     if (AMProjNativePackageImportBridgeRequiresRestart()) {
         amproj_pauseForNativeBridgeRestart(nil, nil);
@@ -7081,6 +7393,10 @@ static void amproj_captureActivatedPackageBaselines(NSURL *URL,
 static void amproj_enqueueXMLTemplateImport(NSURL *URL,
                                              NSString *name,
                                              NSString *transactionID) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"xml_template_queue");
+        return;
+    }
     if (!URL || !transactionID.length) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!amproj_xmlTemplatePendingQueue) {
@@ -7104,6 +7420,10 @@ static void amproj_enqueueXMLTemplateImport(NSURL *URL,
 }
 
 static void amproj_pumpXMLTemplateImports(void) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"xml_template_pump");
+        return;
+    }
     if (!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(), ^{
             amproj_pumpXMLTemplateImports();
@@ -7688,6 +8008,10 @@ static void amproj_beginXMLTemplateImport(NSURL *URL,
                                           NSString *name,
                                           NSString *transactionID,
                                           NSUInteger attempt) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"xml_template_begin");
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         AMProjImportTransaction *transaction =
             amproj_importTransactionForID(transactionID);
@@ -10172,6 +10496,10 @@ static void amproj_finishImportAuthorizationDenied(NSUInteger generation,
 #endif
 
 static void amproj_tryDispatchPendingImport(NSUInteger generation) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"pending_import_dispatch");
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (generation != amproj_pendingImportGeneration || !amproj_pendingImportURL) return;
 
@@ -10465,6 +10793,10 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
 
 static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                                        NSString *transactionID) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"prepared_import_queue");
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!URL) return;
         if (!amproj_pendingImportQueue) {
@@ -10536,6 +10868,10 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
 }
 
 static void amproj_resumeQueuedImports(NSString *source) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"queued_import_resume");
+        return;
+    }
     if (!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(), ^{
             amproj_resumeQueuedImports(source);
@@ -10630,6 +10966,10 @@ static BOOL amproj_isImportCommandURL(NSURL *URL) {
 }
 
 static BOOL amproj_handleImportCommandURL(NSURL *URL, NSString *source) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"import_command_url");
+        return NO;
+    }
     if (!amproj_isImportCommandURL(URL)) return NO;
 
     NSString *requestID = nil;
@@ -10674,6 +11014,12 @@ static BOOL amproj_URLIsInDocumentsInbox(NSURL *URL) {
 static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
     NSURL *URL, NSString *source, NSDictionary *options, BOOL *prepared) {
     if (prepared) *prepared = NO;
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        // No non-legacy build may stage a provider URL into the 862 queue or
+        // invoke the private PackageImporter continuation.
+        amproj_log865LegacyPathDisabled(@"incoming_project_url");
+        return AMProjIncomingURLNotRecognized;
+    }
     if (amproj_handleImportCommandURL(URL, source)) return AMProjIncomingURLAccepted;
     if (!amproj_isIncomingProjectURL(URL, options)) return AMProjIncomingURLNotRecognized;
     BOOL directStage = [options[@"AMProjDirectStage"] boolValue];
@@ -11264,6 +11610,12 @@ static BOOL amproj_scanShareInboxNow(NSString *source, NSString *requestedID) {
 }
 
 static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        // Non-legacy builds must not consume Inbox files and replay them through the old
+        // staging queue. UIKit/AM owns document delivery on this build.
+        amproj_log865LegacyPathDisabled(@"local_import_inbox_scan");
+        return;
+    }
     NSString *sourceSnapshot = [source copy] ?: @"lifecycle_scan";
     NSString *requestSnapshot = [requestID copy];
     BOOL schedule = NO;
@@ -11332,6 +11684,10 @@ static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID)
 }
 
 static void amproj_retryDeferredLaunchImportCandidates(void) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"deferred_launch_import");
+        return;
+    }
     NSArray<NSDictionary *> *candidates = nil;
     @synchronized (amproj_importDedupeLock()) {
         candidates = [amproj_deferredLaunchImportCandidates copy] ?: @[];
@@ -11547,6 +11903,12 @@ static void amproj_removeFailedDeferredLaunchCandidateForURL(NSURL *URL,
 
 static BOOL amproj_captureSystemProjectURL(NSURL *URL, NSString *source,
                                            NSDictionary *systemOptions) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        // Returning NO preserves the original AppDelegate/SceneDelegate
+        // callback and prevents a second consumer from touching the URL.
+        amproj_log865LegacyPathDisabled(@"system_project_url_capture");
+        return NO;
+    }
     if (!amproj_isIncomingProjectURL(URL, systemOptions)) return NO;
     NSMutableDictionary *options = systemOptions
         ? [systemOptions mutableCopy] : [NSMutableDictionary dictionary];
@@ -11628,6 +11990,8 @@ static BOOL hooked_applicationOpenURL(id self, SEL _cmd, UIApplication *applicat
         @"extension": URL.pathExtension.lowercaseString ?: @"",
         @"scheme": URL.scheme ?: @""
     });
+    if (amproj_rejectLikelyEncryptedXMLSelection865(
+            URL, @"application_open_url_865")) return YES;
     if (amproj_handleImportCommandURL(URL, @"application_open_url_command")) return YES;
     if (amproj_captureSystemProjectURL(URL, @"application_open_url", options)) {
         return YES;
@@ -12148,6 +12512,8 @@ static BOOL hooked_applicationContinueActivity(id self, SEL _cmd, UIApplication 
         @"activity_type": activity.activityType ?: @"",
         @"extension": URL.pathExtension.lowercaseString ?: @""
     });
+    if (amproj_rejectLikelyEncryptedXMLSelection865(
+            URL, @"continue_user_activity_865")) return YES;
     if (amproj_handleImportCommandURL(URL, @"continue_user_activity_command")) return YES;
     if (amproj_captureSystemProjectURL(URL, @"continue_user_activity", options)) {
         return YES;
@@ -12178,6 +12544,8 @@ static BOOL hooked_applicationHandleOpenURL(id self, SEL _cmd,
         @"delegate": NSStringFromClass([self class]) ?: @"",
         @"extension": URL.pathExtension.lowercaseString ?: @""
     });
+    if (amproj_rejectLikelyEncryptedXMLSelection865(
+            URL, @"application_handle_open_url_865")) return YES;
     if (amproj_handleImportCommandURL(URL, @"application_handle_open_url_command")) return YES;
     if (amproj_captureSystemProjectURL(URL, @"application_handle_open_url", nil)) {
         return YES;
@@ -12210,6 +12578,8 @@ static BOOL hooked_applicationLegacyOpenURL(id self, SEL _cmd, UIApplication *ap
         @"extension": URL.pathExtension.lowercaseString ?: @"",
         @"source_application": sourceApplication ?: @""
     });
+    if (amproj_rejectLikelyEncryptedXMLSelection865(
+            URL, @"application_legacy_open_url_865")) return YES;
     NSDictionary *options = sourceApplication.length
         ? @{@"source_application": sourceApplication} : nil;
     if (amproj_handleImportCommandURL(URL, @"application_legacy_open_url_command")) return YES;
@@ -12389,6 +12759,11 @@ static void hooked_sceneOpenURLContexts(id self, SEL _cmd, UIScene *scene,
         }
         if (!URL) {
             if (context) [passthroughContexts addObject:context];
+            continue;
+        }
+        if (amproj_rejectLikelyEncryptedXMLSelection865(
+                URL, @"scene_open_url_contexts_865")) {
+            consumedCount++;
             continue;
         }
         if (amproj_handleImportCommandURL(URL, @"scene_open_url_contexts_command") ||
@@ -12762,14 +13137,286 @@ static id hooked_initWithItems(id self, SEL _cmd, NSArray *activityItems,
     return result;
 }
 
+static BOOL amproj_IPAFireTextMatches(NSString *text) {
+    if (![text isKindOfClass:NSString.class] || !text.length) return NO;
+    NSString *normalized = text.lowercaseString;
+    if ([normalized containsString:@"@ipafire"]) return YES;
+    BOOL hasWelcome = [normalized containsString:@"welcome"];
+    BOOL hasCracked = [normalized containsString:@"cracked by blatant"] ||
+        [normalized containsString:@"instant certificates"];
+    BOOL hasMoreApps = [normalized containsString:@"more apps"];
+    return (hasWelcome && hasCracked) || (hasCracked && hasMoreApps);
+}
+
+static void amproj_IPAFireAppendViewText(UIView *view,
+                                         NSMutableString *output,
+                                         NSUInteger depth) {
+    if (!view || !output || depth > 32 || output.length >= 131072) return;
+
+    // The welcome page renders each marker in a separate UILabel. Aggregate
+    // the subtree before matching so the fingerprint is evaluated across the
+    // whole page instead of one control at a time.
+    if ([view isKindOfClass:UILabel.class]) {
+        NSString *text = ((UILabel *)view).text;
+        if (text.length) [output appendFormat:@"%@\n", text];
+    }
+    if ([view isKindOfClass:UIButton.class]) {
+        NSString *text = ((UIButton *)view).currentTitle;
+        if (text.length) [output appendFormat:@"%@\n", text];
+    }
+    if ([view.accessibilityLabel isKindOfClass:NSString.class] &&
+        view.accessibilityLabel.length) {
+        [output appendFormat:@"%@\n", view.accessibilityLabel];
+    }
+    if ([view.accessibilityValue isKindOfClass:NSString.class] &&
+        view.accessibilityValue.length) {
+        [output appendFormat:@"%@\n", view.accessibilityValue];
+    }
+
+    // SwiftUI may expose its labels as UIAccessibilityElement instances
+    // without creating UILabel subviews. Read only bounded accessibility text
+    // and keep the same subtree depth/size limits as the visual walk.
+    for (id element in amproj_accessibilityChildren(view)) {
+        if (!element || [element isKindOfClass:UIView.class]) continue;
+        for (NSString *selectorName in @[
+            NSStringFromSelector(@selector(accessibilityLabel)),
+            NSStringFromSelector(@selector(accessibilityValue)),
+            NSStringFromSelector(@selector(accessibilityHint))
+        ]) {
+            SEL selector = NSSelectorFromString(selectorName);
+            if (![element respondsToSelector:selector]) continue;
+            id value = ((id (*)(id, SEL))objc_msgSend)(element, selector);
+            if ([value isKindOfClass:NSString.class] && [value length]) {
+                [output appendFormat:@"%@\n", value];
+            }
+            if (output.length >= 131072) break;
+        }
+        if (output.length >= 131072) break;
+    }
+
+    for (UIView *subview in view.subviews) {
+        amproj_IPAFireAppendViewText(subview, output, depth + 1);
+        if (output.length >= 131072) break;
+    }
+}
+
+static BOOL amproj_IPAFireViewContainsMarker(UIView *view, NSUInteger depth) {
+    if (!view || depth > 32) return NO;
+    NSMutableString *content = [NSMutableString stringWithCapacity:256];
+    amproj_IPAFireAppendViewText(view, content, depth);
+    return amproj_IPAFireTextMatches(content);
+}
+
+static UIView *amproj_IPAFireFindOverlayView(UIView *view, NSUInteger depth) {
+    if (!view || depth > 36) return nil;
+    // Prefer the smallest matching subtree so a welcome overlay attached to
+    // the app's normal root view can be removed without hiding the app itself.
+    for (UIView *subview in view.subviews.reverseObjectEnumerator) {
+        UIView *candidate = amproj_IPAFireFindOverlayView(subview, depth + 1);
+        if (candidate) return candidate;
+    }
+    return amproj_IPAFireViewContainsMarker(view, depth) ? view : nil;
+}
+
+// Some IPAFire builds install the welcome page directly as the key window's
+// root view. In that layout there is no child overlay to remove. Hide only a
+// strict, startup-only fingerprint and reveal the view once its markers are
+// gone; this avoids blanking a normal AM screen after the page has closed.
+static const void *amproj_IPAFireRootHiddenKey = &amproj_IPAFireRootHiddenKey;
+
+static void amproj_IPAFireScheduleRootViewReveal(UIView *rootView) {
+    if (!rootView) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        if (!rootView.window) {
+            objc_setAssociatedObject(rootView, amproj_IPAFireRootHiddenKey,
+                                     nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return;
+        }
+        if (amproj_IPAFireViewContainsMarker(rootView, 0)) {
+            amproj_IPAFireScheduleRootViewReveal(rootView);
+            return;
+        }
+        NSNumber *interactive = objc_getAssociatedObject(
+            rootView, amproj_IPAFireRootHiddenKey);
+        rootView.hidden = NO;
+        rootView.userInteractionEnabled = interactive ? interactive.boolValue : YES;
+        objc_setAssociatedObject(rootView, amproj_IPAFireRootHiddenKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    });
+}
+
+static void amproj_IPAFireHideRootViewTemporarily(UIView *rootView,
+                                                  NSString *source) {
+    if (!rootView) return;
+    NSNumber *wasInteractive = objc_getAssociatedObject(
+        rootView, amproj_IPAFireRootHiddenKey);
+    if (!wasInteractive) {
+        if (rootView.hidden) return;
+        wasInteractive = @(rootView.userInteractionEnabled);
+        objc_setAssociatedObject(rootView, amproj_IPAFireRootHiddenKey,
+                                 wasInteractive, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        amproj_logCriticalEvent(@"popup.suppressed", @{
+            @"fingerprint": @"IPAFire welcome",
+            @"source": source ?: @"root_view",
+            @"mutation": @"hide_root_view"
+        });
+    }
+    rootView.hidden = YES;
+    rootView.userInteractionEnabled = NO;
+    amproj_IPAFireScheduleRootViewReveal(rootView);
+}
+
 static BOOL amproj_isIPAFireWelcome(UIViewController *controller) {
-    if (![controller isKindOfClass:[UIAlertController class]]) return NO;
-    UIAlertController *alert = (UIAlertController *)controller;
-    if (alert.preferredStyle != UIAlertControllerStyleAlert) return NO;
-    NSString *content = [NSString stringWithFormat:@"%@\n%@", alert.title ?: @"", alert.message ?: @""];
-    return [content containsString:@"@IPAFire"] &&
-        ([content containsString:@"Channel Telegram"] ||
-         [content containsString:@"شكراً لاستخدامك تطبيقاتنا"]);
+    if (![controller isKindOfClass:UIViewController.class]) return NO;
+    if ([controller isKindOfClass:[UIAlertController class]]) {
+        UIAlertController *alert = (UIAlertController *)controller;
+        if (alert.preferredStyle != UIAlertControllerStyleAlert) return NO;
+        NSString *content = [NSString stringWithFormat:@"%@\n%@", alert.title ?: @"", alert.message ?: @""];
+        return amproj_IPAFireTextMatches(content) &&
+            ([content containsString:@"Channel Telegram"] ||
+             [content containsString:@"شكراً لاستخدامك تطبيقاتنا"] ||
+             [content.lowercaseString containsString:@"instant certificates"]);
+    }
+
+    NSString *identity = [NSString stringWithFormat:@"%@ %@ %@ %@",
+        NSStringFromClass(controller.class) ?: @"", controller.title ?: @"",
+        controller.restorationIdentifier ?: @"", controller.accessibilityLabel ?: @""];
+    if (amproj_IPAFireTextMatches(identity)) return YES;
+    @try {
+        // `viewIfLoaded` avoids forcing arbitrary AM controllers to construct
+        // their view during presentation. The post-presentation probe below
+        // catches welcome screens whose labels are created in viewDidAppear.
+        return amproj_IPAFireViewContainsMarker(controller.viewIfLoaded, 0);
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
+static void amproj_dismissIPAFireWelcomeIfPresented(
+    UIViewController *controller, NSString *source) {
+    if (!controller || !amproj_isIPAFireWelcome(controller) ||
+        !controller.presentingViewController) return;
+    amproj_logCriticalEvent(@"popup.suppressed", @{
+        @"fingerprint": @"IPAFire welcome",
+        @"source": source ?: @"presentation",
+        @"controller": NSStringFromClass(controller.class) ?: @""
+    });
+    [controller.presentingViewController dismissViewControllerAnimated:NO
+                                                               completion:nil];
+}
+
+static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
+    if (!amproj_runtimeIsBuild865() || !NSThread.isMainThread) return;
+
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class] ||
+                scene.activationState == UISceneActivationStateUnattached) {
+                continue;
+            }
+            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                if (window && ![windows containsObject:window]) {
+                    [windows addObject:window];
+                }
+            }
+        }
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (window && ![windows containsObject:window]) [windows addObject:window];
+    }
+#pragma clang diagnostic pop
+
+    UIWindow *keyWindow = amproj_keyWindow();
+    if (keyWindow && ![windows containsObject:keyWindow]) [windows addObject:keyWindow];
+    for (UIWindow *window in windows) {
+        if (window.hidden || window.alpha <= 0.01 || !window.rootViewController) continue;
+
+        UIViewController *top = amproj_topViewController(window.rootViewController);
+        if (top && amproj_isIPAFireWelcome(top)) {
+            if (top.presentingViewController) {
+                amproj_dismissIPAFireWelcomeIfPresented(top, source);
+                continue;
+            }
+            // IPAFire can use a separate alert-level window instead of a
+            // presented controller. Hide only that identified overlay, never
+            // the normal application key window.
+            if (window != keyWindow && window.windowLevel > UIWindowLevelNormal) {
+                amproj_logCriticalEvent(@"popup.suppressed", @{
+                    @"fingerprint": @"IPAFire welcome",
+                    @"source": source ?: @"window_scan",
+                    @"window_level": @(window.windowLevel)
+                });
+                window.hidden = YES;
+                window.userInteractionEnabled = NO;
+                continue;
+            }
+
+            // A normal app window may host the page as a child view instead of
+            // presenting a controller. Remove only the matching child subtree.
+            UIView *rootView = window.rootViewController.viewIfLoaded;
+            UIView *overlay = amproj_IPAFireFindOverlayView(rootView, 0);
+            if (overlay && overlay != rootView && overlay != window) {
+                amproj_logCriticalEvent(@"popup.suppressed", @{
+                    @"fingerprint": @"IPAFire welcome",
+                    @"source": source ?: @"root_overlay_scan",
+                    @"controller": NSStringFromClass(top.class) ?: @""
+                });
+                overlay.hidden = YES;
+                overlay.userInteractionEnabled = NO;
+            } else if (rootView && amproj_IPAFireViewContainsMarker(rootView, 0)) {
+                // The root-view layout has no smaller subtree to remove. The
+                // fingerprint is strict and limited to build 865 startup, so
+                // temporarily hiding this root is safer than leaving the
+                // full-screen welcome page visible.
+                amproj_IPAFireHideRootViewTemporarily(rootView, source);
+            }
+            continue;
+        }
+
+        UIView *rootView = window.rootViewController.viewIfLoaded;
+        UIView *overlay = amproj_IPAFireFindOverlayView(rootView, 0);
+        BOOL hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);
+        if (window != keyWindow && window.windowLevel > UIWindowLevelNormal &&
+            (hasWindowFingerprint || overlay)) {
+            amproj_logCriticalEvent(@"popup.suppressed", @{
+                @"fingerprint": @"IPAFire welcome",
+                @"source": source ?: @"window_scan",
+                @"window_level": @(window.windowLevel)
+            });
+            window.hidden = YES;
+            window.userInteractionEnabled = NO;
+        } else if (overlay && overlay != rootView && overlay != window) {
+            amproj_logCriticalEvent(@"popup.suppressed", @{
+                @"fingerprint": @"IPAFire welcome",
+                @"source": source ?: @"root_overlay_scan"
+            });
+            overlay.hidden = YES;
+            overlay.userInteractionEnabled = NO;
+        } else if (overlay == rootView &&
+                   amproj_IPAFireViewContainsMarker(rootView, 0)) {
+            amproj_IPAFireHideRootViewTemporarily(rootView, source);
+        }
+    }
+}
+
+static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source) {
+    if (!amproj_runtimeIsBuild865()) return;
+    NSString *sourceSnapshot = [source copy] ?: @"startup";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        amproj_suppressIPAFireWelcomeWindows(sourceSnapshot);
+        for (NSNumber *delay in @[@0.05, @0.25, @0.60, @0.75,
+                                  @1.25, @1.75, @2.50, @3.50]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                          (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                amproj_suppressIPAFireWelcomeWindows(sourceSnapshot);
+            });
+        }
+    });
 }
 
 // A self-signed build can leave StoreKit's SwiftUI paywall in an indefinite
@@ -14435,6 +15082,15 @@ static void hooked_navigationPush(id self, SEL _cmd,
         return;
     }
 #endif
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        // Account replacement above is intentionally retained, but project
+        // export/navigation ownership stays with the native app.
+        amproj_log865LegacyPathDisabled(@"navigation_export");
+        if (orig_navigationPush) {
+            orig_navigationPush(self, _cmd, viewController, animated);
+        }
+        return;
+    }
     // The concrete 6.2.55 project-package controller is the only export
     // boundary. Avoid private ShareVC ivars and leave every other navigation,
     // including project/template deletion, on AM's native path.
@@ -14704,6 +15360,50 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         return;
     }
 #endif
+    if (amproj_runtimeIsBuild865() &&
+        [controller isKindOfClass:UIDocumentPickerViewController.class]) {
+        // 865 uses AM's picker unchanged; the proxy only rejects a clearly
+        // encrypted XML prefix and otherwise forwards every delegate callback.
+        @try { amproj_attachNativeXMLPickerProxy(controller); }
+        @catch (NSException *exception) {
+            amproj_logCriticalEvent(@"import.picker_validation_proxy_exception", @{
+                @"name": exception.name ?: @"NSException",
+                @"reason": exception.reason ?: @""
+            });
+        }
+    }
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        if (amproj_isIPAFireWelcome(controller)) {
+            // Some signed 6.2.58 packages present the IPAFire welcome screen
+            // as a regular controller rather than an alert. Suppress it
+            // before presentation when its marker text is already available.
+            amproj_logCriticalEvent(@"popup.suppressed", @{
+                @"fingerprint": @"IPAFire welcome",
+                @"source": @"pre_presentation",
+                @"controller": NSStringFromClass(controller.class) ?: @""
+            });
+            if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+            return;
+        }
+        // The account presentation replacement remains active above. All
+        // other controllers, including document pickers and AM alerts, must
+        // use the native lifecycle exactly once.
+        amproj_log865LegacyPathDisabled(@"presentation_interception");
+        void (^originalCompletion)(void) = [completion copy];
+        void (^wrappedCompletion)(void) = ^{
+            if (originalCompletion) originalCompletion();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                amproj_dismissIPAFireWelcomeIfPresented(
+                    controller, @"post_presentation");
+            });
+        };
+        orig_presentVC(self, _cmd, controller, animated, wrappedCompletion);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            amproj_dismissIPAFireWelcomeIfPresented(
+                controller, @"post_present_probe");
+        });
+        return;
+    }
     BOOL isShareExportHost = amproj_isShareExportHostController(controller);
     if (isShareExportHost) {
         amproj_installShareExportHook();
@@ -15110,6 +15810,7 @@ static id amproj_didBecomeActiveObserver = nil;
 static id amproj_willResignActiveObserver = nil;
 static id amproj_sceneWillConnectObserver = nil;
 static id amproj_sceneWillDeactivateObserver = nil;
+static id amproj_windowDidBecomeKeyObserver = nil;
 
 static IMP amproj_installMethodHook(Method method, IMP replacement,
                                     unsigned int expectedArguments, NSString *name) {
@@ -15204,6 +15905,10 @@ static void hooked_applicationSetDelegate(UIApplication *application, SEL _cmd,
 }
 
 static void amproj_installApplicationDelegateHook(void) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"application_delegate_hook");
+        return;
+    }
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         Method method = class_getInstanceMethod(
@@ -15552,6 +16257,10 @@ static Class amproj_declaredAppDelegateClass(void) {
 }
 
 static BOOL amproj_installColdLaunchHook(void) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"cold_launch_hook");
+        return NO;
+    }
     Class cls = amproj_declaredAppDelegateClass();
     if (!cls) return NO;
 
@@ -15609,6 +16318,10 @@ static BOOL amproj_installColdLaunchHook(void) {
 // This is limited to the two launch selectors and uses the same tracked
 // original table, so forwarding remains stable across repeated installs.
 static BOOL amproj_installRuntimeColdLaunchHook(void) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"runtime_cold_launch_hook");
+        return NO;
+    }
     id delegate = UIApplication.sharedApplication.delegate;
     Class runtimeClass = delegate ? object_getClass(delegate) : Nil;
     Class declaredClass = amproj_declaredAppDelegateClass();
@@ -15662,6 +16375,10 @@ static BOOL amproj_installRuntimeColdLaunchHook(void) {
 }
 
 static BOOL amproj_installDeclaredURLHooks(void) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"declared_url_hooks");
+        return NO;
+    }
     Class cls = amproj_declaredAppDelegateClass();
     if (!cls) return NO;
 
@@ -15722,6 +16439,94 @@ static BOOL amproj_installDeclaredURLHooks(void) {
         });
     }
     return modernInstalled || handleInstalled || legacyInstalled;
+}
+
+// Build 865 gets only a passthrough URL validator. Unlike the legacy import
+// hook this does not stage files, inspect private controllers, or alter launch
+// options; it consumes only a positively classified encrypted XML and forwards
+// every other callback to Alight Motion's original implementation.
+static BOOL amproj_install865ValidationURLHooks(void) {
+    if (!amproj_runtimeIsBuild865()) return NO;
+
+    Class declaredClass = amproj_declaredAppDelegateClass();
+    id delegate = UIApplication.sharedApplication.delegate;
+    Class runtimeClass = delegate ? object_getClass(delegate) : Nil;
+    Class classes[2] = {declaredClass, runtimeClass};
+    BOOL installed = NO;
+    for (NSUInteger index = 0; index < 2; index++) {
+        Class cls = classes[index];
+        if (!cls || (index == 1 && cls == classes[0])) continue;
+
+        Method modern = class_getInstanceMethod(
+            cls, @selector(application:openURL:options:));
+        if (modern) {
+            BOOL changed = NO;
+            installed |= amproj_installTrackedHook(
+                cls, @selector(application:openURL:options:),
+                (IMP)hooked_applicationOpenURL, 5,
+                amproj_openURLHooks,
+                sizeof(amproj_openURLHooks) / sizeof(amproj_openURLHooks[0]),
+                &changed);
+        }
+        Method activity = class_getInstanceMethod(
+            cls, @selector(application:continueUserActivity:restorationHandler:));
+        if (activity) {
+            BOOL changed = NO;
+            installed |= amproj_installTrackedHook(
+                cls, @selector(application:continueUserActivity:restorationHandler:),
+                (IMP)hooked_applicationContinueActivity, 5,
+                amproj_continueActivityHooks,
+                sizeof(amproj_continueActivityHooks) /
+                    sizeof(amproj_continueActivityHooks[0]),
+                &changed);
+        }
+        SEL handleSelector = NSSelectorFromString(@"application:handleOpenURL:");
+        Method handle = class_getInstanceMethod(cls, handleSelector);
+        if (handle) {
+            BOOL changed = NO;
+            installed |= amproj_installTrackedHook(
+                cls, handleSelector, (IMP)hooked_applicationHandleOpenURL, 4,
+                amproj_handleOpenURLHooks,
+                sizeof(amproj_handleOpenURLHooks) /
+                    sizeof(amproj_handleOpenURLHooks[0]),
+                &changed);
+        }
+        SEL legacySelector = NSSelectorFromString(
+            @"application:openURL:sourceApplication:annotation:");
+        Method legacy = class_getInstanceMethod(cls, legacySelector);
+        if (legacy) {
+            BOOL changed = NO;
+            installed |= amproj_installTrackedHook(
+                cls, legacySelector, (IMP)hooked_applicationLegacyOpenURL, 6,
+                amproj_legacyOpenURLHooks,
+                sizeof(amproj_legacyOpenURLHooks) /
+                    sizeof(amproj_legacyOpenURLHooks[0]),
+                &changed);
+        }
+    }
+
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            id sceneDelegate = scene.delegate;
+            Class cls = sceneDelegate ? object_getClass(sceneDelegate) : Nil;
+            if (!cls) continue;
+            SEL selector = NSSelectorFromString(@"scene:openURLContexts:");
+            if (!class_getInstanceMethod(cls, selector)) continue;
+            BOOL changed = NO;
+            installed |= amproj_installTrackedHook(
+                cls, selector, (IMP)hooked_sceneOpenURLContexts, 4,
+                amproj_sceneOpenURLHooks,
+                sizeof(amproj_sceneOpenURLHooks) /
+                    sizeof(amproj_sceneOpenURLHooks[0]),
+                &changed);
+        }
+    }
+    amproj_debugEvent(@"import.865_validation_hooks", @{
+        @"installed": @(installed),
+        @"declared_class": declaredClass ? NSStringFromClass(declaredClass) : @"",
+        @"runtime_class": runtimeClass ? NSStringFromClass(runtimeClass) : @""
+    });
+    return installed;
 }
 
 static void amproj_installProjectsImportAlertHook(void) {
@@ -15786,6 +16591,10 @@ static void amproj_installProjectsImportAlertHook(void) {
 }
 
 static void amproj_installSceneImportHook(id sceneDelegate) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"scene_import_hook");
+        return;
+    }
     if (!sceneDelegate) return;
     Class cls = object_getClass(sceneDelegate);
     SEL willConnectSelector =
@@ -15814,6 +16623,10 @@ static void amproj_installSceneImportHook(id sceneDelegate) {
 }
 
 static void amproj_installNativeProjectPickerHook(void) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_log865LegacyPathDisabled(@"native_document_picker");
+        return;
+    }
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         Class pickerClass = UIDocumentPickerViewController.class;
@@ -15847,6 +16660,13 @@ static void amproj_installNativeProjectPickerHook(void) {
 }
 
 static void amproj_installImportHook(void) {
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        // Non-legacy builds must keep Alight Motion's own document and delegate
+        // lifecycle. The import hook below relies on the 862 private ABI and
+        // can otherwise consume a URL twice or call a stale Swift callback.
+        amproj_log865LegacyPathDisabled(@"import_hooks");
+        return;
+    }
     amproj_installNativeProjectPickerHook();
     (void)amproj_installColdLaunchHook();
     (void)amproj_installRuntimeColdLaunchHook();
@@ -16040,6 +16860,14 @@ static void amproj_installExportHooks(void) {
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing export hooks after app launch");
         amproj_installPresentationHook();
+        if (!amproj_runtimeUsesLegacyImportHooks()) {
+            // Keep only the presentation hook for the account replacement on
+            // non-legacy builds.
+            // ShareNC, navigation and UIActivity interception all depend on
+            // the older 6.2.55 project-export UI and are unsafe elsewhere.
+            amproj_log865LegacyPathDisabled(@"export_hooks");
+            return;
+        }
         amproj_installNavigationExportHook();
         amproj_installShareExportHook();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
@@ -16233,11 +17061,32 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                     });
                 }
             });
-        AMProjInstallNativePackageImportBridge();
+        if (AMProjNativePackageImportBridgeIsRuntimeSupported()) {
+            AMProjInstallNativePackageImportBridge();
+        } else {
+            amproj_log865LegacyPathDisabled(@"native_package_bridge");
+            AMProjRegisterNativePackageImportStarter(nil);
+        }
 #if AMPROJ_CLOUD_SYNC
-        AMCloudSyncInstall(^BOOL(NSURL *URL, NSString *filename, NSURL *cleanupURL) {
-            return amproj_importCloudPackage(URL, filename, cleanupURL);
-        });
+        AMCloudImportHandler cloudImportHandler = nil;
+        if (!amproj_runtimeUsesLegacyImportHooks()) {
+            // Cloud account/avatar/plugin synchronization stays enabled. The
+            // old cloud-project importer is intentionally unavailable until
+            // a matching legacy ABI is verified, so fail closed without touching the
+            // native PackageImporter or an old delegate.
+            cloudImportHandler = ^BOOL(__unused NSURL *URL,
+                                       __unused NSString *filename,
+                                       __unused NSURL *cleanupURL) {
+                amproj_log865LegacyPathDisabled(@"cloud_project_import");
+                return NO;
+            };
+        } else {
+            cloudImportHandler = ^BOOL(NSURL *URL, NSString *filename,
+                                       NSURL *cleanupURL) {
+                return amproj_importCloudPackage(URL, filename, cleanupURL);
+            };
+        }
+        AMCloudSyncInstall(cloudImportHandler);
 #endif
 
         NSString *startupTrigger = [trigger copy] ?: @"unknown";
@@ -16260,14 +17109,18 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                         interruptedStage], YES);
                 }
             }
-            amproj_purgeOldDirectExports();
-            amproj_purgeOldImports();
-            if (!amproj_hasDeferredLaunchImportCandidates()) {
-                amproj_scanLocalImportInboxes(@"bootstrap", nil);
+            if (amproj_runtimeUsesLegacyImportHooks()) {
+                amproj_purgeOldDirectExports();
+                amproj_purgeOldImports();
+                if (!amproj_hasDeferredLaunchImportCandidates()) {
+                    amproj_scanLocalImportInboxes(@"bootstrap", nil);
+                } else {
+                    amproj_debugEvent(@"import.scan_deferred_priority", @{
+                        @"reason": @"launch_candidate_pending"
+                    });
+                }
             } else {
-                amproj_debugEvent(@"import.scan_deferred_priority", @{
-                    @"reason": @"launch_candidate_pending"
-                });
+                amproj_log865LegacyPathDisabled(@"bootstrap_import_scan");
             }
 #if AMPROJ_DEBUG || AMPROJ_TELEMETRY
             [[AMDebugTransport shared] start];
@@ -16304,17 +17157,35 @@ static void AMProjExportInit(void) {
         AMCloudSyncInstallPluginHooksEarly();
 #endif
         amproj_restorePhotoAlbumMode();
+        if (amproj_runtimeIsBuild865()) {
+            // Install only the non-invasive URL validator; all legacy import
+            // staging and private bridge hooks remain disabled on 865.
+            amproj_install865ValidationURLHooks();
+        }
 
         // ObjC classes are registered before image constructors. Installing only
         // this AppDelegate hook here avoids touching UIApplication or UIKit UI.
         // The didFinish hook synchronously stages cold-launch documents while
         // their grant is valid. Validation, unpacking, native import and UI wait
         // until activation; constructors still do not instantiate UIApplication/UI.
-        amproj_installApplicationDelegateHook();
-        (void)amproj_installColdLaunchHook();
-        (void)amproj_installDeclaredURLHooks();
+        if (amproj_runtimeUsesLegacyImportHooks()) {
+            amproj_installApplicationDelegateHook();
+            (void)amproj_installColdLaunchHook();
+            (void)amproj_installDeclaredURLHooks();
+        } else {
+            amproj_log865LegacyPathDisabled(@"constructor_import_hooks");
+        }
 
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        if (amproj_runtimeIsBuild865() && !amproj_windowDidBecomeKeyObserver) {
+            amproj_windowDidBecomeKeyObserver = [center
+                addObserverForName:UIWindowDidBecomeKeyNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(__unused NSNotification *notification) {
+                amproj_scheduleIPAFireWelcomeSuppression(@"window_did_become_key");
+            }];
+        }
         amproj_willLaunchObserver = [center
             addObserverForName:@"UIApplicationWillFinishLaunchingNotification"
                         object:nil
@@ -16324,6 +17195,9 @@ static void AMProjExportInit(void) {
             // creates the media browser, so their demo preset cannot win a
             // constructor-order race.
             amproj_restorePhotoAlbumMode();
+            if (amproj_runtimeIsBuild865()) {
+                amproj_install865ValidationURLHooks();
+            }
             // Install only the app/scene delivery hooks here. UIKit presentation
             // hook must be present here because AM can present its startup
             // PaywallLoadingScreenView before DidFinishLaunching. Do not consume
@@ -16331,6 +17205,7 @@ static void AMProjExportInit(void) {
             // callback's temporary sandbox extension.
             amproj_installPresentationHook();
             amproj_installImportHook();
+            amproj_scheduleIPAFireWelcomeSuppression(@"will_finish_launching");
         }];
         amproj_didLaunchObserver = [center
             addObserverForName:UIApplicationDidFinishLaunchingNotification
@@ -16350,17 +17225,25 @@ static void AMProjExportInit(void) {
             amproj_armPaywallStartupFallback();
             amproj_startStartupPaywallRescue();
             amproj_schedulePaywallScan(nil, @"did_become_active");
-            // The launch URL is the current user action. Consume its deferred
-            // candidate first; only then inspect stale app-owned Inbox files.
-            amproj_retryDeferredLaunchImportCandidates();
-            amproj_scanLocalImportInboxes(@"did_become_active", nil);
-            if (amproj_pendingImportURL) {
-                amproj_tryDispatchPendingImport(amproj_pendingImportGeneration);
-            } else if (amproj_importDispatchCoolingDown &&
-                       !amproj_nativeImportObservationActive &&
-                       !amproj_nativeImportAlertActive &&
-                       !amproj_waitingForNativeImportAlert) {
-                amproj_resumeQueuedImports(@"did_become_active");
+            amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active");
+            if (amproj_runtimeIsBuild865()) {
+                amproj_install865ValidationURLHooks();
+            }
+            if (amproj_runtimeUsesLegacyImportHooks()) {
+                // The launch URL is the current user action. Consume its deferred
+                // candidate first; only then inspect stale app-owned Inbox files.
+                amproj_retryDeferredLaunchImportCandidates();
+                amproj_scanLocalImportInboxes(@"did_become_active", nil);
+                if (amproj_pendingImportURL) {
+                    amproj_tryDispatchPendingImport(amproj_pendingImportGeneration);
+                } else if (amproj_importDispatchCoolingDown &&
+                           !amproj_nativeImportObservationActive &&
+                           !amproj_nativeImportAlertActive &&
+                           !amproj_waitingForNativeImportAlert) {
+                    amproj_resumeQueuedImports(@"did_become_active");
+                }
+            } else {
+                amproj_log865LegacyPathDisabled(@"did_become_active_import_replay");
             }
         }];
         amproj_willResignActiveObserver = [center
@@ -16381,7 +17264,13 @@ static void AMProjExportInit(void) {
                         usingBlock:^(__unused NSNotification *notification) {
                 UIScene *scene = [notification.object isKindOfClass:UIScene.class]
                     ? notification.object : nil;
-                amproj_installSceneImportHook(scene.delegate);
+                if (amproj_runtimeUsesLegacyImportHooks()) {
+                    amproj_installSceneImportHook(scene.delegate);
+                } else if (amproj_runtimeIsBuild865()) {
+                    amproj_install865ValidationURLHooks();
+                } else {
+                    amproj_log865LegacyPathDisabled(@"scene_connect_import_hook");
+                }
             }];
             amproj_sceneWillDeactivateObserver = [center
                 addObserverForName:UISceneWillDeactivateNotification
@@ -16399,6 +17288,7 @@ static void AMProjExportInit(void) {
             amproj_armPaywallStartupFallback();
             amproj_startStartupPaywallRescue();
             amproj_schedulePaywallScan(nil, @"main_queue_fallback");
+            amproj_scheduleIPAFireWelcomeSuppression(@"main_queue_fallback");
         });
 
         NSLog(@"[AMProjExport] Hooks scheduled for launch, activation, and delayed fallback");

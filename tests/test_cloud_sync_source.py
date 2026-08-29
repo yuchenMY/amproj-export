@@ -399,7 +399,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('manifest[@"catalogRevision"]', CLOUD)
         self.assertIn('manifest[@"plugins"]', CLOUD)
         self.assertIn('@"/ios/plugins/items/%@/versions/%@/download"', CLOUD)
-        self.assertIn('AMCloudPluginsCatalogProtocolVersion = 7', PLUGINS)
+        self.assertIn('AMCloudPluginsCatalogProtocolVersion = 8', PLUGINS)
         self.assertIn('@"protocol_version": @(AMCloudPluginsCatalogProtocolVersion)', PLUGINS)
         self.assertIn('AMCloudPluginsCatalogProtocolVersion', PLUGIN_HEADER)
         self.assertIn('@"catalog_revision"', PLUGINS)
@@ -458,7 +458,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         )[1].split("NSObject *commitLock", 1)[0]
         self.assertIn("AMCloudPluginsDedupeCatalogRootEffects", activation)
         self.assertIn('URLByAppendingPathComponent:@"releases"', PLUGINS)
-        self.assertIn("AMCloudPluginsCatalogProtocolVersion = 7", PLUGINS)
+        self.assertIn("AMCloudPluginsCatalogProtocolVersion = 8", PLUGINS)
         legacy_restore = PLUGINS.split(
             "BOOL AMCloudPluginsRestoreInstalledReleaseForAuthorization", 1
         )[1]
@@ -468,6 +468,23 @@ class CloudSyncSourceTests(unittest.TestCase):
             "BOOL AMCloudPluginsInstallArchive", 1
         )[1].split("BOOL AMCloudPluginsRemoveAllIf", 1)[0]
         self.assertIn("AMCloudPluginsDedupeCatalogRootEffects", legacy_install)
+
+    def test_client_skips_only_explicit_official_alias_manifest_items(self):
+        self.assertIn("AMCloudManifestItemIsOfficialAlias", CLOUD)
+        helper = CLOUD.split("static BOOL AMCloudManifestItemIsOfficialAlias", 1)[1]
+        helper = helper.split("static NSError *AMCloudError", 1)[0]
+        self.assertIn('[@"kind"]', helper)
+        self.assertIn('[@"type"]', helper)
+        self.assertIn('[@"officialAlias"]', helper)
+        self.assertIn('[@"official_alias"]', helper)
+        self.assertIn('@"custom_plugin"', helper)
+        sync = CLOUD.rsplit("- (void)syncPluginCatalog:", 1)[1].split(
+            "NSDictionary *state", 1
+        )[0]
+        self.assertIn("visiblePlugins", sync)
+        self.assertIn("AMCloudManifestItemIsOfficialAlias", sync)
+        self.assertIn("plugins = visiblePlugins", sync)
+        self.assertNotIn("hasPrefix:@\"com.autfeng.\"", helper)
 
     def test_catalog_failure_clears_legacy_release_state(self):
         self.assertIn("cloud.plugins.legacy_release_cleared", CLOUD)
@@ -513,6 +530,35 @@ class CloudSyncSourceTests(unittest.TestCase):
         )[1].split("static NSURL *AMCloudPluginsBundledEffectsURL", 1)[0]
         self.assertIn("AMCloudPluginsCustomPluginTargetsBundledEffect", installer)
         self.assertIn("return NO;", installer)
+
+    def test_custom_plugin_identity_is_checked_before_item_commit_and_catalog_copy(self):
+        self.assertIn("AMCloudPluginsValidateCustomPluginIdentity", PLUGINS)
+        self.assertIn("Custom plugin XML effect id does not match metadata", PLUGINS)
+        self.assertIn("Custom plugin cannot use an IPA official effect id", PLUGINS)
+        installer = PLUGINS.split(
+            "BOOL AMCloudPluginsInstallItemArchiveWithMetadata", 1
+        )[1].split("static NSURL *AMCloudPluginsBundledEffectsURL", 1)[0]
+        self.assertLess(
+            installer.index("AMCloudPluginsValidateCustomPluginIdentity"),
+            installer.index("moveItemAtURL:stagingURL toURL:finalURL"),
+        )
+        validator = PLUGINS.split(
+            "static BOOL AMCloudPluginsValidateCatalogItemFiles", 1
+        )[1].split("BOOL AMCloudPluginsActivateCatalog", 1)[0]
+        self.assertIn("AMCloudPluginsValidateCustomPluginIdentity", validator)
+
+    def test_legacy_full_release_validates_official_ids_at_original_paths(self):
+        self.assertIn("AMCloudPluginsValidateLegacyReleaseEffects", PLUGINS)
+        self.assertIn("Legacy release official XML id does not match the IPA baseline", PLUGINS)
+        self.assertIn("Legacy release cannot relocate an IPA official effect id", PLUGINS)
+        restore = PLUGINS.split(
+            "static BOOL AMCloudPluginsActivatePersistedState", 1
+        )[1].split("static BOOL AMCloudPluginsActivatePersistedCatalog", 1)[0]
+        self.assertIn("AMCloudPluginsValidateLegacyReleaseEffects", restore)
+        install = PLUGINS.split(
+            "BOOL AMCloudPluginsInstallArchive", 1
+        )[1].split("BOOL AMCloudPluginsRemoveAllIf", 1)[0]
+        self.assertIn("AMCloudPluginsValidateLegacyReleaseEffects", install)
 
     def test_catalog_identity_errors_include_item_context(self):
         self.assertIn("AMCloudPluginsValidationErrorForItem", PLUGINS)
@@ -1065,13 +1111,13 @@ class CloudSyncSourceTests(unittest.TestCase):
         )[0]
         self.assertIn("AMCloudAttachVisibleProjectsControllers();", update_entry)
 
-    def test_home_ui_is_linked_and_installed_without_secondary_dlopen(self):
-        self.assertIn('#import "AMHomeUI.h"', CLOUD)
+    def test_home_ui_is_not_linked_or_installed_by_cloud(self):
+        self.assertNotIn('#import "AMHomeUI.h"', CLOUD)
         install = CLOUD.split("void AMCloudSyncInstall(", 1)[1].split(
             "void AMCloudAuthorizeFeature", 1
         )[0]
-        self.assertIn("AMHomeUIInstall();", install)
-        self.assertIn('@"cloud.home_ui.linked_install"', install)
+        self.assertNotIn("AMHomeUIInstall();", install)
+        self.assertNotIn('cloud.home_ui.linked_install', install)
         self.assertNotIn("AMCloudLoadHomeUI", CLOUD)
         self.assertNotIn("AMCloudScheduleHomeUILoad", CLOUD)
         self.assertNotIn("dlopen(", CLOUD)

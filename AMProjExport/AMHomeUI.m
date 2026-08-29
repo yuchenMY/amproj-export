@@ -1856,3 +1856,12 @@ void AMHomeUIInstall(void) {
         AMHomeUIScheduleActivation(0.35);
     });
 }
+
+// Home UI is a standalone image. Its constructor is the only activation
+// entrypoint, so Cloud cannot install the observers a second time.
+__attribute__((constructor))
+static void AMHomeUIInitialize(void) {
+    @autoreleasepool {
+        AMHomeUIInstall();
+    }
+}

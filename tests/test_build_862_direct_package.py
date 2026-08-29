@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 import build_862_direct_package as direct
+import inject_dylib
 
 
 class DirectCloud862Tests(unittest.TestCase):
@@ -138,6 +139,7 @@ class DirectCloud862Tests(unittest.TestCase):
         loader_command=None,
         loader_command_size=80,
         include_frameworks_rpath=False,
+        extra_load_commands=(),
     ):
         loader_command = loader_command or direct.handoff.LC_LOAD_DYLIB
         commands = [
@@ -158,6 +160,7 @@ class DirectCloud862Tests(unittest.TestCase):
                 loader_command_size,
             ),
         ]
+        commands.extend(extra_load_commands)
         if include_frameworks_rpath:
             commands.append(self.rpath_command(direct.FRAMEWORKS_RPATH))
         signature_offset = 32 + sum(map(len, commands)) + 16
@@ -302,6 +305,40 @@ class DirectCloud862Tests(unittest.TestCase):
         source = self.fixture_main()
         with self.assertRaisesRegex(RuntimeError, "must strongly load"):
             direct._verify_output_main_structure(source)
+
+    def test_home_ui_requirement_injects_once_and_is_idempotent(self):
+        source = self.fixture_main()
+
+        result = direct.patch_main_direct_cloud(source, require_home_ui=True)
+        info = inject_dylib.parse_macho_data(result, "direct HomeUI main")
+        loads = direct.homeui.home_ui_loads(info)
+
+        self.assertEqual(len(loads), 1)
+        self.assertEqual(loads[0]["cmd"], inject_dylib.LC_LOAD_DYLIB)
+        self.assertEqual(loads[0]["name"], direct.homeui.HOME_UI_LOAD)
+        self.assertEqual(info["uuid"], "01b730171a6e3b178f59c27462dea563")
+        self.assertEqual(
+            direct.patch_main_direct_cloud(result, require_home_ui=True), result
+        )
+
+    def test_home_ui_contract_rejects_duplicate_loads(self):
+        source = self.fixture_main(
+            extra_load_commands=(
+                self.dylib_command(
+                    inject_dylib.LC_LOAD_DYLIB,
+                    direct.homeui.HOME_UI_LOAD,
+                    80,
+                ),
+                self.dylib_command(
+                    inject_dylib.LC_LOAD_DYLIB,
+                    direct.homeui.HOME_UI_LOAD,
+                    80,
+                ),
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Conflicting Mach-O loads|duplicate AMHomeUI loads"):
+            direct.patch_main_direct_cloud(source, require_home_ui=True)
 
     def test_cloud_runtime_marker_rejects_stale_v43(self):
         with self.assertRaisesRegex(RuntimeError, "source Cloud is v43"):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replace the embedded Cloud runtime and update editor assets in an IPA."""
+"""Replace Cloud and install the standalone Home UI runtime in an IPA."""
 
 import argparse
 import hashlib
@@ -16,6 +16,7 @@ CLOUD_PATH = "Payload/AlightMotion.app/Frameworks/AMProjExportCloud.dylib"
 HOME_UI_PATH = "Payload/AlightMotion.app/Frameworks/AMHomeUI.dylib"
 MAIN_PATH = "Payload/AlightMotion.app/AlightMotion"
 HOME_UI_BASENAME = "AMHomeUI.dylib"
+HOME_UI_LOAD = "@executable_path/Frameworks/AMHomeUI.dylib"
 BUTTON_IMAGE_PATH = "Payload/AlightMotion.app/autfeng_add_layer_button.png"
 CATEGORY_PREFIX = "Payload/AlightMotion.app/BuiltinCategory/thumb/"
 CATEGORY_NAMES = (
@@ -36,7 +37,7 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def copy_zip_info(info):
+def copy_zip_info(info, *, executable=None):
     clone = zipfile.ZipInfo(info.filename, date_time=info.date_time)
     clone.compress_type = info.compress_type
     clone.comment = info.comment
@@ -47,7 +48,10 @@ def copy_zip_info(info):
     clone.flag_bits = info.flag_bits
     clone.volume = info.volume
     clone.internal_attr = info.internal_attr
-    clone.external_attr = info.external_attr
+    if executable is None:
+        clone.external_attr = info.external_attr
+    else:
+        clone.external_attr = (0o100755 if executable else 0o100644) << 16
     return clone
 
 
@@ -78,20 +82,90 @@ def ensure_no_home_ui_loads(info, context):
         )
 
 
-def verify_cloud_embedded_home_ui(dylib_path):
+def ensure_home_ui_load_contract(info, context):
+    """Require exactly one strong load at the standalone HomeUI path."""
+    commands = [
+        command
+        for command in info["dylib_load_commands"]
+        if command["name"].rsplit("/", 1)[-1] == HOME_UI_BASENAME
+    ]
+    if len(commands) != 1:
+        raise RuntimeError(
+            f"{context} must strongly load AMHomeUI exactly once; found {len(commands)}"
+        )
+    command = commands[0]
+    if command["name"] != HOME_UI_LOAD or command["cmd"] != inject_dylib.LC_LOAD_DYLIB:
+        raise RuntimeError(
+            f"{context} has a conflicting AMHomeUI load: "
+            f"{command['command']} {command['name']}"
+        )
+
+
+def verify_cloud_standalone_home_ui(dylib_path):
+    """Verify that Cloud is independent from the standalone Home UI image."""
     info = inject_dylib.verify_dylib_architecture(dylib_path)
     ensure_no_home_ui_loads(info, "Cloud dylib")
-    if "_AMHomeUIInstall" not in info["external_defined_symbols"]:
-        raise RuntimeError("Cloud dylib must define _AMHomeUIInstall")
+    if "_AMHomeUIInstall" in info["external_defined_symbols"]:
+        raise RuntimeError("Cloud dylib must not define _AMHomeUIInstall")
     cloud = Path(dylib_path).read_bytes()
-    if b"https://amhome.meowcr.cn/home" not in cloud:
-        raise RuntimeError("Cloud dylib is missing the AutFeng home URL")
+    if b"https://amhome.meowcr.cn/home" in cloud:
+        raise RuntimeError("Cloud dylib must not embed the Home UI URL")
 
 
-def package(source_path, output_path, dylib_path, image_path, category_directory):
+# Keep the old import name usable while changing its contract to the split
+# runtime. Callers should migrate to verify_cloud_standalone_home_ui.
+verify_cloud_embedded_home_ui = verify_cloud_standalone_home_ui
+
+
+def patch_main_with_home_ui(main, home_ui_name=HOME_UI_BASENAME):
+    """Add one strong HomeUI load command using existing Mach-O padding."""
+    with tempfile.TemporaryDirectory(prefix="am-home-ui-main-") as directory:
+        main_path = Path(directory) / "AlightMotion"
+        home_ui_path = Path(directory) / home_ui_name
+        main_path.write_bytes(main)
+        # insert_load_dylib only uses the basename to construct the load name;
+        # the placeholder does not need to contain a valid Mach-O image.
+        home_ui_path.write_bytes(b"")
+        inject_dylib.insert_load_dylib(str(main_path), str(home_ui_path))
+        patched = main_path.read_bytes()
+    info = inject_dylib.parse_macho_data(patched, MAIN_PATH)
+    loads = [
+        command for command in info["dylib_load_commands"]
+        if command["name"] == HOME_UI_LOAD
+    ]
+    if len(loads) != 1 or loads[0]["cmd"] != inject_dylib.LC_LOAD_DYLIB:
+        raise RuntimeError("main executable must strongly load AMHomeUI exactly once")
+    return patched
+
+
+def verify_home_ui_binary(home_ui_path, home_ui):
+    """Verify the standalone HomeUI dylib's ABI, identity, symbol, and URL."""
+    info = inject_dylib.verify_dylib_architecture(home_ui_path)
+    install_names = info.get("id_dylibs", [])
+    if install_names != ["@rpath/AMHomeUI.dylib"]:
+        raise RuntimeError(
+            "Home UI dylib install name must be @rpath/AMHomeUI.dylib"
+        )
+    if "_AMHomeUIInstall" not in info["external_defined_symbols"]:
+        raise RuntimeError("Home UI dylib must export _AMHomeUIInstall")
+    if b"https://amhome.meowcr.cn/home" not in home_ui:
+        raise RuntimeError("Home UI dylib is missing the AutFeng home URL")
+
+
+def package(
+    source_path,
+    output_path,
+    dylib_path,
+    home_ui_path,
+    image_path,
+    category_directory,
+):
     source_path = Path(source_path).resolve()
     output_path = Path(output_path).resolve()
-    dylib = Path(dylib_path).resolve().read_bytes()
+    dylib_path = Path(dylib_path).resolve()
+    home_ui_path = Path(home_ui_path).resolve()
+    dylib = dylib_path.read_bytes()
+    home_ui = home_ui_path.read_bytes()
     image = Path(image_path).resolve().read_bytes()
     category_directory = Path(category_directory).resolve()
     category_images = {
@@ -101,7 +175,8 @@ def package(source_path, output_path, dylib_path, image_path, category_directory
     direct.verify_cloud_runtime_version(dylib)
     direct.verify_cloud_stability_contract(dylib)
     direct.prepare_cloud(dylib)
-    verify_cloud_embedded_home_ui(dylib_path)
+    verify_cloud_standalone_home_ui(dylib_path)
+    verify_home_ui_binary(home_ui_path, home_ui)
 
     with zipfile.ZipFile(source_path, "r") as source:
         names = source.namelist()
@@ -113,7 +188,16 @@ def package(source_path, output_path, dylib_path, image_path, category_directory
             raise RuntimeError("source IPA has an unexpected Home UI layout")
         source_main = source.read(MAIN_PATH)
         source_main_info = inject_dylib.parse_macho_data(source_main, MAIN_PATH)
-        ensure_no_home_ui_loads(source_main_info, "source main")
+        source_home_ui_loads = [
+            command
+            for command in source_main_info["dylib_load_commands"]
+            if command["name"].rsplit("/", 1)[-1] == HOME_UI_BASENAME
+        ]
+        if source_home_ui_loads:
+            ensure_home_ui_load_contract(source_main_info, "source main")
+            main = source_main
+        else:
+            main = patch_main_with_home_ui(source_main)
         missing_categories = [
             name
             for name in category_images
@@ -134,22 +218,26 @@ def package(source_path, output_path, dylib_path, image_path, category_directory
             candidate, "w", allowZip64=True
         ) as output:
             for info in source.infolist():
-                if info.filename == HOME_UI_PATH:
-                    continue
                 payload = b"" if info.is_dir() else source.read(info.filename)
                 if info.filename == CLOUD_PATH:
                     payload = dylib
                 elif info.filename == MAIN_PATH:
-                    payload = source_main
+                    payload = main
+                elif info.filename == HOME_UI_PATH:
+                    payload = home_ui
                 elif info.filename == BUTTON_IMAGE_PATH:
                     payload = image
                 elif info.filename in category_images:
                     payload = category_images[info.filename]
                 output_info = copy_zip_info(info)
+                if info.filename == HOME_UI_PATH:
+                    output_info.external_attr = 0o100755 << 16
                 output.writestr(output_info, payload)
 
             if BUTTON_IMAGE_PATH not in source.namelist():
                 output.writestr(new_zip_info(BUTTON_IMAGE_PATH), image)
+            if HOME_UI_PATH not in source.namelist():
+                output.writestr(new_zip_info(HOME_UI_PATH, executable=True), home_ui)
             for name, payload in category_images.items():
                 if name not in source.namelist():
                     output.writestr(new_zip_info(name), payload)
@@ -159,21 +247,42 @@ def package(source_path, output_path, dylib_path, image_path, category_directory
         ) as output:
             if output.testzip() is not None:
                 raise RuntimeError("output IPA CRC validation failed")
-            expected_names = (set(source.namelist()) - {HOME_UI_PATH}) | {
+            expected_names = set(source.namelist()) | {
                 BUTTON_IMAGE_PATH,
+                HOME_UI_PATH,
                 *category_images,
             }
             if set(output.namelist()) != expected_names:
                 raise RuntimeError("output IPA member set changed unexpectedly")
             if output.read(CLOUD_PATH) != dylib:
                 raise RuntimeError("output Cloud dylib mismatch")
-            if HOME_UI_PATH in output.namelist():
-                raise RuntimeError("output IPA must not contain AMHomeUI.dylib")
+            if output.read(HOME_UI_PATH) != home_ui:
+                raise RuntimeError("output Home UI dylib mismatch")
             output_main = output.read(MAIN_PATH)
             output_main_info = inject_dylib.parse_macho_data(output_main, MAIN_PATH)
-            ensure_no_home_ui_loads(output_main_info, "output main")
-            if output_main != source_main:
-                raise RuntimeError("output main executable changed")
+            ensure_home_ui_load_contract(output_main_info, "output main")
+            if not source_home_ui_loads:
+                expected_command_growth = (
+                    output_main_info["sizeofcmds"] - source_main_info["sizeofcmds"]
+                )
+                changed = {
+                    index
+                    for index, (before, after) in enumerate(
+                        zip(source_main, output_main)
+                    )
+                    if before != after
+                }
+                allowed = set(range(16, 24)) | set(
+                    range(
+                        source_main_info["load_commands_end"],
+                        source_main_info["load_commands_end"]
+                        + expected_command_growth,
+                    )
+                )
+                if not changed or not changed <= allowed:
+                    raise RuntimeError(
+                        "Home UI injection changed bytes outside the Mach-O header"
+                    )
             if output.read(BUTTON_IMAGE_PATH) != image:
                 raise RuntimeError("output editor button image mismatch")
             for name, payload in category_images.items():
@@ -197,6 +306,7 @@ def package(source_path, output_path, dylib_path, image_path, category_directory
         "input_sha256": sha256(source_path.read_bytes()),
         "output_sha256": sha256(output_path.read_bytes()),
         "dylib_sha256": sha256(dylib),
+        "home_ui_sha256": sha256(home_ui),
         "image_sha256": sha256(image),
         "category_image_sha256": {
             Path(name).name: sha256(payload)
@@ -211,6 +321,7 @@ def main():
     parser.add_argument("source")
     parser.add_argument("output")
     parser.add_argument("dylib")
+    parser.add_argument("home_ui")
     parser.add_argument("image")
     parser.add_argument("category_directory")
     args = parser.parse_args()
@@ -219,6 +330,7 @@ def main():
             args.source,
             args.output,
             args.dylib,
+            args.home_ui,
             args.image,
             args.category_directory,
         )

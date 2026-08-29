@@ -18,6 +18,8 @@ from pathlib import Path
 
 import build_862_loadcontrol_package as handoff
 import build_862_stable_package as stable
+import home_ui_contract as homeui
+import inject_dylib
 
 
 # Hashes are intentionally optional.  LCSign changes the executable and the
@@ -451,7 +453,7 @@ def verify_input_main(data):
     return loader[0]
 
 
-def _verify_output_main_structure(data):
+def _verify_output_main_structure(data, require_home_ui=False):
     uuids, enhancer, cloud, loader = _custom_loads(data, "direct-Cloud main")
     if uuids != [handoff.EXPECTED_MAIN_UUID]:
         raise RuntimeError("direct-Cloud main UUID changed")
@@ -463,17 +465,25 @@ def _verify_output_main_structure(data):
         raise RuntimeError("direct-Cloud main must not load LoadControl")
     if cloud[0]["name"] == CLOUD_LOAD_COMPACT:
         _require_frameworks_rpath(data, "direct-Cloud main")
+    info = inject_dylib.parse_macho_data(data, "direct-Cloud main")
+    home_loads = homeui.home_ui_loads(info)
+    if len(home_loads) > 1:
+        raise RuntimeError("main executable contains duplicate AMHomeUI loads")
+    if home_loads:
+        homeui.ensure_home_ui_load_contract(info, "direct-Cloud main")
+    elif require_home_ui:
+        raise RuntimeError("direct-Cloud main must strongly load AMHomeUI")
     return cloud[0]
 
 
-def verify_resign_ready_main(data):
+def verify_resign_ready_main(data, require_home_ui=False):
     actual_hash = sha256_bytes(data)
     if EXPECTED_OUTPUT_MAIN_SHA256 and actual_hash != EXPECTED_OUTPUT_MAIN_SHA256:
         raise RuntimeError(
             "direct-Cloud main mismatch: "
             f"expected {EXPECTED_OUTPUT_MAIN_SHA256}, found {actual_hash}"
         )
-    result = _verify_output_main_structure(data)
+    result = _verify_output_main_structure(data, require_home_ui=require_home_ui)
     _verify_nonempty_signature_container(data, "AlightMotion")
     return result
 
@@ -488,7 +498,7 @@ def _verify_nonempty_signature_container(data, label):
         )
 
 
-def patch_main_direct_cloud(data):
+def patch_main_direct_cloud(data, require_home_ui=False):
     try:
         target = verify_input_main(data)
     except RuntimeError as input_error:
@@ -496,11 +506,17 @@ def patch_main_direct_cloud(data):
         # already has the desired load command, so only the Cloud member needs
         # replacement and re-signing.
         try:
-            _verify_output_main_structure(data)
+            _verify_output_main_structure(data, require_home_ui=False)
             _verify_nonempty_signature_container(data, "AlightMotion")
         except RuntimeError:
             raise input_error
-        return data
+        result = data
+        if require_home_ui:
+            info = inject_dylib.parse_macho_data(result, "AlightMotion")
+            if not homeui.home_ui_loads(info):
+                result = homeui.patch_main_with_home_ui(result, "AlightMotion")
+        verify_resign_ready_main(result, require_home_ui=require_home_ui)
+        return result
     capacity = target["size"] - target["name_offset"]
     full_replacement = handoff.CLOUD_LOAD.encode("utf-8") + b"\0"
     lcsign_replacement = CLOUD_LOAD_LCSIGN.encode("utf-8") + b"\0"
@@ -535,13 +551,19 @@ def patch_main_direct_cloud(data):
     # LCSign recognizes the existing non-empty signature command and replaces
     # its blob.  A zero-sized placeholder is silently skipped by LCSign.
     result = bytes(patched)
-    verify_resign_ready_main(result)
+    if require_home_ui:
+        result = homeui.patch_main_with_home_ui(result, "AlightMotion")
+    verify_resign_ready_main(result, require_home_ui=require_home_ui)
     return result
 
 
 def prepare_cloud(data):
     verify_cloud_runtime_version(data)
     verify_cloud_stability_contract(data)
+    # The Cloud image is intentionally independent from the Home UI image.
+    # Keep this check in the common direct packager so legacy entry points
+    # cannot accidentally reintroduce the old linked/embedded runtime.
+    homeui.verify_cloud_payload(data, "AMProjExportCloud.dylib")
     actual_hash = sha256_bytes(data)
     if EXPECTED_INPUT_CLOUD_SHA256 and actual_hash != EXPECTED_INPUT_CLOUD_SHA256:
         raise RuntimeError(
@@ -568,7 +590,7 @@ def prepare_cloud(data):
     return result
 
 
-def _copy_zip_info(info):
+def _copy_zip_info(info, *, executable=None):
     clone = zipfile.ZipInfo(info.filename, date_time=info.date_time)
     clone.compress_type = info.compress_type
     clone.comment = info.comment
@@ -579,13 +601,25 @@ def _copy_zip_info(info):
     clone.flag_bits = info.flag_bits
     clone.volume = info.volume
     clone.internal_attr = info.internal_attr
-    clone.external_attr = info.external_attr
+    if executable is None:
+        clone.external_attr = info.external_attr
+    else:
+        clone.external_attr = (0o100755 if executable else 0o100644) << 16
     return clone
 
 
-def verify_resign_ready_ipa(source_path, output_path, info, main, cloud, enhancer):
+def verify_resign_ready_ipa(
+    source_path,
+    output_path,
+    info,
+    main,
+    cloud,
+    enhancer,
+    home_ui=None,
+):
     verify_cloud_runtime_version(cloud)
-    cloud_load = _verify_output_main_structure(main)
+    require_home_ui = home_ui is not None
+    cloud_load = _verify_output_main_structure(main, require_home_ui=require_home_ui)
     output_cloud_path = _cloud_member_path(cloud_load["name"])
     with zipfile.ZipFile(source_path, "r") as source, zipfile.ZipFile(
         output_path, "r"
@@ -602,16 +636,24 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud, enhance
             for name in source_names
             if not handoff._is_stale_signing_entry(name)
             and name != LOADCONTROL_PATH
-            and name != HOME_UI_PATH
             and name not in CLOUD_MEMBER_PATHS
         }
         expected_names.add(output_cloud_path)
+        if home_ui is not None:
+            expected_names.add(HOME_UI_PATH)
         if set(output_names) != expected_names:
             raise RuntimeError("output IPA member set changed unexpectedly")
         if LOADCONTROL_PATH in output_names:
             raise RuntimeError("output IPA still contains LoadControl")
-        if HOME_UI_PATH in output_names:
-            raise RuntimeError("output IPA still contains standalone AMHomeUI")
+        if home_ui is not None:
+            if output_names.count(HOME_UI_PATH) != 1:
+                raise RuntimeError("output IPA must contain one standalone AMHomeUI")
+            if output.read(HOME_UI_PATH) != home_ui:
+                raise RuntimeError("output Home UI differs from prepared Home UI")
+        elif HOME_UI_PATH in output_names:
+            raise RuntimeError(
+                "output IPA contains AMHomeUI but no standalone Home UI payload was supplied"
+            )
         if output.read(INFO_PLIST) != info:
             raise RuntimeError("output Info.plist differs from prepared identity")
         verify_output_info(info)
@@ -647,9 +689,10 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud, enhance
             MAIN_EXECUTABLE,
             AMENHANCER_PATH,
             LOADCONTROL_PATH,
-            HOME_UI_PATH,
             *CLOUD_MEMBER_PATHS,
         }
+        if home_ui is not None:
+            changed.add(HOME_UI_PATH)
         for name in expected_names - changed:
             source_info = source.getinfo(name)
             if source_info.is_dir():
@@ -669,7 +712,7 @@ def verify_resign_ready_ipa(source_path, output_path, info, main, cloud, enhance
     }
 
 
-def build_direct_package(source_path, output_path, cloud_path=None):
+def build_direct_package(source_path, output_path, cloud_path=None, home_ui_path=None):
     source_path = Path(source_path).resolve()
     output_path = Path(output_path).resolve()
     if source_path == output_path:
@@ -711,8 +754,27 @@ def build_direct_package(source_path, output_path, cloud_path=None):
             or names.count(HOME_UI_PATH) > 1
         ):
             raise RuntimeError("source IPA contains duplicate loader members")
+        source_home_ui_present = names.count(HOME_UI_PATH) == 1
+        supplied_home_ui = (
+            Path(home_ui_path).resolve().read_bytes() if home_ui_path else None
+        )
+        if supplied_home_ui is not None:
+            homeui.verify_home_ui_payload(home_ui_path, supplied_home_ui)
+        elif source_home_ui_present:
+            supplied_home_ui = source.read(HOME_UI_PATH)
+            homeui.verify_home_ui_payload(HOME_UI_PATH, supplied_home_ui)
         info = prepare_output_info(source.read(INFO_PLIST))
-        main = patch_main_direct_cloud(source.read(MAIN_EXECUTABLE))
+        source_main = source.read(MAIN_EXECUTABLE)
+        source_main_info = inject_dylib.parse_macho_data(
+            source_main, "source AlightMotion executable"
+        )
+        if homeui.home_ui_loads(source_main_info) and supplied_home_ui is None:
+            raise RuntimeError(
+                "source main loads AMHomeUI but the standalone Home UI member is missing"
+            )
+        main = patch_main_direct_cloud(
+            source_main, require_home_ui=supplied_home_ui is not None
+        )
         cloud_source = Path(cloud_path).resolve().read_bytes() if cloud_path else (
             source.read(source_cloud_paths[0]) if has_cloud else None
         )
@@ -721,7 +783,9 @@ def build_direct_package(source_path, output_path, cloud_path=None):
                 "a freshly built v44 AMProjExportCloud.dylib is required when the source has only LoadControl"
             )
         cloud = prepare_cloud(cloud_source)
-        cloud_load = _verify_output_main_structure(main)
+        cloud_load = _verify_output_main_structure(
+            main, require_home_ui=supplied_home_ui is not None
+        )
         output_cloud_path = _cloud_member_path(cloud_load["name"])
         source_amenhancer = source.read(AMENHANCER_PATH)
         if EXPECTED_AMENHANCER_SHA256 and sha256_bytes(source_amenhancer) != EXPECTED_AMENHANCER_SHA256:
@@ -745,11 +809,7 @@ def build_direct_package(source_path, output_path, cloud_path=None):
         ) as output:
             for zip_info in source.infolist():
                 name = zip_info.filename
-                if (
-                    handoff._is_stale_signing_entry(name)
-                    or name == LOADCONTROL_PATH
-                    or name == HOME_UI_PATH
-                ):
+                if handoff._is_stale_signing_entry(name) or name == LOADCONTROL_PATH:
                     continue
                 payload = b"" if zip_info.is_dir() else source.read(zip_info)
                 if name == INFO_PLIST:
@@ -760,7 +820,17 @@ def build_direct_package(source_path, output_path, cloud_path=None):
                     payload = enhancer
                 elif name in CLOUD_MEMBER_PATHS:
                     continue
-                output.writestr(_copy_zip_info(zip_info), payload)
+                elif name == HOME_UI_PATH and supplied_home_ui is not None:
+                    payload = supplied_home_ui
+                output.writestr(
+                    _copy_zip_info(
+                        zip_info,
+                        executable=(name == HOME_UI_PATH)
+                        if supplied_home_ui is not None
+                        else None,
+                    ),
+                    payload,
+                )
             output.writestr(
                 _copy_zip_info(
                     zipfile.ZipInfo(
@@ -769,6 +839,17 @@ def build_direct_package(source_path, output_path, cloud_path=None):
                 ),
                 cloud,
             )
+            if supplied_home_ui is not None and HOME_UI_PATH not in names:
+                home_ui_info = zipfile.ZipInfo(
+                    HOME_UI_PATH, date_time=(1980, 1, 1, 0, 0, 0)
+                )
+                home_ui_info.compress_type = zipfile.ZIP_DEFLATED
+                home_ui_info.create_system = 3
+                home_ui_info.external_attr = 0o100755 << 16
+                output.writestr(
+                    home_ui_info,
+                    supplied_home_ui,
+                )
 
         verification = verify_resign_ready_ipa(
             source_path,
@@ -777,6 +858,7 @@ def build_direct_package(source_path, output_path, cloud_path=None):
             main=main,
             cloud=cloud,
             enhancer=enhancer,
+            home_ui=supplied_home_ui,
         )
         os.replace(candidate, output_path)
 
@@ -785,6 +867,10 @@ def build_direct_package(source_path, output_path, cloud_path=None):
         **verification,
         "output_sha256": sha256_bytes(output_path.read_bytes()),
         "output": str(output_path),
+        "home_ui_sha256": (
+            sha256_bytes(supplied_home_ui) if supplied_home_ui is not None else None
+        ),
+        "home_ui_member": HOME_UI_PATH if supplied_home_ui is not None else None,
         "requires_recursive_real_signing": True,
     }
 
@@ -800,8 +886,18 @@ def main(argv=None):
         dest="cloud",
         help="fresh v44 AMProjExportCloud.dylib from the macOS build",
     )
+    parser.add_argument(
+        "--home-ui",
+        dest="home_ui",
+        help="standalone AMHomeUI.dylib from the macOS build",
+    )
     args = parser.parse_args(argv)
-    result = build_direct_package(args.source, args.output, cloud_path=args.cloud)
+    result = build_direct_package(
+        args.source,
+        args.output,
+        cloud_path=args.cloud,
+        home_ui_path=args.home_ui,
+    )
     for key, value in result.items():
         print(f"{key}: {value}")
 

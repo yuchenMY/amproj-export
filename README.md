@@ -135,15 +135,16 @@ AMProjExport/AMProjExport.dylib
 AMProjExport/AMProjExportCloud.dylib
 AMProjExport/AMProjExportDebug.dylib
 AMProjExport/AMMeowLoader.dylib
+AMProjExport/AMHomeUI.dylib
 ```
 
 下载名为 `AMProjExport-v44-dylibs` 的 artifact。其中的 `build-metadata.json`
 记录插件版本、commit、Actions run ID 以及每个二进制文件的 SHA-256，注入前可用它确认没有混入旧版本产物。
 
-主页模块已直接编译进 `AMProjExportCloud.dylib`，由 Cloud 构造器安装到
-Alight Motion 的 `HomeVC`/`FeedVC`。最终 IPA 只保留一个 Cloud dylib，不能再包含
-`Frameworks/AMHomeUI.dylib`，也不能有任何 HomeUI 的加载命令。这样 LCSign 递归签名
-时不会再单独处理主页模块，避免独立 dylib 的签名页校验导致启动闪退。包体仍必须重新签名安装。
+主页模块单独编译为 `AMHomeUI.dylib`，由它自己的 constructor 安装到
+Alight Motion 的 `HomeVC`/`FeedVC`。最终 IPA 必须同时包含 Cloud 和
+`Frameworks/AMHomeUI.dylib`，主程序只保留一条 `@executable_path/Frameworks/AMHomeUI.dylib`
+强加载命令。Cloud 不包含主页源码、URL 或 `_AMHomeUIInstall`，LCSign 必须递归签名两个 dylib。
 
 在已有全分类图和编辑器按钮的 IPA 上生成待签包：
 
@@ -151,12 +152,13 @@ Alight Motion 的 `HomeVC`/`FeedVC`。最终 IPA 只保留一个 Cloud dylib，�
 python .\package_editor_button_ipa.py `
   <source.ipa> <output.ipa> `
   .\AMProjExport\AMProjExportCloud.dylib `
+  .\AMProjExport\AMHomeUI.dylib `
   <add_layer_button.png> <category_image_directory>
 ```
 
-打包器会替换内嵌主页模块的 Cloud dylib、删除遗留的 `AMHomeUI.dylib`，替换指定按钮
-和 12 张分类图，并强制校验主程序逐字节不变。Cloud 必须导出 `_AMHomeUIInstall`，且
-主程序和 Cloud 如残留任何 HomeUI 加载命令都会直接拒绝打包。
+打包器会替换 Cloud、写入独立 `AMHomeUI.dylib`、注入主程序唯一 HomeUI 加载，并替换指定按钮
+和 12 张分类图。它会拒绝 Cloud 中的 `_AMHomeUIInstall`/主页 URL，且校验 HomeUI 的 ABI、安装名
+和导出符号，防止旧的合并模式再次进入包体。
 
 需要同时修复官方原版效果时，必须使用完整交付入口，而不要单独运行 XML 覆盖工具：
 
@@ -164,11 +166,12 @@ python .\package_editor_button_ipa.py `
 python .\build_862_official_effects_package.py `
   <source.ipa> <output.ipa> `
   D:\am\BuiltinEffects `
-  .\AMProjExport\AMProjExportCloud.dylib
+  .\AMProjExport\AMProjExportCloud.dylib `
+  --home-ui .\AMProjExport\AMHomeUI.dylib
 ```
 
 该入口仅覆盖基线 IPA 中已有、ID 与路径可核对的 `com.alightcreative...` 原版效果，
-保留额外插件；随后替换嵌入主页模块的 Cloud dylib、删除独立 HomeUI 与旧签名记录。
+保留额外插件；随后替换 Cloud、保留独立 HomeUI 与旧签名记录清理。
 它会阻止旧 `void main()` shader 覆盖 AFX2 `shadeFragment()` 修复版，并在最终 IPA 中复核
 所有 `BuiltinEffects` 资源没有被后续步骤改写。
 
@@ -227,3 +230,24 @@ It is not installable until LCSign recursively signs the main executable,
 with one identity. The signer must preserve `Info.plist`, app name, icons,
 Bundle ID, and all non-signature bytes. A package that leaves Cloud unsigned is
 invalid.
+
+## Standalone Home UI runtime
+
+`AMHomeUI.dylib` is an independent arm64 `MH_DYLIB`. `AMProjExportCloud.dylib`
+must not contain the Home UI source, `_AMHomeUIInstall`, or the home URL. The
+IPA must contain both files under `Payload/AlightMotion.app/Frameworks/`, and
+the main executable must have exactly one strong load:
+`@executable_path/Frameworks/AMHomeUI.dylib`.
+
+Build the 6.2.55 direct handoff with both binaries:
+
+```powershell
+py .\build_862_direct_package.py <source.ipa> <output.ipa> `
+  --cloud .\AMProjExport\AMProjExportCloud.dylib `
+  --home-ui .\AMProjExport\AMHomeUI.dylib
+```
+
+For official effect repair, pass the same `--home-ui` option to
+`build_862_official_effects_package.py`. For the 6.2.58 migration entry point,
+pass `--home-ui` to `build_865_migration_package.py`. LCSign must recursively
+sign the main executable, Cloud, HomeUI, and every nested Mach-O in one pass.

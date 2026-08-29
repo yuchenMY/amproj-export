@@ -2,7 +2,6 @@
 #import "AMCloudPlugins.h"
 #import "AMDebugTransport.h"
 #import "AMEditorCustomization.h"
-#import "AMHomeUI.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <QuartzCore/QuartzCore.h>
@@ -103,6 +102,21 @@ static NSString *AMCloudClassName(id object) {
 static void AMCloudDiagnostic(NSString *name, NSDictionary *fields) {
     NSLog(@"[AMProjExport] %@ %@", name ?: @"cloud.account", fields ?: @{});
     [[AMDebugTransport shared] emitCriticalEvent:name fields:fields ?: @{}];
+}
+
+// This flag is deliberately opt-in. A com.autfeng item is otherwise a
+// legitimate custom plugin and must continue through the normal catalog flow.
+static BOOL AMCloudManifestItemIsOfficialAlias(NSDictionary *plugin) {
+    if (![plugin isKindOfClass:NSDictionary.class]) return NO;
+    NSString *kind = [plugin[@"kind"] isKindOfClass:NSString.class]
+        ? [plugin[@"kind"] lowercaseString] : nil;
+    if (!kind.length) {
+        kind = [plugin[@"type"] isKindOfClass:NSString.class]
+            ? [plugin[@"type"] lowercaseString] : @"custom_plugin";
+    }
+    if (![kind isEqualToString:@"custom_plugin"]) return NO;
+    return [plugin[@"officialAlias"] boolValue] ||
+        [plugin[@"official_alias"] boolValue];
 }
 
 static NSError *AMCloudError(NSInteger code, NSString *message) {
@@ -2110,10 +2124,27 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 - (void)syncPluginCatalog:(NSArray<NSDictionary *> *)plugins
                  revision:(NSNumber *)revision
-                    token:(NSString *)token
-  authorizationGeneration:(uint64_t)authorizationGeneration
-         authorizationKey:(NSString *)authorizationKey
-              operationID:(NSString *)operationID {
+                     token:(NSString *)token
+   authorizationGeneration:(uint64_t)authorizationGeneration
+          authorizationKey:(NSString *)authorizationKey
+               operationID:(NSString *)operationID {
+    // Historical official mirrors are excluded only when the backend marks
+    // them explicitly. This preserves all unmarked custom com.autfeng items.
+    NSMutableArray<NSDictionary *> *visiblePlugins =
+        [NSMutableArray arrayWithCapacity:plugins.count];
+    for (NSDictionary *plugin in plugins ?: @[]) {
+        if (AMCloudManifestItemIsOfficialAlias(plugin)) {
+            AMCloudDiagnostic(@"cloud.plugins.official_alias_skipped", @{
+                @"plugin_id": [plugin[@"id"] isKindOfClass:NSString.class]
+                    ? plugin[@"id"] : @"",
+                @"effect_id": [plugin[@"effectId"] isKindOfClass:NSString.class]
+                    ? plugin[@"effectId"] : @""
+            });
+            continue;
+        }
+        [visiblePlugins addObject:plugin];
+    }
+    plugins = visiblePlugins;
     NSDictionary *state = AMCloudPluginsCurrentState();
     NSArray *installed = [state[@"plugins"] isKindOfClass:NSArray.class] ? state[@"plugins"] : @[];
     NSMutableDictionary<NSString *, NSDictionary *> *installedByID = [NSMutableDictionary dictionary];
@@ -3641,8 +3672,6 @@ void AMCloudSyncInstallPluginHooksEarly(void) {
 
 void AMCloudSyncInstall(AMCloudImportHandler importHandler) {
     [[AMCloudManager shared] installWithImportHandler:importHandler];
-    AMCloudDiagnostic(@"cloud.home_ui.linked_install", @{});
-    AMHomeUIInstall();
 }
 
 BOOL AMCloudSyncHasLoggedInAccount(void) {

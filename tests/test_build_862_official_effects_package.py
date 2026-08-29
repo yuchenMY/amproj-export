@@ -13,7 +13,7 @@ def effect_xml(effect_id):
 
 
 class OfficialEffectsFinalPackageTests(unittest.TestCase):
-    def test_final_package_keeps_repaired_effects_and_removes_home_ui(self):
+    def test_final_package_keeps_repaired_effects_and_standalone_home_ui(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             source_path = root / "source.ipa"
@@ -39,8 +39,6 @@ class OfficialEffectsFinalPackageTests(unittest.TestCase):
                     final_path, "w"
                 ) as output:
                     for info in repaired.infolist():
-                        if info.filename == final_package.direct.HOME_UI_PATH:
-                            continue
                         payload = repaired.read(info.filename)
                         if info.filename == final_package.direct.CLOUD_PATH:
                             payload = Path(cloud_path).read_bytes()
@@ -48,13 +46,15 @@ class OfficialEffectsFinalPackageTests(unittest.TestCase):
                 return {
                     "output": str(final_path),
                     "cloud_member": final_package.direct.CLOUD_PATH,
+                    "home_ui_member": final_package.direct.HOME_UI_PATH,
                 }
 
             with (
                 mock.patch.object(
                     final_package.direct, "build_direct_package", side_effect=fake_direct
                 ),
-                mock.patch.object(final_package.editor_package, "verify_cloud_embedded_home_ui") as verify_cloud,
+                mock.patch.object(final_package.editor_package, "verify_cloud_standalone_home_ui") as verify_cloud,
+                mock.patch.object(final_package.editor_package, "verify_home_ui_binary"),
             ):
                 result = final_package.build(
                     source_path, output_path, effects, cloud_path
@@ -63,9 +63,7 @@ class OfficialEffectsFinalPackageTests(unittest.TestCase):
             self.assertTrue(result["requires_recursive_real_signing"])
             self.assertEqual(verify_cloud.call_count, 2)
             with zipfile.ZipFile(output_path) as output:
-                self.assertNotIn(
-                    final_package.direct.HOME_UI_PATH, output.namelist()
-                )
+                self.assertIn(final_package.direct.HOME_UI_PATH, output.namelist())
                 self.assertEqual(
                     output.read(official_effects.BUILTIN_EFFECTS_PREFIX + "lift.xml"),
                     effect_xml("com.alightcreative.effects.lift.fixed"),
@@ -76,7 +74,7 @@ class OfficialEffectsFinalPackageTests(unittest.TestCase):
                     output.read("Payload/AlightMotion.app/custom.bin"), b"custom"
                 )
 
-    def test_rejects_cloud_that_fails_the_embedded_home_ui_contract(self):
+    def test_rejects_cloud_that_fails_the_standalone_home_ui_contract(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             source_path = root / "source.ipa"
@@ -90,7 +88,7 @@ class OfficialEffectsFinalPackageTests(unittest.TestCase):
             with (
                 mock.patch.object(
                     final_package.editor_package,
-                    "verify_cloud_embedded_home_ui",
+                    "verify_cloud_standalone_home_ui",
                     side_effect=RuntimeError("split HomeUI dependency"),
                 ),
                 mock.patch.object(final_package.direct, "build_direct_package") as direct_build,
