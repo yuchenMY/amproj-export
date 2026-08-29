@@ -5,7 +5,11 @@ from pathlib import Path
 from unittest import mock
 
 import package_cloud_dylib_ipa as packager
-from tests.test_package_editor_button_ipa import make_home_ui_dylib, make_main
+from tests.test_package_editor_button_ipa import (
+    make_home_ui_dylib,
+    make_legacy_info,
+    make_main,
+)
 
 
 class CloudOnlyPackageTests(unittest.TestCase):
@@ -17,11 +21,12 @@ class CloudOnlyPackageTests(unittest.TestCase):
             cloud_path = root / "AMProjExportCloud.dylib"
             cloud_path.write_bytes(b"new-cloud")
             home_ui = make_home_ui_dylib()
+            legacy_info = make_legacy_info()
             with zipfile.ZipFile(source_path, "w") as source:
                 source.writestr(packager.CLOUD_PATH, b"old-cloud")
                 source.writestr(packager.HOME_UI_PATH, home_ui)
                 source.writestr(packager.MAIN_PATH, make_main())
-                source.writestr("Payload/AlightMotion.app/Info.plist", b"plist")
+                source.writestr(packager.INFO_PATH, legacy_info)
 
             with (
                 mock.patch.object(packager.direct, "verify_cloud_runtime_version"),
@@ -43,7 +48,7 @@ class CloudOnlyPackageTests(unittest.TestCase):
                 )
                 packager.homeui.ensure_home_ui_load_contract(info, "output main")
                 self.assertEqual(
-                    output.read("Payload/AlightMotion.app/Info.plist"), b"plist"
+                    output.read(packager.INFO_PATH), legacy_info
                 )
 
 

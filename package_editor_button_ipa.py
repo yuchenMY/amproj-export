@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Replace Cloud and install the standalone Home UI runtime in an IPA."""
+"""Legacy 6.2.55/862-only Cloud and editor asset packager."""
 
 import argparse
 import hashlib
 import os
+import plistlib
 import tempfile
 import zipfile
 from pathlib import Path
@@ -15,6 +16,7 @@ import inject_dylib
 CLOUD_PATH = "Payload/AlightMotion.app/Frameworks/AMProjExportCloud.dylib"
 HOME_UI_PATH = "Payload/AlightMotion.app/Frameworks/AMHomeUI.dylib"
 MAIN_PATH = "Payload/AlightMotion.app/AlightMotion"
+INFO_PATH = "Payload/AlightMotion.app/Info.plist"
 HOME_UI_BASENAME = "AMHomeUI.dylib"
 HOME_UI_LOAD = "@executable_path/Frameworks/AMHomeUI.dylib"
 BUTTON_IMAGE_PATH = "Payload/AlightMotion.app/autfeng_add_layer_button.png"
@@ -65,6 +67,18 @@ def new_zip_info(name, executable=False):
     info.create_system = 3
     info.external_attr = (0o100755 if executable else 0o100644) << 16
     return info
+
+
+def reject_v865_source(source_path):
+    """Keep this legacy Cloud-name packager away from the 865 baseline."""
+    with zipfile.ZipFile(source_path, "r") as source:
+        if source.namelist().count(INFO_PATH) != 1:
+            raise RuntimeError("source IPA must contain exactly one Info.plist")
+        try:
+            info = plistlib.loads(source.read(INFO_PATH))
+        except (plistlib.InvalidFileException, ValueError, TypeError) as error:
+            raise RuntimeError("source IPA Info.plist is invalid") from error
+    inject_dylib.reject_v865_legacy_entry(info, "package_editor_button_ipa.py")
 
 
 def ensure_no_home_ui_loads(info, context):
@@ -164,6 +178,7 @@ def package(
     output_path = Path(output_path).resolve()
     dylib_path = Path(dylib_path).resolve()
     home_ui_path = Path(home_ui_path).resolve()
+    reject_v865_source(source_path)
     dylib = dylib_path.read_bytes()
     home_ui = home_ui_path.read_bytes()
     image = Path(image_path).resolve().read_bytes()
@@ -317,7 +332,9 @@ def package(
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Legacy 6.2.55/862-only Cloud and editor asset packager"
+    )
     parser.add_argument("source")
     parser.add_argument("output")
     parser.add_argument("dylib")

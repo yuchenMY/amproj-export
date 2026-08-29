@@ -1,3 +1,4 @@
+import io
 import plistlib
 import shutil
 import struct
@@ -145,19 +146,23 @@ def make_fake_ipa(
     root,
     bundle_identifier="com.example.fixture",
     wrapper=None,
+    short_version=None,
+    bundle_version=None,
 ):
     source = Path(root) / "source"
     archive_root = source / wrapper if wrapper else source
     app = archive_root / "Payload" / "Fixture.app"
     app.mkdir(parents=True)
+    info = {
+        "CFBundleExecutable": "Fixture",
+        "CFBundleIdentifier": bundle_identifier,
+    }
+    if short_version is not None:
+        info["CFBundleShortVersionString"] = short_version
+    if bundle_version is not None:
+        info["CFBundleVersion"] = bundle_version
     with (app / "Info.plist").open("wb") as file:
-        plistlib.dump(
-            {
-                "CFBundleExecutable": "Fixture",
-                "CFBundleIdentifier": bundle_identifier,
-            },
-            file,
-        )
+        plistlib.dump(info, file)
     make_macho(app / "Fixture")
     ipa = Path(root) / "input.ipa"
     with zipfile.ZipFile(ipa, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -664,6 +669,26 @@ class ConfigTests(unittest.TestCase):
 
 
 class InjectionTests(unittest.TestCase):
+    def test_injection_rejects_real_865_source_info_plist(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ipa, _ = make_fake_ipa(
+                root,
+                short_version="6.2.58",
+                bundle_version="865",
+            )
+            dylib = root / "AMProjExport.dylib"
+            make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
+            output = root / "rejected-865.ipa"
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "cannot package Alight Motion 6.2.58/865",
+            ):
+                inject_dylib.inject_ipa(ipa, dylib, output)
+
+            self.assertFalse(output.exists())
+
     def test_bundle_version_is_patched_and_verified_end_to_end(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1111,6 +1136,43 @@ class InjectionTests(unittest.TestCase):
 
 
 class ArgumentTests(unittest.TestCase):
+    def test_cli_rejects_explicit_865_bundle_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ipa, _ = make_fake_ipa(
+                root,
+                short_version="6.2.55",
+                bundle_version="862",
+            )
+            dylib = root / "AMProjExport.dylib"
+            make_macho(dylib, filetype=inject_dylib.MH_DYLIB)
+            output = root / "cli-rejected-865.ipa"
+
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    inject_dylib.main(
+                        [
+                            str(ipa),
+                            str(dylib),
+                            str(output),
+                            "--bundle-version",
+                            "865",
+                        ]
+                    )
+
+            self.assertEqual(raised.exception.code, 1)
+            self.assertIn(
+                "cannot package Alight Motion 6.2.58/865",
+                stderr.getvalue(),
+            )
+            self.assertFalse(output.exists())
+
+    def test_help_points_865_users_to_dedicated_migration_packager(self):
+        help_text = inject_dylib.build_argument_parser().format_help()
+
+        self.assertIn("build_865_migration_package.py", help_text)
+        self.assertIn("AMProjExport.dylib", help_text)
+
     def test_bundle_version_accepts_738_and_reaches_injector(self):
         parser = inject_dylib.build_argument_parser()
         args = parser.parse_args(

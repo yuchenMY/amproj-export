@@ -1,14 +1,23 @@
 # AMProjExport
 
-为 Alight Motion iOS v27b 注入 `.amproj` 导出与本地导入能力。项目包含：
+当前发布基线是 Alight Motion iOS **6.2.58 (Build 865)**。所有当前包体只允许注入
+`AMProjExport.dylib`；`AMProjExportCloud.dylib` 是 6.2.55 (Build 862) 的历史名称，
+不得再放入 865 包体。`AMHomeUI.dylib` 始终作为独立库保留，不合并进项目导入导出库。
 
-- `AMProjExport.dylib`：离线 Release 版。
-- `AMProjExportCloud.dylib`：日常使用的云端统一版；导入/导出逻辑与 Release 相同，只异步上报核心诊断事件，不安装完整 Debug hook。
+当前 865 包体的 XML、`.amproj` 导入和导出由 Alight Motion 自己的原生文档生命周期处理。
+项目库不安装 862 私有 `PackageImporter`、`UIDocumentPicker` delegate、Scene/URL、ShareNC
+或 UIActivity 接管；这些私有 ABI 未在 865 上验证，强行复用会导致重复消费文件、导入失败或闪退。
+`AMProjExport.dylib` 仍负责已验证的云同步、账户替换及其他独立功能，原生文档回调保持原样。
+
+项目包含：
+
+- `AMProjExport.dylib`：865 当前云端 Release 版。
 - `AMProjExportDebug.dylib`：带 Windows 调试后端遥测的 Debug 版；后端不可达不会阻塞导入或导出。
+- `AMHomeUI.dylib`：独立的主页 UI 库，不与 `AMProjExport.dylib` 合并。
 - `AMProjShareExtension.appex`：独立实验组件；稳定 Cloud IPA 不嵌入它，也不依赖 App Group。
 - `inject_dylib.py`：Windows IPA 注入、Info.plist 修补和产物验证工具。
 
-Cloud IPA 直接连接注入时配置的 HTTPS 后端，不显示 Debug 状态条、不轮询远程控制命令、不上传项目文件，也不安装全局 UI、网络或解析诊断 hook。完整 Debug IPA 仍支持本地发现、模式控制和按需产物捕获。两者的后端都不参与文件解析、项目保存或导入控制；连接失败只会缺少日志，不会阻塞导入、导出。
+865 Release IPA 直接连接注入时配置的 HTTPS 后端，不显示 Debug 状态条、不轮询远程控制命令、不上传项目文件，也不安装全局 UI、网络或解析诊断 hook。完整 Debug IPA 仍支持本地发现、模式控制和按需产物捕获。两者的后端都不参与文件解析、项目保存或导入控制；连接失败只会缺少日志，不会阻塞原生导入、导出。
 
 ## `.amproj` 格式
 
@@ -25,7 +34,36 @@ project.amproj
 
 完整格式见 `format_spec.md`。
 
-## v44 XML/AMProj 本地双路由导入
+## 865 XML/AMProj 原生导入导出
+
+6.2.58 (865) 的 XML、`.amproj`、项目包导入和导出全部交给 Alight Motion 原生
+document lifecycle。`build_865_migration_package.py` 只在 `Info.plist` 注册
+`com.alightcreative.motion.amproj` 与 `public.xml`，并把主程序唯一强加载改为
+`@executable_path/Frameworks/AMProjExport.dylib`。这保证系统“用其他应用打开”与
+应用内文件选择器仍由 865 自己完成，已有的 Swift 文档状态和工程引用不会被第二个消费者改写。
+
+865 不安装 6.2.55/862 的私有 `PackageImporter` continuation、UIDocumentPicker delegate、
+Scene/URL、ShareNC 或 UIActivity 导出 Hook。当前源码没有经过 865 ABI 验证的专用入口，
+因此不能为了“恢复入口”复用旧地址；云工程下载回调在 865 上保持 fail-closed，避免把下载缓存
+伪装成已经导入。要实现云工程下载后自动导入，必须先取得并验证 865 的真实类、selector、参数
+和 completion，再单独增加 865 适配器。
+
+### 865 迁移打包
+
+```powershell
+python .\build_865_migration_package.py `
+  <clean-6.2.58-865.ipa> <output.ipa> `
+  .\AMProjExport\AMProjExport.dylib `
+  <category_image_directory> <add_layer_button.png> `
+  --home-ui .\AMProjExport\AMHomeUI.dylib
+```
+
+脚本固定校验版本 `6.2.58`、Build `865` 和主程序 UUID，拒绝
+`AMProjExportCloud.dylib`、`AMMeowLoader.dylib`、重复加载命令及非标准 Frameworks 路径。
+输出包仅是 LCSign 待签包，必须递归签名主程序、`AMProjExport.dylib`、独立
+`AMHomeUI.dylib` 以及所有嵌套 Mach-O；签名后才能安装。
+
+## 历史 v44 XML/AMProj 导入（仅 6.2.55/862）
 
 Alight Motion 6.2.55 (862) 的底部“模板”是在线模板商城；本地“您的模板”和“上传 XML”
 都属于底部“项目”宿主。导入状态机不得把在线 `TemplatesListVC` 当作本地模板列表，也不得
@@ -126,15 +164,13 @@ completion、持久化变化和临时包消费全部成立时报告中性完成�
 
 `6.2.55 (862)` 稳定包优先在 `_TtC12AlightMotion7ShareNC` 的 `onTapExport:` 精确 hook 中读取 `ShareVC.selectedExportOptID`；仅值为 `7`（项目包）时启动植入的 `.amproj` 直出链。若该 Swift 状态未暴露，代码只在 AM 即将呈现精确的 `ShareProjectPackageVC` 时进行第二道接管，避免回落到会闪退的原生项目包流程。其他视频、图片、GIF、WebP 与 XML 导出仍交回 Alight Motion。系统分享表只收到生成的 `.amproj` 文件 URL；生成失败只提供“重试”或“取消”。
 
-## GitHub Actions 构建
+## GitHub Actions 构建（当前 865）
 
-推送源码后，Actions 会构建并验证：
+推送源码后，Actions 会在 macOS runner 构建并验证当前 865 产物：
 
 ```text
 AMProjExport/AMProjExport.dylib
-AMProjExport/AMProjExportCloud.dylib
 AMProjExport/AMProjExportDebug.dylib
-AMProjExport/AMMeowLoader.dylib
 AMProjExport/AMHomeUI.dylib
 ```
 
@@ -142,40 +178,40 @@ AMProjExport/AMHomeUI.dylib
 记录插件版本、commit、Actions run ID 以及每个二进制文件的 SHA-256，注入前可用它确认没有混入旧版本产物。
 
 主页模块单独编译为 `AMHomeUI.dylib`，由它自己的 constructor 安装到
-Alight Motion 的 `HomeVC`/`FeedVC`。最终 IPA 必须同时包含 Cloud 和
+Alight Motion 的 `HomeVC`/`FeedVC`。最终 IPA 必须同时包含
+`Frameworks/AMProjExport.dylib` 和
 `Frameworks/AMHomeUI.dylib`，主程序只保留一条 `@executable_path/Frameworks/AMHomeUI.dylib`
-强加载命令。Cloud 不包含主页源码、URL 或 `_AMHomeUIInstall`，LCSign 必须递归签名两个 dylib。
+强加载命令。`AMProjExport.dylib` 不包含主页源码、URL 或 `_AMHomeUIInstall`，LCSign 必须递归签名两个 dylib。
 
-在已有全分类图和编辑器按钮的 IPA 上生成待签包：
-
-```powershell
-python .\package_editor_button_ipa.py `
-  <source.ipa> <output.ipa> `
-  .\AMProjExport\AMProjExportCloud.dylib `
-  .\AMProjExport\AMHomeUI.dylib `
-  <add_layer_button.png> <category_image_directory>
-```
-
-打包器会替换 Cloud、写入独立 `AMHomeUI.dylib`、注入主程序唯一 HomeUI 加载，并替换指定按钮
-和 12 张分类图。它会拒绝 Cloud 中的 `_AMHomeUIInstall`/主页 URL，且校验 HomeUI 的 ABI、安装名
-和导出符号，防止旧的合并模式再次进入包体。
-
-需要同时修复官方原版效果时，必须使用完整交付入口，而不要单独运行 XML 覆盖工具：
+使用 865 专用迁移入口生成待签包：
 
 ```powershell
-python .\build_862_official_effects_package.py `
-  <source.ipa> <output.ipa> `
-  D:\am\BuiltinEffects `
-  .\AMProjExport\AMProjExportCloud.dylib `
+python .\build_865_migration_package.py `
+  <clean-6.2.58-865.ipa> <output.ipa> `
+  .\AMProjExport\AMProjExport.dylib `
+  <category_image_directory> <add_layer_button.png> `
   --home-ui .\AMProjExport\AMHomeUI.dylib
 ```
 
-该入口仅覆盖基线 IPA 中已有、ID 与路径可核对的 `com.alightcreative...` 原版效果，
-保留额外插件；随后替换 Cloud、保留独立 HomeUI 与旧签名记录清理。
-它会阻止旧 `void main()` shader 覆盖 AFX2 `shadeFragment()` 修复版，并在最终 IPA 中复核
-所有 `BuiltinEffects` 资源没有被后续步骤改写。
+迁移脚本会固定校验 6.2.58/865 的版本、Build 和主程序 UUID，写入
+`AMProjExport.dylib`、独立 `AMHomeUI.dylib`、编辑器按钮及 12 张分类图，并清理旧签名。
+它拒绝旧 Cloud 名称、`AMMeowLoader.dylib`、重复加载和非标准路径，防止 6.2.55 产物混入。
 
-## 从自有 6.2.55 (862) 底包生成唯一 Direct Cloud 包
+需要同时修复官方原版效果时，仍使用同一个 865 迁移入口，不要单独运行 862 XML 覆盖工具。
+原版效果必须保留官方 ID、文件名和 `BuiltinEffects` 相对路径。
+
+```powershell
+python .\build_865_migration_package.py `
+  <clean-6.2.58-865.ipa> <output.ipa> `
+  .\AMProjExport\AMProjExport.dylib `
+  <category_image_directory> <add_layer_button.png> `
+  --home-ui .\AMProjExport\AMHomeUI.dylib
+```
+
+效果 XML 的云端覆盖由运行时清单负责；迁移脚本本身不改写官方效果 ID，也不把官方
+`com.alightcreative...` 转成 `com.autfeng...`。原版覆盖停用或回滚后，运行时恢复 IPA 内置文件。
+
+## 历史 6.2.55 (862) Direct Cloud 包（不可用于 865）
 
 唯一输入是自有底包派生的 `am_v74_ownbase_LoadControl_LCSign-LC.ipa`。构建器保留主程序、
 全部资源、AmEnhancer、CydiaSubstrate、`.amproj/XML` 注册以及现有导入/自定义 `.amproj`
@@ -222,24 +258,25 @@ python -m unittest discover -s tests -v
 python -m unittest debug_backend.test_server -v
 ```
 
-## Signed handoff gate
+## 历史 Signed handoff gate（仅 862）
 
-`am_v77_ownbase_directCloud_LCSign.ipa` is the only current staging package.
+`am_v77_ownbase_directCloud_LCSign.ipa` is a historical 6.2.55/862 staging package.
 It is not installable until LCSign recursively signs the main executable,
 `AMProjExportCloud.dylib`, AmEnhancer, CydiaSubstrate, and every nested framework
 with one identity. The signer must preserve `Info.plist`, app name, icons,
 Bundle ID, and all non-signature bytes. A package that leaves Cloud unsigned is
 invalid.
 
-## Standalone Home UI runtime
+## 独立 AMHomeUI 运行时（当前 865）
 
-`AMHomeUI.dylib` is an independent arm64 `MH_DYLIB`. `AMProjExportCloud.dylib`
-must not contain the Home UI source, `_AMHomeUIInstall`, or the home URL. The
+`AMHomeUI.dylib` is an independent arm64 `MH_DYLIB`. The current
+`AMProjExport.dylib` (and the historical `AMProjExportCloud.dylib`) must not
+contain the Home UI source, `_AMHomeUIInstall`, or the home URL. The
 IPA must contain both files under `Payload/AlightMotion.app/Frameworks/`, and
 the main executable must have exactly one strong load:
 `@executable_path/Frameworks/AMHomeUI.dylib`.
 
-Build the 6.2.55 direct handoff with both binaries:
+Build the historical 6.2.55 direct handoff with both binaries (never use this for 865):
 
 ```powershell
 py .\build_862_direct_package.py <source.ipa> <output.ipa> `
@@ -247,7 +284,6 @@ py .\build_862_direct_package.py <source.ipa> <output.ipa> `
   --home-ui .\AMProjExport\AMHomeUI.dylib
 ```
 
-For official effect repair, pass the same `--home-ui` option to
-`build_862_official_effects_package.py`. For the 6.2.58 migration entry point,
-pass `--home-ui` to `build_865_migration_package.py`. LCSign must recursively
-sign the main executable, Cloud, HomeUI, and every nested Mach-O in one pass.
+For 6.2.58/865, use only `build_865_migration_package.py` with
+`AMProjExport.dylib`; LCSign must recursively sign the main executable,
+`AMProjExport.dylib`, `AMHomeUI.dylib`, and every nested Mach-O in one pass.

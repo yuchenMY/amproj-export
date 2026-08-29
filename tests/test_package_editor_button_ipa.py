@@ -2,6 +2,7 @@ import struct
 import tempfile
 import unittest
 import zipfile
+import plistlib
 from pathlib import Path
 from unittest import mock
 
@@ -13,6 +14,21 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGER_SOURCE = (ROOT / "package_editor_button_ipa.py").read_text(
     encoding="utf-8"
 )
+
+
+def make_legacy_info(
+    *, short_version="6.2.55", bundle_version="862", identifier="com.example.fixture"
+):
+    """Return a valid pre-865 Info.plist for the legacy packager fixtures."""
+    return plistlib.dumps(
+        {
+            "CFBundleExecutable": "AlightMotion",
+            "CFBundleIdentifier": identifier,
+            "CFBundleShortVersionString": short_version,
+            "CFBundleVersion": bundle_version,
+        },
+        fmt=plistlib.FMT_BINARY,
+    )
 
 
 def make_dylib_command(command, name):
@@ -176,6 +192,76 @@ def make_home_ui_dylib():
 
 
 class EditorHomePackageTests(unittest.TestCase):
+    def test_legacy_guard_rejects_865_variants_before_old_cloud_validation(self):
+        variants = (
+            {"short_version": "6.2.58", "bundle_version": "864"},
+            {"short_version": "6.2.57", "bundle_version": "865"},
+        )
+        for plist_values in variants:
+            with self.subTest(plist_values=plist_values):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    source_path = root / "source.ipa"
+                    output_path = root / "output.ipa"
+                    cloud_path = root / "AMProjExportCloud.dylib"
+                    home_ui_path = root / "AMHomeUI.dylib"
+                    button_path = root / "button.png"
+                    categories = root / "categories"
+                    categories.mkdir()
+                    cloud_path.write_bytes(make_cloud_dylib())
+                    home_ui_path.write_bytes(make_home_ui_dylib())
+                    button_path.write_bytes(b"button")
+                    for name in packager.CATEGORY_NAMES:
+                        (categories / name).write_bytes(b"category")
+                    info = make_legacy_info(**plist_values)
+                    with zipfile.ZipFile(source_path, "w") as source:
+                        source.writestr(packager.MAIN_PATH, make_main())
+                        source.writestr(packager.CLOUD_PATH, b"old-cloud")
+                        source.writestr(packager.HOME_UI_PATH, make_home_ui_dylib())
+                        source.writestr(packager.INFO_PATH, info)
+
+                    runtime_mock = mock.patch.object(
+                        packager.direct, "verify_cloud_runtime_version"
+                    )
+                    with runtime_mock as verify_runtime:
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "cannot package Alight Motion 6.2.58/865",
+                        ):
+                            packager.package(
+                                source_path,
+                                output_path,
+                                cloud_path,
+                                home_ui_path,
+                                button_path,
+                                categories,
+                            )
+                    verify_runtime.assert_not_called()
+                    self.assertFalse(output_path.exists())
+
+    def test_legacy_guard_rejects_missing_duplicate_and_invalid_info_plist(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            cloud_path = root / "AMProjExportCloud.dylib"
+            cloud_path.write_bytes(make_cloud_dylib())
+            cases = {
+                "missing": (),
+                "duplicate": (make_legacy_info(), make_legacy_info()),
+                "invalid": (b"not-a-plist",),
+            }
+            for label, info_members in cases.items():
+                with self.subTest(label=label):
+                    source_path = root / f"{label}.ipa"
+                    output_path = root / f"{label}-output.ipa"
+                    with zipfile.ZipFile(source_path, "w") as source:
+                        source.writestr(packager.MAIN_PATH, make_main())
+                        source.writestr(packager.CLOUD_PATH, b"old-cloud")
+                        for info in info_members:
+                            source.writestr(packager.INFO_PATH, info)
+                    with self.assertRaisesRegex(RuntimeError, "Info.plist"):
+                        packager.reject_v865_source(source_path)
+                    self.assertFalse(output_path.exists())
+
     def test_cloud_and_home_ui_verifiers_enforce_the_split_contract(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "AMProjExportCloud.dylib"
@@ -276,7 +362,7 @@ class EditorHomePackageTests(unittest.TestCase):
             with zipfile.ZipFile(source_path, "w") as source:
                 source.writestr(packager.MAIN_PATH, main)
                 source.writestr(packager.CLOUD_PATH, b"old-cloud")
-                source.writestr("Payload/AlightMotion.app/Info.plist", b"plist")
+                source.writestr(packager.INFO_PATH, make_legacy_info())
                 for name in packager.CATEGORY_NAMES:
                     if name == "ic_category_thumbnail_other.png":
                         continue
@@ -353,7 +439,7 @@ class EditorHomePackageTests(unittest.TestCase):
                 source.writestr(packager.MAIN_PATH, main)
                 source.writestr(packager.CLOUD_PATH, b"old-cloud")
                 source.writestr(packager.HOME_UI_PATH, home_ui)
-                source.writestr("Payload/AlightMotion.app/Info.plist", b"plist")
+                source.writestr(packager.INFO_PATH, make_legacy_info())
                 for name in packager.CATEGORY_NAMES:
                     source.writestr(
                         packager.category_path(name), ("old:" + name).encode()
@@ -408,7 +494,7 @@ class EditorHomePackageTests(unittest.TestCase):
             with zipfile.ZipFile(source_path, "w") as source:
                 source.writestr(packager.MAIN_PATH, main)
                 source.writestr(packager.CLOUD_PATH, b"old-cloud")
-                source.writestr("Payload/AlightMotion.app/Info.plist", b"plist")
+                source.writestr(packager.INFO_PATH, make_legacy_info())
 
             with (
                 mock.patch.object(packager.direct, "verify_cloud_runtime_version"),

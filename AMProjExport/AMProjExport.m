@@ -15301,22 +15301,14 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             return;
         }
         // The account presentation replacement remains active above. All
-        // other controllers, including document pickers and AM alerts, must
-        // use the native lifecycle exactly once.
+        // other controllers, including document pickers, XML import alerts,
+        // and activity sheets, must use the native lifecycle exactly once.
+        // Do not wrap the completion or run a post-presentation window scan
+        // here. On 6.2.58 those callbacks can be Swift-owned and are outside
+        // the verified 862 ABI; touching them has caused XML picker/export
+        // crashes even though the original presentation itself is valid.
         amproj_log865LegacyPathDisabled(@"presentation_interception");
-        void (^originalCompletion)(void) = [completion copy];
-        void (^wrappedCompletion)(void) = ^{
-            if (originalCompletion) originalCompletion();
-            dispatch_async(dispatch_get_main_queue(), ^{
-                amproj_dismissIPAFireWelcomeIfPresented(
-                    controller, @"post_presentation");
-            });
-        };
-        orig_presentVC(self, _cmd, controller, animated, wrappedCompletion);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            amproj_dismissIPAFireWelcomeIfPresented(
-                controller, @"post_present_probe");
-        });
+        orig_presentVC(self, _cmd, controller, animated, completion);
         return;
     }
     BOOL isShareExportHost = amproj_isShareExportHostController(controller);

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Replace only AMProjExportCloud.dylib in a resign-ready IPA."""
+"""Legacy 6.2.55/862-only Cloud dylib replacement helper."""
 
 import argparse
 import hashlib
 import json
 import os
+import plistlib
 import tempfile
 import zipfile
 from pathlib import Path
@@ -17,6 +18,7 @@ import inject_dylib
 CLOUD_PATH = "Payload/AlightMotion.app/Frameworks/AMProjExportCloud.dylib"
 HOME_UI_PATH = "Payload/AlightMotion.app/Frameworks/AMHomeUI.dylib"
 MAIN_PATH = "Payload/AlightMotion.app/AlightMotion"
+INFO_PATH = "Payload/AlightMotion.app/Info.plist"
 
 
 def sha256(data):
@@ -49,10 +51,23 @@ def _new_zip_info(name, executable=False):
     return info
 
 
+def reject_v865_source(source_path):
+    """Keep this legacy Cloud-name packager away from the 865 baseline."""
+    with zipfile.ZipFile(source_path, "r") as source:
+        if source.namelist().count(INFO_PATH) != 1:
+            raise RuntimeError("source IPA must contain exactly one Info.plist")
+        try:
+            info = plistlib.loads(source.read(INFO_PATH))
+        except (plistlib.InvalidFileException, ValueError, TypeError) as error:
+            raise RuntimeError("source IPA Info.plist is invalid") from error
+    inject_dylib.reject_v865_legacy_entry(info, "package_cloud_dylib_ipa.py")
+
+
 def package(source_path, output_path, dylib_path, home_ui_path=None):
     source_path = Path(source_path).resolve()
     output_path = Path(output_path).resolve()
     dylib_path = Path(dylib_path).resolve()
+    reject_v865_source(source_path)
     dylib = dylib_path.read_bytes()
     home_ui_explicit = home_ui_path is not None
     supplied_home_ui = (
@@ -179,10 +194,12 @@ def package(source_path, output_path, dylib_path, home_ui_path=None):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("source", help="existing resign-ready IPA")
+    parser = argparse.ArgumentParser(
+        description="Legacy 6.2.55/862-only AMProjExportCloud replacement"
+    )
+    parser.add_argument("source", help="existing 6.2.55/862 resign-ready IPA")
     parser.add_argument("output", help="new resign-ready IPA")
-    parser.add_argument("dylib", help="fresh AMProjExportCloud.dylib")
+    parser.add_argument("dylib", help="fresh historical AMProjExportCloud.dylib")
     parser.add_argument(
         "--home-ui", dest="home_ui", help="standalone AMHomeUI.dylib (optional)"
     )

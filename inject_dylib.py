@@ -61,6 +61,8 @@ SHARE_EXTENSION_BUNDLE_NAME = "AMProjShareExtension.appex"
 APPLICATION_GROUPS_ENTITLEMENT = "com.apple.security.application-groups"
 SHARE_APP_GROUP_INFO_KEY = "AMProjShareAppGroupIdentifier"
 AMPROJ_URL_SCHEME = "alightmotion"
+V865_SHORT_VERSION = "6.2.58"
+V865_BUNDLE_VERSION = "865"
 RFC1918_NETWORKS = tuple(
     ipaddress.ip_network(network)
     for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
@@ -78,6 +80,22 @@ class DebugSettings:
     server_url: Optional[str] = None
     discovery_enabled: Optional[bool] = None
     build_identifier: Optional[str] = None
+
+
+def reject_v865_legacy_entry(plist, entry_point):
+    """Reject 865 inputs at generic or legacy packaging entry points."""
+    if not isinstance(plist, dict):
+        raise ValueError("Info.plist root must be a dictionary")
+    short_version = str(plist.get("CFBundleShortVersionString", ""))
+    bundle_version = str(plist.get("CFBundleVersion", ""))
+    if (
+        short_version == V865_SHORT_VERSION
+        or bundle_version == V865_BUNDLE_VERSION
+    ):
+        raise RuntimeError(
+            f"{entry_point} cannot package Alight Motion 6.2.58/865; "
+            "use build_865_migration_package.py with AMProjExport.dylib"
+        )
 
 
 def parse_macho_data(data, label="<memory>"):
@@ -1669,6 +1687,9 @@ def inject_ipa(
     settings = debug_settings or DebugSettings()
     if bundle_version is not None:
         bundle_version = _normalize_bundle_version(bundle_version)
+        reject_v865_legacy_entry(
+            {"CFBundleVersion": bundle_version}, "inject_dylib.py"
+        )
 
     if (share_extension_path is None) != (app_group_id is None):
         raise ValueError(
@@ -1693,6 +1714,7 @@ def inject_ipa(
             original_info = plistlib.load(file)
         if not isinstance(original_info, dict):
             raise ValueError("Info.plist root must be a dictionary")
+        reject_v865_legacy_entry(original_info, "inject_dylib.py")
         original_bundle_identifier = original_info.get("CFBundleIdentifier")
 
         frameworks = app_dir / "Frameworks"
@@ -1827,12 +1849,19 @@ def _share_extension_options_from_args(args, parser):
 
 def build_argument_parser():
     parser = argparse.ArgumentParser(
-        description="Inject an AMProjExport dylib into an iOS IPA."
+        description=(
+            "Generic AMProjExport injector for legacy/debug packages. "
+            "For Alight Motion 6.2.58/865 use "
+            "build_865_migration_package.py."
+        )
     )
     parser.add_argument("ipa", help="input IPA")
     parser.add_argument(
         "dylib",
-        help="AMProjExport, AMProjExportCloud, or AMProjExportDebug dylib",
+        help=(
+            "AMProjExport.dylib, AMProjExportDebug.dylib, or the historical "
+            "6.2.55/862 AMProjExportCloud.dylib"
+        ),
     )
     parser.add_argument("output", nargs="?", help="output IPA")
     parser.add_argument(
@@ -1870,7 +1899,10 @@ def build_argument_parser():
     parser.add_argument(
         "--bundle-version",
         type=_bundle_version,
-        help="set CFBundleVersion to a positive integer, for example 862",
+        help=(
+            "set CFBundleVersion to a positive integer; 865 must use the "
+            "dedicated migration packager"
+        ),
     )
     parser.add_argument(
         "--share-extension",

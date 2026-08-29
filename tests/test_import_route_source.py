@@ -2988,10 +2988,11 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         account = present.index('AMCloudSyncReplacementForNativeAccountPresentation')
         welcome = present.index('amproj_isIPAFireWelcome')
         forward = present.index(
-            'orig_presentVC(self, _cmd, controller, animated, wrappedCompletion)'
+            'orig_presentVC(self, _cmd, controller, animated, completion)'
         )
         self.assertLess(account, welcome)
         self.assertLess(welcome, forward)
+        self.assertNotIn('wrappedCompletion', present)
         self.assertIn('amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active")', SOURCE)
         self.assertIn('amproj_IPAFireHideRootViewTemporarily', SOURCE)
         self.assertIn('for (NSNumber *delay in @[@0.05, @0.25, @0.60, @0.75,', SOURCE)
