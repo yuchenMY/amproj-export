@@ -561,7 +561,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         body = function_body(signature, next_signature)
         capture = re.search(
             r"if\s*\([^;]*amproj_captureSystemProjectURL\([^;]+?\)\)\s*"
-            r"\{\s*return YES;\s*\}",
+            r"\{\s*(?:if\s*\(heldSecurityScope\)\s*\[URL stopAccessingSecurityScopedResource\];\s*)?return YES;\s*\}",
             body,
             re.DOTALL,
         )
@@ -1830,13 +1830,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('[identifier isEqualToString:@"public.xml"]', recognizer)
 
         recorder = function_body(
-            "static void amproj_recordLaunchImportCandidates",
+            "static NSArray<NSURL *> *amproj_recordLaunchImportCandidates",
             "static NSDictionary *amproj_launchOptionsForNativeAppDelegate",
         )
         self.assertIn("amproj_recordDeferredLaunchCandidate", recorder)
         self.assertNotIn("amproj_captureSystemProjectURL", recorder)
         self.assertNotIn("amproj_handleIncomingProjectURL", recorder)
         self.assertNotIn("removeObjectForKey", recorder)
+        self.assertIn("startAccessingSecurityScopedResource", recorder)
+        self.assertIn("scopedURLs", recorder)
+        self.assertIn("return [scopedURLs copy]", recorder)
 
         stager = function_body(
             "static NSDictionary* amproj_stageLaunchImportCandidate",
@@ -1856,7 +1859,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
         deferred = function_body(
             "static void amproj_recordDeferredLaunchCandidate",
-            "static void amproj_recordLaunchImportCandidates",
+            "static NSArray<NSURL *> *amproj_recordLaunchImportCandidates",
         )
         first_dedupe = deferred.index("@synchronized")
         stage_call = deferred.index("amproj_stageLaunchImportCandidate")
@@ -1968,11 +1971,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         native_call = hook.index("self, _cmd, application, forwardedOptions);")
         restage = hook.index("amproj_restageFailedLaunchImportCandidates")
         self.assertLess(record, filter_call)
-        self.assertLess(filter_call, original)
+        self.assertLess(original, filter_call)
+        self.assertLess(filter_call, native_call)
         self.assertLess(native_call, restage)
         self.assertIn("self, _cmd, application, forwardedOptions);", hook)
         self.assertIn('application_did_finish_after_native', hook)
         self.assertIn('@"forwarded_project_url_removed"', hook)
+        self.assertLess(
+            hook.index("self, _cmd, application, forwardedOptions);"),
+            hook.index("stopAccessingSecurityScopedResource"),
+        )
 
     def test_non_scene_cold_launch_stages_at_will_finish_before_did_finish(self):
         will_finish = function_body(
@@ -1984,8 +1992,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         original = will_finish.index("IMP original")
         native_call = will_finish.index("self, _cmd, application, forwardedOptions);")
         self.assertLess(record, filter_call)
-        self.assertLess(filter_call, original)
-        self.assertLess(original, native_call)
+        self.assertLess(original, filter_call)
+        self.assertLess(filter_call, native_call)
+        scope_release = will_finish.index("stopAccessingSecurityScopedResource")
+        self.assertLess(native_call, scope_release)
         self.assertIn('application_will_finish', will_finish)
         self.assertIn("BOOL launched = YES", will_finish)
         self.assertIn('@"forwarded_project_url_removed"', will_finish)
@@ -2007,6 +2017,15 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertLess(tracked_hook, did_finish)
         self.assertIn("@protocol(UIApplicationDelegate)", installer)
         self.assertIn('"B32@0:8@16@24"', installer)
+
+        did_finish = function_body(
+            "static BOOL hooked_applicationDidFinish",
+            "static BOOL hooked_applicationContinueActivity",
+        )
+        self.assertLess(
+            did_finish.index("self, _cmd, application, forwardedOptions);"),
+            did_finish.index("stopAccessingSecurityScopedResource"),
+        )
 
         warm = function_body(
             "static BOOL hooked_applicationOpenURL",
@@ -2046,7 +2065,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('@"AMProjUserActivityType": activityType', activity_options)
 
         launch_pipeline = function_body(
-            "static void amproj_recordLaunchImportCandidates",
+            "static NSArray<NSURL *> *amproj_recordLaunchImportCandidates",
             "static BOOL hooked_applicationDidFinish",
         )
         self.assertGreaterEqual(
@@ -2138,7 +2157,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
 
     def test_scene_cold_launch_captures_connection_options_before_native(self):
         recorder = function_body(
-            "static void amproj_recordSceneConnectionCandidates",
+            "static NSArray<NSURL *> *amproj_recordSceneConnectionCandidates",
             "static UISceneConfiguration *hooked_applicationConfigurationForConnecting",
         )
         self.assertIn("connectionOptions.URLContexts", recorder)
@@ -2150,9 +2169,25 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             "static UISceneConfiguration *hooked_applicationConfigurationForConnecting",
             "static void hooked_sceneWillConnectToSession",
         )
+        record_call = configuration.index("amproj_recordSceneConnectionCandidates")
+        native_call = configuration.index(
+            "configuration = ((AMProjApplicationConfigurationForConnectingIMP)original)"
+        )
+        scope_release = configuration.index("stopAccessingSecurityScopedResource")
+        self.assertLess(record_call, native_call)
+        self.assertLess(native_call, scope_release)
         self.assertIn("amproj_recordSceneConnectionCandidates", configuration)
         self.assertIn("AMProjApplicationConfigurationForConnectingIMP", configuration)
         self.assertIn("return configuration", configuration)
+
+        scene_connect = function_body(
+            "static void hooked_sceneWillConnectToSession",
+            "static void hooked_sceneOpenURLContexts",
+        )
+        self.assertLess(
+            scene_connect.index("self, _cmd, scene, session, connectionOptions);"),
+            scene_connect.index("stopAccessingSecurityScopedResource"),
+        )
 
         installer = function_body(
             "static BOOL amproj_installColdLaunchHook",
@@ -2230,7 +2265,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_cold_launch_successful_stage_replaces_prior_failed_candidate(self):
         body = function_body(
             "static void amproj_recordDeferredLaunchCandidate",
-            "static void amproj_recordLaunchImportCandidates",
+            "static NSArray<NSURL *> *amproj_recordLaunchImportCandidates",
         )
         replace = body.index("if (launchStaged && !existingStaged)")
         keep_success = body.index(
@@ -2244,7 +2279,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
     def test_cold_launch_failed_stage_cannot_replace_prior_success(self):
         body = function_body(
             "static void amproj_recordDeferredLaunchCandidate",
-            "static void amproj_recordLaunchImportCandidates",
+            "static NSArray<NSURL *> *amproj_recordLaunchImportCandidates",
         )
         replace = body.index("if (launchStaged && !existingStaged)")
         keep_existing = body.index("discardedCandidate = newCandidate", replace)
@@ -2915,7 +2950,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertLess(return_index, picker_check)
         self.assertLess(return_index, delegate_write)
 
-    def test_build_865_does_not_consume_native_picker_or_url_lifecycle(self):
+    def test_build_865_public_callbacks_stage_without_rewriting_native_inputs(self):
         self.assertNotIn('amproj_rejectLikelyEncryptedXMLSelection865', SOURCE)
         self.assertNotIn('amproj_install865ValidationURLHooks', SOURCE)
         picker = function_body(
@@ -2929,23 +2964,172 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertNotIn('amproj_rejectLikelyEncryptedXMLSelection865(', single)
 
-        for signature, next_signature in (
-            (
-                'static BOOL hooked_applicationOpenURL',
-                'static NSURL* amproj_projectURLFromUserActivity',
+        open_url = function_body(
+            'static BOOL hooked_applicationOpenURL',
+            'static NSURL* amproj_projectURLFromUserActivity',
+        )
+        self.assertIn('amproj_stagePublic865ProjectURL(', open_url)
+        self.assertIn('self, _cmd, application, URL, options', open_url)
+        self.assertIn('AMProjV865ProjectFlowRecordNativeRouteDispatched(', open_url)
+        self.assertNotIn('amproj_public865NativeURL', open_url)
+
+        activity = function_body(
+            'static BOOL hooked_applicationContinueActivity',
+            'static BOOL hooked_applicationHandleOpenURL',
+        )
+        self.assertIn('amproj_stagePublic865ProjectURL(', activity)
+        self.assertIn(
+            'self, _cmd, application, activity, restorationHandler', activity
+        )
+        self.assertIn('AMProjV865ProjectFlowRecordNativeRouteDispatched(', activity)
+
+        handle = function_body(
+            'static BOOL hooked_applicationHandleOpenURL',
+            'static BOOL hooked_applicationLegacyOpenURL',
+        )
+        self.assertIn('self, _cmd, application, URL', handle)
+        self.assertNotIn('amproj_public865NativeURL', handle)
+
+        legacy = function_body(
+            'static BOOL hooked_applicationLegacyOpenURL',
+            'static NSArray<NSURL *> *amproj_recordSceneConnectionCandidates',
+        )
+        self.assertIn(
+            'self, _cmd, application, URL, sourceApplication, annotation', legacy
+        )
+        self.assertNotIn('amproj_public865NativeURL', legacy)
+
+    def test_managed_staged_url_reentry_does_not_create_a_second_notice(self):
+        open_url = function_body(
+            'static BOOL hooked_applicationOpenURL',
+            'static NSURL* amproj_projectURLFromUserActivity',
+        )
+        notice_call = open_url.index(
+            'AMProjV865ProjectFlowPresentPendingNotice('
+        )
+        managed_guard = open_url.index(
+            'AMProjV865ProjectFlowIsManagedStagedURL(URL)'
+        )
+        self.assertLess(managed_guard, notice_call)
+        self.assertIn(
+            '!AMProjV865ProjectFlowIsManagedStagedURL(URL)',
+            open_url[notice_call - 180:notice_call + 120],
+        )
+
+        flow_notice = (
+            ROOT / 'AMProjExport' / 'AMProjV865ProjectFlow.m'
+        ).read_text(encoding='utf-8')
+        self.assertIn('objc_getAssociatedObject(', flow_notice)
+        self.assertIn('BOOL sameStagedURL', flow_notice)
+        self.assertIn('existing.nativeRouteInFlight', flow_notice)
+        self.assertIn('existing.fallbackPresented', flow_notice)
+        self.assertIn('Do not replace it when the URL re-enters', flow_notice)
+
+    def test_build_865_scene_callback_stages_and_forwards_same_context_once(self):
+        scene = function_body(
+            'static void hooked_sceneOpenURLContexts',
+            'static void (*orig_projectsImportAlertViewDidLoad)',
+        )
+        public_start = scene.index('if (amproj_runtimeUsesPublic865ImportHooks())')
+        legacy_start = scene.index('NSMutableSet *passthroughContexts', public_start)
+        public = scene[public_start:legacy_start]
+        self.assertIn('amproj_stagePublic865ProjectURL(', public)
+        self.assertEqual(
+            public.count(
+                '((AMProjSceneOpenURLContextsIMP)original)(\n'
+                '                    self, _cmd, scene, URLContexts);'
             ),
-            (
-                'static BOOL hooked_applicationContinueActivity',
-                'static BOOL hooked_applicationHandleOpenURL',
-            ),
-            (
-                'static void hooked_sceneOpenURLContexts',
-                'static void (*orig_projectsImportAlertViewDidLoad)',
-            ),
+            1,
+        )
+        self.assertNotIn('[passthroughContexts copy]', public)
+        self.assertNotIn('amproj_captureSystemProjectURL', public)
+        self.assertNotIn('amproj_handleImportCommandURL', public)
+        native_forward = public.index('self, _cmd, scene, URLContexts')
+        scope_release = public.index('stopAccessingSecurityScopedResource')
+        self.assertLess(native_forward, scope_release)
+        self.assertIn('@"same_context_object": @YES', public)
+        self.assertIn('@"consumed": @0', public)
+
+    def test_build_865_scene_cold_launch_stages_without_deferred_replay(self):
+        recorder = function_body(
+            'static NSArray<NSURL *> *amproj_recordSceneConnectionCandidates',
+            'static void amproj_recordPublic865SceneConnectionRoutes',
+        )
+        gate = recorder.index('BOOL public865 = amproj_runtimeUsesPublic865ImportHooks()')
+        first_public = recorder.index('if (public865)', gate)
+        first_continue = recorder.index('continue;', first_public)
+        first_deferred = recorder.index('amproj_recordDeferredLaunchCandidate', first_public)
+        self.assertLess(first_continue, first_deferred)
+        self.assertIn('AMProjV865ProjectFlowStageIncomingDocument', SOURCE)
+        self.assertIn('@"deferred_queue": @(!public865)', recorder)
+
+        configuration = function_body(
+            'static UISceneConfiguration *hooked_applicationConfigurationForConnecting',
+            'static void hooked_sceneWillConnectToSession',
+        )
+        native_call = configuration.index(
+            'configuration = ((AMProjApplicationConfigurationForConnectingIMP)original)'
+        )
+        public_before_native = configuration.index(
+            'amproj_recordSceneConnectionCandidates'
+        )
+        scope_release = configuration.index('stopAccessingSecurityScopedResource')
+        self.assertLess(public_before_native, native_call)
+        self.assertLess(native_call, scope_release)
+        self.assertIn(
+            'amproj_installPublic865SceneHooksForClass(configuration.delegateClass)',
+            configuration,
+        )
+
+    def test_build_865_has_an_independent_public_lifecycle_installer(self):
+        installer = function_body(
+            'static void amproj_installPublic865ImportHooks(void)',
+            'static void amproj_installProjectsImportAlertHook',
+        )
+        self.assertIn('amproj_runtimeUsesPublic865ImportHooks()', installer)
+        self.assertIn('amproj_installPublic865ApplicationDelegateHook()', installer)
+        self.assertIn('amproj_installPublic865AppDelegateHooksForClass', installer)
+        self.assertIn('application.connectedScenes', installer)
+        self.assertIn('amproj_installPublic865SceneHooksForClass', installer)
+        self.assertNotIn('UIApplication.sharedApplication', installer)
+        for forbidden in (
+            'AMProjInstallNativePackageImportBridge',
+            'amproj_installNativeProjectPickerHook',
+            'amproj_installNativeXMLParserHook',
+            'amproj_scanLocalImportInboxes',
         ):
-            body = source_body(SOURCE, signature, next_signature)
-            self.assertNotIn('amproj_rejectLikelyEncryptedXMLSelection865(', body)
-            self.assertNotIn('_865', body)
+            self.assertNotIn(forbidden, installer)
+
+        app_hooks = function_body(
+            'static BOOL amproj_installPublic865AppDelegateHooksForClass',
+            'static void amproj_installPublic865ApplicationDelegateHook',
+        )
+        for selector in (
+            'application:willFinishLaunchingWithOptions:',
+            'application:didFinishLaunchingWithOptions:',
+            'application:configurationForConnectingSceneSession:options:',
+            'application:openURL:options:',
+            'application:continueUserActivity:restorationHandler:',
+            'application:handleOpenURL:',
+            'application:openURL:sourceApplication:annotation:',
+        ):
+            self.assertIn(selector, app_hooks)
+
+        constructor = SOURCE[SOURCE.index('__attribute__((constructor))') :]
+        public_gate = constructor.index('if (amproj_runtimeUsesPublic865ImportHooks())')
+        legacy_gate = constructor.index(
+            '} else if (amproj_runtimeUsesLegacyImportHooks())', public_gate
+        )
+        self.assertIn(
+            'amproj_installPublic865ImportHooks();',
+            constructor[public_gate:legacy_gate],
+        )
+        setter = function_body(
+            'static void hooked_applicationSetDelegate',
+            'static void amproj_installApplicationDelegateHook',
+        )
+        self.assertIn('amproj_public865RuntimeDelegate = delegate', setter)
+        self.assertGreaterEqual(setter.count('amproj_installPublic865ImportHooks();'), 2)
 
     def test_build_865_present_hook_keeps_account_replacement_and_forwards_other_presentations(self):
         present = function_body(
@@ -3000,6 +3184,21 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('for (NSNumber *delay in @[@0.05, @0.25, @0.60, @0.75,', SOURCE)
         self.assertIn('@1.25, @1.75, @2.50, @3.50])', SOURCE)
         self.assertIn('UIWindowDidBecomeKeyNotification', SOURCE)
+        self.assertIn('UIWindowDidBecomeVisibleNotification', SOURCE)
+        self.assertIn('UIApplicationWillEnterForegroundNotification', SOURCE)
+        self.assertIn('hide_window_without_root', SOURCE)
+        self.assertIn('amproj_IPAFireAppendLayerText', SOURCE)
+        self.assertIn('CATextLayer.class', SOURCE)
+        self.assertIn('hooked_windowMakeKeyAndVisible', SOURCE)
+        self.assertIn('window_make_key_and_visible', SOURCE)
+        self.assertIn('amproj_installIPAFireWindowHook();', SOURCE)
+        scan = function_body(
+            'static void amproj_suppressIPAFireWelcomeWindows',
+            'static void amproj_scheduleIPAFireWelcomeSuppression',
+        )
+        self.assertIn('BOOL hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);', scan)
+        self.assertIn('if (!window.rootViewController)', scan)
+        self.assertIn('window.hidden = YES;', scan)
 
     def test_build_865_does_not_scan_inboxes_or_replay_deferred_urls(self):
         for signature, marker in (

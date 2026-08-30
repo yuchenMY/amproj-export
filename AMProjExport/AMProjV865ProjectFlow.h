@@ -22,7 +22,9 @@ FOUNDATION_EXPORT void AMProjV865ProjectFlowInstall(void);
  */
 typedef NS_ENUM(NSInteger, AMProjV865ProjectHandoffStatus) {
     AMProjV865ProjectHandoffStatusFailed = 0,
+    AMProjV865ProjectHandoffStatusReceived,
     AMProjV865ProjectHandoffStatusStaged,
+    AMProjV865ProjectHandoffStatusRoutePending,
     AMProjV865ProjectHandoffStatusRouteAccepted,
     AMProjV865ProjectHandoffStatusFallbackPresented,
     AMProjV865ProjectHandoffStatusUnverified,
@@ -57,6 +59,38 @@ typedef void (^AMProjV865ProjectFlowStageCompletion)(
 
 FOUNDATION_EXPORT void AMProjV865ProjectFlowCancelDocument(
     NSURL *fileURL);
+
+/*
+ * Copies an external document while its provider capability is still valid.
+ * The returned URL is app-owned and remains available for retry. This is a
+ * staging boundary only; it never reports the project as imported.
+ *
+ * Callers that already hold a security-scoped grant keep ownership of that
+ * grant and must release it after forwarding the original lifecycle callback.
+ */
+FOUNDATION_EXPORT NSURL * _Nullable
+AMProjV865ProjectFlowStageIncomingDocument(
+    NSURL *fileURL, NSString * _Nullable filename, NSString *source,
+    BOOL securityScopeAlreadyActive,
+    NSError * _Nullable * _Nullable error);
+
+FOUNDATION_EXPORT BOOL AMProjV865ProjectFlowIsManagedStagedURL(
+    NSURL * _Nullable fileURL);
+
+/*
+ * Records that an unchanged public AppDelegate/SceneDelegate callback was
+ * dispatched. A callback return value is deliberately not treated as import
+ * confirmation because Build 865 exposes no verified completion boundary.
+ */
+FOUNDATION_EXPORT void AMProjV865ProjectFlowRecordNativeRouteDispatched(
+    NSURL *fileURL, NSString *source, BOOL forwarded);
+
+/*
+ * Presents an explicit retry state for a staged document. The Open In menu is
+ * reachable only from the user's action in this notice.
+ */
+FOUNDATION_EXPORT void AMProjV865ProjectFlowPresentPendingNotice(
+    NSURL *fileURL, NSString *source);
 
 FOUNDATION_EXPORT AMProjV865ProjectFlowRequest *
 AMProjV865ProjectFlowStageDocumentAsync(

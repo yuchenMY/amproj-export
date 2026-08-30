@@ -121,6 +121,8 @@ static void amproj_presentImportDocumentPicker(void);
 static dispatch_queue_t amproj_importInboxQueue(void);
 static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID);
 static void amproj_installImportHook(void);
+static void amproj_installPublic865ImportHooks(void);
+static void amproj_installPublic865SceneHooksForClass(Class cls);
 static void amproj_installNativeProjectPickerHook(void);
 static Class amproj_declaredAppDelegateClass(void);
 static void amproj_installApplicationDelegateHook(void);
@@ -197,6 +199,12 @@ static BOOL amproj_runtimeUsesLegacyImportHooks(void) {
     // the 6.2.55 package. Unknown or missing bundle metadata fails closed.
     return amproj_runtimeIsLegacy862() &&
         AMProjNativePackageImportBridgeIsRuntimeSupported();
+}
+
+static BOOL amproj_runtimeUsesPublic865ImportHooks(void) {
+    // Build 865 owns a separate public-API lane. This gate must never imply
+    // that the verified 862 PackageImporter ABI is available.
+    return amproj_runtimeIsBuild865();
 }
 
 static void amproj_log865LegacyPathDisabled(NSString *component) {
@@ -2999,6 +3007,8 @@ static AMProjTrackedHook amproj_sceneOpenURLHooks[12] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateStartHooks[8] = {0};
 static AMProjTrackedHook amproj_nativeXMLDelegateEndHooks[8] = {0};
 static AMProjApplicationSetDelegateIMP orig_applicationSetDelegate = NULL;
+static __weak UIApplication *amproj_public865Application = nil;
+static __weak id<UIApplicationDelegate> amproj_public865RuntimeDelegate = nil;
 static AMProjDocumentPickerModernInitIMP orig_documentPickerModernInit = NULL;
 static AMProjDocumentPickerLegacyInitIMP orig_documentPickerLegacyInit = NULL;
 static IMP amproj_nativeAppDelegateOpenURLIMP = NULL;
@@ -4789,6 +4799,11 @@ static UIViewController* amproj_topViewController(UIViewController *controller) 
         }
         if (!next && [controller isKindOfClass:UITabBarController.class]) {
             next = ((UITabBarController *)controller).selectedViewController;
+        }
+        if (!next && controller.childViewControllers.count) {
+            // IPAFire may attach its welcome controller through a custom
+            // containment controller rather than navigation/tab presentation.
+            next = controller.childViewControllers.lastObject;
         }
         if (!next) break;
         controller = next;
@@ -11880,6 +11895,33 @@ static void amproj_removeFailedDeferredLaunchCandidateForURL(NSURL *URL,
     }
 }
 
+static NSURL *amproj_stagePublic865ProjectURL(
+    NSURL *URL, NSString *source, NSDictionary *options,
+    BOOL securityScopeAlreadyActive, NSError **error) {
+    if (!amproj_runtimeUsesPublic865ImportHooks() ||
+        !amproj_isIncomingProjectURL(URL, options)) {
+        return nil;
+    }
+    NSString *filename = [options[@"AMProjOriginalFilename"]
+        isKindOfClass:NSString.class] ? options[@"AMProjOriginalFilename"]
+                                      : URL.lastPathComponent;
+    NSError *localError = nil;
+    NSError **errorTarget = error ?: &localError;
+    NSURL *stagedURL = AMProjV865ProjectFlowStageIncomingDocument(
+        URL, filename, source.length ? source : @"public_document_callback",
+        securityScopeAlreadyActive, errorTarget);
+    NSError *reportedError = error ? *error : localError;
+    amproj_logCriticalEvent(@"import.865_public_stage", @{
+        @"source": source ?: @"public_document_callback",
+        @"filename": filename ?: @"",
+        @"staged": @(stagedURL != nil),
+        @"managed_source": @(AMProjV865ProjectFlowIsManagedStagedURL(URL)),
+        @"security_scope": @(securityScopeAlreadyActive),
+        @"error": reportedError.localizedDescription ?: @""
+    });
+    return stagedURL;
+}
+
 static BOOL amproj_captureSystemProjectURL(NSURL *URL, NSString *source,
                                            NSDictionary *systemOptions) {
     if (!amproj_runtimeUsesLegacyImportHooks()) {
@@ -11970,7 +12012,18 @@ static BOOL hooked_applicationOpenURL(id self, SEL _cmd, UIApplication *applicat
         @"scheme": URL.scheme ?: @""
     });
     if (amproj_handleImportCommandURL(URL, @"application_open_url_command")) return YES;
+    BOOL public865Project = amproj_runtimeUsesPublic865ImportHooks() &&
+        amproj_isIncomingProjectURL(URL, options);
+    BOOL heldSecurityScope = public865Project &&
+        !AMProjV865ProjectFlowIsManagedStagedURL(URL)
+        ? [URL startAccessingSecurityScopedResource] : NO;
+    NSError *stageError = nil;
+    NSURL *stagedURL = public865Project
+        ? amproj_stagePublic865ProjectURL(
+            URL, @"application_open_url", options, heldSecurityScope, &stageError)
+        : nil;
     if (amproj_captureSystemProjectURL(URL, @"application_open_url", options)) {
+        if (heldSecurityScope) [URL stopAccessingSecurityScopedResource];
         return YES;
     }
     IMP original = amproj_openURLForwardDepth
@@ -11983,20 +12036,40 @@ static BOOL hooked_applicationOpenURL(id self, SEL _cmd, UIApplication *applicat
         original = amproj_nativeAppDelegateOpenURLIMP;
     }
     BOOL nativeHandled = NO;
+    BOOL forwarded = NO;
     if (original && original != (IMP)hooked_applicationOpenURL) {
         amproj_openURLForwardDepth += 1;
         @try {
             nativeHandled = ((AMProjApplicationOpenURLIMP)original)(
                 self, _cmd, application, URL, options);
+            forwarded = YES;
         } @finally {
             amproj_openURLForwardDepth -= 1;
+            if (heldSecurityScope) [URL stopAccessingSecurityScopedResource];
+        }
+    } else if (heldSecurityScope) {
+        [URL stopAccessingSecurityScopedResource];
+    }
+    if (public865Project) {
+        AMProjV865ProjectFlowRecordNativeRouteDispatched(
+            stagedURL ?: URL, @"application_open_url", forwarded);
+        // A broker-created staged URL re-enters this hook when openURL is
+        // used for the handoff. Its completion owns the single retry notice;
+        // showing one here would race and replace that broker.
+        if (stagedURL && !nativeHandled &&
+            !AMProjV865ProjectFlowIsManagedStagedURL(URL)) {
+            AMProjV865ProjectFlowPresentPendingNotice(
+                stagedURL, stageError ? @"application_open_url_stage_error"
+                                      : @"application_open_url_declined");
         }
     }
     amproj_debugEvent(@"import.native_initial", @{
         @"source": @"application_open_url",
-        @"recognized": @NO,
+        @"recognized": @(public865Project),
         @"accepted": @(nativeHandled),
-        @"has_original": @(original != NULL)
+        @"has_original": @(original != NULL),
+        @"staged": @(stagedURL != nil),
+        @"stage_error": stageError.localizedDescription ?: @""
     });
     return nativeHandled;
 }
@@ -12210,9 +12283,68 @@ static void amproj_recordDeferredLaunchCandidate(NSURL *URL,
     }
 }
 
-static void amproj_recordLaunchImportCandidates(NSDictionary *launchOptions,
-                                                 NSString *source) {
-    if (![launchOptions isKindOfClass:NSDictionary.class]) return;
+static NSArray<NSURL *> *amproj_recordLaunchImportCandidates(
+    NSDictionary *launchOptions, NSString *source) {
+    NSMutableArray<NSURL *> *scopedURLs = [NSMutableArray array];
+    if (![launchOptions isKindOfClass:NSDictionary.class]) return scopedURLs;
+    if (amproj_runtimeUsesPublic865ImportHooks()) {
+        __block NSUInteger stagedCount = 0;
+        void (^stageCandidate)(NSURL *, NSString *, NSDictionary *) =
+            ^(NSURL *candidateURL, NSString *candidateSource,
+              NSDictionary *candidateOptions) {
+            if (!amproj_isIncomingProjectURL(candidateURL, candidateOptions)) return;
+            BOOL heldSecurityScope =
+                !AMProjV865ProjectFlowIsManagedStagedURL(candidateURL)
+                    ? [candidateURL startAccessingSecurityScopedResource] : NO;
+            if (heldSecurityScope) [scopedURLs addObject:candidateURL];
+            NSError *error = nil;
+            NSURL *stagedURL = nil;
+            @try {
+                stagedURL = amproj_stagePublic865ProjectURL(
+                    candidateURL, candidateSource, candidateOptions,
+                    heldSecurityScope, &error);
+            } @catch (NSException *exception) {
+                amproj_debugEvent(@"import.865_launch_stage_exception", @{
+                    @"source": candidateSource ?: @"",
+                    @"filename": candidateURL.lastPathComponent ?: @"",
+                    @"exception": exception.name ?: @"unknown",
+                    @"reason": exception.reason ?: @"unknown"
+                });
+            }
+            if (stagedURL) stagedCount++;
+        };
+        NSURL *launchURL = launchOptions[UIApplicationLaunchOptionsURLKey];
+        if ([launchURL isKindOfClass:NSURL.class]) {
+            stageCandidate(launchURL,
+                [source stringByAppendingString:@"_url"], launchOptions);
+        }
+        id activityContainer =
+            launchOptions[UIApplicationLaunchOptionsUserActivityDictionaryKey];
+        if ([activityContainer isKindOfClass:NSDictionary.class]) {
+            [(NSDictionary *)activityContainer enumerateKeysAndObjectsUsingBlock:
+                ^(__unused id key, id value, __unused BOOL *stop) {
+                if (![value isKindOfClass:NSUserActivity.class]) return;
+                NSURL *activityURL = amproj_projectURLFromUserActivity(value);
+                stageCandidate(activityURL,
+                    [source stringByAppendingString:@"_activity"],
+                    amproj_projectOptionsFromUserActivity(value));
+            }];
+        }
+        id topLevelActivity = launchOptions[kAMProjLaunchOptionsUserActivityKey];
+        if ([topLevelActivity isKindOfClass:NSUserActivity.class]) {
+            NSURL *activityURL = amproj_projectURLFromUserActivity(topLevelActivity);
+            stageCandidate(activityURL,
+                [source stringByAppendingString:@"_activity"],
+                amproj_projectOptionsFromUserActivity(topLevelActivity));
+        }
+        amproj_debugEvent(@"import.865_launch_stage", @{
+            @"source": source ?: @"",
+            @"staged_count": @(stagedCount),
+            @"scoped_count": @(scopedURLs.count),
+            @"forwarded_unchanged": @YES
+        });
+        return [scopedURLs copy];
+    }
     NSURL *launchURL = launchOptions[UIApplicationLaunchOptionsURLKey];
     if ([launchURL isKindOfClass:NSURL.class]) {
         amproj_recordDeferredLaunchCandidate(
@@ -12255,6 +12387,7 @@ static void amproj_recordLaunchImportCandidates(NSDictionary *launchOptions,
         @"candidate_count": @(candidateCount),
         @"forwarded_unchanged": @YES
     });
+    return [scopedURLs copy];
 }
 
 static void amproj_restageFailedLaunchImportCandidates(
@@ -12301,6 +12434,11 @@ static void amproj_restageFailedLaunchImportCandidates(
 static NSDictionary *amproj_launchOptionsForNativeAppDelegate(
     NSDictionary *launchOptions) {
     if (![launchOptions isKindOfClass:NSDictionary.class]) return launchOptions;
+    if (amproj_runtimeUsesPublic865ImportHooks()) {
+        // Build 865 stages a durable copy but keeps the public launch payload
+        // untouched so Alight Motion remains the only native consumer.
+        return launchOptions;
+    }
     NSMutableDictionary *filtered = [launchOptions mutableCopy];
     NSURL *launchURL = launchOptions[UIApplicationLaunchOptionsURLKey];
     BOOL removedProjectLaunchURL = NO;
@@ -12393,34 +12531,41 @@ static NSDictionary *amproj_launchOptionsForNativeAppDelegate(
 static BOOL hooked_applicationWillFinish(id self, SEL _cmd,
                                           UIApplication *application,
                                           NSDictionary *launchOptions) {
-    // On non-scene apps UIKit delivers document launch options here before
-    // didFinish. Stage the provider URL while its temporary read capability is
-    // still freshest, then keep the same project keys away from AM's native
-    // startup route. didFinish remains a second chance for providers that become
-    // readable later.
-    amproj_recordLaunchImportCandidates(launchOptions, @"application_will_finish");
-    NSDictionary *forwardedOptions =
-        amproj_launchOptionsForNativeAppDelegate(launchOptions);
-    IMP original = amproj_willFinishForwardDepth
-        ? amproj_originalHookForReceiverSkippingExact(
-              amproj_willFinishHooks,
-              sizeof(amproj_willFinishHooks) / sizeof(amproj_willFinishHooks[0]), self)
-        : amproj_originalHookForReceiver(
-              amproj_willFinishHooks,
-              sizeof(amproj_willFinishHooks) / sizeof(amproj_willFinishHooks[0]), self);
+    // Build 865 keeps a durable retry copy while forwarding the exact launch
+    // dictionary. The verified 862 lane retains its existing filtered route.
+    NSArray<NSURL *> *scopedURLs = amproj_recordLaunchImportCandidates(
+        launchOptions, @"application_will_finish");
+    NSDictionary *forwardedOptions = nil;
+    IMP original = NULL;
     BOOL launched = YES;
     BOOL forwarded = NO;
-    if (original && original != (IMP)hooked_applicationWillFinish) {
-        amproj_willFinishForwardDepth += 1;
-        @try {
-            launched = ((AMProjApplicationWillFinishIMP)original)(
-                self, _cmd, application, forwardedOptions);
-        } @finally {
-            amproj_willFinishForwardDepth -= 1;
+    @try {
+        forwardedOptions = amproj_launchOptionsForNativeAppDelegate(launchOptions);
+        original = amproj_willFinishForwardDepth
+            ? amproj_originalHookForReceiverSkippingExact(
+                  amproj_willFinishHooks,
+                  sizeof(amproj_willFinishHooks) / sizeof(amproj_willFinishHooks[0]), self)
+            : amproj_originalHookForReceiver(
+                  amproj_willFinishHooks,
+                  sizeof(amproj_willFinishHooks) / sizeof(amproj_willFinishHooks[0]), self);
+        if (original && original != (IMP)hooked_applicationWillFinish) {
+            amproj_willFinishForwardDepth += 1;
+            @try {
+                launched = ((AMProjApplicationWillFinishIMP)original)(
+                    self, _cmd, application, forwardedOptions);
+            } @finally {
+                amproj_willFinishForwardDepth -= 1;
+            }
+            forwarded = YES;
         }
-        forwarded = YES;
+    } @finally {
+        for (NSURL *scopedURL in scopedURLs) {
+            [scopedURL stopAccessingSecurityScopedResource];
+        }
     }
     if (amproj_willFinishForwardDepth) return launched;
+    amproj_recordPublic865LaunchNativeRoute(
+        launchOptions, @"application_will_finish", forwarded);
     amproj_debugEvent(@"import.will_finish_forward", @{
         @"has_original": @(forwarded),
         @"launch_result": @(launched),
@@ -12432,38 +12577,49 @@ static BOOL hooked_applicationWillFinish(id self, SEL _cmd,
 }
 
 static BOOL hooked_applicationDidFinish(id self, SEL _cmd, UIApplication *application,
-                                         NSDictionary *launchOptions) {
-    // Stage before native startup when possible. The incoming project URL is
-    // always withheld from AM's native delegate; failed provider reads remain
-    // in our deferred queue and are retried after startup while offering the
-    // picker fallback instead of entering AM's native XML loading screen.
-    amproj_recordLaunchImportCandidates(launchOptions, @"application_did_finish");
-    NSDictionary *forwardedOptions = amproj_launchOptionsForNativeAppDelegate(launchOptions);
-    IMP original = amproj_didFinishForwardDepth
-        ? amproj_originalHookForReceiverSkippingExact(
-              amproj_didFinishHooks,
-              sizeof(amproj_didFinishHooks) / sizeof(amproj_didFinishHooks[0]), self)
-        : amproj_originalHookForReceiver(
-              amproj_didFinishHooks,
-              sizeof(amproj_didFinishHooks) / sizeof(amproj_didFinishHooks[0]), self);
+                                          NSDictionary *launchOptions) {
+    // Build 865 forwards the original launch dictionary unchanged. Only the
+    // verified 862 lane filters and replays deferred launch candidates.
+    NSArray<NSURL *> *scopedURLs = amproj_recordLaunchImportCandidates(
+        launchOptions, @"application_did_finish");
+    NSDictionary *forwardedOptions = nil;
+    IMP original = NULL;
     BOOL launched = YES;
     BOOL forwarded = NO;
-    if (original && original != (IMP)hooked_applicationDidFinish) {
-        amproj_didFinishForwardDepth += 1;
-        @try {
-            launched = ((AMProjApplicationDidFinishIMP)original)(
-                self, _cmd, application, forwardedOptions);
-        } @finally {
-            amproj_didFinishForwardDepth -= 1;
+    @try {
+        forwardedOptions = amproj_launchOptionsForNativeAppDelegate(launchOptions);
+        original = amproj_didFinishForwardDepth
+            ? amproj_originalHookForReceiverSkippingExact(
+                  amproj_didFinishHooks,
+                  sizeof(amproj_didFinishHooks) / sizeof(amproj_didFinishHooks[0]), self)
+            : amproj_originalHookForReceiver(
+                  amproj_didFinishHooks,
+                  sizeof(amproj_didFinishHooks) / sizeof(amproj_didFinishHooks[0]), self);
+        if (original && original != (IMP)hooked_applicationDidFinish) {
+            amproj_didFinishForwardDepth += 1;
+            @try {
+                launched = ((AMProjApplicationDidFinishIMP)original)(
+                    self, _cmd, application, forwardedOptions);
+            } @finally {
+                amproj_didFinishForwardDepth -= 1;
+            }
+            forwarded = YES;
         }
-        forwarded = YES;
+    } @finally {
+        for (NSURL *scopedURL in scopedURLs) {
+            [scopedURL stopAccessingSecurityScopedResource];
+        }
     }
     if (amproj_didFinishForwardDepth) return launched;
     // Some providers become readable only after AM finishes initialization.
     // Retry only candidates that are still failed; a successful openURL
     // delivery removes its failed candidate before this point.
-    amproj_restageFailedLaunchImportCandidates(
-        launchOptions, @"application_did_finish_after_native");
+    if (amproj_runtimeUsesLegacyImportHooks()) {
+        amproj_restageFailedLaunchImportCandidates(
+            launchOptions, @"application_did_finish_after_native");
+    }
+    amproj_recordPublic865LaunchNativeRoute(
+        launchOptions, @"application_did_finish", forwarded);
     amproj_debugEvent(@"import.did_finish_forward", @{
         @"has_original": @(forwarded),
         @"launch_result": @(launched),
@@ -12474,6 +12630,7 @@ static BOOL hooked_applicationDidFinish(id self, SEL _cmd, UIApplication *applic
 
     dispatch_async(dispatch_get_main_queue(), ^{
         // Firebase may install its openURL proxy during AM's startup.
+        amproj_installPublic865ImportHooks();
         amproj_installImportHook();
     });
     return launched;
@@ -12490,7 +12647,19 @@ static BOOL hooked_applicationContinueActivity(id self, SEL _cmd, UIApplication 
         @"extension": URL.pathExtension.lowercaseString ?: @""
     });
     if (amproj_handleImportCommandURL(URL, @"continue_user_activity_command")) return YES;
+    BOOL public865Project = amproj_runtimeUsesPublic865ImportHooks() &&
+        amproj_isIncomingProjectURL(URL, options);
+    BOOL heldSecurityScope = public865Project &&
+        !AMProjV865ProjectFlowIsManagedStagedURL(URL)
+        ? [URL startAccessingSecurityScopedResource] : NO;
+    NSError *stageError = nil;
+    NSURL *stagedURL = public865Project
+        ? amproj_stagePublic865ProjectURL(
+            URL, @"continue_user_activity", options,
+            heldSecurityScope, &stageError)
+        : nil;
     if (amproj_captureSystemProjectURL(URL, @"continue_user_activity", options)) {
+        if (heldSecurityScope) [URL stopAccessingSecurityScopedResource];
         return YES;
     }
     IMP original = amproj_activityForwardDepth
@@ -12501,13 +12670,28 @@ static BOOL hooked_applicationContinueActivity(id self, SEL _cmd, UIApplication 
               amproj_continueActivityHooks,
               sizeof(amproj_continueActivityHooks) / sizeof(amproj_continueActivityHooks[0]), self);
     BOOL nativeHandled = NO;
+    BOOL forwarded = NO;
     if (original && original != (IMP)hooked_applicationContinueActivity) {
         amproj_activityForwardDepth += 1;
         @try {
             nativeHandled = ((AMProjApplicationContinueActivityIMP)original)(
                 self, _cmd, application, activity, restorationHandler);
+            forwarded = YES;
         } @finally {
             amproj_activityForwardDepth -= 1;
+            if (heldSecurityScope) [URL stopAccessingSecurityScopedResource];
+        }
+    } else if (heldSecurityScope) {
+        [URL stopAccessingSecurityScopedResource];
+    }
+    if (public865Project) {
+        AMProjV865ProjectFlowRecordNativeRouteDispatched(
+            stagedURL ?: URL, @"continue_user_activity", forwarded);
+        if (stagedURL && !nativeHandled &&
+            !AMProjV865ProjectFlowIsManagedStagedURL(URL)) {
+            AMProjV865ProjectFlowPresentPendingNotice(
+                stagedURL, stageError ? @"continue_user_activity_stage_error"
+                                      : @"continue_user_activity_declined");
         }
     }
     return nativeHandled;
@@ -12520,7 +12704,19 @@ static BOOL hooked_applicationHandleOpenURL(id self, SEL _cmd,
         @"extension": URL.pathExtension.lowercaseString ?: @""
     });
     if (amproj_handleImportCommandURL(URL, @"application_handle_open_url_command")) return YES;
+    BOOL public865Project = amproj_runtimeUsesPublic865ImportHooks() &&
+        amproj_isIncomingProjectURL(URL, nil);
+    BOOL heldSecurityScope = public865Project &&
+        !AMProjV865ProjectFlowIsManagedStagedURL(URL)
+        ? [URL startAccessingSecurityScopedResource] : NO;
+    NSError *stageError = nil;
+    NSURL *stagedURL = public865Project
+        ? amproj_stagePublic865ProjectURL(
+            URL, @"application_handle_open_url", nil,
+            heldSecurityScope, &stageError)
+        : nil;
     if (amproj_captureSystemProjectURL(URL, @"application_handle_open_url", nil)) {
+        if (heldSecurityScope) [URL stopAccessingSecurityScopedResource];
         return YES;
     }
     IMP original = amproj_handleOpenURLForwardDepth
@@ -12531,13 +12727,28 @@ static BOOL hooked_applicationHandleOpenURL(id self, SEL _cmd,
               amproj_handleOpenURLHooks,
               sizeof(amproj_handleOpenURLHooks) / sizeof(amproj_handleOpenURLHooks[0]), self);
     BOOL nativeHandled = NO;
+    BOOL forwarded = NO;
     if (original && original != (IMP)hooked_applicationHandleOpenURL) {
         amproj_handleOpenURLForwardDepth += 1;
         @try {
             nativeHandled = ((AMProjApplicationHandleOpenURLIMP)original)(
                 self, _cmd, application, URL);
+            forwarded = YES;
         } @finally {
             amproj_handleOpenURLForwardDepth -= 1;
+            if (heldSecurityScope) [URL stopAccessingSecurityScopedResource];
+        }
+    } else if (heldSecurityScope) {
+        [URL stopAccessingSecurityScopedResource];
+    }
+    if (public865Project) {
+        AMProjV865ProjectFlowRecordNativeRouteDispatched(
+            stagedURL ?: URL, @"application_handle_open_url", forwarded);
+        if (stagedURL && !nativeHandled &&
+            !AMProjV865ProjectFlowIsManagedStagedURL(URL)) {
+            AMProjV865ProjectFlowPresentPendingNotice(
+                stagedURL, stageError ? @"application_handle_open_url_stage_error"
+                                      : @"application_handle_open_url_declined");
         }
     }
     return nativeHandled;
@@ -12554,7 +12765,19 @@ static BOOL hooked_applicationLegacyOpenURL(id self, SEL _cmd, UIApplication *ap
     NSDictionary *options = sourceApplication.length
         ? @{@"source_application": sourceApplication} : nil;
     if (amproj_handleImportCommandURL(URL, @"application_legacy_open_url_command")) return YES;
+    BOOL public865Project = amproj_runtimeUsesPublic865ImportHooks() &&
+        amproj_isIncomingProjectURL(URL, options);
+    BOOL heldSecurityScope = public865Project &&
+        !AMProjV865ProjectFlowIsManagedStagedURL(URL)
+        ? [URL startAccessingSecurityScopedResource] : NO;
+    NSError *stageError = nil;
+    NSURL *stagedURL = public865Project
+        ? amproj_stagePublic865ProjectURL(
+            URL, @"application_legacy_open_url", options,
+            heldSecurityScope, &stageError)
+        : nil;
     if (amproj_captureSystemProjectURL(URL, @"application_legacy_open_url", options)) {
+        if (heldSecurityScope) [URL stopAccessingSecurityScopedResource];
         return YES;
     }
     IMP original = amproj_legacyOpenURLForwardDepth
@@ -12565,29 +12788,43 @@ static BOOL hooked_applicationLegacyOpenURL(id self, SEL _cmd, UIApplication *ap
               amproj_legacyOpenURLHooks,
               sizeof(amproj_legacyOpenURLHooks) / sizeof(amproj_legacyOpenURLHooks[0]), self);
     BOOL nativeHandled = NO;
+    BOOL forwarded = NO;
     if (original && original != (IMP)hooked_applicationLegacyOpenURL) {
         amproj_legacyOpenURLForwardDepth += 1;
         @try {
             nativeHandled = ((AMProjApplicationLegacyOpenURLIMP)original)(
                 self, _cmd, application, URL, sourceApplication, annotation);
+            forwarded = YES;
         } @finally {
             amproj_legacyOpenURLForwardDepth -= 1;
+            if (heldSecurityScope) [URL stopAccessingSecurityScopedResource];
+        }
+    } else if (heldSecurityScope) {
+        [URL stopAccessingSecurityScopedResource];
+    }
+    if (public865Project) {
+        AMProjV865ProjectFlowRecordNativeRouteDispatched(
+            stagedURL ?: URL, @"application_legacy_open_url", forwarded);
+        if (stagedURL && !nativeHandled &&
+            !AMProjV865ProjectFlowIsManagedStagedURL(URL)) {
+            AMProjV865ProjectFlowPresentPendingNotice(
+                stagedURL, stageError ? @"application_legacy_open_url_stage_error"
+                                      : @"application_legacy_open_url_declined");
         }
     }
     return nativeHandled;
 }
 
-// Scene-based cold launches deliver the document before any scene delegate
-// `openURLContexts:` callback.  Stage those security-scoped URLs immediately
-// while the provider grant is still valid; activation will run the normal
-// serial import queue later.  This deliberately does not call the importer
-// from the configuration callback or alter UIKit's immutable connection
-// options.
-static void amproj_recordSceneConnectionCandidates(
+// Scene-based cold launches deliver the document before `openURLContexts:`.
+// Build 865 keeps a durable copy but leaves the immutable connection options
+// untouched; the verified 862 lane retains its deferred import queue.
+static NSArray<NSURL *> *amproj_recordSceneConnectionCandidates(
     UISceneConnectionOptions *connectionOptions, NSString *source) {
-    if (!connectionOptions) return;
+    NSMutableArray<NSURL *> *scopedURLs = [NSMutableArray array];
+    if (!connectionOptions) return scopedURLs;
     NSUInteger URLCount = 0;
     NSUInteger activityCount = 0;
+    BOOL public865 = amproj_runtimeUsesPublic865ImportHooks();
     for (UIOpenURLContext *context in connectionOptions.URLContexts) {
         if (![context isKindOfClass:UIOpenURLContext.class] || !context.URL) continue;
         NSMutableDictionary *options = [NSMutableDictionary dictionary];
@@ -12597,6 +12834,30 @@ static void amproj_recordSceneConnectionCandidates(
         if (sceneOptions.sourceApplication.length) {
             options[UIApplicationOpenURLOptionsSourceApplicationKey] =
                 sceneOptions.sourceApplication;
+        }
+        if (public865) {
+            NSURL *URL = context.URL;
+            if (!amproj_isIncomingProjectURL(URL, options)) continue;
+            BOOL heldSecurityScope =
+                !AMProjV865ProjectFlowIsManagedStagedURL(URL)
+                ? [URL startAccessingSecurityScopedResource] : NO;
+            if (heldSecurityScope) [scopedURLs addObject:URL];
+            NSError *stageError = nil;
+            NSURL *stagedURL = nil;
+            @try {
+                stagedURL = amproj_stagePublic865ProjectURL(
+                    URL, [source stringByAppendingString:@"_url"], options,
+                    heldSecurityScope, &stageError);
+            } @catch (NSException *exception) {
+                amproj_debugEvent(@"import.865_scene_stage_exception", @{
+                    @"source": source ?: @"",
+                    @"filename": URL.lastPathComponent ?: @"",
+                    @"exception": exception.name ?: @"unknown",
+                    @"reason": exception.reason ?: @"unknown"
+                });
+            }
+            if (stagedURL) URLCount++;
+            continue;
         }
         NSUInteger before = 0;
         @synchronized (amproj_importDedupeLock()) {
@@ -12611,6 +12872,30 @@ static void amproj_recordSceneConnectionCandidates(
     for (NSUserActivity *activity in connectionOptions.userActivities) {
         NSURL *URL = amproj_projectURLFromUserActivity(activity);
         if (!URL) continue;
+        if (public865) {
+            NSDictionary *options = amproj_projectOptionsFromUserActivity(activity);
+            if (!amproj_isIncomingProjectURL(URL, options)) continue;
+            BOOL heldSecurityScope =
+                !AMProjV865ProjectFlowIsManagedStagedURL(URL)
+                ? [URL startAccessingSecurityScopedResource] : NO;
+            if (heldSecurityScope) [scopedURLs addObject:URL];
+            NSError *stageError = nil;
+            NSURL *stagedURL = nil;
+            @try {
+                stagedURL = amproj_stagePublic865ProjectURL(
+                    URL, [source stringByAppendingString:@"_activity"], options,
+                    heldSecurityScope, &stageError);
+            } @catch (NSException *exception) {
+                amproj_debugEvent(@"import.865_scene_stage_exception", @{
+                    @"source": source ?: @"",
+                    @"filename": URL.lastPathComponent ?: @"",
+                    @"exception": exception.name ?: @"unknown",
+                    @"reason": exception.reason ?: @"unknown"
+                });
+            }
+            if (stagedURL) activityCount++;
+            continue;
+        }
         activityCount++;
         amproj_recordDeferredLaunchCandidate(
             URL, [source stringByAppendingString:@"_activity"],
@@ -12621,33 +12906,75 @@ static void amproj_recordSceneConnectionCandidates(
         @"url_count": @(URLCount),
         @"activity_count": @(activityCount),
         @"received_url_contexts": @(connectionOptions.URLContexts.count),
-        @"received_user_activities": @(connectionOptions.userActivities.count)
+        @"received_user_activities": @(connectionOptions.userActivities.count),
+        @"forwarded_unchanged": @(public865),
+        @"deferred_queue": @(!public865),
+        @"scoped_count": @(scopedURLs.count)
     });
+    return [scopedURLs copy];
+}
+
+static void amproj_recordPublic865SceneConnectionRoutes(
+    UISceneConnectionOptions *connectionOptions, NSString *source,
+    BOOL forwarded) {
+    if (!amproj_runtimeUsesPublic865ImportHooks() || !connectionOptions) return;
+    for (UIOpenURLContext *context in connectionOptions.URLContexts) {
+        NSURL *URL = [context isKindOfClass:UIOpenURLContext.class]
+            ? context.URL : nil;
+        if (!amproj_isIncomingProjectURL(URL, nil)) continue;
+        AMProjV865ProjectFlowRecordNativeRouteDispatched(
+            URL, [source stringByAppendingString:@"_url"], forwarded);
+    }
+    for (NSUserActivity *activity in connectionOptions.userActivities) {
+        NSURL *URL = amproj_projectURLFromUserActivity(activity);
+        NSDictionary *options = amproj_projectOptionsFromUserActivity(activity);
+        if (!amproj_isIncomingProjectURL(URL, options)) continue;
+        AMProjV865ProjectFlowRecordNativeRouteDispatched(
+            URL, [source stringByAppendingString:@"_activity"], forwarded);
+    }
 }
 
 static UISceneConfiguration *hooked_applicationConfigurationForConnecting(
     id self, SEL _cmd, UIApplication *application, UISceneSession *session,
     UISceneConnectionOptions *connectionOptions) {
-    amproj_recordSceneConnectionCandidates(
+    BOOL public865 = amproj_runtimeUsesPublic865ImportHooks();
+    // Stage before the native configuration callback while the provider grant
+    // is valid, then keep every acquired scope alive until that callback ends.
+    NSArray<NSURL *> *scopedURLs = amproj_recordSceneConnectionCandidates(
         connectionOptions, @"application_configuration_for_connecting");
-    IMP original = amproj_configurationForwardDepth
-        ? amproj_originalHookForReceiverSkippingExact(
-              amproj_configurationHooks,
-              sizeof(amproj_configurationHooks) /
-                  sizeof(amproj_configurationHooks[0]), self)
-        : amproj_originalHookForReceiver(
-              amproj_configurationHooks,
-              sizeof(amproj_configurationHooks) /
-                  sizeof(amproj_configurationHooks[0]), self);
+    IMP original = NULL;
     UISceneConfiguration *configuration = nil;
-    if (original && original != (IMP)hooked_applicationConfigurationForConnecting) {
-        amproj_configurationForwardDepth += 1;
-        @try {
-            configuration = ((AMProjApplicationConfigurationForConnectingIMP)original)(
-                self, _cmd, application, session, connectionOptions);
-        } @finally {
-            amproj_configurationForwardDepth -= 1;
+    BOOL forwarded = NO;
+    @try {
+        original = amproj_configurationForwardDepth
+            ? amproj_originalHookForReceiverSkippingExact(
+                  amproj_configurationHooks,
+                  sizeof(amproj_configurationHooks) /
+                      sizeof(amproj_configurationHooks[0]), self)
+            : amproj_originalHookForReceiver(
+                  amproj_configurationHooks,
+                  sizeof(amproj_configurationHooks) /
+                      sizeof(amproj_configurationHooks[0]), self);
+        if (original && original != (IMP)hooked_applicationConfigurationForConnecting) {
+            amproj_configurationForwardDepth += 1;
+            @try {
+                configuration = ((AMProjApplicationConfigurationForConnectingIMP)original)(
+                    self, _cmd, application, session, connectionOptions);
+                forwarded = YES;
+            } @finally {
+                amproj_configurationForwardDepth -= 1;
+            }
         }
+    } @finally {
+        for (NSURL *scopedURL in scopedURLs) {
+            [scopedURL stopAccessingSecurityScopedResource];
+        }
+    }
+    if (public865) {
+        amproj_installPublic865SceneHooksForClass(configuration.delegateClass);
+        amproj_recordPublic865SceneConnectionRoutes(
+            connectionOptions, @"application_configuration_for_connecting",
+            forwarded);
     }
     amproj_debugEvent(@"import.scene_configuration_forward", @{
         @"delegate": NSStringFromClass([self class]) ?: @"",
@@ -12660,26 +12987,40 @@ static UISceneConfiguration *hooked_applicationConfigurationForConnecting(
 static void hooked_sceneWillConnectToSession(
     id self, SEL _cmd, UIScene *scene, UISceneSession *session,
     UISceneConnectionOptions *connectionOptions) {
-    amproj_recordSceneConnectionCandidates(
+    NSArray<NSURL *> *scopedURLs = amproj_recordSceneConnectionCandidates(
         connectionOptions, @"scene_will_connect");
-    IMP original = amproj_sceneWillConnectForwardDepth
-        ? amproj_originalHookForReceiverSkippingExact(
-              amproj_sceneWillConnectHooks,
-              sizeof(amproj_sceneWillConnectHooks) /
-                  sizeof(amproj_sceneWillConnectHooks[0]), self)
-        : amproj_originalHookForReceiver(
-              amproj_sceneWillConnectHooks,
-              sizeof(amproj_sceneWillConnectHooks) /
-                  sizeof(amproj_sceneWillConnectHooks[0]), self);
-    if (original && original != (IMP)hooked_sceneWillConnectToSession) {
-        amproj_sceneWillConnectForwardDepth += 1;
-        @try {
-            ((AMProjSceneWillConnectIMP)original)(
-                self, _cmd, scene, session, connectionOptions);
-        } @finally {
-            amproj_sceneWillConnectForwardDepth -= 1;
+    IMP original = NULL;
+    BOOL forwarded = NO;
+    @try {
+        original = amproj_sceneWillConnectForwardDepth
+            ? amproj_originalHookForReceiverSkippingExact(
+                  amproj_sceneWillConnectHooks,
+                  sizeof(amproj_sceneWillConnectHooks) /
+                      sizeof(amproj_sceneWillConnectHooks[0]), self)
+            : amproj_originalHookForReceiver(
+                  amproj_sceneWillConnectHooks,
+                  sizeof(amproj_sceneWillConnectHooks) /
+                      sizeof(amproj_sceneWillConnectHooks[0]), self);
+        if (original && original != (IMP)hooked_sceneWillConnectToSession) {
+            amproj_sceneWillConnectForwardDepth += 1;
+            @try {
+                ((AMProjSceneWillConnectIMP)original)(
+                    self, _cmd, scene, session, connectionOptions);
+                forwarded = YES;
+            } @finally {
+                amproj_sceneWillConnectForwardDepth -= 1;
+            }
+        }
+    } @finally {
+        for (NSURL *scopedURL in scopedURLs) {
+            [scopedURL stopAccessingSecurityScopedResource];
         }
     }
+    if (amproj_runtimeUsesPublic865ImportHooks()) {
+        amproj_installPublic865SceneHooksForClass([self class]);
+    }
+    amproj_recordPublic865SceneConnectionRoutes(
+        connectionOptions, @"scene_will_connect", forwarded);
 }
 
 static void hooked_sceneOpenURLContexts(id self, SEL _cmd, UIScene *scene,
@@ -12704,6 +13045,68 @@ static void hooked_sceneOpenURLContexts(id self, SEL _cmd, UIScene *scene,
                 amproj_sceneOpenURLForwardDepth -= 1;
             }
         }
+        return;
+    }
+
+    if (amproj_runtimeUsesPublic865ImportHooks()) {
+        NSMutableArray<NSURL *> *projectURLs = [NSMutableArray array];
+        NSMutableArray<NSURL *> *scopedURLs = [NSMutableArray array];
+        NSUInteger stagedCount = 0;
+        for (id context in URLContexts) {
+            UIOpenURLContext *openContext =
+                [context isKindOfClass:UIOpenURLContext.class] ? context : nil;
+            NSURL *URL = openContext.URL;
+            if (!URL) continue;
+            NSMutableDictionary *options = [NSMutableDictionary dictionary];
+            UISceneOpenURLOptions *sceneOptions = openContext.options;
+            options[UIApplicationOpenURLOptionsOpenInPlaceKey] =
+                @(sceneOptions.openInPlace);
+            if (sceneOptions.sourceApplication.length) {
+                options[UIApplicationOpenURLOptionsSourceApplicationKey] =
+                    sceneOptions.sourceApplication;
+            }
+            if (!amproj_isIncomingProjectURL(URL, options)) continue;
+            BOOL heldSecurityScope =
+                !AMProjV865ProjectFlowIsManagedStagedURL(URL)
+                ? [URL startAccessingSecurityScopedResource] : NO;
+            if (heldSecurityScope) [scopedURLs addObject:URL];
+            NSError *stageError = nil;
+            NSURL *stagedURL = amproj_stagePublic865ProjectURL(
+                URL, @"scene_open_url_contexts", options,
+                heldSecurityScope, &stageError);
+            [projectURLs addObject:stagedURL ?: URL];
+            if (stagedURL) stagedCount++;
+        }
+        BOOL forwarded = NO;
+        if (original && original != (IMP)hooked_sceneOpenURLContexts) {
+            amproj_sceneOpenURLForwardDepth += 1;
+            @try {
+                ((AMProjSceneOpenURLContextsIMP)original)(
+                    self, _cmd, scene, URLContexts);
+                forwarded = YES;
+            } @finally {
+                amproj_sceneOpenURLForwardDepth -= 1;
+                for (NSURL *scopedURL in scopedURLs) {
+                    [scopedURL stopAccessingSecurityScopedResource];
+                }
+            }
+        } else {
+            for (NSURL *scopedURL in scopedURLs) {
+                [scopedURL stopAccessingSecurityScopedResource];
+            }
+        }
+        for (NSURL *projectURL in projectURLs) {
+            AMProjV865ProjectFlowRecordNativeRouteDispatched(
+                projectURL, @"scene_open_url_contexts", forwarded);
+        }
+        amproj_debugEvent(@"import.865_scene_forward", @{
+            @"received": @(URLContexts.count),
+            @"recognized": @(projectURLs.count),
+            @"staged": @(stagedCount),
+            @"forwarded": @(forwarded),
+            @"same_context_object": @YES,
+            @"consumed": @0
+        });
         return;
     }
 
@@ -13114,6 +13517,26 @@ static BOOL amproj_IPAFireTextMatches(NSString *text) {
     return (hasWelcome && hasCracked) || (hasCracked && hasMoreApps);
 }
 
+static void amproj_IPAFireAppendLayerText(CALayer *layer,
+                                          NSMutableString *output,
+                                          NSUInteger depth) {
+    if (!layer || !output || depth > 32 || output.length >= 131072) return;
+    if ([layer isKindOfClass:CATextLayer.class]) {
+        id value = ((CATextLayer *)layer).string;
+        NSString *text = nil;
+        if ([value isKindOfClass:NSString.class]) {
+            text = value;
+        } else if ([value isKindOfClass:NSAttributedString.class]) {
+            text = ((NSAttributedString *)value).string;
+        }
+        if (text.length) [output appendFormat:@"%@\n", text];
+    }
+    for (CALayer *sublayer in layer.sublayers) {
+        amproj_IPAFireAppendLayerText(sublayer, output, depth + 1);
+        if (output.length >= 131072) break;
+    }
+}
+
 static void amproj_IPAFireAppendViewText(UIView *view,
                                          NSMutableString *output,
                                          NSUInteger depth) {
@@ -13128,6 +13551,14 @@ static void amproj_IPAFireAppendViewText(UIView *view,
     }
     if ([view isKindOfClass:UIButton.class]) {
         NSString *text = ((UIButton *)view).currentTitle;
+        if (text.length) [output appendFormat:@"%@\n", text];
+    }
+    if ([view isKindOfClass:UITextView.class]) {
+        NSString *text = ((UITextView *)view).text;
+        if (text.length) [output appendFormat:@"%@\n", text];
+    }
+    if ([view isKindOfClass:UITextField.class]) {
+        NSString *text = ((UITextField *)view).text;
         if (text.length) [output appendFormat:@"%@\n", text];
     }
     if ([view.accessibilityLabel isKindOfClass:NSString.class] &&
@@ -13170,6 +13601,7 @@ static BOOL amproj_IPAFireViewContainsMarker(UIView *view, NSUInteger depth) {
     if (!view || depth > 32) return NO;
     NSMutableString *content = [NSMutableString stringWithCapacity:256];
     amproj_IPAFireAppendViewText(view, content, depth);
+    amproj_IPAFireAppendLayerText(view.layer, content, depth);
     return amproj_IPAFireTextMatches(content);
 }
 
@@ -13210,6 +13642,43 @@ static void amproj_IPAFireScheduleRootViewReveal(UIView *rootView) {
         objc_setAssociatedObject(rootView, amproj_IPAFireRootHiddenKey,
                                  nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     });
+}
+
+static void amproj_recordPublic865LaunchNativeRoute(
+    NSDictionary *launchOptions, NSString *source, BOOL forwarded) {
+    if (!amproj_runtimeUsesPublic865ImportHooks() ||
+        ![launchOptions isKindOfClass:NSDictionary.class]) return;
+    void (^recordCandidate)(NSURL *, NSString *, NSDictionary *) =
+        ^(NSURL *candidateURL, NSString *candidateSource,
+          NSDictionary *candidateOptions) {
+        if (!amproj_isIncomingProjectURL(candidateURL, candidateOptions)) return;
+        AMProjV865ProjectFlowRecordNativeRouteDispatched(
+            candidateURL, candidateSource, forwarded);
+    };
+    NSURL *launchURL = launchOptions[UIApplicationLaunchOptionsURLKey];
+    if ([launchURL isKindOfClass:NSURL.class]) {
+        recordCandidate(launchURL, [source stringByAppendingString:@"_url"],
+                        launchOptions);
+    }
+    id activityContainer =
+        launchOptions[UIApplicationLaunchOptionsUserActivityDictionaryKey];
+    if ([activityContainer isKindOfClass:NSDictionary.class]) {
+        [(NSDictionary *)activityContainer enumerateKeysAndObjectsUsingBlock:
+            ^(__unused id key, id value, __unused BOOL *stop) {
+            if (![value isKindOfClass:NSUserActivity.class]) return;
+            NSURL *activityURL = amproj_projectURLFromUserActivity(value);
+            recordCandidate(activityURL,
+                [source stringByAppendingString:@"_activity"],
+                amproj_projectOptionsFromUserActivity(value));
+        }];
+    }
+    id topLevelActivity = launchOptions[kAMProjLaunchOptionsUserActivityKey];
+    if ([topLevelActivity isKindOfClass:NSUserActivity.class]) {
+        NSURL *activityURL = amproj_projectURLFromUserActivity(topLevelActivity);
+        recordCandidate(activityURL,
+            [source stringByAppendingString:@"_activity"],
+            amproj_projectOptionsFromUserActivity(topLevelActivity));
+    }
 }
 
 static void amproj_IPAFireHideRootViewTemporarily(UIView *rootView,
@@ -13299,7 +13768,26 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
     UIWindow *keyWindow = amproj_keyWindow();
     if (keyWindow && ![windows containsObject:keyWindow]) [windows addObject:keyWindow];
     for (UIWindow *window in windows) {
-        if (window.hidden || window.alpha <= 0.01 || !window.rootViewController) continue;
+        if (window.hidden || window.alpha <= 0.01) continue;
+
+        // A signed helper can briefly expose the page from an independent
+        // UIWindow before assigning a root controller. Inspect the window
+        // itself so that layout is not required for the startup fingerprint.
+        BOOL hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);
+        if (!window.rootViewController) {
+            if (hasWindowFingerprint &&
+                (window != keyWindow || window.windowLevel > UIWindowLevelNormal)) {
+                amproj_logCriticalEvent(@"popup.suppressed", @{
+                    @"fingerprint": @"IPAFire welcome",
+                    @"source": source ?: @"window_scan",
+                    @"window_level": @(window.windowLevel),
+                    @"mutation": @"hide_window_without_root"
+                });
+                window.hidden = YES;
+                window.userInteractionEnabled = NO;
+            }
+            continue;
+        }
 
         UIViewController *top = amproj_topViewController(window.rootViewController);
         if (top && amproj_isIPAFireWelcome(top)) {
@@ -13345,7 +13833,6 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
 
         UIView *rootView = window.rootViewController.viewIfLoaded;
         UIView *overlay = amproj_IPAFireFindOverlayView(rootView, 0);
-        BOOL hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);
         if (window != keyWindow && window.windowLevel > UIWindowLevelNormal &&
             (hasWindowFingerprint || overlay)) {
             amproj_logCriticalEvent(@"popup.suppressed", @{
@@ -15049,9 +15536,29 @@ static void hooked_navigationPush(id self, SEL _cmd,
     }
 #endif
     if (!amproj_runtimeUsesLegacyImportHooks()) {
-        // Account replacement above is intentionally retained. Build 865 has
-        // no verified navigation-export callback, so every project navigation
-        // must continue through Alight Motion's native implementation.
+        // Build 865 does not expose the legacy ShareNC callback, but the
+        // concrete project-package controller is a stable semantic boundary
+        // used by the presentation hook as well. Handle only that exact
+        // controller here so the package export button is not lost when AM
+        // pushes it through a navigation controller. Every other navigation
+        // remains native, including the 865 import/document flow.
+        if (amproj_runtimeIsBuild865() &&
+            AMProjV865ProjectFlowIsProjectPackageController(viewController) &&
+            ![amproj_exportMode() isEqualToString:@"observe"] &&
+            [self isKindOfClass:UIViewController.class] && orig_presentVC) {
+            UIViewController *presenter = (UIViewController *)self;
+            NSString *title = amproj_currentProjectTitle(presenter);
+            amproj_logCriticalEvent(@"865.project_export_navigation_entry", @{
+                @"controller": NSStringFromClass(viewController.class) ?: @"",
+                @"destination": @"share_sheet",
+                @"native_private_abi": @NO
+            });
+            dispatch_async(dispatch_get_main_queue(), ^{
+                amproj_startDirectExport(
+                    presenter, viewController, animated, nil, title);
+            });
+            return;
+        }
         amproj_log865LegacyPathDisabled(@"navigation_export");
         if (orig_navigationPush) {
             orig_navigationPush(self, _cmd, viewController, animated);
@@ -15783,6 +16290,22 @@ static id amproj_willResignActiveObserver = nil;
 static id amproj_sceneWillConnectObserver = nil;
 static id amproj_sceneWillDeactivateObserver = nil;
 static id amproj_windowDidBecomeKeyObserver = nil;
+static id amproj_windowDidBecomeVisibleObserver = nil;
+static id amproj_willEnterForegroundObserver = nil;
+static void (*orig_windowMakeKeyAndVisible)(UIWindow *, SEL) = NULL;
+
+static void hooked_windowMakeKeyAndVisible(UIWindow *window, SEL _cmd) {
+    if (orig_windowMakeKeyAndVisible) {
+        orig_windowMakeKeyAndVisible(window, _cmd);
+    }
+    if (!window || !amproj_runtimeIsBuild865() || !NSThread.isMainThread) return;
+
+    // makeKeyAndVisible returns before Core Animation commits the next frame.
+    // Suppress an already-built welcome hierarchy synchronously so it never
+    // flashes, then retain the delayed probes for labels added after layout.
+    amproj_suppressIPAFireWelcomeWindows(@"window_make_key_and_visible");
+    amproj_scheduleIPAFireWelcomeSuppression(@"window_make_key_and_visible");
+}
 
 static IMP amproj_installMethodHook(Method method, IMP replacement,
                                     unsigned int expectedArguments, NSString *name) {
@@ -15823,6 +16346,25 @@ static Method amproj_ownInstanceMethod(Class cls, SEL selector) {
     return found;
 }
 
+static void amproj_installIPAFireWindowHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (!amproj_runtimeIsBuild865()) return;
+        Method method = amproj_ownInstanceMethod(
+            UIWindow.class, @selector(makeKeyAndVisible));
+        if (!method) {
+            amproj_logCriticalEvent(@"popup.window_hook_unavailable", @{
+                @"selector": @"makeKeyAndVisible"
+            });
+            return;
+        }
+        orig_windowMakeKeyAndVisible = (void (*)(UIWindow *, SEL))
+            amproj_installMethodHook(
+                method, (IMP)hooked_windowMakeKeyAndVisible, 2,
+                @"UIWindow.makeKeyAndVisible");
+    });
+}
+
 static BOOL amproj_installTrackedHook(Class cls, SEL selector, IMP replacement,
                                       unsigned int expectedArguments,
                                       AMProjTrackedHook *hooks, NSUInteger hookCount,
@@ -15860,10 +16402,15 @@ static void hooked_applicationSetDelegate(UIApplication *application, SEL _cmd,
         orig_applicationSetDelegate(application, _cmd, delegate);
     }
     if (!delegate) return;
+    if (amproj_runtimeUsesPublic865ImportHooks()) {
+        amproj_public865Application = application;
+        amproj_public865RuntimeDelegate = delegate;
+    }
 
     // Install against the concrete delegate immediately after UIKit binds it.
     // A second main-queue pass catches proxy subclasses installed in the same
     // startup turn without delaying launch-option capture.
+    amproj_installPublic865ImportHooks();
     amproj_installImportHook();
     __weak UIApplication *weakApplication = application;
     __weak id<UIApplicationDelegate> weakDelegate = delegate;
@@ -15871,6 +16418,11 @@ static void hooked_applicationSetDelegate(UIApplication *application, SEL _cmd,
         UIApplication *strongApplication = weakApplication;
         id<UIApplicationDelegate> strongDelegate = weakDelegate;
         if (strongApplication.delegate == strongDelegate) {
+            if (amproj_runtimeUsesPublic865ImportHooks()) {
+                amproj_public865Application = strongApplication;
+                amproj_public865RuntimeDelegate = strongDelegate;
+            }
+            amproj_installPublic865ImportHooks();
             amproj_installImportHook();
         }
     });
@@ -16413,6 +16965,121 @@ static BOOL amproj_installDeclaredURLHooks(void) {
     return modernInstalled || handleInstalled || legacyInstalled;
 }
 
+static BOOL amproj_installPublic865AppDelegateHooksForClass(
+    Class cls, BOOL runtimeDelegate) {
+    if (!amproj_runtimeUsesPublic865ImportHooks() || !cls) return NO;
+
+    SEL modernSelector = @selector(application:openURL:options:);
+    Method nativeModernMethod = amproj_ownInstanceMethod(cls, modernSelector);
+    if (!amproj_nativeAppDelegateOpenURLIMP && nativeModernMethod) {
+        IMP candidate = method_getImplementation(nativeModernMethod);
+        if (candidate && candidate != (IMP)hooked_applicationOpenURL) {
+            amproj_nativeAppDelegateOpenURLIMP = candidate;
+        }
+    }
+
+    BOOL willChanged = NO;
+    BOOL willInstalled = amproj_installTrackedHook(
+        cls, @selector(application:willFinishLaunchingWithOptions:),
+        (IMP)hooked_applicationWillFinish, 4, amproj_willFinishHooks,
+        sizeof(amproj_willFinishHooks) / sizeof(amproj_willFinishHooks[0]),
+        &willChanged);
+    BOOL didChanged = NO;
+    BOOL didInstalled = amproj_installTrackedHook(
+        cls, @selector(application:didFinishLaunchingWithOptions:),
+        (IMP)hooked_applicationDidFinish, 4, amproj_didFinishHooks,
+        sizeof(amproj_didFinishHooks) / sizeof(amproj_didFinishHooks[0]),
+        &didChanged);
+    BOOL configurationChanged = NO;
+    BOOL configurationInstalled = amproj_installTrackedHook(
+        cls, @selector(application:configurationForConnectingSceneSession:options:),
+        (IMP)hooked_applicationConfigurationForConnecting, 5,
+        amproj_configurationHooks,
+        sizeof(amproj_configurationHooks) / sizeof(amproj_configurationHooks[0]),
+        &configurationChanged);
+    BOOL openChanged = NO;
+    BOOL openInstalled = amproj_installTrackedHook(
+        cls, modernSelector, (IMP)hooked_applicationOpenURL, 5,
+        amproj_openURLHooks,
+        sizeof(amproj_openURLHooks) / sizeof(amproj_openURLHooks[0]),
+        &openChanged);
+    BOOL activityChanged = NO;
+    BOOL activityInstalled = amproj_installTrackedHook(
+        cls, @selector(application:continueUserActivity:restorationHandler:),
+        (IMP)hooked_applicationContinueActivity, 5,
+        amproj_continueActivityHooks,
+        sizeof(amproj_continueActivityHooks) /
+            sizeof(amproj_continueActivityHooks[0]),
+        &activityChanged);
+    BOOL handleChanged = NO;
+    BOOL handleInstalled = amproj_installTrackedHook(
+        cls, NSSelectorFromString(@"application:handleOpenURL:"),
+        (IMP)hooked_applicationHandleOpenURL, 4, amproj_handleOpenURLHooks,
+        sizeof(amproj_handleOpenURLHooks) / sizeof(amproj_handleOpenURLHooks[0]),
+        &handleChanged);
+    BOOL legacyChanged = NO;
+    BOOL legacyInstalled = amproj_installTrackedHook(
+        cls, NSSelectorFromString(
+                 @"application:openURL:sourceApplication:annotation:"),
+        (IMP)hooked_applicationLegacyOpenURL, 6, amproj_legacyOpenURLHooks,
+        sizeof(amproj_legacyOpenURLHooks) / sizeof(amproj_legacyOpenURLHooks[0]),
+        &legacyChanged);
+
+    amproj_logCriticalEvent(@"import.865_public_app_delegate_hooks", @{
+        @"class": NSStringFromClass(cls) ?: @"",
+        @"runtime_delegate": @(runtimeDelegate),
+        @"will_finish": @(willInstalled),
+        @"did_finish": @(didInstalled),
+        @"scene_configuration": @(configurationInstalled),
+        @"open_url": @(openInstalled),
+        @"continue_activity": @(activityInstalled),
+        @"handle_open_url": @(handleInstalled),
+        @"legacy_open_url": @(legacyInstalled),
+        @"changed": @(willChanged || didChanged || configurationChanged ||
+                       openChanged || activityChanged || handleChanged ||
+                       legacyChanged)
+    });
+    return willInstalled || didInstalled || configurationInstalled ||
+        openInstalled || activityInstalled || handleInstalled || legacyInstalled;
+}
+
+static void amproj_installPublic865ApplicationDelegateHook(void) {
+    if (!amproj_runtimeUsesPublic865ImportHooks()) return;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Method method = class_getInstanceMethod(
+            UIApplication.class, @selector(setDelegate:));
+        IMP previous = amproj_installMethodHook(
+            method, (IMP)hooked_applicationSetDelegate, 3,
+            @"UIApplication.setDelegate.865_public");
+        if (previous) {
+            orig_applicationSetDelegate =
+                (AMProjApplicationSetDelegateIMP)previous;
+        }
+    });
+}
+
+static void amproj_installPublic865ImportHooks(void) {
+    if (!amproj_runtimeUsesPublic865ImportHooks()) return;
+    amproj_installPublic865ApplicationDelegateHook();
+    Class declaredClass = amproj_declaredAppDelegateClass();
+    (void)amproj_installPublic865AppDelegateHooksForClass(
+        declaredClass, NO);
+    id<UIApplicationDelegate> runtimeDelegate =
+        amproj_public865RuntimeDelegate;
+    Class runtimeClass = runtimeDelegate ? object_getClass(runtimeDelegate) : Nil;
+    if (runtimeClass && runtimeClass != declaredClass) {
+        (void)amproj_installPublic865AppDelegateHooksForClass(
+            runtimeClass, YES);
+    }
+    UIApplication *application = amproj_public865Application;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in application.connectedScenes) {
+            amproj_installPublic865SceneHooksForClass([scene.delegate class]);
+        }
+    }
+}
+
 static void amproj_installProjectsImportAlertHook(void) {
     static dispatch_once_t onceToken;
     Class cls = NSClassFromString(@"AlightMotion.ProjectsImportAlert");
@@ -16471,6 +17138,30 @@ static void amproj_installProjectsImportAlertHook(void) {
             @"cancel_pressed": @(orig_projectsImportAlertOnPressCancel != NULL),
             @"view_disappeared": @(disappearedInstalled)
         });
+    });
+}
+
+static void amproj_installPublic865SceneHooksForClass(Class cls) {
+    if (!amproj_runtimeUsesPublic865ImportHooks() || !cls) return;
+    BOOL willConnectChanged = NO;
+    BOOL willConnectInstalled = amproj_installTrackedHook(
+        cls, @selector(scene:willConnectToSession:options:),
+        (IMP)hooked_sceneWillConnectToSession, 5,
+        amproj_sceneWillConnectHooks,
+        sizeof(amproj_sceneWillConnectHooks) /
+            sizeof(amproj_sceneWillConnectHooks[0]),
+        &willConnectChanged);
+    BOOL openChanged = NO;
+    BOOL openInstalled = amproj_installTrackedHook(
+        cls, NSSelectorFromString(@"scene:openURLContexts:"),
+        (IMP)hooked_sceneOpenURLContexts, 4, amproj_sceneOpenURLHooks,
+        sizeof(amproj_sceneOpenURLHooks) / sizeof(amproj_sceneOpenURLHooks[0]),
+        &openChanged);
+    amproj_logCriticalEvent(@"import.865_public_scene_hooks", @{
+        @"class": NSStringFromClass(cls) ?: @"",
+        @"will_connect": @(willConnectInstalled),
+        @"open_url_contexts": @(openInstalled),
+        @"changed": @(willConnectChanged || openChanged)
     });
 }
 
@@ -16745,13 +17436,14 @@ static void amproj_installExportHooks(void) {
         NSLog(@"[AMProjExport] Installing export hooks after app launch");
         amproj_installPresentationHook();
         if (amproj_runtimeIsBuild865()) {
-            // Keep navigation swizzling only for the cloud account replacement
-            // above. Project export is owned only by the exact presentation
-            // boundary; no verified 865 navigation-export callback exists.
+            // Keep only the public presentation hook and the navigation
+            // semantic boundary above. The latter handles the exact 865
+            // project-package controller; it does not inspect private ShareVC
+            // state or intercept unrelated navigation.
             amproj_installNavigationExportHook();
-            amproj_logCriticalEvent(@"export_hooks.865_native_navigation", @{
+            amproj_logCriticalEvent(@"export_hooks.865_project_boundary", @{
                 @"presentation": @YES,
-                @"navigation": @"account_replacement_only",
+                @"navigation": @"project_package_boundary_and_account_replacement",
                 @"legacy_share_hooks": @NO
             });
             return;
@@ -16893,6 +17585,7 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
         }
         amproj_armPaywallStartupFallback();
         amproj_startStartupPaywallRescue();
+        amproj_installPublic865ImportHooks();
         amproj_installImportHook();
         AMProjRegisterNativePackageImportEventHandler(
             ^(NSString *event, NSDictionary<NSString *, id> *fields) {
@@ -17064,13 +17757,18 @@ static void AMProjExportInit(void) {
         AMCloudSyncInstallPluginHooksEarly();
 #endif
         amproj_restorePhotoAlbumMode();
+        amproj_installIPAFireWindowHook();
 
         // ObjC classes are registered before image constructors. Installing only
         // this AppDelegate hook here avoids touching UIApplication or UIKit UI.
         // The didFinish hook synchronously stages cold-launch documents while
         // their grant is valid. Validation, unpacking, native import and UI wait
         // until activation; constructors still do not instantiate UIApplication/UI.
-        if (amproj_runtimeUsesLegacyImportHooks()) {
+        if (amproj_runtimeUsesPublic865ImportHooks()) {
+            // Constructor-safe: this installer only mutates already-registered
+            // classes and never asks UIApplication for an instance.
+            amproj_installPublic865ImportHooks();
+        } else if (amproj_runtimeUsesLegacyImportHooks()) {
             amproj_installApplicationDelegateHook();
             (void)amproj_installColdLaunchHook();
             (void)amproj_installDeclaredURLHooks();
@@ -17088,11 +17786,29 @@ static void AMProjExportInit(void) {
                 amproj_scheduleIPAFireWelcomeSuppression(@"window_did_become_key");
             }];
         }
+        if (amproj_runtimeIsBuild865() && !amproj_windowDidBecomeVisibleObserver) {
+            amproj_windowDidBecomeVisibleObserver = [center
+                addObserverForName:UIWindowDidBecomeVisibleNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(__unused NSNotification *notification) {
+                amproj_scheduleIPAFireWelcomeSuppression(@"window_did_become_visible");
+            }];
+        }
+        if (amproj_runtimeIsBuild865() && !amproj_willEnterForegroundObserver) {
+            amproj_willEnterForegroundObserver = [center
+                addObserverForName:UIApplicationWillEnterForegroundNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(__unused NSNotification *notification) {
+                amproj_scheduleIPAFireWelcomeSuppression(@"will_enter_foreground");
+            }];
+        }
         amproj_willLaunchObserver = [center
             addObserverForName:@"UIApplicationWillFinishLaunchingNotification"
                         object:nil
                          queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(__unused NSNotification *notification) {
+                    usingBlock:^(NSNotification *notification) {
             // This runs after other injected dylib constructors and before AM
             // creates the media browser, so their demo preset cannot win a
             // constructor-order race.
@@ -17101,7 +17817,15 @@ static void AMProjExportInit(void) {
             // present its startup
             // PaywallLoadingScreenView before DidFinishLaunching. Do not consume
             // launch URLs here: Build 865 owns its own document lifecycle.
+            UIApplication *application =
+                [notification.object isKindOfClass:UIApplication.class]
+                    ? notification.object : nil;
+            if (amproj_runtimeUsesPublic865ImportHooks() && application.delegate) {
+                amproj_public865Application = application;
+                amproj_public865RuntimeDelegate = application.delegate;
+            }
             amproj_installPresentationHook();
+            amproj_installPublic865ImportHooks();
             amproj_installImportHook();
             amproj_scheduleIPAFireWelcomeSuppression(@"will_finish_launching");
         }];
@@ -17109,16 +17833,32 @@ static void AMProjExportInit(void) {
             addObserverForName:UIApplicationDidFinishLaunchingNotification
                         object:nil
                          queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(__unused NSNotification *notification) {
+                    usingBlock:^(NSNotification *notification) {
+            UIApplication *application =
+                [notification.object isKindOfClass:UIApplication.class]
+                    ? notification.object : nil;
+            if (amproj_runtimeUsesPublic865ImportHooks() && application.delegate) {
+                amproj_public865Application = application;
+                amproj_public865RuntimeDelegate = application.delegate;
+            }
             amproj_bootstrapAfterLaunch(@"did_finish_launching");
+            amproj_installPublic865ImportHooks();
             amproj_installImportHook();
         }];
         amproj_didBecomeActiveObserver = [center
             addObserverForName:UIApplicationDidBecomeActiveNotification
                         object:nil
                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(__unused NSNotification *notification) {
+                    usingBlock:^(NSNotification *notification) {
+            UIApplication *application =
+                [notification.object isKindOfClass:UIApplication.class]
+                    ? notification.object : nil;
+            if (amproj_runtimeUsesPublic865ImportHooks() && application.delegate) {
+                amproj_public865Application = application;
+                amproj_public865RuntimeDelegate = application.delegate;
+            }
             amproj_bootstrapAfterLaunch(@"did_become_active");
+            amproj_installPublic865ImportHooks();
             amproj_installImportHook();
             amproj_armPaywallStartupFallback();
             amproj_startStartupPaywallRescue();
@@ -17149,6 +17889,7 @@ static void AMProjExportInit(void) {
             // QQ/Files returns through openURL before the next didBecomeActive.
             // Reinstall here so late Firebase/AppDelegate swizzles cannot own
             // that callback window.
+            amproj_installPublic865ImportHooks();
             amproj_installImportHook();
         }];
         if (@available(iOS 13.0, *)) {
@@ -17159,7 +17900,11 @@ static void AMProjExportInit(void) {
                         usingBlock:^(__unused NSNotification *notification) {
                 UIScene *scene = [notification.object isKindOfClass:UIScene.class]
                     ? notification.object : nil;
-                if (amproj_runtimeUsesLegacyImportHooks()) {
+                if (amproj_runtimeUsesPublic865ImportHooks()) {
+                    amproj_installPublic865SceneHooksForClass(
+                        [scene.delegate class]);
+                    amproj_installPublic865ImportHooks();
+                } else if (amproj_runtimeUsesLegacyImportHooks()) {
                     amproj_installSceneImportHook(scene.delegate);
                 } else {
                     amproj_log865LegacyPathDisabled(@"scene_connect_import_hook");
@@ -17170,6 +17915,7 @@ static void AMProjExportInit(void) {
                             object:nil
                              queue:[NSOperationQueue mainQueue]
                         usingBlock:^(__unused NSNotification *notification) {
+                amproj_installPublic865ImportHooks();
                 amproj_installImportHook();
             }];
         }
@@ -17177,6 +17923,7 @@ static void AMProjExportInit(void) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{
             amproj_bootstrapAfterLaunch(@"main_queue_fallback");
+            amproj_installPublic865ImportHooks();
             amproj_installImportHook();
             amproj_armPaywallStartupFallback();
             amproj_startStartupPaywallRescue();

@@ -9,6 +9,7 @@ static NSString *const AMProjV865DirectoryName = @"AMProjV865ProjectHandoff";
 static NSString *const AMProjV865BreadcrumbFilename = @"last-handoff.plist";
 static const void *AMProjV865BrokerKey = &AMProjV865BrokerKey;
 static const unsigned long long AMProjV865MaximumDocumentBytes = 512ULL * 1024ULL * 1024ULL;
+static const NSTimeInterval AMProjV865RetentionSeconds = 7.0 * 24.0 * 60.0 * 60.0;
 
 @interface AMProjV865ProjectFlowRequest ()
 @property(nonatomic, readwrite, getter=isCancelled) BOOL cancelled;
@@ -118,6 +119,10 @@ NSString *AMProjV865ProjectFlowHandoffStatusString(
     switch (status) {
         case AMProjV865ProjectHandoffStatusStaged:
             return @"staged";
+        case AMProjV865ProjectHandoffStatusReceived:
+            return @"received";
+        case AMProjV865ProjectHandoffStatusRoutePending:
+            return @"route_pending";
         case AMProjV865ProjectHandoffStatusRouteAccepted:
             return @"route_accepted";
         case AMProjV865ProjectHandoffStatusFallbackPresented:
@@ -170,6 +175,56 @@ static NSURL *AMProjV865HandoffRoot(void) {
         NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
     return [support URLByAppendingPathComponent:AMProjV865DirectoryName
                                       isDirectory:YES];
+}
+
+static NSObject *AMProjV865SourceRegistryLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static NSMutableDictionary<NSString *, NSURL *> *AMProjV865SourceRegistry(void) {
+    static NSMutableDictionary<NSString *, NSURL *> *registry;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ registry = [NSMutableDictionary dictionary]; });
+    return registry;
+}
+
+static NSString *AMProjV865StandardizedPath(NSURL *URL) {
+    if (!URL.isFileURL || !URL.path.length) return nil;
+    return URL.URLByStandardizingPath.path;
+}
+
+BOOL AMProjV865ProjectFlowIsManagedStagedURL(NSURL *fileURL) {
+    NSString *path = AMProjV865StandardizedPath(fileURL);
+    NSString *root = AMProjV865StandardizedPath(AMProjV865HandoffRoot());
+    if (!path.length || !root.length) return NO;
+    NSString *prefix = [root stringByAppendingString:@"/"];
+    return [path isEqualToString:root] || [path hasPrefix:prefix];
+}
+
+static NSURL *AMProjV865RegisteredStagedURL(NSURL *sourceURL) {
+    if (AMProjV865ProjectFlowIsManagedStagedURL(sourceURL)) return sourceURL;
+    NSString *key = AMProjV865StandardizedPath(sourceURL);
+    if (!key.length) return nil;
+    @synchronized (AMProjV865SourceRegistryLock()) {
+        NSURL *stagedURL = AMProjV865SourceRegistry()[key];
+        if (stagedURL &&
+            [NSFileManager.defaultManager fileExistsAtPath:stagedURL.path]) {
+            return stagedURL;
+        }
+        [AMProjV865SourceRegistry() removeObjectForKey:key];
+        return nil;
+    }
+}
+
+static void AMProjV865RegisterStagedURL(NSURL *sourceURL, NSURL *stagedURL) {
+    NSString *key = AMProjV865StandardizedPath(sourceURL);
+    if (!key.length || !stagedURL.isFileURL) return;
+    @synchronized (AMProjV865SourceRegistryLock()) {
+        AMProjV865SourceRegistry()[key] = stagedURL;
+    }
 }
 
 static void AMProjV865WriteHandoffBreadcrumb(
@@ -225,7 +280,8 @@ static void AMProjV865WriteHandoffBreadcrumb(
 
 static void AMProjV865ScheduleDirectoryCleanup(NSURL *directory) {
     if (!directory) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 24 * 60 * 60 * NSEC_PER_SEC),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(AMProjV865RetentionSeconds * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         [NSFileManager.defaultManager removeItemAtURL:directory error:nil];
     });
@@ -331,6 +387,134 @@ static NSURL *AMProjV865CopyDocument(NSURL *source, NSString *filename,
     }
 }
 
+static NSURL *AMProjV865CoordinatedCopyDocument(
+    NSURL *source, NSString *filename, NSError **error) {
+    if (AMProjV865ProjectFlowIsManagedStagedURL(source)) return source;
+    __block NSURL *stagedURL = nil;
+    __block NSError *copyError = nil;
+    NSError *coordinationError = nil;
+    NSFileCoordinator *coordinator =
+        [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+    @try {
+        [coordinator coordinateReadingItemAtURL:source
+                                        options:NSFileCoordinatorReadingWithoutChanges
+                                          error:&coordinationError
+                                     byAccessor:^(NSURL *coordinatedURL) {
+            stagedURL = AMProjV865CopyDocument(
+                coordinatedURL ?: source, filename, &copyError);
+        }];
+        if (!stagedURL && !copyError) {
+            stagedURL = AMProjV865CopyDocument(source, filename, &copyError);
+        }
+    } @catch (NSException *exception) {
+        copyError = AMProjV865StageError(
+            4, @"The project handoff raised an exception while coordinating the source");
+        NSLog(@"[AMProjExport] 865 coordinated staging exception: %@ (%@)",
+              exception.name ?: @"unknown", exception.reason ?: @"unknown");
+    }
+    if (!stagedURL && error) {
+        *error = copyError ?: coordinationError ?: AMProjV865StageError(
+            2, @"The project document could not be staged");
+    }
+    return stagedURL;
+}
+
+NSURL *AMProjV865ProjectFlowStageIncomingDocument(
+    NSURL *fileURL, NSString *filename, NSString *source,
+    BOOL securityScopeAlreadyActive, NSError **error) {
+    if (!AMProjV865ProjectFlowIsRuntimeSupported() || !fileURL.isFileURL) {
+        if (error) {
+            *error = AMProjV865StageError(
+                1, @"The incoming project is not a supported file URL");
+        }
+        return nil;
+    }
+    NSString *extension = fileURL.pathExtension.lowercaseString;
+    if (![extension isEqualToString:@"amproj"] &&
+        ![extension isEqualToString:@"xml"]) {
+        if (error) {
+            *error = AMProjV865StageError(
+                1, @"The incoming document is not an AM project or XML file");
+        }
+        return nil;
+    }
+
+    NSString *routeSource = source.length ? source : @"public_document_callback";
+    AMProjV865WriteHandoffBreadcrumb(
+        AMProjV865ProjectHandoffStatusReceived, nil,
+        filename.length ? filename : fileURL.lastPathComponent, nil,
+        @{ @"source": routeSource,
+           @"security_scope_already_active": @(securityScopeAlreadyActive) });
+
+    NSURL *registered = AMProjV865RegisteredStagedURL(fileURL);
+    if (registered) {
+        AMProjV865WriteHandoffBreadcrumb(
+            AMProjV865ProjectHandoffStatusRoutePending, registered,
+            registered.lastPathComponent, nil,
+            @{ @"source": routeSource, @"deduplicated": @YES });
+        return registered;
+    }
+
+    BOOL acquiredScope = securityScopeAlreadyActive
+        ? NO : [fileURL startAccessingSecurityScopedResource];
+    NSError *stageError = nil;
+    NSURL *stagedURL = nil;
+    @try {
+        stagedURL = AMProjV865CoordinatedCopyDocument(
+            fileURL, filename.length ? filename : fileURL.lastPathComponent,
+            &stageError);
+    } @finally {
+        if (acquiredScope) [fileURL stopAccessingSecurityScopedResource];
+    }
+    if (!stagedURL) {
+        if (error) *error = stageError;
+        AMProjV865WriteHandoffBreadcrumb(
+            AMProjV865ProjectHandoffStatusFailed, nil,
+            filename.length ? filename : fileURL.lastPathComponent,
+            stageError.localizedDescription ?: @"incoming_document_staging_failed",
+            @{ @"source": routeSource,
+               @"security_scope": @(securityScopeAlreadyActive || acquiredScope) });
+        return nil;
+    }
+    AMProjV865RegisterStagedURL(fileURL, stagedURL);
+    AMProjV865WriteHandoffBreadcrumb(
+        AMProjV865ProjectHandoffStatusStaged, stagedURL,
+        stagedURL.lastPathComponent, nil,
+        @{ @"source": routeSource,
+           @"security_scope": @(securityScopeAlreadyActive || acquiredScope) });
+    AMProjV865WriteHandoffBreadcrumb(
+        AMProjV865ProjectHandoffStatusRoutePending, stagedURL,
+        stagedURL.lastPathComponent, nil,
+        @{ @"source": routeSource, @"route": @"native_public_callback" });
+    return stagedURL;
+}
+
+void AMProjV865ProjectFlowRecordNativeRouteDispatched(
+    NSURL *fileURL, NSString *source, BOOL forwarded) {
+    if (!AMProjV865ProjectFlowIsRuntimeSupported()) return;
+    NSURL *resolvedURL = AMProjV865RegisteredStagedURL(fileURL);
+    NSURL *stagedURL = AMProjV865ProjectFlowIsManagedStagedURL(resolvedURL)
+        ? resolvedURL : nil;
+    NSString *filename = stagedURL.lastPathComponent.length
+        ? stagedURL.lastPathComponent : fileURL.lastPathComponent;
+    NSString *routeSource = source.length ? source : @"native_public_callback";
+    if (!forwarded) {
+        AMProjV865WriteHandoffBreadcrumb(
+            AMProjV865ProjectHandoffStatusFailed, stagedURL,
+            filename, @"native_callback_missing",
+            @{ @"source": routeSource, @"forwarded": @NO,
+               @"route_status": @"not_dispatched",
+               @"retained_for_retry": @YES });
+        return;
+    }
+    AMProjV865WriteHandoffBreadcrumb(
+        AMProjV865ProjectHandoffStatusUnverified, stagedURL,
+        filename,
+        @"native_callback_dispatch_is_not_import_confirmation",
+        @{ @"source": routeSource, @"route_status": @"dispatched",
+           @"retained_for_retry": @YES });
+}
+
 @interface AMProjV865DocumentBroker : NSObject <UIDocumentInteractionControllerDelegate>
 @property(nonatomic, strong) UIDocumentInteractionController *controller;
 @property(nonatomic, strong) NSURL *stagedURL;
@@ -339,6 +523,7 @@ static NSURL *AMProjV865CopyDocument(NSURL *source, NSString *filename,
 @property(nonatomic, strong) AMProjV865ProjectFlowRequest *request;
 @property(nonatomic) BOOL nativeRouteInFlight;
 @property(nonatomic) BOOL fallbackPresented;
+@property(nonatomic) BOOL pendingNoticePresented;
 - (void)scheduleCleanup;
 @end
 
@@ -442,6 +627,86 @@ static BOOL AMProjV865PresentOpenInFallback(
     return presented;
 }
 
+static BOOL AMProjV865PresentPendingNoticeWithBroker(
+    AMProjV865DocumentBroker *broker, UIViewController *presenter,
+    NSString *source) {
+    if (!broker || broker.pendingNoticePresented || !presenter ||
+        !presenter.viewIfLoaded.window || !broker.stagedURL) {
+        return NO;
+    }
+    broker.pendingNoticePresented = YES;
+    NSString *routeSource = source.length ? source : @"public_document_route";
+    UIAlertController *notice = [UIAlertController
+        alertControllerWithTitle:@"项目文件已暂存"
+                         message:@"文件已安全保存在本机，并已交给 6.2.58 的原生导入入口。当前无法确认项目是否已写入；如果项目列表没有出现，请在项目页重试，或选择打开方式。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    __weak AMProjV865DocumentBroker *weakBroker = broker;
+    [notice addAction:[UIAlertAction actionWithTitle:@"稍后"
+        style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
+        AMProjV865DocumentBroker *strongBroker = weakBroker;
+        if (strongBroker) [strongBroker scheduleCleanup];
+    }]];
+    [notice addAction:[UIAlertAction actionWithTitle:@"选择打开方式"
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        AMProjV865DocumentBroker *strongBroker = weakBroker;
+        if (!strongBroker) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *owner = AMProjV865PresenterForBroker(strongBroker);
+            if (owner) {
+                (void)AMProjV865PresentOpenInFallback(
+                    strongBroker, owner, nil);
+            }
+        });
+    }]];
+    AMProjV865WriteHandoffBreadcrumb(
+        AMProjV865ProjectHandoffStatusUnverified, broker.stagedURL,
+        broker.stagedURL.lastPathComponent,
+        @"staged_document_requires_native_confirmation",
+        @{ @"source": routeSource, @"retry_available": @YES,
+           @"open_in_requires_user_action": @YES });
+    @try {
+        [presenter presentViewController:notice animated:YES completion:nil];
+        return YES;
+    } @catch (NSException *exception) {
+        broker.pendingNoticePresented = NO;
+        NSLog(@"[AMProjExport] 865 pending notice exception: %@ (%@)",
+              exception.name ?: @"unknown", exception.reason ?: @"unknown");
+        return NO;
+    }
+}
+
+void AMProjV865ProjectFlowPresentPendingNotice(NSURL *fileURL,
+                                                NSString *source) {
+    if (!AMProjV865ProjectFlowIsRuntimeSupported() || !fileURL.isFileURL) return;
+    NSURL *stagedURL = AMProjV865RegisteredStagedURL(fileURL) ?: fileURL;
+    if (!AMProjV865ProjectFlowIsManagedStagedURL(stagedURL)) return;
+    NSString *sourceSnapshot = [source copy] ?: @"public_document_route";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *presenter = AMProjV865ForegroundPresenter();
+        if (!presenter) return;
+        AMProjV865DocumentBroker *existing = objc_getAssociatedObject(
+            presenter, AMProjV865BrokerKey);
+        BOOL sameStagedURL = [existing isKindOfClass:AMProjV865DocumentBroker.class] &&
+            [existing.stagedURL.path isEqualToString:stagedURL.path];
+        if (sameStagedURL && (existing.pendingNoticePresented ||
+                              existing.nativeRouteInFlight ||
+                              existing.fallbackPresented)) {
+            // The broker that initiated openURL owns the notice for this
+            // staged document. Do not replace it when the URL re-enters an
+            // AppDelegate or SceneDelegate callback.
+            return;
+        }
+        AMProjV865DocumentBroker *broker = [AMProjV865DocumentBroker new];
+        broker.stagedURL = stagedURL;
+        broker.cleanupDirectory = stagedURL.URLByDeletingLastPathComponent;
+        broker.presenter = presenter;
+        objc_setAssociatedObject(presenter, AMProjV865BrokerKey, broker,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        (void)AMProjV865PresentPendingNoticeWithBroker(
+            broker, presenter, sourceSnapshot);
+    });
+}
+
 static BOOL AMProjV865PresentStagedDocument(NSURL *stagedURL,
                                             UIViewController *presenter,
                                             AMProjV865ProjectFlowRequest *request,
@@ -500,21 +765,36 @@ static BOOL AMProjV865PresentStagedDocument(NSURL *stagedURL,
                         broker.stagedURL, broker.stagedURL.lastPathComponent,
                         @"openURL_acceptance_is_not_import_confirmation",
                         @{ @"route_status": @"route_accepted" });
-                    NSLog(@"[AMProjExport] 865 native document URL route accepted: %@",
+                    NSLog(@"[AMProjExport] 865 native document URL route accepted but unverified: %@",
                           stagedURL.lastPathComponent ?: @"project");
                     [broker scheduleCleanup];
-                    if (completion) completion(AMProjV865ProjectHandoffStatusRouteAccepted, nil);
+                    (void)AMProjV865PresentPendingNoticeWithBroker(
+                        broker, AMProjV865PresenterForBroker(broker),
+                        @"application.openURL");
+                    if (completion) completion(AMProjV865ProjectHandoffStatusUnverified, nil);
                     return;
                 }
+                AMProjV865WriteHandoffBreadcrumb(
+                    AMProjV865ProjectHandoffStatusFailed, broker.stagedURL,
+                    broker.stagedURL.lastPathComponent, @"application_openURL_declined",
+                    @{ @"retained_for_retry": @YES });
                 UIViewController *fallback = AMProjV865PresenterForBroker(broker);
-                if (!fallback || !AMProjV865PresentOpenInFallback(broker, fallback, completion)) {
-                    NSLog(@"[AMProjExport] 865 native document URL route declined and no fallback presenter is available");
-                }
+                (void)AMProjV865PresentPendingNoticeWithBroker(
+                    broker, fallback, @"application.openURL_declined");
+                NSLog(@"[AMProjExport] 865 native document URL route declined; staged file retained for user retry");
+                if (completion) completion(AMProjV865ProjectHandoffStatusUnverified, nil);
             });
         }];
         return YES;
     }
-    return AMProjV865PresentOpenInFallback(broker, presenter, completion);
+    AMProjV865WriteHandoffBreadcrumb(
+        AMProjV865ProjectHandoffStatusFailed, stagedURL,
+        stagedURL.lastPathComponent, @"application_openURL_unavailable",
+        @{ @"retained_for_retry": @YES });
+    (void)AMProjV865PresentPendingNoticeWithBroker(
+        broker, presenter, @"application.openURL_unavailable");
+    if (completion) completion(AMProjV865ProjectHandoffStatusUnverified, nil);
+    return YES;
 }
 
 BOOL AMProjV865ProjectFlowIsProjectPackageController(UIViewController *controller) {
@@ -774,7 +1054,8 @@ void AMProjV865ProjectFlowInstall(void) {
             // A staged source remains available for at least one day. Clean
             // expired handoffs on a later launch if the scheduled cleanup did
             // not run because the app was terminated.
-            NSDate *cutoff = [NSDate dateWithTimeIntervalSinceNow:-24 * 60 * 60];
+            NSDate *cutoff = [NSDate dateWithTimeIntervalSinceNow:
+                -AMProjV865RetentionSeconds];
             for (NSURL *entry in entries) {
                 NSDate *modified = nil;
                 [entry getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];

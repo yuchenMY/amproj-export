@@ -80,11 +80,29 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn('@"verified": @NO', FLOW)
         self.assertIn("openURL_acceptance_is_not_import_confirmation", FLOW)
 
+    def test_public_native_callbacks_record_dispatched_without_claiming_acceptance(self):
+        self.assertIn(
+            "AMProjV865ProjectFlowRecordNativeRouteDispatched", FLOW_HEADER
+        )
+        start = FLOW.index(
+            "void AMProjV865ProjectFlowRecordNativeRouteDispatched("
+        )
+        end = FLOW.index("@interface AMProjV865DocumentBroker", start)
+        recorder = FLOW[start:end]
+        self.assertIn('AMProjV865ProjectHandoffStatusUnverified', recorder)
+        self.assertIn('@"route_status": @"dispatched"', recorder)
+        self.assertIn(
+            '@"native_callback_dispatch_is_not_import_confirmation"', recorder
+        )
+        self.assertNotIn('AMProjV865ProjectHandoffStatusRouteAccepted', recorder)
+        self.assertNotIn('@"route_accepted"', recorder)
+        self.assertNotIn('accepted', recorder)
+
     def test_865_handoff_breadcrumbs_are_atomic_and_retained_before_delayed_cleanup(self):
         self.assertIn("last-handoff.plist", FLOW)
         self.assertIn("handoff.plist", FLOW)
         self.assertIn("NSDataWritingAtomic", FLOW)
-        self.assertIn("24 * 60 * 60 * NSEC_PER_SEC", FLOW)
+        self.assertIn("AMProjV865RetentionSeconds * NSEC_PER_SEC", FLOW)
         self.assertIn("AMProjV865ScheduleDirectoryCleanup", FLOW)
         self.assertIn("AMProjV865ProjectHandoffStatusFailed", FLOW)
 
@@ -133,7 +151,8 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         native_route = FLOW[FLOW.index("BOOL canUseNativeRoute") :]
         self.assertIn("openURL:stagedURL options:@{}", native_route)
         self.assertIn("if (success)", native_route)
-        self.assertIn("AMProjV865PresentOpenInFallback", native_route)
+        self.assertIn("AMProjV865PresentPendingNoticeWithBroker", native_route)
+        self.assertIn("AMProjV865PresentOpenInFallback", FLOW)
 
     def test_865_handoff_resolves_a_current_visible_presenter_after_dismissal(self):
         handoff = FLOW[FLOW.index("static void AMProjV865ScheduleStagedPresentation") :]
@@ -155,7 +174,7 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn('native_private_abi": @NO', EXPORT)
         self.assertIn("amproj_startDirectExport(", EXPORT)
 
-    def test_865_navigation_forwards_project_export_to_native_implementation(self):
+    def test_865_navigation_routes_exact_package_controller_to_direct_export(self):
         navigation = EXPORT[
             EXPORT.index("static void hooked_navigationPush"):
             EXPORT.index("static void amproj_forwardPresentation")
@@ -163,17 +182,22 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         nonlegacy = navigation[
             navigation.index("if (!amproj_runtimeUsesLegacyImportHooks())"):
         ]
+        self.assertIn("amproj_runtimeIsBuild865()", nonlegacy)
+        self.assertIn(
+            "AMProjV865ProjectFlowIsProjectPackageController(viewController)",
+            nonlegacy,
+        )
+        self.assertIn('@"865.project_export_navigation_entry"', nonlegacy)
+        self.assertIn("amproj_startDirectExport(", nonlegacy)
         self.assertIn("orig_navigationPush(self, _cmd, viewController, animated)", nonlegacy)
-        self.assertNotIn("865.project_export_navigation_entry", navigation)
-        self.assertNotIn("AMProjV865ProjectFlowIsProjectPackageController(viewController)", navigation)
 
         installer = EXPORT[
             EXPORT.index("static void amproj_installExportHooks"):
             EXPORT.index("if (!amproj_runtimeUsesLegacyImportHooks())",
                          EXPORT.index("static void amproj_installExportHooks"))
         ]
-        self.assertIn('export_hooks.865_native_navigation', installer)
-        self.assertIn('account_replacement_only', installer)
+        self.assertIn('export_hooks.865_project_boundary', installer)
+        self.assertIn('project_package_boundary_and_account_replacement', installer)
         self.assertNotIn("amproj_installShareExportHook", installer)
 
     def test_cloud_download_uses_865_handoff_and_862_stays_gated(self):
@@ -233,9 +257,11 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertNotIn("sendAction:to:from:forEvent:", EXPORT)
         self.assertNotIn("sendAction:to:from:forEvent:", FLOW)
 
-    def test_865_release_keeps_native_document_callbacks_unowned(self):
+    def test_865_release_uses_only_public_document_observation_callbacks(self):
         self.assertIn("AMProjV865ProjectFlowInstall", EXPORT)
         self.assertIn("Build 865 owns its own document lifecycle", EXPORT)
+        self.assertIn("amproj_installPublic865ImportHooks", EXPORT)
+        self.assertIn("AMProjV865ProjectFlowRecordNativeRouteDispatched", EXPORT)
         self.assertIn("amproj_attachNativeXMLPickerProxy(controller)", EXPORT)
         self.assertIn("amproj_log865LegacyPathDisabled(@\"native_xml_picker_proxy\")", EXPORT)
         self.assertIn("AMProjRegisterNativePackageImportStarter(nil);", EXPORT)
