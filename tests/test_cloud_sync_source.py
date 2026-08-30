@@ -960,6 +960,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         project_download = project_download.split(
             "- (void)showVersionsForProject:", 1
         )[0]
+        self.assertIn("AMCloudManager *manager = weakSelf", project_download)
         self.assertIn(
             "AMCloudImportAsyncHandler asyncHandler = manager.asyncImportHandler",
             project_download,
@@ -970,6 +971,8 @@ class CloudSyncSourceTests(unittest.TestCase):
         )
         self.assertIn("AMCloudImportHandler importHandler = manager.importHandler", project_download)
         self.assertIn("importHandler(URL, filename, cleanupURL)", project_download)
+        self.assertNotIn("weakSelf.asyncImportHandler(", project_download)
+        self.assertNotIn("weakSelf.importHandler(", project_download)
         self.assertIn("AMCloudRetainProjectDownloadForRetry", project_download)
         self.assertIn("@catch (NSException *exception)", project_download)
         self.assertNotIn("@finally", project_download)

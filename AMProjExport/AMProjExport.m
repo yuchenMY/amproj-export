@@ -16967,14 +16967,31 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
             AMProjRegisterNativePackageImportStarter(nil);
         }
 #if AMPROJ_CLOUD_SYNC
-        // The same cloud callback is used for both supported lanes.  The
-        // handler itself selects the exact 865 public handoff or the verified
-        // 862 private bridge; no old bridge is ever reachable on 865.
-        AMCloudSyncInstallAsync(^(NSURL *URL, NSString *filename,
-                                 NSURL *cleanupURL,
-                                 AMCloudImportCompletion completion) {
-            amproj_importCloudPackage(URL, filename, cleanupURL, completion);
-        });
+        // Cloud project handoff has two different ABI/queue contracts. Build
+        // 865 must stage asynchronously before entering UIKit; the verified
+        // 862 bridge is a synchronous BOOL handler. Register exactly one lane
+        // for the current bundle and clear both handlers for unknown builds.
+        if (amproj_runtimeIsBuild865()) {
+            AMCloudSyncInstallAsync(^(NSURL *URL, NSString *filename,
+                                     NSURL *cleanupURL,
+                                     AMCloudImportCompletion completion) {
+                amproj_importCloudPackage(URL, filename, cleanupURL, completion);
+            });
+        } else if (amproj_runtimeUsesLegacyImportHooks()) {
+            AMCloudSyncInstall(^(NSURL *URL, NSString *filename,
+                                 NSURL *cleanupURL) {
+                __block BOOL accepted = NO;
+                amproj_importCloudPackage(URL, filename, cleanupURL,
+                    ^(BOOL staged, NSError *error) {
+                        (void)error;
+                        accepted = staged;
+                    });
+                return accepted;
+            });
+        } else {
+            amproj_log865LegacyPathDisabled(@"cloud_import_handler");
+            AMCloudSyncInstall(nil);
+        }
 #endif
 
         NSString *startupTrigger = [trigger copy] ?: @"unknown";

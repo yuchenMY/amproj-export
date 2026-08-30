@@ -185,15 +185,43 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn("amproj_log865LegacyPathDisabled", cloud)
         self.assertIn("AMProjIncomingCleanupURL", cloud)
 
-    def test_bootstrap_registers_one_cloud_handler_for_both_verified_lanes(self):
+    def test_bootstrap_registers_version_specific_cloud_handlers(self):
         bootstrap = EXPORT[EXPORT.index("static void amproj_bootstrapAfterLaunch") :]
-        handler = bootstrap[bootstrap.index("AMCloudSyncInstallAsync(") :]
-        self.assertIn("AMCloudSyncInstallAsync(", handler)
+        self.assertEqual(bootstrap.count("AMCloudSyncInstallAsync("), 1)
+        # The legacy lane installs its handler and the fail-closed lane clears
+        # the manager explicitly; both are intentional sync calls.
+        self.assertEqual(bootstrap.count("AMCloudSyncInstall("), 2)
+
+        async_gate = bootstrap.index("if (amproj_runtimeIsBuild865())")
+        legacy_gate = bootstrap.index(
+            "} else if (amproj_runtimeUsesLegacyImportHooks())", async_gate
+        )
+        unknown_gate = bootstrap.index(
+            "} else {\n            amproj_log865LegacyPathDisabled(@\"cloud_import_handler\")",
+            legacy_gate,
+        )
+        async_branch = bootstrap[async_gate:legacy_gate]
+        legacy_branch = bootstrap[legacy_gate:unknown_gate]
+        unknown_branch = bootstrap[unknown_gate:]
+
+        self.assertIn("AMCloudSyncInstallAsync(^(NSURL *URL, NSString *filename,", async_branch)
         self.assertIn(
             "amproj_importCloudPackage(URL, filename, cleanupURL, completion);",
-            handler,
+            async_branch,
         )
-        self.assertNotIn('cloud_project_import")', handler)
+        self.assertNotIn("AMCloudSyncInstall(", async_branch)
+
+        self.assertIn("AMCloudSyncInstall(^(NSURL *URL, NSString *filename,", legacy_branch)
+        self.assertIn("__block BOOL accepted = NO", legacy_branch)
+        self.assertIn(
+            "amproj_importCloudPackage(URL, filename, cleanupURL,",
+            legacy_branch,
+        )
+        self.assertIn("accepted = staged", legacy_branch)
+        self.assertNotIn("AMCloudSyncInstallAsync(", legacy_branch)
+
+        self.assertIn("AMCloudSyncInstall(nil);", unknown_branch)
+        self.assertIn('amproj_log865LegacyPathDisabled(@"cloud_import_handler")', unknown_branch)
         self.assertIn("AMProjV865ProjectFlowInstall();", bootstrap)
 
     def test_865_release_does_not_install_a_global_action_observer(self):

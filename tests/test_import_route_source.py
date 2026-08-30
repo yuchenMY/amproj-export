@@ -3037,10 +3037,29 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             'static void amproj_bootstrapAfterLaunch',
             '__attribute__((constructor))',
         )
-        handler_start = bootstrap.index('AMCloudSyncInstallAsync(^(NSURL *URL, NSString *filename,')
-        handler = bootstrap[handler_start:]
-        self.assertIn('AMCloudSyncInstallAsync(^(NSURL *URL, NSString *filename,', handler)
-        self.assertIn('amproj_importCloudPackage(URL, filename, cleanupURL, completion);', handler)
+        async_gate = bootstrap.index('if (amproj_runtimeIsBuild865())')
+        legacy_gate = bootstrap.index(
+            '} else if (amproj_runtimeUsesLegacyImportHooks())', async_gate
+        )
+        unknown_gate = bootstrap.index(
+            '} else {\n            amproj_log865LegacyPathDisabled(@"cloud_import_handler")',
+            legacy_gate,
+        )
+        async_branch = bootstrap[async_gate:legacy_gate]
+        legacy_branch = bootstrap[legacy_gate:unknown_gate]
+        unknown_branch = bootstrap[unknown_gate:]
+
+        self.assertIn('AMCloudSyncInstallAsync(^(NSURL *URL, NSString *filename,', async_branch)
+        self.assertIn(
+            'amproj_importCloudPackage(URL, filename, cleanupURL, completion);',
+            async_branch,
+        )
+        self.assertNotIn('AMCloudSyncInstall(', async_branch)
+        self.assertIn('AMCloudSyncInstall(^(NSURL *URL, NSString *filename,', legacy_branch)
+        self.assertIn('__block BOOL accepted = NO', legacy_branch)
+        self.assertIn('accepted = staged', legacy_branch)
+        self.assertNotIn('AMCloudSyncInstallAsync(', legacy_branch)
+        self.assertIn('AMCloudSyncInstall(nil);', unknown_branch)
         cloud = SOURCE[SOURCE.index('static void amproj_importCloudPackage') :]
         self.assertIn('if (amproj_runtimeIsBuild865())', cloud)
         self.assertIn('AMProjV865ProjectFlowStageDocumentAsync', cloud)
