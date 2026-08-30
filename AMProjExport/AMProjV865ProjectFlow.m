@@ -218,25 +218,39 @@ static NSURL *AMProjV865CopyDocument(NSURL *source, NSString *filename,
     }
 
     NSFileManager *manager = NSFileManager.defaultManager;
-    NSURL *root = AMProjV865HandoffRoot();
-    if (!root || ![manager createDirectoryAtURL:root withIntermediateDirectories:YES
-                                      attributes:nil error:error]) return nil;
-    NSURL *directory = [root URLByAppendingPathComponent:NSUUID.UUID.UUIDString
-                                              isDirectory:YES];
-    if (![manager createDirectoryAtURL:directory withIntermediateDirectories:NO
-                              attributes:nil error:error]) return nil;
-    [directory setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    NSURL *directory = nil;
+    @try {
+        NSURL *root = AMProjV865HandoffRoot();
+        if (!root || ![manager createDirectoryAtURL:root withIntermediateDirectories:YES
+                                          attributes:nil error:error]) return nil;
+        directory = [root URLByAppendingPathComponent:NSUUID.UUID.UUIDString
+                                          isDirectory:YES];
+        if (![manager createDirectoryAtURL:directory withIntermediateDirectories:NO
+                                  attributes:nil error:error]) return nil;
+        [directory setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
 
-    NSString *safeName = AMProjV865SafeFilename(filename ?: source.lastPathComponent);
-    NSURL *temporary = [directory URLByAppendingPathComponent:@"document.partial"];
-    NSURL *destination = [directory URLByAppendingPathComponent:safeName];
-    BOOL copied = [manager copyItemAtURL:source toURL:temporary error:error];
-    if (!copied || ![manager moveItemAtURL:temporary toURL:destination error:error]) {
-        [manager removeItemAtURL:directory error:nil];
+        NSString *safeName = AMProjV865SafeFilename(filename ?: source.lastPathComponent);
+        NSURL *temporary = [directory URLByAppendingPathComponent:@"document.partial"];
+        NSURL *destination = [directory URLByAppendingPathComponent:safeName];
+        BOOL copied = [manager copyItemAtURL:source toURL:temporary error:error];
+        if (!copied || ![manager moveItemAtURL:temporary toURL:destination error:error]) {
+            [manager removeItemAtURL:directory error:nil];
+            return nil;
+        }
+        [destination setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+        return destination;
+    } @catch (NSException *exception) {
+        if (directory) [manager removeItemAtURL:directory error:nil];
+        if (error && !*error) {
+            *error = [NSError errorWithDomain:@"com.amproj.865.project-flow"
+                                          code:4
+                                      userInfo:@{NSLocalizedDescriptionKey:
+                                          @"The project handoff raised an exception while copying",
+                                                 @"exception": exception.name ?: @"unknown",
+                                                 @"reason": exception.reason ?: @"unknown"}];
+        }
         return nil;
     }
-    [destination setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
-    return destination;
 }
 
 @interface AMProjV865DocumentBroker : NSObject <UIDocumentInteractionControllerDelegate>
@@ -420,7 +434,14 @@ static void AMProjV865CompleteStage(
     AMProjV865ProjectFlowStageCompletion completion,
     AMProjV865ProjectHandoffStatus status, NSError *error) {
     if (!completion) return;
-    void (^deliver)(void) = ^{ completion(status, error); };
+    void (^deliver)(void) = ^{
+        @try {
+            completion(status, error);
+        } @catch (NSException *exception) {
+            NSLog(@"[AMProjExport] 865 handoff completion exception: %@ (%@)",
+                  exception.name ?: @"unknown", exception.reason ?: @"unknown");
+        }
+    };
     if ([NSThread isMainThread]) {
         deliver();
     } else {
@@ -500,8 +521,31 @@ void AMProjV865ProjectFlowStageDocumentAsync(
                 AMProjV865ProjectHandoffStatusStaged, stagedURL,
                 stagedURL.lastPathComponent, nil, @{ @"route": @"pending" });
             dispatch_async(dispatch_get_main_queue(), ^{
-                AMProjV865ScheduleStagedPresentation(stagedURL, weakPresenter);
-                completeOnce(AMProjV865ProjectHandoffStatusStaged, nil);
+                @try {
+                    AMProjV865ScheduleStagedPresentation(stagedURL, weakPresenter);
+                    completeOnce(AMProjV865ProjectHandoffStatusStaged, nil);
+                } @catch (NSException *exception) {
+                    NSError *error = AMProjV865StageError(
+                        5, @"The project handoff raised an exception while routing");
+                    @try {
+                        AMProjV865WriteHandoffBreadcrumb(
+                            AMProjV865ProjectHandoffStatusFailed, stagedURL,
+                            requestedFilename, error.localizedDescription,
+                            @{ @"phase": @"main_queue_route",
+                               @"exception": exception.name ?: @"unknown",
+                               @"reason": exception.reason ?: @"unknown" });
+                    } @catch (__unused NSException *breadcrumbException) {
+                        NSLog(@"[AMProjExport] 865 route failure breadcrumb raised an exception");
+                    }
+                    if (stagedURL) {
+                        // Keep the staged source available for retry after a route exception.
+                        AMProjV865ScheduleDirectoryCleanup(
+                            stagedURL.URLByDeletingLastPathComponent);
+                    }
+                    NSLog(@"[AMProjExport] 865 project handoff route exception: %@ (%@)",
+                          exception.name ?: @"unknown", exception.reason ?: @"unknown");
+                    completeOnce(AMProjV865ProjectHandoffStatusFailed, error);
+                }
             });
         } @catch (NSException *exception) {
             NSError *error = AMProjV865StageError(

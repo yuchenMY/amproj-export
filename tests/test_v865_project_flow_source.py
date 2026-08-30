@@ -101,6 +101,30 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn('@"reason":', async_stage)
         self.assertIn("completeOnce(AMProjV865ProjectHandoffStatusFailed, error)", async_stage)
 
+    def test_865_async_main_queue_route_has_an_exception_boundary(self):
+        start = FLOW.index("void AMProjV865ProjectFlowStageDocumentAsync")
+        end = FLOW.index("AMProjV865ProjectHandoffStatus AMProjV865ProjectFlowStageDocument", start)
+        async_stage = FLOW[start:end]
+        self.assertIn(
+            "dispatch_async(dispatch_get_main_queue(), ^{\n                @try {",
+            async_stage,
+        )
+        self.assertIn('@"phase": @"main_queue_route"', async_stage)
+        self.assertIn("865 project handoff route exception", async_stage)
+        self.assertIn("AMProjV865ScheduleDirectoryCleanup(", async_stage)
+
+    def test_865_copy_and_completion_boundaries_clean_up_and_swallow_callback_exceptions(self):
+        copy_start = FLOW.index("static NSURL *AMProjV865CopyDocument")
+        copy_end = FLOW.index("@interface AMProjV865DocumentBroker", copy_start)
+        copy_helper = FLOW[copy_start:copy_end]
+        self.assertIn("@catch (NSException *exception)", copy_helper)
+        self.assertIn("if (directory) [manager removeItemAtURL:directory error:nil]", copy_helper)
+        completion_start = FLOW.index("static void AMProjV865CompleteStage")
+        completion_end = FLOW.index("static void AMProjV865ScheduleStagedPresentation", completion_start)
+        completion = FLOW[completion_start:completion_end]
+        self.assertIn("@try", completion)
+        self.assertIn("handoff completion exception", completion)
+
     def test_865_adapter_has_public_native_url_route_before_open_in_fallback(self):
         native_route = FLOW[FLOW.index("BOOL canUseNativeRoute") :]
         self.assertIn("openURL:stagedURL options:@{}", native_route)

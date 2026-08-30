@@ -19,6 +19,10 @@ static NSString *const AMCloudTokenChangedNotification = @"AMCloudTokenChangedNo
 static NSString *const AMCloudAvatarChangedNotification = @"AMCloudAvatarChangedNotification";
 static NSString *const AMHomeUIShowAccountNotification = @"AMHomeUIShowAccountNotification";
 static NSString *const AMCloudAvatarCacheFilename = @"account-avatar.png";
+static NSString *const AMCloudProjectDownloadRootDirectory = @"AMProjCloudDownloads";
+static NSString *const AMCloudProjectRetryMarkerFilename = @".amproj-retry.plist";
+static const NSTimeInterval AMCloudProjectRetryRetention = 24 * 60 * 60;
+static const NSTimeInterval AMCloudProjectHandoffTimeout = 120.0;
 
 typedef void (^AMCloudResult)(id _Nullable data, NSError * _Nullable error);
 typedef void (^AMCloudDownloadProgress)(long long completedBytes, long long totalBytes);
@@ -162,23 +166,106 @@ static dispatch_queue_t AMCloudAuthQueue(void) {
     return queue;
 }
 
+static NSURL *AMCloudProjectDownloadRootURL(void) {
+    NSURL *support = [NSFileManager.defaultManager URLsForDirectory:
+        NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    return [support URLByAppendingPathComponent:AMCloudProjectDownloadRootDirectory
+                                      isDirectory:YES];
+}
+
+static BOOL AMCloudProjectDownloadDirectoryIsDirectChild(NSURL *directory) {
+    if (!directory.isFileURL || !directory.path.length) return NO;
+    NSURL *root = AMCloudProjectDownloadRootURL();
+    if (!root.path.length || ![directory.URLByDeletingLastPathComponent.path
+                               isEqualToString:root.path]) return NO;
+    return [[NSUUID alloc] initWithUUIDString:directory.lastPathComponent] != nil;
+}
+
+static NSDate *AMCloudProjectRetryExpiry(NSURL *directory) {
+    if (!AMCloudProjectDownloadDirectoryIsDirectChild(directory)) return nil;
+    NSURL *markerURL = [directory URLByAppendingPathComponent:
+        AMCloudProjectRetryMarkerFilename isDirectory:NO];
+    NSData *data = [NSData dataWithContentsOfURL:markerURL];
+    if (!data.length) return nil;
+    NSDictionary *marker = [NSPropertyListSerialization
+        propertyListWithData:data options:NSPropertyListImmutable format:nil error:nil];
+    NSDate *expiry = [marker isKindOfClass:NSDictionary.class] ? marker[@"expiresAt"] : nil;
+    return [expiry isKindOfClass:NSDate.class] ? expiry : nil;
+}
+
+// Failed cloud handoffs survive process death. Only UUID-named direct children
+// with our marker are eligible for cleanup; this prevents a stale timer from
+// deleting a directory that a later retry has extended.
+static void AMCloudCleanupExpiredProjectDownloads(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @try {
+            NSURL *root = AMCloudProjectDownloadRootURL();
+            if (!root.path.length) return;
+            NSArray<NSURL *> *entries = [NSFileManager.defaultManager
+                contentsOfDirectoryAtURL:root
+                includingPropertiesForKeys:@[NSURLIsDirectoryKey]
+                options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
+            NSDate *now = NSDate.date;
+            for (NSURL *entry in entries) {
+                NSNumber *isDirectory = nil;
+                [entry getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+                NSDate *expiry = AMCloudProjectRetryExpiry(entry);
+                if (isDirectory.boolValue && expiry &&
+                    [expiry compare:now] != NSOrderedDescending) {
+                    [NSFileManager.defaultManager removeItemAtURL:entry error:nil];
+                }
+            }
+        } @catch (NSException *exception) {
+            AMCloudDiagnostic(@"cloud.project_download_cleanup_exception", @{
+                @"exception": exception.name ?: @"unknown",
+                @"reason": exception.reason ?: @"unknown"
+            });
+        }
+    });
+}
+
 // A 865 handoff first copies a verified cloud download into app-owned storage.
 // Keep the original download directory when that staging step fails so a user
 // can retry and diagnostics can still identify the failing file.
 static void AMCloudRetainProjectDownloadForRetry(NSURL *cleanupURL,
                                                  NSString *filename,
                                                  NSString *reason) {
-    if (!cleanupURL) return;
+    if (!AMCloudProjectDownloadDirectoryIsDirectChild(cleanupURL)) {
+        AMCloudDiagnostic(@"cloud.project_download_retention_skipped", @{
+            @"filename": filename ?: @"project.amproj",
+            @"reason": reason ?: @"invalid_cleanup_directory"
+        });
+        return;
+    }
+    NSDate *expiresAt = [NSDate dateWithTimeIntervalSinceNow:AMCloudProjectRetryRetention];
+    NSDictionary *marker = @{
+        @"expiresAt": expiresAt,
+        @"filename": filename ?: @"project.amproj",
+        @"reason": reason ?: @"handoff_failed"
+    };
+    NSData *markerData = [NSPropertyListSerialization dataWithPropertyList:marker
+        format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    NSURL *markerURL = [cleanupURL URLByAppendingPathComponent:
+        AMCloudProjectRetryMarkerFilename isDirectory:NO];
+    BOOL markerWritten = markerData && [markerData writeToURL:markerURL
+                                                        options:NSDataWritingAtomic
+                                                          error:nil];
     AMCloudDiagnostic(@"cloud.project_download_retained", @{
         @"filename": filename ?: @"project.amproj",
         @"reason": reason ?: @"handoff_failed",
-        @"retention_seconds": @(24 * 60 * 60)
+        @"retention_seconds": @(AMCloudProjectRetryRetention),
+        @"marker_written": @(markerWritten)
     });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 24 * 60 * 60 * NSEC_PER_SEC),
+    if (!markerWritten) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                  (int64_t)(AMCloudProjectRetryRetention * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDate *currentExpiry = AMCloudProjectRetryExpiry(cleanupURL);
+        if (!currentExpiry || [currentExpiry compare:NSDate.date] == NSOrderedDescending) {
+            return;
+        }
         NSError *cleanupError = nil;
-        if (![NSFileManager.defaultManager removeItemAtURL:cleanupURL
-                                                    error:&cleanupError] &&
+        if (![NSFileManager.defaultManager removeItemAtURL:cleanupURL error:&cleanupError] &&
             cleanupError.code != NSFileNoSuchFileError) {
             AMCloudDiagnostic(@"cloud.project_download_retention_cleanup_failed", @{
                 @"reason": cleanupError.localizedDescription ?: @"unknown"
@@ -959,7 +1046,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         }
         NSURL *support = [NSFileManager.defaultManager URLsForDirectory:
             NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
-        NSURL *directory = [[support URLByAppendingPathComponent:@"AMProjCloudDownloads"
+        NSURL *directory = [[support URLByAppendingPathComponent:AMCloudProjectDownloadRootDirectory
                                                      isDirectory:YES]
             URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
         NSError *fileError = nil;
@@ -1741,6 +1828,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler {
     self.importHandler = importHandler;
+    self.asyncImportHandler = nil;
+    AMCloudCleanupExpiredProjectDownloads();
     NSString *startupToken = nil;
     uint64_t startupGeneration = 0;
     NSString *startupAuthorizationKey = nil;
@@ -1795,8 +1884,8 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 }
 
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler {
-    self.asyncImportHandler = importHandler;
     [self installWithImportHandler:nil];
+    self.asyncImportHandler = importHandler;
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
@@ -3218,46 +3307,71 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 ? data[@"filename"] : @"project.amproj";
             NSURL *cleanupURL = [data[@"cleanupURL"] isKindOfClass:NSURL.class]
                 ? data[@"cleanupURL"] : URL;
-            if (!error && URL && weakSelf.asyncImportHandler) {
+            AMCloudManager *manager = weakSelf;
+            AMCloudImportAsyncHandler asyncHandler = manager.asyncImportHandler;
+            if (!error && URL && asyncHandler) {
                 __block BOOL completionCalled = NO;
                 NSObject *completionLock = [NSObject new];
-                AMCloudImportCompletion handoffCompletion = ^(BOOL staged, NSError *handoffError) {
-                    void (^finishOnMain)(void) = ^{
-                        @synchronized (completionLock) {
-                            if (completionCalled) return;
-                            completionCalled = YES;
-                        }
-                        AMCloudManager *strongSelf = weakSelf;
-                        if (!staged) {
-                            AMCloudRetainProjectDownloadForRetry(
-                                cleanupURL, filename, handoffError.localizedDescription);
-                            [strongSelf showError:handoffError ?: AMCloudError(14,
-                                @"项目包未能安全暂存，下载文件已保留 24 小时")
-                                      presenter:presenter];
-                            return;
-                        }
-                        /* The verified copy is complete. Start cleanup off-main
-                         * and dismiss the account sheet without waiting for it. */
-                        AMCloudDiagnostic(@"cloud.project_handoff_staged", @{
+                void (^deliverHandoff)(BOOL, NSError *, BOOL) = ^(BOOL staged,
+                                                                   NSError *handoffError,
+                                                                   BOOL timedOut) {
+                    @synchronized (completionLock) {
+                        if (completionCalled) return;
+                        completionCalled = YES;
+                    }
+                    if (timedOut) {
+                        AMCloudDiagnostic(@"cloud.project_handoff_timeout", @{
                             @"filename": filename ?: @"project.amproj",
-                            @"source_removed": @NO,
-                            @"import_confirmed": @NO,
-                            @"cleanup_pending": @YES
+                            @"timeout_seconds": @(AMCloudProjectHandoffTimeout)
                         });
-                        [presenter dismissViewControllerAnimated:YES completion:nil];
-                        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                            NSError *cleanupError = nil;
-                            BOOL sourceRemoved = !cleanupURL ||
-                                [NSFileManager.defaultManager removeItemAtURL:cleanupURL
-                                                              error:&cleanupError];
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                AMCloudDiagnostic(@"cloud.project_handoff_cleanup", @{
+                    }
+                    void (^finishOnMain)(void) = ^{
+                        @try {
+                            AMCloudManager *strongSelf = manager;
+                            if (!strongSelf) {
+                                AMCloudDiagnostic(@"cloud.project_handoff_manager_deallocated", @{
                                     @"filename": filename ?: @"project.amproj",
-                                    @"source_removed": @(sourceRemoved),
-                                    @"cleanup_error": cleanupError.localizedDescription ?: @""
+                                    @"staged": @(staged)
+                                });
+                                return;
+                            }
+                            if (!staged) {
+                                AMCloudRetainProjectDownloadForRetry(
+                                    cleanupURL, filename, handoffError.localizedDescription);
+                                [strongSelf showError:handoffError ?: AMCloudError(14,
+                                    @"项目包未能安全暂存，下载文件已保留 24 小时")
+                                          presenter:presenter];
+                                return;
+                            }
+                            /* The verified copy is complete. Start cleanup off-main
+                             * and dismiss the account sheet without waiting for it. */
+                            AMCloudDiagnostic(@"cloud.project_handoff_staged", @{
+                                @"filename": filename ?: @"project.amproj",
+                                @"source_removed": @NO,
+                                @"import_confirmed": @NO,
+                                @"cleanup_pending": @YES
+                            });
+                            [presenter dismissViewControllerAnimated:YES completion:nil];
+                            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                                NSError *cleanupError = nil;
+                                BOOL sourceRemoved = !cleanupURL ||
+                                    [NSFileManager.defaultManager removeItemAtURL:cleanupURL
+                                                                  error:&cleanupError];
+                                dispatch_async(dispatch_get_main_queue(), ^{
+                                    AMCloudDiagnostic(@"cloud.project_handoff_cleanup", @{
+                                        @"filename": filename ?: @"project.amproj",
+                                        @"source_removed": @(sourceRemoved),
+                                        @"cleanup_error": cleanupError.localizedDescription ?: @""
+                                    });
                                 });
                             });
-                        });
+                        } @catch (NSException *exception) {
+                            AMCloudDiagnostic(@"cloud.project_handoff_completion_exception", @{
+                                @"filename": filename ?: @"project.amproj",
+                                @"exception": exception.name ?: @"unknown",
+                                @"reason": exception.reason ?: @"unknown"
+                            });
+                        }
                     };
                     if ([NSThread isMainThread]) {
                         finishOnMain();
@@ -3265,8 +3379,18 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                         dispatch_async(dispatch_get_main_queue(), finishOnMain);
                     }
                 };
+                AMCloudImportCompletion handoffCompletion = ^(BOOL staged,
+                                                              NSError *handoffError) {
+                    deliverHandoff(staged, handoffError, NO);
+                };
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                             (int64_t)(AMCloudProjectHandoffTimeout * NSEC_PER_SEC)),
+                               dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    deliverHandoff(NO, AMCloudError(15,
+                        @"项目云端交接超时，下载文件已保留 24 小时"), YES);
+                });
                 @try {
-                    weakSelf.asyncImportHandler(URL, filename, cleanupURL, handoffCompletion);
+                    asyncHandler(URL, filename, cleanupURL, handoffCompletion);
                 } @catch (NSException *exception) {
                     AMCloudDiagnostic(@"cloud.project_handoff_exception", @{
                         @"filename": filename ?: @"project.amproj",
@@ -3279,9 +3403,10 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             }
             __block BOOL staged = NO;
             NSError *handoffError = error;
+            AMCloudImportHandler importHandler = manager.importHandler;
             @try {
-                staged = !handoffError && URL && weakSelf.importHandler
-                    ? weakSelf.importHandler(URL, filename, cleanupURL) : NO;
+                staged = !handoffError && URL && importHandler
+                    ? importHandler(URL, filename, cleanupURL) : NO;
             } @catch (NSException *exception) {
                 AMCloudDiagnostic(@"cloud.project_handoff_exception", @{
                     @"filename": filename ?: @"project.amproj",
@@ -3293,7 +3418,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             if (!staged) {
                 AMCloudRetainProjectDownloadForRetry(
                     cleanupURL, filename, handoffError.localizedDescription);
-                [weakSelf showError:handoffError ?: AMCloudError(14, @"项目包未能安全暂存，下载文件已保留 24 小时")
+                [manager showError:handoffError ?: AMCloudError(14, @"项目包未能安全暂存，下载文件已保留 24 小时")
                           presenter:presenter];
                 return;
             }

@@ -961,10 +961,15 @@ class CloudSyncSourceTests(unittest.TestCase):
             "- (void)showVersionsForProject:", 1
         )[0]
         self.assertIn(
-            "weakSelf.asyncImportHandler(URL, filename, cleanupURL, handoffCompletion)",
+            "AMCloudImportAsyncHandler asyncHandler = manager.asyncImportHandler",
             project_download,
         )
-        self.assertIn("weakSelf.importHandler(URL, filename, cleanupURL)", project_download)
+        self.assertIn(
+            "asyncHandler(URL, filename, cleanupURL, handoffCompletion)",
+            project_download,
+        )
+        self.assertIn("AMCloudImportHandler importHandler = manager.importHandler", project_download)
+        self.assertIn("importHandler(URL, filename, cleanupURL)", project_download)
         self.assertIn("AMCloudRetainProjectDownloadForRetry", project_download)
         self.assertIn("@catch (NSException *exception)", project_download)
         self.assertNotIn("@finally", project_download)
@@ -973,6 +978,29 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("if (!staged)", project_download)
         self.assertIn("dispatch_get_global_queue(QOS_CLASS_UTILITY, 0)", project_download)
         self.assertIn("completionCalled", project_download)
+        self.assertIn("AMCloudProjectHandoffTimeout", project_download)
+        self.assertIn('cloud.project_handoff_timeout', project_download)
+        self.assertIn('cloud.project_handoff_manager_deallocated', project_download)
+        self.assertIn('cloud.project_handoff_completion_exception', project_download)
+
+    def test_project_download_retention_is_marked_and_only_cleans_its_own_uuid_directory(self):
+        self.assertIn('AMCloudProjectRetryMarkerFilename = @".amproj-retry.plist"', CLOUD)
+        self.assertIn('AMCloudProjectRetryRetention = 24 * 60 * 60', CLOUD)
+        self.assertIn("AMCloudProjectDownloadDirectoryIsDirectChild", CLOUD)
+        self.assertIn("AMCloudCleanupExpiredProjectDownloads", CLOUD)
+        self.assertIn("NSPropertyListSerialization", CLOUD)
+        self.assertIn("marker_written", CLOUD)
+        self.assertIn("currentExpiry", CLOUD)
+
+    def test_cloud_import_handler_installers_are_mutually_exclusive(self):
+        sync = CLOUD.split("- (void)installWithImportHandler:", 1)[1].split(
+            "- (void)applicationDidBecomeActive:", 1
+        )[0]
+        async_install = CLOUD.split("- (void)installWithAsyncImportHandler:", 1)[1].split(
+            "- (void)applicationDidBecomeActive:", 1
+        )[0]
+        self.assertIn("self.asyncImportHandler = nil", sync)
+        self.assertIn("[self installWithImportHandler:nil]", async_install)
 
     def test_async_cloud_install_entrypoint_is_explicit(self):
         self.assertIn("AMCloudImportAsyncHandler", HEADER)
