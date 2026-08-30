@@ -10510,7 +10510,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
             amproj_showImportStatusForTransaction(
                 XML ? @"AMProj · XML 已校验，但 865 原生导入引擎尚未接通"
                     : @"AMProj · 项目包已校验，但 865 原生导入引擎尚未接通",
-                YES, transactionID);
+                YES, amproj_pendingImportTransactionID);
             amproj_presentImportErrorOfferingPicker(
                 XML
                     ? @"XML 已通过完整校验并保留在本机缓存。6.2.58 的原生导入入口无法从插件调用（其导入闭包依赖 AM 内部云下载对象），因此本次没有写入项目，也不会伪装成功。可点击“重试”或“选择 XML 文件”。"
