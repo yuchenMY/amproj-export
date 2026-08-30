@@ -951,14 +951,34 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn('forHTTPHeaderField:@"X-AMProj-SHA256"', CLOUD)
         self.assertIn("AMCloudSHA256(fileURL", CLOUD)
 
-    def test_download_is_verified_before_reusing_v44_import_lane(self):
+    def test_project_download_is_verified_then_staged_without_claiming_import_success(self):
         self.assertIn("downloadTaskWithRequest:request", CLOUD)
         self.assertIn("caseInsensitiveCompare:expectedSHA", CLOUD)
         self.assertIn("response.expectedContentLength", CLOUD)
-        self.assertIn("weakSelf.importHandler(URL, filename, cleanupURL)", CLOUD)
-        self.assertIn("removeItemAtURL:cleanupURL", CLOUD)
-        self.assertIn('URL, @"cloud_download", options, &prepared', EXPORT)
-        self.assertIn('AMProjIncomingCleanupURL', EXPORT)
+        download_start = CLOUD.rindex("- (void)downloadAndImportProject:")
+        project_download = CLOUD[download_start:]
+        project_download = project_download.split(
+            "- (void)showVersionsForProject:", 1
+        )[0]
+        self.assertIn(
+            "weakSelf.asyncImportHandler(URL, filename, cleanupURL, handoffCompletion)",
+            project_download,
+        )
+        self.assertIn("weakSelf.importHandler(URL, filename, cleanupURL)", project_download)
+        self.assertIn("AMCloudRetainProjectDownloadForRetry", project_download)
+        self.assertIn("@catch (NSException *exception)", project_download)
+        self.assertNotIn("@finally", project_download)
+        self.assertIn('@"cloud.project_handoff_staged"', project_download)
+        self.assertIn('@"import_confirmed": @NO', project_download)
+        self.assertIn("if (!staged)", project_download)
+        self.assertIn("dispatch_get_global_queue(QOS_CLASS_UTILITY, 0)", project_download)
+        self.assertIn("completionCalled", project_download)
+
+    def test_async_cloud_install_entrypoint_is_explicit(self):
+        self.assertIn("AMCloudImportAsyncHandler", HEADER)
+        self.assertIn("AMCloudSyncInstallAsync", HEADER)
+        self.assertIn("void AMCloudSyncInstallAsync", CLOUD)
+        self.assertIn("installWithAsyncImportHandler", CLOUD)
 
     def test_json_envelope_requires_explicit_zero_code(self):
         self.assertIn("|| !code", CLOUD)

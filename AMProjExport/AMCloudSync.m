@@ -162,6 +162,31 @@ static dispatch_queue_t AMCloudAuthQueue(void) {
     return queue;
 }
 
+// A 865 handoff first copies a verified cloud download into app-owned storage.
+// Keep the original download directory when that staging step fails so a user
+// can retry and diagnostics can still identify the failing file.
+static void AMCloudRetainProjectDownloadForRetry(NSURL *cleanupURL,
+                                                 NSString *filename,
+                                                 NSString *reason) {
+    if (!cleanupURL) return;
+    AMCloudDiagnostic(@"cloud.project_download_retained", @{
+        @"filename": filename ?: @"project.amproj",
+        @"reason": reason ?: @"handoff_failed",
+        @"retention_seconds": @(24 * 60 * 60)
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 24 * 60 * 60 * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSError *cleanupError = nil;
+        if (![NSFileManager.defaultManager removeItemAtURL:cleanupURL
+                                                    error:&cleanupError] &&
+            cleanupError.code != NSFileNoSuchFileError) {
+            AMCloudDiagnostic(@"cloud.project_download_retention_cleanup_failed", @{
+                @"reason": cleanupError.localizedDescription ?: @"unknown"
+            });
+        }
+    });
+}
+
 static dispatch_source_t AMCloudTrackDownloadTask(NSURLSessionDownloadTask *task,
                                                    long long fallbackTotal,
                                                    AMCloudDownloadProgress progress) {
@@ -1192,6 +1217,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @interface AMCloudManager : NSObject
 @property(nonatomic, strong) AMCloudClient *client;
 @property(nonatomic, copy) AMCloudImportHandler importHandler;
+@property(nonatomic, copy) AMCloudImportAsyncHandler asyncImportHandler;
 @property(nonatomic, weak) UIViewController *lastProjectsController;
 @property(nonatomic, weak) UIViewController *accountController;
 @property(nonatomic, strong) NSTimer *pluginSyncTimer;
@@ -1222,6 +1248,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic) BOOL accountAvatarRefreshInFlight;
 + (instancetype)shared;
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
+- (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
@@ -1765,6 +1792,11 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             AMCloudAttachVisibleProjectsControllers();
         });
     }
+}
+
+- (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler {
+    self.asyncImportHandler = importHandler;
+    [self installWithImportHandler:nil];
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
@@ -3186,21 +3218,95 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 ? data[@"filename"] : @"project.amproj";
             NSURL *cleanupURL = [data[@"cleanupURL"] isKindOfClass:NSURL.class]
                 ? data[@"cleanupURL"] : URL;
-            __block BOOL accepted = NO;
-            @try {
-                accepted = !error && URL && weakSelf.importHandler
-                    ? weakSelf.importHandler(URL, filename, cleanupURL) : NO;
-            } @finally {
-                if (cleanupURL) {
-                    [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:nil];
+            if (!error && URL && weakSelf.asyncImportHandler) {
+                __block BOOL completionCalled = NO;
+                NSObject *completionLock = [NSObject new];
+                AMCloudImportCompletion handoffCompletion = ^(BOOL staged, NSError *handoffError) {
+                    void (^finishOnMain)(void) = ^{
+                        @synchronized (completionLock) {
+                            if (completionCalled) return;
+                            completionCalled = YES;
+                        }
+                        AMCloudManager *strongSelf = weakSelf;
+                        if (!staged) {
+                            AMCloudRetainProjectDownloadForRetry(
+                                cleanupURL, filename, handoffError.localizedDescription);
+                            [strongSelf showError:handoffError ?: AMCloudError(14,
+                                @"项目包未能安全暂存，下载文件已保留 24 小时")
+                                      presenter:presenter];
+                            return;
+                        }
+                        /* The verified copy is complete. Start cleanup off-main
+                         * and dismiss the account sheet without waiting for it. */
+                        AMCloudDiagnostic(@"cloud.project_handoff_staged", @{
+                            @"filename": filename ?: @"project.amproj",
+                            @"source_removed": @NO,
+                            @"import_confirmed": @NO,
+                            @"cleanup_pending": @YES
+                        });
+                        [presenter dismissViewControllerAnimated:YES completion:nil];
+                        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                            NSError *cleanupError = nil;
+                            BOOL sourceRemoved = !cleanupURL ||
+                                [NSFileManager.defaultManager removeItemAtURL:cleanupURL
+                                                              error:&cleanupError];
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                AMCloudDiagnostic(@"cloud.project_handoff_cleanup", @{
+                                    @"filename": filename ?: @"project.amproj",
+                                    @"source_removed": @(sourceRemoved),
+                                    @"cleanup_error": cleanupError.localizedDescription ?: @""
+                                });
+                            });
+                        });
+                    };
+                    if ([NSThread isMainThread]) {
+                        finishOnMain();
+                    } else {
+                        dispatch_async(dispatch_get_main_queue(), finishOnMain);
+                    }
+                };
+                @try {
+                    weakSelf.asyncImportHandler(URL, filename, cleanupURL, handoffCompletion);
+                } @catch (NSException *exception) {
+                    AMCloudDiagnostic(@"cloud.project_handoff_exception", @{
+                        @"filename": filename ?: @"project.amproj",
+                        @"exception": exception.name ?: @"unknown",
+                        @"reason": exception.reason ?: @"unknown"
+                    });
+                    handoffCompletion(NO, AMCloudError(14, @"项目包暂存时发生异常"));
                 }
+                return;
             }
-            if (error || !accepted) {
-                [weakSelf showError:error ?: AMCloudError(14, @"项目包未能进入本地导入队列")
+            __block BOOL staged = NO;
+            NSError *handoffError = error;
+            @try {
+                staged = !handoffError && URL && weakSelf.importHandler
+                    ? weakSelf.importHandler(URL, filename, cleanupURL) : NO;
+            } @catch (NSException *exception) {
+                AMCloudDiagnostic(@"cloud.project_handoff_exception", @{
+                    @"filename": filename ?: @"project.amproj",
+                    @"exception": exception.name ?: @"unknown",
+                    @"reason": exception.reason ?: @"unknown"
+                });
+                handoffError = AMCloudError(14, @"项目包暂存时发生异常");
+            }
+            if (!staged) {
+                AMCloudRetainProjectDownloadForRetry(
+                    cleanupURL, filename, handoffError.localizedDescription);
+                [weakSelf showError:handoffError ?: AMCloudError(14, @"项目包未能安全暂存，下载文件已保留 24 小时")
                           presenter:presenter];
-            } else {
-                [presenter dismissViewControllerAnimated:YES completion:nil];
+                return;
             }
+            NSError *cleanupError = nil;
+            BOOL sourceRemoved = !cleanupURL ||
+                [NSFileManager.defaultManager removeItemAtURL:cleanupURL error:&cleanupError];
+            AMCloudDiagnostic(@"cloud.project_handoff_staged", @{
+                @"filename": filename ?: @"project.amproj",
+                @"source_removed": @(sourceRemoved),
+                @"import_confirmed": @NO,
+                @"cleanup_error": cleanupError.localizedDescription ?: @""
+            });
+            [presenter dismissViewControllerAnimated:YES completion:nil];
         }];
     }];
 }
@@ -3672,6 +3778,10 @@ void AMCloudSyncInstallPluginHooksEarly(void) {
 
 void AMCloudSyncInstall(AMCloudImportHandler importHandler) {
     [[AMCloudManager shared] installWithImportHandler:importHandler];
+}
+
+void AMCloudSyncInstallAsync(AMCloudImportAsyncHandler importHandler) {
+    [[AMCloudManager shared] installWithAsyncImportHandler:importHandler];
 }
 
 BOOL AMCloudSyncHasLoggedInAccount(void) {

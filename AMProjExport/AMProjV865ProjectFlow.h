@@ -12,6 +12,50 @@ NS_ASSUME_NONNULL_BEGIN
  */
 FOUNDATION_EXPORT BOOL AMProjV865ProjectFlowIsRuntimeSupported(void);
 FOUNDATION_EXPORT void AMProjV865ProjectFlowInstall(void);
+
+/*
+ * A successful UIKit openURL completion only means that LaunchServices
+ * accepted the document route. It is not evidence that Alight Motion parsed
+ * or saved the project. Callers can inspect the latest handoff state for
+ * diagnostics; `unverified` is deliberately the terminal state until a
+ * verified native import callback exists for Build 865.
+ */
+typedef NS_ENUM(NSInteger, AMProjV865ProjectHandoffStatus) {
+    AMProjV865ProjectHandoffStatusFailed = 0,
+    AMProjV865ProjectHandoffStatusStaged,
+    AMProjV865ProjectHandoffStatusRouteAccepted,
+    AMProjV865ProjectHandoffStatusFallbackPresented,
+    AMProjV865ProjectHandoffStatusUnverified,
+};
+
+FOUNDATION_EXPORT NSString *AMProjV865ProjectFlowHandoffStatusString(
+    AMProjV865ProjectHandoffStatus status);
+FOUNDATION_EXPORT AMProjV865ProjectHandoffStatus
+AMProjV865ProjectFlowLastHandoffStatus(void);
+
+/*
+ * Stages a downloaded document on a serial utility queue. The completion is
+ * delivered on the main thread after the atomic copy completes, before the
+ * public UIKit document handoff is attempted. A staged result means that the
+ * caller may release its original download directory; it does not mean that
+ * Alight Motion has imported the project.
+ */
+typedef void (^AMProjV865ProjectFlowStageCompletion)(
+    AMProjV865ProjectHandoffStatus status, NSError * _Nullable error);
+FOUNDATION_EXPORT void AMProjV865ProjectFlowStageDocumentAsync(
+    NSURL *fileURL, NSString * _Nullable filename,
+    UIViewController * _Nullable presenter,
+    AMProjV865ProjectFlowStageCompletion _Nullable completion);
+
+/*
+ * Compatibility-only synchronous entry point. It refuses main-thread calls
+ * so an older caller cannot copy a large cloud project on the UI thread.
+ */
+FOUNDATION_EXPORT AMProjV865ProjectHandoffStatus
+AMProjV865ProjectFlowStageDocument(
+    NSURL *fileURL, NSString * _Nullable filename,
+    UIViewController * _Nullable presenter);
+
 FOUNDATION_EXPORT BOOL AMProjV865ProjectFlowIsProjectPackageController(
     UIViewController * _Nullable controller);
 FOUNDATION_EXPORT BOOL AMProjV865ProjectFlowQueueDownloadedProject(

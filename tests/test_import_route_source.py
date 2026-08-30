@@ -3037,13 +3037,17 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             'static void amproj_bootstrapAfterLaunch',
             '__attribute__((constructor))',
         )
-        handler_start = bootstrap.index('AMCloudSyncInstall(^BOOL(NSURL *URL, NSString *filename,')
+        handler_start = bootstrap.index('AMCloudSyncInstallAsync(^(NSURL *URL, NSString *filename,')
         handler = bootstrap[handler_start:]
-        self.assertIn('AMCloudSyncInstall(^BOOL(NSURL *URL, NSString *filename,', handler)
-        self.assertIn('return amproj_importCloudPackage(URL, filename, cleanupURL);', handler)
-        cloud = SOURCE[SOURCE.index('static BOOL amproj_importCloudPackage') :]
+        self.assertIn('AMCloudSyncInstallAsync(^(NSURL *URL, NSString *filename,', handler)
+        self.assertIn('amproj_importCloudPackage(URL, filename, cleanupURL, completion);', handler)
+        cloud = SOURCE[SOURCE.index('static void amproj_importCloudPackage') :]
         self.assertIn('if (amproj_runtimeIsBuild865())', cloud)
-        self.assertIn('AMProjV865ProjectFlowQueueDownloadedProject', cloud)
+        self.assertIn('AMProjV865ProjectFlowStageDocumentAsync', cloud)
+        self.assertIn('AMProjV865ProjectHandoffStatusStaged', cloud)
+        self.assertIn('@"handoff_status":', cloud)
+        self.assertIn('@"import_confirmed": @NO', cloud)
+        self.assertNotIn('AMProjV865ProjectFlowQueueDownloadedProject', cloud)
         self.assertIn('amproj_runtimeUsesLegacyImportHooks()', cloud)
 
     def test_encrypted_xml_is_rejected_before_packaging_and_queueing(self):

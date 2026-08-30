@@ -3,14 +3,25 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/*
+ * Project downloads can be large enough that the receiving side must stage
+ * them off the main thread. The completion reports only whether staging
+ * finished and the source download can be released; it is not an import
+ * completion from Alight Motion.
+ */
+typedef void (^AMCloudImportCompletion)(BOOL staged, NSError * _Nullable error);
 typedef BOOL (^AMCloudImportHandler)(NSURL *fileURL, NSString *filename,
                                      NSURL *cleanupURL);
+typedef void (^AMCloudImportAsyncHandler)(NSURL *fileURL, NSString *filename,
+                                          NSURL *cleanupURL,
+                                          AMCloudImportCompletion completion);
 typedef void (^AMCloudAuthorizationCompletion)(BOOL allowed,
                                                 NSError * _Nullable error);
 
 /// 构造期仅恢复与当前 Keychain token 匹配的云插件资源 Hook，不触碰 UIKit UI。
 FOUNDATION_EXPORT void AMCloudSyncInstallPluginHooksEarly(void);
 FOUNDATION_EXPORT void AMCloudSyncInstall(AMCloudImportHandler importHandler);
+FOUNDATION_EXPORT void AMCloudSyncInstallAsync(AMCloudImportAsyncHandler importHandler);
 FOUNDATION_EXPORT NSArray<UIActivity *> *AMCloudSyncUploadActivities(
     NSURL *fileURL, NSString *projectTitle, UIViewController *presenter);
 /// 仅判断当前设备是否保存了账户令牌，不检查会员、功能权限或设备授权。

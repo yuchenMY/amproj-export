@@ -21,6 +21,11 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertNotIn("import build_862_direct_package", MIGRATION)
         self.assertIn("cloud_payload_contract.py", WORKFLOW)
 
+    def test_865_workflow_checks_active_staging_symbol_and_legacy_wrapper(self):
+        self.assertIn('"_AMProjV865ProjectFlowStageDocument"', WORKFLOW)
+        self.assertIn('"_AMProjV865ProjectFlowStageDocumentAsync"', WORKFLOW)
+        self.assertIn('"_AMProjV865ProjectFlowQueueDownloadedProject"', WORKFLOW)
+
     def test_default_865_outputs_keep_the_feature_libraries_separate(self):
         all_rule = MAKEFILE.split("all:", 1)[1].split("\n", 1)[0]
         self.assertIn("AMProjExport.dylib", all_rule)
@@ -47,6 +52,8 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         # UIKit's document broker is an implementation detail; the header
         # intentionally exposes only the small C-facing adapter contract.
         self.assertIn("AMProjV865ProjectFlowPresentDocument", FLOW_HEADER)
+        self.assertIn("AMProjV865ProjectFlowStageDocumentAsync", FLOW_HEADER)
+        self.assertIn("AMProjV865StagingQueue", FLOW)
         self.assertIn("UIDocumentInteractionController", FLOW)
         self.assertIn("presentOpenInMenuFromRect", FLOW)
         self.assertIn("openURL:stagedURL options:@{}", FLOW)
@@ -54,6 +61,7 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn("native document URL route accepted", FLOW)
         self.assertIn("native document URL route declined", FLOW)
         self.assertIn("copyItemAtURL:source", FLOW)
+        self.assertIn("dispatch_queue_create(\"com.amproj.865.project-staging\"", FLOW)
         self.assertIn('document.partial', FLOW)
         self.assertIn("moveItemAtURL:temporary", FLOW)
         self.assertIn("AMProjV865ProjectFlowQueueDownloadedProject", FLOW)
@@ -63,6 +71,36 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertNotIn("selectedExportOptID", FLOW)
         self.assertNotIn("AMProjMainAddress", FLOW)
 
+    def test_865_handoff_exposes_an_explicit_unverified_result_contract(self):
+        self.assertIn("AMProjV865ProjectHandoffStatus", FLOW_HEADER)
+        for status in ("staged", "route_accepted", "fallback_presented", "unverified", "failed"):
+            self.assertIn(f'@"{status}"', FLOW)
+        self.assertIn("AMProjV865ProjectFlowLastHandoffStatus", FLOW_HEADER)
+        self.assertIn("AMProjV865ProjectFlowHandoffStatusString", FLOW_HEADER)
+        self.assertIn('@"verified": @NO', FLOW)
+        self.assertIn("openURL_acceptance_is_not_import_confirmation", FLOW)
+
+    def test_865_handoff_breadcrumbs_are_atomic_and_retained_before_delayed_cleanup(self):
+        self.assertIn("last-handoff.plist", FLOW)
+        self.assertIn("handoff.plist", FLOW)
+        self.assertIn("NSDataWritingAtomic", FLOW)
+        self.assertIn("24 * 60 * 60 * NSEC_PER_SEC", FLOW)
+        self.assertIn("AMProjV865ScheduleDirectoryCleanup", FLOW)
+        self.assertIn("AMProjV865ProjectHandoffStatusFailed", FLOW)
+
+    def test_865_async_staging_contains_an_exception_boundary_and_one_shot_completion(self):
+        start = FLOW.index("void AMProjV865ProjectFlowStageDocumentAsync")
+        end = FLOW.index("AMProjV865ProjectHandoffStatus AMProjV865ProjectFlowStageDocument", start)
+        async_stage = FLOW[start:end]
+        self.assertIn("__block BOOL completionDelivered = NO", async_stage)
+        self.assertIn("if (completionDelivered) return", async_stage)
+        self.assertIn("@try {", async_stage)
+        self.assertIn("} @catch (NSException *exception)", async_stage)
+        self.assertIn("AMProjV865ProjectHandoffStatusFailed", async_stage)
+        self.assertIn('@"exception":', async_stage)
+        self.assertIn('@"reason":', async_stage)
+        self.assertIn("completeOnce(AMProjV865ProjectHandoffStatusFailed, error)", async_stage)
+
     def test_865_adapter_has_public_native_url_route_before_open_in_fallback(self):
         native_route = FLOW[FLOW.index("BOOL canUseNativeRoute") :]
         self.assertIn("openURL:stagedURL options:@{}", native_route)
@@ -70,9 +108,9 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn("AMProjV865PresentOpenInFallback", native_route)
 
     def test_865_handoff_resolves_a_current_visible_presenter_after_dismissal(self):
-        handoff = FLOW[FLOW.index("void (^presentWhenReady)") :]
+        handoff = FLOW[FLOW.index("static void AMProjV865ScheduleStagedPresentation") :]
         current = handoff.index("UIViewController *owner = AMProjV865ForegroundPresenter()")
-        stale_guard = handoff.index("presenter.viewIfLoaded.window", current)
+        stale_guard = handoff.index("candidate.viewIfLoaded.window", current)
         self.assertLess(current, stale_guard)
 
     def test_865_adapter_matches_only_the_verified_package_controller(self):
@@ -89,10 +127,35 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn('native_private_abi": @NO', EXPORT)
         self.assertIn("amproj_startDirectExport(", EXPORT)
 
+    def test_865_navigation_forwards_project_export_to_native_implementation(self):
+        navigation = EXPORT[
+            EXPORT.index("static void hooked_navigationPush"):
+            EXPORT.index("static void amproj_forwardPresentation")
+        ]
+        nonlegacy = navigation[
+            navigation.index("if (!amproj_runtimeUsesLegacyImportHooks())"):
+        ]
+        self.assertIn("orig_navigationPush(self, _cmd, viewController, animated)", nonlegacy)
+        self.assertNotIn("865.project_export_navigation_entry", navigation)
+        self.assertNotIn("AMProjV865ProjectFlowIsProjectPackageController(viewController)", navigation)
+
+        installer = EXPORT[
+            EXPORT.index("static void amproj_installExportHooks"):
+            EXPORT.index("if (!amproj_runtimeUsesLegacyImportHooks())",
+                         EXPORT.index("static void amproj_installExportHooks"))
+        ]
+        self.assertIn('export_hooks.865_native_navigation', installer)
+        self.assertIn('account_replacement_only', installer)
+        self.assertNotIn("amproj_installShareExportHook", installer)
+
     def test_cloud_download_uses_865_handoff_and_862_stays_gated(self):
-        cloud = EXPORT[EXPORT.index("static BOOL amproj_importCloudPackage") :]
+        cloud = EXPORT[EXPORT.index("static void amproj_importCloudPackage") :]
         self.assertIn("amproj_runtimeIsBuild865()", cloud)
-        self.assertIn("AMProjV865ProjectFlowQueueDownloadedProject", cloud)
+        self.assertIn("AMProjV865ProjectFlowStageDocumentAsync", cloud)
+        self.assertIn("AMProjV865ProjectHandoffStatusStaged", cloud)
+        self.assertIn('@"handoff_status":', cloud)
+        self.assertIn('@"import_confirmed": @NO', cloud)
+        self.assertNotIn("AMProjV865ProjectFlowQueueDownloadedProject", cloud)
         self.assertIn('legacy_862_bridge": @NO', cloud)
         self.assertIn("amproj_runtimeUsesLegacyImportHooks()", cloud)
         self.assertIn("amproj_log865LegacyPathDisabled", cloud)
@@ -100,8 +163,12 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
 
     def test_bootstrap_registers_one_cloud_handler_for_both_verified_lanes(self):
         bootstrap = EXPORT[EXPORT.index("static void amproj_bootstrapAfterLaunch") :]
-        handler = bootstrap[bootstrap.index("AMCloudSyncInstall(") :]
-        self.assertIn("amproj_importCloudPackage(URL, filename, cleanupURL)", handler)
+        handler = bootstrap[bootstrap.index("AMCloudSyncInstallAsync(") :]
+        self.assertIn("AMCloudSyncInstallAsync(", handler)
+        self.assertIn(
+            "amproj_importCloudPackage(URL, filename, cleanupURL, completion);",
+            handler,
+        )
         self.assertNotIn('cloud_project_import")', handler)
         self.assertIn("AMProjV865ProjectFlowInstall();", bootstrap)
 

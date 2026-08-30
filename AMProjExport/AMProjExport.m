@@ -103,8 +103,9 @@ static void amproj_clearImportSuppression(NSURL *URL, NSString *name);
 static AMProjIncomingURLResult amproj_handleIncomingProjectURLSafely(
     NSURL *URL, NSString *source, NSDictionary *options, BOOL *prepared);
 #if AMPROJ_CLOUD_SYNC
-static BOOL amproj_importCloudPackage(NSURL *URL, NSString *filename,
-                                      NSURL *cleanupURL);
+static void amproj_importCloudPackage(NSURL *URL, NSString *filename,
+                                      NSURL *cleanupURL,
+                                      AMCloudImportCompletion completion);
 #endif
 static void amproj_presentImportError(NSString *message);
 static void amproj_presentImportErrorOfferingPicker(NSString *message,
@@ -11308,27 +11309,39 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLSafely(
 }
 
 #if AMPROJ_CLOUD_SYNC
-static BOOL amproj_importCloudPackage(NSURL *URL, NSString *filename,
-                                      NSURL *cleanupURL) {
-    if (!URL.isFileURL) return NO;
+static void amproj_importCloudPackage(NSURL *URL, NSString *filename,
+                                      NSURL *cleanupURL,
+                                      AMCloudImportCompletion completion) {
+    if (!URL.isFileURL) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"com.amproj.cloud-import"
+            code:1 userInfo:@{NSLocalizedDescriptionKey: @"下载项目不是本地文件"}]);
+        return;
+    }
     if (amproj_runtimeIsBuild865()) {
-        // Cloud downloads on 865 use the public UIKit document handoff. The
-        // adapter copies the verified file before AMCloudSync removes its
-        // temporary download directory, then lets Alight Motion receive it
-        // through the normal system document route.
-        BOOL queued = AMProjV865ProjectFlowQueueDownloadedProject(
-            URL, filename.length ? filename : @"project.amproj");
-        amproj_debugEvent(@"cloud.import_865_handoff", @{
-            @"accepted": @(queued),
-            @"filename": filename ?: @"",
-            @"native_document_route": @YES,
-            @"legacy_862_bridge": @NO
-        });
-        return queued;
+        // Build 865 stages the file on a utility queue. UIKit is entered only
+        // after the copy completion returns to the main thread.
+        AMProjV865ProjectFlowStageDocumentAsync(
+            URL, filename.length ? filename : @"project.amproj", nil,
+            ^(AMProjV865ProjectHandoffStatus handoffStatus, NSError *error) {
+                BOOL staged = handoffStatus == AMProjV865ProjectHandoffStatusStaged;
+                amproj_debugEvent(@"cloud.import_865_handoff", @{
+                    @"staged": @(staged),
+                    @"handoff_status":
+                        AMProjV865ProjectFlowHandoffStatusString(handoffStatus),
+                    @"import_confirmed": @NO,
+                    @"filename": filename ?: @"",
+                    @"native_document_route": @YES,
+                    @"legacy_862_bridge": @NO
+                });
+                if (completion) completion(staged, error);
+            });
+        return;
     }
     if (!amproj_runtimeUsesLegacyImportHooks()) {
         amproj_log865LegacyPathDisabled(@"cloud_project_import");
-        return NO;
+        if (completion) completion(NO, [NSError errorWithDomain:@"com.amproj.cloud-import"
+            code:2 userInfo:@{NSLocalizedDescriptionKey: @"当前包体不支持旧版导入链路"}]);
+        return;
     }
     BOOL prepared = NO;
     NSDictionary *options = @{
@@ -11343,7 +11356,11 @@ static BOOL amproj_importCloudPackage(NSURL *URL, NSString *filename,
         @"prepared": @(prepared),
         @"filename": filename ?: @""
     });
-    return result == AMProjIncomingURLAccepted;
+    if (completion) completion(result == AMProjIncomingURLAccepted,
+                               result == AMProjIncomingURLAccepted ? nil :
+                               [NSError errorWithDomain:@"com.amproj.cloud-import"
+                                   code:3 userInfo:@{NSLocalizedDescriptionKey:
+                                       @"项目包未能进入导入队列"}]);
 }
 #endif
 
@@ -15030,8 +15047,9 @@ static void hooked_navigationPush(id self, SEL _cmd,
     }
 #endif
     if (!amproj_runtimeUsesLegacyImportHooks()) {
-        // Account replacement above is intentionally retained, but project
-        // export/navigation ownership stays with the native app.
+        // Account replacement above is intentionally retained. Build 865 has
+        // no verified navigation-export callback, so every project navigation
+        // must continue through Alight Motion's native implementation.
         amproj_log865LegacyPathDisabled(@"navigation_export");
         if (orig_navigationPush) {
             orig_navigationPush(self, _cmd, viewController, animated);
@@ -16724,6 +16742,18 @@ static void amproj_installExportHooks(void) {
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing export hooks after app launch");
         amproj_installPresentationHook();
+        if (amproj_runtimeIsBuild865()) {
+            // Keep navigation swizzling only for the cloud account replacement
+            // above. Project export is owned only by the exact presentation
+            // boundary; no verified 865 navigation-export callback exists.
+            amproj_installNavigationExportHook();
+            amproj_logCriticalEvent(@"export_hooks.865_native_navigation", @{
+                @"presentation": @YES,
+                @"navigation": @"account_replacement_only",
+                @"legacy_share_hooks": @NO
+            });
+            return;
+        }
         if (!amproj_runtimeUsesLegacyImportHooks()) {
             // Keep only the presentation hook for the account replacement on
             // non-legacy builds.
@@ -16940,9 +16970,10 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
         // The same cloud callback is used for both supported lanes.  The
         // handler itself selects the exact 865 public handoff or the verified
         // 862 private bridge; no old bridge is ever reachable on 865.
-        AMCloudSyncInstall(^BOOL(NSURL *URL, NSString *filename,
-                                 NSURL *cleanupURL) {
-            return amproj_importCloudPackage(URL, filename, cleanupURL);
+        AMCloudSyncInstallAsync(^(NSURL *URL, NSString *filename,
+                                 NSURL *cleanupURL,
+                                 AMCloudImportCompletion completion) {
+            amproj_importCloudPackage(URL, filename, cleanupURL, completion);
         });
 #endif
 

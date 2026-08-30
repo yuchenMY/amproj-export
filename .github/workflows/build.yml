@@ -56,6 +56,8 @@ jobs:
               "_AMProjV44ReleaseNativeActivityFallbackEnabled",
               "_AMProjV865ProjectFlowIsRuntimeSupported",
               "_AMProjV865ProjectFlowInstall",
+              "_AMProjV865ProjectFlowStageDocument",
+              "_AMProjV865ProjectFlowStageDocumentAsync",
               "_AMProjV865ProjectFlowQueueDownloadedProject",
               "_AMProjV865ProjectFlowIsProjectPackageController",
           }
