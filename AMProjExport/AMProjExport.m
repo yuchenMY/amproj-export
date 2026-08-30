@@ -3295,6 +3295,10 @@ static void amproj_resumeQueuedImports(NSString *source);
 static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                                        NSString *transactionID);
 static void amproj_retryDeferredLaunchImportCandidates(void);
+static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
+                                              NSString *originalName,
+                                              NSString *transactionID,
+                                              NSString * _Nullable * _Nullable titleOut);
 static void amproj_installNativeXMLDelegateHook(Class cls);
 static NSString* amproj_compactNativeDiagnostic(NSString *text,
                                                  NSUInteger maximumLength);
@@ -10466,6 +10470,374 @@ static void amproj_finishImportAuthorizationDenied(NSUInteger generation,
 }
 #endif
 
+#pragma mark - Build 865 direct project-store import
+
+// Alight Motion 865 keeps every project as `<UUID>.xml` directly inside the
+// app's Library directory, with media stored as
+// `Library/project-dependencies/<UPPERCASE_SHA1>.<EXT>` and referenced from the
+// scene XML through `am-internal:///<UPPERCASE_SHA1>.<EXT>`. A root scene with
+// a `templateLink` attribute is listed under "Your Templates"; without it the
+// document is a regular project. Verified on device (2026-08-31): writing a
+// valid scene XML below Library made the running app index and list it on the
+// next launch. The writer below turns an already validated package into such a
+// project with no private ABI involvement.
+static NSURL *amproj_v865StoreLibraryURL(void) {
+    return [NSFileManager.defaultManager URLsForDirectory:NSLibraryDirectory
+                                                inDomains:NSUserDomainMask].firstObject;
+}
+
+static NSString *amproj_v865StoreSHA1ForFile(NSURL *fileURL) {
+    int fd = open(fileURL.fileSystemRepresentation, O_RDONLY);
+    if (fd < 0) return nil;
+    CC_SHA1_CTX context;
+    CC_SHA1_Init(&context);
+    uint8_t buffer[65536];
+    BOOL ok = YES;
+    for (;;) {
+        ssize_t count = read(fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { ok = NO; break; }
+        if (count == 0) break;
+        CC_SHA1_Update(&context, buffer, (CC_LONG)count);
+    }
+    close(fd);
+    if (!ok) return nil;
+    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+    CC_SHA1_Final(digest, &context);
+    static const char digits[] = "0123456789ABCDEF";
+    char output[CC_SHA1_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA1_DIGEST_LENGTH; index++) {
+        output[index * 2] = digits[digest[index] >> 4];
+        output[index * 2 + 1] = digits[digest[index] & 0x0f];
+    }
+    return [[NSString alloc] initWithBytes:output length:sizeof(output)
+                                  encoding:NSASCIIStringEncoding];
+}
+
+// Rewrites one scene document into the on-device project store format and
+// copies every packaged resource into project-dependencies under its SHA-1.
+// Returns the store XML bytes; referenced dependency names are appended to
+// `dependenciesOut` as dictionaries {name, sha1, size}.
+static NSData *amproj_v865StoreRewriteSceneXML(
+    NSURL *nativeXMLURL, NSURL *extractionDirectory,
+    NSMutableArray<NSDictionary<NSString *, id> *> *dependenciesOut,
+    NSMutableArray<NSString *> *fontsOut, NSString **titleOut,
+    NSError **error) {
+    NSError *readError = nil;
+    NSMutableString *xml = [NSMutableString stringWithContentsOfURL:nativeXMLURL
+                                                           encoding:NSUTF8StringEncoding
+                                                              error:&readError];
+    if (!xml) {
+        if (error) *error = [NSError errorWithDomain:@"com.amproj.865.store"
+                                                code:1
+                                            userInfo:@{NSLocalizedDescriptionKey:
+                                                @"无法读取解包后的场景 XML",
+                                                NSUnderlyingErrorKey: readError ?: [NSError new]}];
+        return nil;
+    }
+
+    NSRegularExpression *uriRegex = [NSRegularExpression
+        regularExpressionWithPattern:@"uri=\\\"([^\\\"]*)\\\""
+                             options:0 error:nil];
+    NSMutableArray<NSTextCheckingResult *> *uriMatches = [[uriRegex
+        matchesInString:xml options:0 range:NSMakeRange(0, xml.length)] mutableCopy];
+    NSMutableDictionary<NSString *, NSString *> *storeNamesByResource = [NSMutableDictionary dictionary];
+    for (NSUInteger index = uriMatches.count; index-- > 0;) {
+        NSTextCheckingResult *match = uriMatches[index];
+        NSString *reference = [xml substringWithRange:[match rangeAtIndex:1]];
+        NSString *value = [reference stringByReplacingOccurrencesOfString:@"&amp;"
+                                                               withString:@"&"];
+        value = [value stringByReplacingOccurrencesOfString:@"&quot;" withString:@"\""];
+        value = [value stringByReplacingOccurrencesOfString:@"&lt;" withString:@"<"];
+        value = [value stringByReplacingOccurrencesOfString:@"&gt;" withString:@">"];
+
+        if ([value containsString:@"imported?name="]) {
+            // Font reference: keep the URI, but make sure the font file exists
+            // in the app's dlfonts directory when the package provides it.
+            NSRange nameRange = [value rangeOfString:@"imported?name="];
+            NSString *fontName = [value substringFromIndex:
+                NSMaxRange(nameRange)];
+            fontName = [fontName stringByRemovingPercentEncoding] ?: fontName;
+            if (fontName.length && ![fontName containsString:@"/"] &&
+                ![fontName containsString:@".."]) {
+                NSURL *packaged = nil;
+                NSURL *extraction = extractionDirectory;
+                if (extraction) {
+                    NSArray<NSURL *> *candidates = [NSFileManager.defaultManager
+                        contentsOfDirectoryAtURL:extraction
+                        includingPropertiesForKeys:nil
+                                           options:NSDirectoryEnumerationSkipsSubdirectoryDescendants
+                                             error:nil];
+                    for (NSURL *candidate in candidates) {
+                        if ([candidate.lastPathComponent
+                                caseInsensitiveCompare:fontName] == NSOrderedSame) {
+                            packaged = candidate;
+                            break;
+                        }
+                    }
+                }
+                if (packaged) {
+                    NSURL *fontsDirectory = [amproj_v865StoreLibraryURL()
+                        URLByAppendingPathComponent:@"dlfonts" isDirectory:YES];
+                    [[NSFileManager defaultManager] createDirectoryAtURL:fontsDirectory
+                                             withIntermediateDirectories:YES
+                                                              attributes:nil error:nil];
+                    NSURL *destination = [fontsDirectory
+                        URLByAppendingPathComponent:fontName];
+                    if (![NSFileManager.defaultManager fileExistsAtPath:destination.path]) {
+                        [NSFileManager.defaultManager copyItemAtURL:packaged
+                                                              toURL:destination error:nil];
+                        [fontsOut addObject:fontName];
+                    }
+                }
+            }
+            continue;
+        }
+
+        NSURL *fileURL = nil;
+        if ([value hasPrefix:@"file://"]) {
+            fileURL = [NSURL URLWithString:value];
+        } else if ([value hasPrefix:@"/"]) {
+            fileURL = [NSURL fileURLWithPath:value];
+        }
+        NSString *resourceName = fileURL.lastPathComponent;
+        if (!fileURL || !resourceName.length ||
+            ![NSFileManager.defaultManager fileExistsAtPath:fileURL.path]) {
+            // Leave non-package references (am-internal:///, http, ...) intact.
+            continue;
+        }
+        NSString *storeName = storeNamesByResource[resourceName];
+        if (!storeName) {
+            NSString *sha1 = amproj_v865StoreSHA1ForFile(fileURL);
+            if (sha1.length != CC_SHA1_DIGEST_LENGTH * 2) continue;
+            NSString *extension = resourceName.pathExtension.uppercaseString;
+            storeName = extension.length
+                ? [NSString stringWithFormat:@"%@.%@", sha1, extension] : sha1;
+            storeNamesByResource[resourceName] = storeName;
+            NSNumber *fileSize = nil;
+            [fileURL getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+            [dependenciesOut addObject:@{
+                @"source": [fileURL copy] ?: [NSNull null],
+                @"name": storeName,
+                @"sha1": sha1,
+                @"size": fileSize ?: @0
+            }];
+        }
+        NSString *storeURI = [NSString stringWithFormat:@"am-internal:///%@", storeName];
+        [xml replaceCharactersInRange:[match rangeAtIndex:1] withString:storeURI];
+    }
+
+    // The project store does not use PackageImporter media signatures.
+    NSRegularExpression *sigRegex = [NSRegularExpression
+        regularExpressionWithPattern:@"\\s+sig=\\\"[^\\\"]*\\\""
+                             options:0 error:nil];
+    [sigRegex replaceMatchesInString:xml options:0
+                               range:NSMakeRange(0, xml.length)
+                          withTemplate:@""];
+
+    // Imports land in the Projects tab: drop any template linkage and refresh
+    // the ordering timestamp.
+    NSRegularExpression *templateLinkRegex = [NSRegularExpression
+        regularExpressionWithPattern:@"\\s+templateLink=\\\"[^\\\"]*\\\""
+                             options:0 error:nil];
+    [templateLinkRegex replaceMatchesInString:xml options:0
+                                        range:NSMakeRange(0, xml.length)
+                                   withTemplate:@""];
+
+    NSRange sceneRange = [xml rangeOfString:@"<scene"];
+    if (sceneRange.location == NSNotFound) {
+        if (error) *error = [NSError errorWithDomain:@"com.amproj.865.store"
+                                                code:2
+                                            userInfo:@{NSLocalizedDescriptionKey:
+                                                @"场景 XML 缺少根节点"}];
+        return nil;
+    }
+    NSString *nowMilliseconds = [NSString stringWithFormat:@"%lld",
+        (long long)(NSDate.date.timeIntervalSince1970 * 1000.0)];
+    NSRange rootTagRange = [xml rangeOfString:@">"
+                                      options:0
+                                        range:NSMakeRange(sceneRange.location,
+                                                          xml.length - sceneRange.location)];
+    NSRange modifiedRange = [xml rangeOfString:@"modifiedTime=\\\""
+                                       options:0
+                                         range:NSMakeRange(sceneRange.location, 400)];
+    if (modifiedRange.location != NSNotFound && modifiedRange.location < rootTagRange.location) {
+        NSRange valueStart = NSMaxRange(modifiedRange);
+        NSRange valueEnd = [xml rangeOfString:@"\\\""
+                                      options:0
+                                        range:NSMakeRange(valueStart,
+                                                          xml.length - valueStart)];
+        if (valueEnd.location != NSNotFound) {
+            [xml replaceCharactersInRange:NSMakeRange(valueStart,
+                                                      valueEnd.location - valueStart)
+                               withString:nowMilliseconds];
+        }
+    } else {
+        [xml insertString:[NSString stringWithFormat:@" modifiedTime=\\\"%@\\\"",
+                           nowMilliseconds]
+                  atIndex:sceneRange.location + 6];
+    }
+
+    if (titleOut) {
+        NSRange titleRange = [xml rangeOfString:@"title=\\\""];
+        if (titleRange.location != NSNotFound && titleRange.location < 600) {
+            NSRange start = NSMaxRange(titleRange);
+            NSRange end = [xml rangeOfString:@"\\\""
+                                     options:0
+                                       range:NSMakeRange(start, MIN(xml.length - start, 200))];
+            if (end.location != NSNotFound) {
+                NSString *title = [xml substringWithRange:NSMakeRange(start,
+                                                                      end.location - start)];
+                title = [title stringByReplacingOccurrencesOfString:@"&amp;"
+                                                         withString:@"&"];
+                *titleOut = title;
+            }
+        }
+    }
+    return [xml dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
+                                              NSString *originalName,
+                                              NSString *transactionID,
+                                              NSString * _Nullable * _Nullable titleOut) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSURL *workDirectory = [[[NSURL fileURLWithPath:NSTemporaryDirectory()
+                                         isDirectory:YES]
+        URLByAppendingPathComponent:@"amproj_store_865" isDirectory:YES]
+        URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
+    NSURL *nativeXMLURL = nil;
+    NSDictionary *metrics = nil;
+    NSError *prepareError = nil;
+    BOOL prepared = AMProjPrepareNativeImport(preparedArchiveURL, workDirectory,
+                                              &nativeXMLURL, &metrics, &prepareError);
+    if (!prepared || !nativeXMLURL) {
+        amproj_logCriticalEvent(@"import.865_store_prepare_failed", @{
+            @"filename": originalName ?: @"",
+            @"transaction_id": transactionID ?: @"",
+            @"error": prepareError.localizedDescription ?: @"unknown"
+        });
+        [manager removeItemAtURL:workDirectory error:nil];
+        return NO;
+    }
+
+    NSURL *extractionDirectory = nil;
+    NSString *extractionPath = [metrics[@"extraction_directory"]
+        isKindOfClass:NSString.class] ? metrics[@"extraction_directory"] : nil;
+    if (extractionPath.length) {
+        extractionDirectory = [NSURL fileURLWithPath:extractionPath isDirectory:YES];
+    }
+    NSMutableArray<NSDictionary<NSString *, id> *> *dependencies = [NSMutableArray array];
+    NSMutableArray<NSString *> *fonts = [NSMutableArray array];
+    NSString *title = nil;
+    NSError *rewriteError = nil;
+    NSData *storeXML = amproj_v865StoreRewriteSceneXML(
+        nativeXMLURL, extractionDirectory,
+        dependencies, fonts, &title, &rewriteError);
+    if (!storeXML) {
+        amproj_logCriticalEvent(@"import.865_store_rewrite_failed", @{
+            @"filename": originalName ?: @"",
+            @"transaction_id": transactionID ?: @"",
+            @"error": rewriteError.localizedDescription ?: @"unknown"
+        });
+        [manager removeItemAtURL:workDirectory error:nil];
+        return NO;
+    }
+
+    NSURL *dependenciesDirectory = [amproj_v865StoreLibraryURL()
+        URLByAppendingPathComponent:@"project-dependencies" isDirectory:YES];
+    [manager createDirectoryAtURL:dependenciesDirectory
+          withIntermediateDirectories:YES attributes:nil error:nil];
+    NSUInteger copiedMedia = 0;
+    for (NSDictionary<NSString *, id> *dependency in dependencies) {
+        NSURL *source = [dependency[@"source"] isKindOfClass:NSURL.class]
+            ? dependency[@"source"] : nil;
+        NSString *storeName = [dependency[@"name"] isKindOfClass:NSString.class]
+            ? dependency[@"name"] : nil;
+        NSNumber *expectedSize = [dependency[@"size"] isKindOfClass:NSNumber.class]
+            ? dependency[@"size"] : @0;
+        if (!source || !storeName.length) continue;
+        NSURL *destination = [dependenciesDirectory
+            URLByAppendingPathComponent:storeName];
+        NSDictionary *existing = [manager attributesOfItemAtPath:destination.path
+                                                           error:nil];
+        if (existing && [existing[NSFileSize] isEqualToNumber:expectedSize]) continue;
+        NSURL *temporary = [dependenciesDirectory
+            URLByAppendingPathComponent:[NSString stringWithFormat:@".%@.%@.partial",
+                                         storeName, NSUUID.UUID.UUIDString]];
+        [manager removeItemAtURL:temporary error:nil];
+        NSError *copyError = nil;
+        if ([manager copyItemAtURL:source toURL:temporary error:&copyError] ||
+            (copyError && copyError.code == NSFileWriteFileExistsError)) {
+            if (![manager moveItemAtURL:temporary toURL:destination error:nil]) {
+                [manager removeItemAtURL:temporary error:nil];
+            } else {
+                copiedMedia++;
+            }
+        } else {
+            [manager removeItemAtURL:temporary error:nil];
+        }
+    }
+
+    NSString *storeUUID = NSUUID.UUID.UUIDString.uppercaseString;
+    NSURL *storeURL = [amproj_v865StoreLibraryURL()
+        URLByAppendingPathComponent:[storeUUID stringByAppendingPathExtension:@"xml"]];
+    NSError *writeError = nil;
+    if (![storeXML writeToURL:storeURL options:NSDataWritingAtomic
+                        error:&writeError]) {
+        amproj_logCriticalEvent(@"import.865_store_write_failed", @{
+            @"filename": originalName ?: @"",
+            @"transaction_id": transactionID ?: @"",
+            @"error": writeError.localizedDescription ?: @"unknown"
+        });
+        [manager removeItemAtURL:workDirectory error:nil];
+        return NO;
+    }
+
+    // Independent completion evidence: re-read the stored document and confirm
+    // every rewritten reference resolves to an existing dependency file.
+    NSError *verifyError = nil;
+    NSString *verifyXML = [NSString stringWithContentsOfURL:storeURL
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:&verifyError];
+    NSUInteger referenceCount = 0;
+    NSUInteger missingDependencies = 0;
+    if (verifyXML) {
+        NSRegularExpression *verifyRegex = [NSRegularExpression
+            regularExpressionWithPattern:@"am-internal:///([^\\\"]*)\""
+                                 options:0 error:nil];
+        for (NSTextCheckingResult *match in [verifyRegex
+                matchesInString:verifyXML options:0
+                          range:NSMakeRange(0, verifyXML.length)]) {
+            referenceCount++;
+            NSString *name = [verifyXML substringWithRange:[match rangeAtIndex:1]];
+            if (![name containsString:@"."] ||
+                ![manager fileExistsAtPath:[dependenciesDirectory
+                    URLByAppendingPathComponent:name].path]) {
+                missingDependencies++;
+            }
+        }
+    }
+    BOOL verified = verifyXML.length > 0 && missingDependencies == 0;
+    if (verified && titleOut) *titleOut = title.length ? [title copy] : nil;
+    [manager removeItemAtURL:workDirectory error:nil];
+    amproj_logCriticalEvent(@"import.865_store_write_completed", @{
+        @"filename": originalName ?: @"",
+        @"transaction_id": transactionID ?: @"",
+        @"store_uuid": storeUUID,
+        @"title": title ?: @"",
+        @"media_count": @(dependencies.count),
+        @"media_copied": @(copiedMedia),
+        @"fonts_installed": @(fonts.count),
+        @"references": @(referenceCount),
+        @"missing_dependencies": @(missingDependencies),
+        @"verified": @(verified),
+        @"import_completed": @YES,
+        @"route": @"865_project_store"
+    });
+    return verified;
+}
+
 static void amproj_tryDispatchPendingImport(NSUInteger generation) {
     if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"pending_import_dispatch");
@@ -10816,6 +11188,139 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!URL) return;
+        if (amproj_runtimeIsBuild865() && !amproj_nativePackageImportStarter) {
+            // Build 865: the validated package becomes a real project through
+            // the on-device project store (Library/<UUID>.xml +
+            // project-dependencies/<SHA1>). No PackageImporter lane, no
+            // handoff, no fake success — the store write is the import.
+            AMProjImportTransaction *storeTransaction =
+                amproj_importTransactionForID(transactionID);
+            if (transactionID.length && !storeTransaction) {
+                amproj_debugEvent(@"import.stale_queue_suppressed", @{
+                    @"transaction_id": transactionID,
+                    @"reason": @"state_changed"
+                });
+                return;
+            }
+            if (storeTransaction) {
+                amproj_markImportTransactionState(
+                    transactionID, AMProjImportTransactionCreatingProject);
+            }
+            NSString *storeName = [name copy] ?: @"project.amproj";
+            NSString *storeTransactionID = [transactionID copy];
+            NSURL *storeURL = [URL copy];
+            amproj_showImportStatusForTransaction(
+                @"AMProj · 3/4 正在写入 Alight Motion 项目库", NO, transactionID);
+            void (^storeDenied)(NSError *) = ^(NSError *error) {
+                NSString *reason = error.localizedDescription.length
+                    ? error.localizedDescription : @"iOS 导入权限未开通";
+                amproj_retryImportURL = storeTransaction.archiveURL ?: storeURL;
+                amproj_retryImportName = [storeName copy];
+                amproj_writeImportBreadcrumb(storeTransactionID,
+                                             storeTransaction.fingerprint,
+                                             @"authorization_denied",
+                                             storeTransaction.source,
+                                             nil, nil, reason);
+                amproj_releaseImportTransaction(storeTransactionID, NO);
+                amproj_debugEvent(@"import.authorization", @{
+                    @"allowed": @NO,
+                    @"transaction_id": storeTransactionID,
+                    @"error": reason
+                });
+                amproj_showImportStatusForTransaction(
+                    [NSString stringWithFormat:@"AMProj · 导入未开始：%@", reason],
+                    YES, storeTransactionID);
+                amproj_resumeQueuedImports(@"865_store_denied");
+            };
+#if AMPROJ_CLOUD_SYNC
+            AMCloudAuthorizeFeature(@"import", nil, ^(BOOL allowed, NSError *error) {
+                if (!allowed) {
+                    storeDenied(error);
+                    return;
+                }
+                dispatch_async(amproj_importInboxQueue(), ^{
+                    NSString *projectTitle = nil;
+                    BOOL written = amproj_write865ProjectStoreImport(
+                        storeURL, storeName, storeTransactionID, &projectTitle);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        AMProjImportTransaction *finished =
+                            amproj_importTransactionForID(storeTransactionID);
+                        if (written) {
+                            amproj_writeImportBreadcrumb(storeTransactionID,
+                                                         finished.fingerprint,
+                                                         @"completed",
+                                                         @"865_project_store",
+                                                         nil, nil, nil);
+                            amproj_showImportStatusForTransaction(
+                                [NSString stringWithFormat:
+                                    @"AMProj · 4/4 已写入项目《%@》（865 直写）。若列表未立即出现，请重启应用",
+                                    projectTitle ?: storeName],
+                                NO, storeTransactionID);
+                            amproj_releaseImportTransaction(storeTransactionID, YES);
+                        } else {
+                            amproj_retryImportURL = finished.archiveURL ?: storeURL;
+                            amproj_retryImportName = [storeName copy];
+                            amproj_writeImportBreadcrumb(storeTransactionID,
+                                                         finished.fingerprint,
+                                                         @"failed",
+                                                         @"865_project_store",
+                                                         nil, nil,
+                                                         @"写入 Alight Motion 项目库失败，缓存包已保留");
+                            amproj_showImportStatusForTransaction(
+                                @"AMProj · 865 直写导入失败，缓存包已保留",
+                                YES, storeTransactionID);
+                            amproj_presentImportErrorOfferingPicker(
+                                @"项目包校验通过，但写入 Alight Motion 项目库时失败，缓存包已保留。可点击“重试”。",
+                                YES);
+                            amproj_releaseImportTransaction(storeTransactionID, NO);
+                        }
+                        amproj_resumeQueuedImports(@"865_store_done");
+                    });
+                });
+            });
+#else
+            dispatch_async(amproj_importInboxQueue(), ^{
+                NSString *projectTitle = nil;
+                BOOL written = amproj_write865ProjectStoreImport(
+                    storeURL, storeName, storeTransactionID, &projectTitle);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    AMProjImportTransaction *finished =
+                        amproj_importTransactionForID(storeTransactionID);
+                    if (written) {
+                        amproj_writeImportBreadcrumb(storeTransactionID,
+                                                     finished.fingerprint,
+                                                     @"completed",
+                                                     @"865_project_store",
+                                                     nil, nil, nil);
+                        amproj_showImportStatusForTransaction(
+                            [NSString stringWithFormat:
+                                @"AMProj · 4/4 已写入项目《%@》（865 直写）。若列表未立即出现，请重启应用",
+                                projectTitle ?: storeName],
+                            NO, storeTransactionID);
+                        amproj_releaseImportTransaction(storeTransactionID, YES);
+                    } else {
+                        amproj_retryImportURL = finished.archiveURL ?: storeURL;
+                        amproj_retryImportName = [storeName copy];
+                        amproj_writeImportBreadcrumb(storeTransactionID,
+                                                     finished.fingerprint,
+                                                     @"failed",
+                                                     @"865_project_store",
+                                                     nil, nil,
+                                                     @"写入 Alight Motion 项目库失败，缓存包已保留");
+                        amproj_showImportStatusForTransaction(
+                            @"AMProj · 865 直写导入失败，缓存包已保留",
+                            YES, storeTransactionID);
+                        amproj_presentImportErrorOfferingPicker(
+                            @"项目包校验通过，但写入 Alight Motion 项目库时失败，缓存包已保留。可点击“重试”。",
+                            YES);
+                        amproj_releaseImportTransaction(storeTransactionID, NO);
+                    }
+                    amproj_resumeQueuedImports(@"865_store_done");
+                });
+            });
+#endif
+            return;
+        }
         if (!amproj_pendingImportQueue) {
             amproj_pendingImportQueue = [NSMutableArray array];
         }
