@@ -2917,7 +2917,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             disabled.index('AMProjRegisterNativePackageImportStarter(\n'),
         )
 
-    def test_build_865_import_and_picker_hooks_return_before_swizzling(self):
+    def test_engine_import_and_picker_hooks_route_and_865_stays_off_private_swizzles(self):
         picker = function_body(
             'static void amproj_installNativeProjectPickerHook(void)',
             'static void amproj_installImportHook(void)',
@@ -2926,11 +2926,14 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             'static void amproj_installImportHook(void)',
             'static void amproj_installShareExportHook(void)',
         )
+        # The document picker hook is build independent: it is installed for
+        # every engine build (862 and 865) so a picked .amproj/.xml reaches the
+        # local transaction engine instead of Alight Motion's online page.
         for body, marker in (
             (picker, 'amproj_log865LegacyPathDisabled(@"native_document_picker")'),
             (import_hook, 'amproj_log865LegacyPathDisabled(@"import_hooks")'),
         ):
-            gate = body.index('if (!amproj_runtimeUsesLegacyImportHooks())')
+            gate = body.index('if (!amproj_runtimeUsesLocalImportEngine())')
             marker_index = body.index(marker, gate)
             return_index = body.index('return;', marker_index)
             self.assertLess(gate, marker_index)
@@ -2938,11 +2941,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('amproj_installNativeProjectPickerHook();', import_hook)
         self.assertGreater(import_hook.index('amproj_installNativeProjectPickerHook();'),
                            import_hook.index('return;'))
+        # Build 865 must not install the 862 cold-launch/declared-URL swizzles.
+        eight65_guard = import_hook.index('if (!amproj_runtimeUsesLegacyImportHooks())')
+        cold_launch = import_hook.index('amproj_installColdLaunchHook();')
+        self.assertLess(eight65_guard, cold_launch)
+        self.assertIn('return;', import_hook[eight65_guard:cold_launch])
         proxy = function_body(
             'static void amproj_attachNativeXMLPickerProxy',
             'static void amproj_presentImportDocumentPicker',
         )
-        gate = proxy.index('if (!amproj_runtimeUsesLegacyImportHooks())')
+        gate = proxy.index('if (!amproj_runtimeUsesLocalImportEngine())')
         return_index = proxy.index('return;', gate)
         picker_check = proxy.index('UIDocumentPickerViewController.class')
         delegate_write = proxy.index('picker.delegate = proxy')
@@ -3025,7 +3033,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('existing.fallbackPresented', flow_notice)
         self.assertIn('Do not replace it when the URL re-enters', flow_notice)
 
-    def test_build_865_scene_callback_stages_and_forwards_same_context_once(self):
+    def test_build_865_scene_callback_consumes_projects_and_forwards_the_rest(self):
         scene = function_body(
             'static void hooked_sceneOpenURLContexts',
             'static void (*orig_projectsImportAlertViewDidLoad)',
@@ -3033,22 +3041,19 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         public_start = scene.index('if (amproj_runtimeUsesPublic865ImportHooks())')
         legacy_start = scene.index('NSMutableSet *passthroughContexts', public_start)
         public = scene[public_start:legacy_start]
-        self.assertIn('amproj_stagePublic865ProjectURL(', public)
-        self.assertEqual(
-            public.count(
-                '((AMProjSceneOpenURLContextsIMP)original)(\n'
-                '                    self, _cmd, scene, URLContexts);'
-            ),
-            1,
-        )
-        self.assertNotIn('[passthroughContexts copy]', public)
-        self.assertNotIn('amproj_captureSystemProjectURL', public)
-        self.assertNotIn('amproj_handleImportCommandURL', public)
-        native_forward = public.index('self, _cmd, scene, URLContexts')
-        scope_release = public.index('stopAccessingSecurityScopedResource')
-        self.assertLess(native_forward, scope_release)
-        self.assertIn('@"same_context_object": @YES', public)
-        self.assertIn('@"consumed": @0', public)
+        # The 865 lane runs the local engine: command URLs and project documents
+        # are consumed; only the remaining contexts reach Alight Motion.
+        self.assertIn('amproj_handleImportCommandURL(', public)
+        self.assertIn('amproj_captureSystemProjectURL(', public)
+        self.assertIn('[forwardContexts copy]', public)
+        self.assertIn('@"engine": @"local_transaction"', public)
+        # No handoff staging and no native-route bookkeeping any more: the file
+        # never travels through the openURL handoff directory on 865.
+        self.assertNotIn('amproj_stagePublic865ProjectURL(', public)
+        self.assertNotIn('AMProjV865ProjectFlowRecordNativeRouteDispatched(', public)
+        self.assertNotIn('@"consumed": @0', public)
+        forward = public.index('((AMProjSceneOpenURLContextsIMP)original)(\n')
+        self.assertIn('[forwardContexts copy]', public[forward:forward + 120])
 
     def test_build_865_scene_cold_launch_stages_without_deferred_replay(self):
         recorder = function_body(
@@ -3200,7 +3205,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('if (!window.rootViewController)', scan)
         self.assertIn('window.hidden = YES;', scan)
 
-    def test_build_865_does_not_scan_inboxes_or_replay_deferred_urls(self):
+    def test_engine_builds_scan_inboxes_and_replay_deferred_urls(self):
+        # 865 joined the local import engine: Inbox files and deferred launch
+        # candidates replay through the plugin's own transaction chain instead
+        # of being left to Alight Motion's original handlers.
         for signature, marker in (
             (
                 'static void amproj_scanLocalImportInboxes',
@@ -3217,21 +3225,33 @@ class NativeImportRouteSourceTests(unittest.TestCase):
                 if signature.startswith('static void amproj_scanLocalImportInboxes')
                 else 'static BOOL amproj_captureSystemProjectURL',
             )
-            gate = body.index('if (!amproj_runtimeUsesLegacyImportHooks())')
+            gate = body.index('if (!amproj_runtimeUsesLocalImportEngine())')
             marker_index = body.index(marker, gate)
             self.assertLess(marker_index, body.index('return;', marker_index))
         bootstrap = function_body(
             'static void amproj_bootstrapAfterLaunch',
             '__attribute__((constructor))',
         )
-        self.assertIn('if (amproj_runtimeUsesLegacyImportHooks())', bootstrap)
+        self.assertIn('if (amproj_runtimeUsesLocalImportEngine())', bootstrap)
         self.assertIn('amproj_log865LegacyPathDisabled(@"bootstrap_import_scan")', bootstrap)
         self.assertLess(
             bootstrap.index('amproj_log865LegacyPathDisabled(@"bootstrap_import_scan")'),
             bootstrap.index('amproj_debugEvent(@"bootstrap.ready"'),
         )
+        # The did-become-active replay must run for engine builds: the gate is
+        # checked directly in SOURCE (the observer is registered outside the
+        # bootstrap function body).
+        active_gate = SOURCE.index(
+            'if (amproj_runtimeUsesLocalImportEngine()) {\n'
+            '                // The launch URL is the current user action.'
+        )
+        replay = SOURCE[active_gate:active_gate + 900]
+        self.assertIn('amproj_retryDeferredLaunchImportCandidates();', replay)
+        self.assertIn(
+            'amproj_scanLocalImportInboxes(@"did_become_active", nil);', replay
+        )
 
-    def test_build_865_cloud_project_callback_uses_public_handoff(self):
+    def test_build_865_cloud_project_callback_enters_local_engine(self):
         bootstrap = function_body(
             'static void amproj_bootstrapAfterLaunch',
             '__attribute__((constructor))',
@@ -3260,12 +3280,14 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn('AMCloudSyncInstallAsync(', legacy_branch)
         self.assertIn('AMCloudSyncInstall(nil);', unknown_branch)
         cloud = SOURCE[SOURCE.index('static void amproj_importCloudPackage') :]
+        # The 865 branch feeds the verified download straight into the local
+        # transaction engine; the openURL handoff is gone for this build.
         self.assertIn('if (amproj_runtimeIsBuild865())', cloud)
-        self.assertIn('AMProjV865ProjectFlowStageDocumentAsync', cloud)
-        self.assertIn('AMProjV865ProjectHandoffStatusRouteAccepted', cloud)
-        self.assertIn('AMProjV865ProjectHandoffStatusFallbackPresented', cloud)
-        self.assertIn('@"handoff_status":', cloud)
-        self.assertIn('@"import_confirmed": @NO', cloud)
+        self.assertIn('amproj_handleIncomingProjectURLSafely(', cloud)
+        self.assertIn('@"cloud_download_865"', cloud)
+        self.assertIn('@"engine": @"local_transaction"', cloud)
+        self.assertIn('@"import_completed": @NO', cloud)
+        self.assertNotIn('AMProjV865ProjectFlowStageDocumentAsync', cloud)
         self.assertNotIn('AMProjV865ProjectFlowQueueDownloadedProject', cloud)
         self.assertIn('amproj_runtimeUsesLegacyImportHooks()', cloud)
 

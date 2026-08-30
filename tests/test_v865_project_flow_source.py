@@ -209,16 +209,21 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn('project_package_boundary_and_account_replacement', installer)
         self.assertNotIn("amproj_installShareExportHook", installer)
 
-    def test_cloud_download_uses_865_handoff_and_862_stays_gated(self):
+    def test_cloud_download_enters_865_engine_and_862_stays_gated(self):
         cloud = EXPORT[EXPORT.index("static void amproj_importCloudPackage") :]
         self.assertIn("amproj_runtimeIsBuild865()", cloud)
-        self.assertIn("AMProjV865ProjectFlowStageDocumentAsync", cloud)
-        self.assertIn("AMProjV865ProjectHandoffStatusRouteAccepted", cloud)
-        self.assertIn("AMProjV865ProjectHandoffStatusFallbackPresented", cloud)
-        self.assertIn('@"handoff_status":', cloud)
-        self.assertIn('@"import_confirmed": @NO', cloud)
+        # The 865 branch feeds the verified download into the local transaction
+        # engine. It reports "accepted" (entered the queue), never "imported":
+        # the transaction itself owns the honest terminal state.
+        self.assertIn("amproj_handleIncomingProjectURLSafely(", cloud)
+        self.assertIn("&prepared", cloud)
+        self.assertIn('@"cloud_download_865"', cloud)
+        self.assertIn('@"engine": @"local_transaction"', cloud)
+        self.assertIn('@"import_completed": @NO', cloud)
+        self.assertIn('云工程未能进入本地导入队列', cloud)
+        self.assertNotIn("AMProjV865ProjectFlowStageDocumentAsync", cloud)
+        self.assertNotIn("AMProjV865ProjectHandoffStatusRouteAccepted", cloud)
         self.assertNotIn("AMProjV865ProjectFlowQueueDownloadedProject", cloud)
-        self.assertIn('legacy_862_bridge": @NO', cloud)
         self.assertIn("amproj_runtimeUsesLegacyImportHooks()", cloud)
         self.assertIn("amproj_log865LegacyPathDisabled", cloud)
         self.assertIn("AMProjIncomingCleanupURL", cloud)

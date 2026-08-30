@@ -209,6 +209,17 @@ static BOOL amproj_runtimeUsesPublic865ImportHooks(void) {
     return amproj_runtimeIsBuild865();
 }
 
+// The local import engine (validation, XML wrap, staging, transaction UI and
+// breadcrumb evidence) is build independent.  It was historically gated to the
+// verified 862 ABI because that was the only build whose native importer could
+// finish a transaction.  6.2.58 (865) now runs the same engine so every
+// XML/.amproj entry lands in the plugin's own chain instead of Alight Motion's
+// online import page.  The final native dispatch step still refuses to run on
+// 865 and reports the engine state honestly instead of forwarding or faking.
+static BOOL amproj_runtimeUsesLocalImportEngine(void) {
+    return amproj_runtimeUsesLegacyImportHooks() || amproj_runtimeIsBuild865();
+}
+
 static void amproj_log865LegacyPathDisabled(NSString *component) {
     static NSObject *lock;
     static dispatch_once_t lockOnce;
@@ -4943,8 +4954,8 @@ static NSURL *amproj_singleNativePickerProjectURL(
 static BOOL amproj_routeNativeProjectPicker(
     UIDocumentPickerViewController *picker, NSArray<NSURL *> *URLs,
     NSString *selectorName) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
-        // Non-legacy builds keep the picker delegate owned by Alight Motion.
+    if (!amproj_runtimeUsesLocalImportEngine()) {
+        // Non-engine builds keep the picker delegate owned by Alight Motion.
         // Returning NO lets the validation proxy forward the callback once.
         amproj_log865LegacyPathDisabled(@"native_picker_route");
         return NO;
@@ -5107,8 +5118,9 @@ static void amproj_finishOriginalPickerAsCancelled(
 @end
 
 static void amproj_attachNativeXMLPickerProxy(UIViewController *controller) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
-        // 6.2.58 owns the complete document picker/delegate lifecycle.
+    if (!amproj_runtimeUsesLocalImportEngine()) {
+        // Builds without the local engine own the complete document
+        // picker/delegate lifecycle.
         amproj_log865LegacyPathDisabled(@"native_xml_picker_proxy");
         return;
     }
@@ -5753,7 +5765,7 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
 }
 
 static void amproj_activateNextPendingImport(void) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"pending_import_activation");
         return;
     }
@@ -7352,7 +7364,7 @@ static void amproj_captureActivatedPackageBaselines(NSURL *URL,
 static void amproj_enqueueXMLTemplateImport(NSURL *URL,
                                              NSString *name,
                                              NSString *transactionID) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"xml_template_queue");
         return;
     }
@@ -7379,7 +7391,7 @@ static void amproj_enqueueXMLTemplateImport(NSURL *URL,
 }
 
 static void amproj_pumpXMLTemplateImports(void) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"xml_template_pump");
         return;
     }
@@ -7967,7 +7979,7 @@ static void amproj_beginXMLTemplateImport(NSURL *URL,
                                           NSString *name,
                                           NSString *transactionID,
                                           NSUInteger attempt) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"xml_template_begin");
         return;
     }
@@ -10455,12 +10467,58 @@ static void amproj_finishImportAuthorizationDenied(NSUInteger generation,
 #endif
 
 static void amproj_tryDispatchPendingImport(NSUInteger generation) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"pending_import_dispatch");
         return;
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (generation != amproj_pendingImportGeneration || !amproj_pendingImportURL) return;
+
+        if (amproj_runtimeIsBuild865() && !amproj_nativePackageImportStarter) {
+            // Build 865's native importer is an async Swift closure chain whose
+            // context captures Alight Motion's own cloud-download objects. It
+            // cannot be invoked from the plugin, and the previous handoff loop
+            // never imported anything. Fail the transaction here, on evidence:
+            // the file is validated and retained, and no success is claimed.
+            NSString *name = amproj_pendingImportName ?: @"project.amproj";
+            AMProjImportTransaction *unreachable =
+                amproj_importTransactionForID(amproj_pendingImportTransactionID);
+            BOOL XML = [name.pathExtension.lowercaseString isEqualToString:@"xml"] ||
+                (unreachable && unreachable.kind == AMProjImportKindXMLTemplate);
+            amproj_retryImportURL = unreachable.archiveURL;
+            amproj_retryImportName = [name copy];
+            amproj_writeImportBreadcrumb(amproj_pendingImportTransactionID,
+                                         unreachable.fingerprint,
+                                         @"failed", unreachable.source,
+                                         nil, nil,
+                                         @"Build 865 native importer is unreachable from the plugin; package validated and retained");
+            amproj_releaseImportTransaction(amproj_pendingImportTransactionID, NO);
+            amproj_pendingImportURL = nil;
+            amproj_pendingImportName = nil;
+            amproj_pendingImportTransactionID = nil;
+            amproj_activeNativeImportGeneration = 0;
+            amproj_activeNativeImportTransactionID = nil;
+            amproj_pendingImportDeadline = 0;
+            amproj_importDispatchCoolingDown = NO;
+            amproj_importProjectRowBaselineCount = -1;
+            amproj_debugEvent(@"import.865_native_importer_unreachable", @{
+                @"filename": name,
+                @"kind": XML ? @"xml_template" : @"amproj_package",
+                @"validated_and_retained": @YES,
+                @"import_completed": @NO
+            });
+            amproj_showImportStatusForTransaction(
+                XML ? @"AMProj · XML 已校验，但 865 原生导入引擎尚未接通"
+                    : @"AMProj · 项目包已校验，但 865 原生导入引擎尚未接通",
+                YES, transactionID);
+            amproj_presentImportErrorOfferingPicker(
+                XML
+                    ? @"XML 已通过完整校验并保留在本机缓存。6.2.58 的原生导入入口无法从插件调用（其导入闭包依赖 AM 内部云下载对象），因此本次没有写入项目，也不会伪装成功。可点击“重试”或“选择 XML 文件”。"
+                    : @"项目包已通过完整校验并保留在本机缓存。6.2.58 的原生导入入口无法从插件调用（其导入闭包依赖 AM 内部云下载对象），因此本次没有写入项目，也不会伪装成功。可点击“重试”或“选择项目包”。",
+                YES);
+            amproj_resumeQueuedImports(@"native_importer_unreachable");
+            return;
+        }
 
         if (AMProjNativePackageImportBridgeRequiresRestart()) {
             amproj_pauseForNativeBridgeRestart(
@@ -10752,7 +10810,7 @@ static void amproj_tryDispatchPendingImport(NSUInteger generation) {
 
 static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                                        NSString *transactionID) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"prepared_import_queue");
         return;
     }
@@ -10827,7 +10885,7 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
 }
 
 static void amproj_resumeQueuedImports(NSString *source) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"queued_import_resume");
         return;
     }
@@ -10973,8 +11031,8 @@ static BOOL amproj_URLIsInDocumentsInbox(NSURL *URL) {
 static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
     NSURL *URL, NSString *source, NSDictionary *options, BOOL *prepared) {
     if (prepared) *prepared = NO;
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
-        // No non-legacy build may stage a provider URL into the 862 queue or
+    if (!amproj_runtimeUsesLocalImportEngine()) {
+        // No non-engine build may stage a provider URL into the 862 queue or
         // invoke the private PackageImporter continuation.
         amproj_log865LegacyPathDisabled(@"incoming_project_url");
         return AMProjIncomingURLNotRecognized;
@@ -11335,25 +11393,33 @@ static void amproj_importCloudPackage(NSURL *URL, NSString *filename,
         return;
     }
     if (amproj_runtimeIsBuild865()) {
-        // Build 865 stages the file on a utility queue. UIKit is entered only
-        // after the copy completion returns to the main thread.
-        AMProjV865ProjectFlowStageDocumentAsync(
-            URL, filename.length ? filename : @"project.amproj", nil,
-            ^(AMProjV865ProjectHandoffStatus handoffStatus, NSError *error) {
-                BOOL staged = handoffStatus == AMProjV865ProjectHandoffStatusRouteAccepted ||
-                    handoffStatus == AMProjV865ProjectHandoffStatusFallbackPresented ||
-                    handoffStatus == AMProjV865ProjectHandoffStatusUnverified;
-                amproj_debugEvent(@"cloud.import_865_handoff", @{
-                    @"staged": @(staged),
-                    @"handoff_status":
-                        AMProjV865ProjectFlowHandoffStatusString(handoffStatus),
-                    @"import_confirmed": @NO,
-                    @"filename": filename ?: @"",
-                    @"native_document_route": @YES,
-                    @"legacy_862_bridge": @NO
-                });
-                if (completion) completion(staged, error);
-            });
+        // Build 865 feeds the downloaded package straight into the local
+        // import engine. The previous openURL handoff bounced the file back
+        // through LaunchServices without ever importing it.
+        NSDictionary *options = @{
+            @"AMProjOriginalFilename": filename.length ? filename : @"project.amproj",
+            @"AMProjPreserveSource": @YES,
+            @"AMProjIncomingCleanupURL": cleanupURL ?: URL
+        };
+        BOOL prepared = NO;
+        AMProjIncomingURLResult result = amproj_handleIncomingProjectURLSafely(
+            URL, @"cloud_download_865", options, &prepared);
+        BOOL accepted = result == AMProjIncomingURLAccepted;
+        amproj_debugEvent(@"cloud.import_865_engine", @{
+            @"accepted": @(accepted),
+            @"prepared": @(prepared),
+            @"filename": filename ?: @"",
+            @"import_completed": @NO,
+            @"engine": @"local_transaction"
+        });
+        if (completion) {
+            completion(accepted,
+                       accepted ? nil :
+                       [NSError errorWithDomain:@"com.amproj.cloud-import"
+                                           code:3
+                                       userInfo:@{NSLocalizedDescriptionKey:
+                                           @"云工程未能进入本地导入队列"}]);
+        }
         return;
     }
     if (!amproj_runtimeUsesLegacyImportHooks()) {
@@ -11606,9 +11672,9 @@ static BOOL amproj_scanShareInboxNow(NSString *source, NSString *requestedID) {
 }
 
 static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
-        // Non-legacy builds must not consume Inbox files and replay them through the old
-        // staging queue. UIKit/AM owns document delivery on this build.
+    if (!amproj_runtimeUsesLocalImportEngine()) {
+        // Builds without the local engine must not consume Inbox files; AM
+        // owns document delivery there.
         amproj_log865LegacyPathDisabled(@"local_import_inbox_scan");
         return;
     }
@@ -11680,7 +11746,7 @@ static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID)
 }
 
 static void amproj_retryDeferredLaunchImportCandidates(void) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"deferred_launch_import");
         return;
     }
@@ -11904,6 +11970,17 @@ static NSURL *amproj_stagePublic865ProjectURL(
         !amproj_isIncomingProjectURL(URL, options)) {
         return nil;
     }
+    if (amproj_runtimeUsesLocalImportEngine()) {
+        // The local import engine owns the synchronous copy while the system
+        // callback's security scope is valid. Staging a second handoff copy
+        // here would double every large download, so report the engine route
+        // and stage nothing.
+        amproj_logCriticalEvent(@"import.865_public_stage_skipped_for_engine", @{
+            @"source": source ?: @"public_document_callback",
+            @"filename": URL.lastPathComponent ?: @""
+        });
+        return nil;
+    }
     NSString *filename = [options[@"AMProjOriginalFilename"]
         isKindOfClass:NSString.class] ? options[@"AMProjOriginalFilename"]
                                       : URL.lastPathComponent;
@@ -11934,12 +12011,16 @@ static NSURL *amproj_stagePublic865ProjectURL(
 
 static BOOL amproj_captureSystemProjectURL(NSURL *URL, NSString *source,
                                            NSDictionary *systemOptions) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         // Returning NO preserves the original AppDelegate/SceneDelegate
         // callback and prevents a second consumer from touching the URL.
         amproj_log865LegacyPathDisabled(@"system_project_url_capture");
         return NO;
     }
+    // Build 865 consumes recognized project documents in the plugin's own
+    // transaction engine. Alight Motion's original openURL handler only offers
+    // the online import page for XML and does nothing for .amproj, so the
+    // callback must not be forwarded once the engine claimed the file.
     if (!amproj_isIncomingProjectURL(URL, systemOptions)) return NO;
     NSMutableDictionary *options = systemOptions
         ? [systemOptions mutableCopy] : [NSMutableDictionary dictionary];
@@ -12297,7 +12378,8 @@ static NSArray<NSURL *> *amproj_recordLaunchImportCandidates(
     NSDictionary *launchOptions, NSString *source) {
     NSMutableArray<NSURL *> *scopedURLs = [NSMutableArray array];
     if (![launchOptions isKindOfClass:NSDictionary.class]) return scopedURLs;
-    if (amproj_runtimeUsesPublic865ImportHooks()) {
+    if (amproj_runtimeUsesPublic865ImportHooks() &&
+        !amproj_runtimeUsesLocalImportEngine()) {
         __block NSUInteger stagedCount = 0;
         void (^stageCandidate)(NSURL *, NSString *, NSDictionary *) =
             ^(NSURL *candidateURL, NSString *candidateSource,
@@ -12444,11 +12526,10 @@ static void amproj_restageFailedLaunchImportCandidates(
 static NSDictionary *amproj_launchOptionsForNativeAppDelegate(
     NSDictionary *launchOptions) {
     if (![launchOptions isKindOfClass:NSDictionary.class]) return launchOptions;
-    if (amproj_runtimeUsesPublic865ImportHooks()) {
-        // Build 865 stages a durable copy but keeps the public launch payload
-        // untouched so Alight Motion remains the only native consumer.
-        return launchOptions;
-    }
+    // Every engine build (865 included) removes recognized project documents
+    // from the forwarded startup payload. Otherwise Alight Motion's original
+    // launch route would open the online XML import page or silently ignore
+    // the .amproj file while the plugin's own transaction is still running.
     NSMutableDictionary *filtered = [launchOptions mutableCopy];
     NSURL *launchURL = launchOptions[UIApplicationLaunchOptionsURLKey];
     BOOL removedProjectLaunchURL = NO;
@@ -12624,7 +12705,7 @@ static BOOL hooked_applicationDidFinish(id self, SEL _cmd, UIApplication *applic
     // Some providers become readable only after AM finishes initialization.
     // Retry only candidates that are still failed; a successful openURL
     // delivery removes its failed candidate before this point.
-    if (amproj_runtimeUsesLegacyImportHooks()) {
+    if (amproj_runtimeUsesLocalImportEngine()) {
         amproj_restageFailedLaunchImportCandidates(
             launchOptions, @"application_did_finish_after_native");
     }
@@ -12834,7 +12915,8 @@ static NSArray<NSURL *> *amproj_recordSceneConnectionCandidates(
     if (!connectionOptions) return scopedURLs;
     NSUInteger URLCount = 0;
     NSUInteger activityCount = 0;
-    BOOL public865 = amproj_runtimeUsesPublic865ImportHooks();
+    BOOL public865 = amproj_runtimeUsesPublic865ImportHooks() &&
+        !amproj_runtimeUsesLocalImportEngine();
     for (UIOpenURLContext *context in connectionOptions.URLContexts) {
         if (![context isKindOfClass:UIOpenURLContext.class] || !context.URL) continue;
         NSMutableDictionary *options = [NSMutableDictionary dictionary];
@@ -13059,14 +13141,21 @@ static void hooked_sceneOpenURLContexts(id self, SEL _cmd, UIScene *scene,
     }
 
     if (amproj_runtimeUsesPublic865ImportHooks()) {
-        NSMutableArray<NSURL *> *projectURLs = [NSMutableArray array];
-        NSMutableArray<NSURL *> *scopedURLs = [NSMutableArray array];
-        NSUInteger stagedCount = 0;
+        // Build 865 consumes recognized project URLs through the local import
+        // engine and forwards only the remaining contexts to Alight Motion.
+        // The previous loop staged a handoff copy and then forwarded the very
+        // same contexts, so AM's original route (online XML page, silent
+        // .amproj handling) still owned the outcome.
+        NSUInteger consumedCount = 0;
+        NSMutableArray<NSURL *> *forwardContexts = [NSMutableArray array];
         for (id context in URLContexts) {
             UIOpenURLContext *openContext =
                 [context isKindOfClass:UIOpenURLContext.class] ? context : nil;
             NSURL *URL = openContext.URL;
-            if (!URL) continue;
+            if (!URL) {
+                [forwardContexts addObject:context];
+                continue;
+            }
             NSMutableDictionary *options = [NSMutableDictionary dictionary];
             UISceneOpenURLOptions *sceneOptions = openContext.options;
             options[UIApplicationOpenURLOptionsOpenInPlaceKey] =
@@ -13075,47 +13164,42 @@ static void hooked_sceneOpenURLContexts(id self, SEL _cmd, UIScene *scene,
                 options[UIApplicationOpenURLOptionsSourceApplicationKey] =
                     sceneOptions.sourceApplication;
             }
-            if (!amproj_isIncomingProjectURL(URL, options)) continue;
+            if (!amproj_isIncomingProjectURL(URL, options)) {
+                [forwardContexts addObject:context];
+                continue;
+            }
             BOOL heldSecurityScope =
                 !AMProjV865ProjectFlowIsManagedStagedURL(URL)
                 ? [URL startAccessingSecurityScopedResource] : NO;
-            if (heldSecurityScope) [scopedURLs addObject:URL];
-            NSError *stageError = nil;
-            NSURL *stagedURL = amproj_stagePublic865ProjectURL(
-                URL, @"scene_open_url_contexts", options,
-                heldSecurityScope, &stageError);
-            [projectURLs addObject:stagedURL ?: URL];
-            if (stagedURL) stagedCount++;
+            BOOL consumed = amproj_handleImportCommandURL(
+                URL, @"scene_open_url_contexts_command") ||
+                amproj_captureSystemProjectURL(
+                    URL, @"scene_open_url_contexts", options);
+            if (heldSecurityScope) [URL stopAccessingSecurityScopedResource];
+            if (consumed) {
+                consumedCount++;
+            } else {
+                [forwardContexts addObject:context];
+            }
         }
         BOOL forwarded = NO;
-        if (original && original != (IMP)hooked_sceneOpenURLContexts) {
+        if (forwardContexts.count &&
+            original && original != (IMP)hooked_sceneOpenURLContexts) {
             amproj_sceneOpenURLForwardDepth += 1;
             @try {
                 ((AMProjSceneOpenURLContextsIMP)original)(
-                    self, _cmd, scene, URLContexts);
+                    self, _cmd, scene, [forwardContexts copy]);
                 forwarded = YES;
             } @finally {
                 amproj_sceneOpenURLForwardDepth -= 1;
-                for (NSURL *scopedURL in scopedURLs) {
-                    [scopedURL stopAccessingSecurityScopedResource];
-                }
-            }
-        } else {
-            for (NSURL *scopedURL in scopedURLs) {
-                [scopedURL stopAccessingSecurityScopedResource];
             }
         }
-        for (NSURL *projectURL in projectURLs) {
-            AMProjV865ProjectFlowRecordNativeRouteDispatched(
-                projectURL, @"scene_open_url_contexts", forwarded);
-        }
-        amproj_debugEvent(@"import.865_scene_forward", @{
+        amproj_debugEvent(@"import.865_scene_partition", @{
             @"received": @(URLContexts.count),
-            @"recognized": @(projectURLs.count),
-            @"staged": @(stagedCount),
-            @"forwarded": @(forwarded),
-            @"same_context_object": @YES,
-            @"consumed": @0
+            @"consumed": @(consumedCount),
+            @"forwarded": @(forwardContexts.count),
+            @"native_forwarded": @(forwarded),
+            @"engine": @"local_transaction"
         });
         return;
     }
@@ -15889,6 +15973,22 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         // here. On 6.2.58 those callbacks can be Swift-owned and are outside
         // the verified 862 ABI; touching them has caused XML picker/export
         // crashes even though the original presentation itself is valid.
+        //
+        // The one exception is the document picker delegate proxy: with the
+        // local engine enabled, a picked .amproj/.xml must enter the plugin's
+        // transaction chain instead of Alight Motion's online upload page.
+        // The proxy only rewrites delegate callbacks and never wraps the
+        // presentation completion.
+        if (amproj_runtimeUsesLocalImportEngine() &&
+            [controller isKindOfClass:UIDocumentPickerViewController.class]) {
+            @try { amproj_attachNativeXMLPickerProxy(controller); }
+            @catch (NSException *exception) {
+                amproj_logCriticalEvent(@"import.picker_proxy_exception", @{
+                    @"name": exception.name ?: @"NSException",
+                    @"reason": exception.reason ?: @""
+                });
+            }
+        }
         amproj_log865LegacyPathDisabled(@"presentation_interception");
         orig_presentVC(self, _cmd, controller, animated, completion);
         return;
@@ -17208,7 +17308,7 @@ static void amproj_installSceneImportHook(id sceneDelegate) {
 }
 
 static void amproj_installNativeProjectPickerHook(void) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
+    if (!amproj_runtimeUsesLocalImportEngine()) {
         amproj_log865LegacyPathDisabled(@"native_document_picker");
         return;
     }
@@ -17245,14 +17345,26 @@ static void amproj_installNativeProjectPickerHook(void) {
 }
 
 static void amproj_installImportHook(void) {
-    if (!amproj_runtimeUsesLegacyImportHooks()) {
-        // Non-legacy builds must keep Alight Motion's own document and delegate
-        // lifecycle. The import hook below relies on the 862 private ABI and
-        // can otherwise consume a URL twice or call a stale Swift callback.
+    if (!amproj_runtimeUsesLocalImportEngine()) {
+        // Builds without the local engine must keep Alight Motion's own
+        // document and delegate lifecycle untouched.
         amproj_log865LegacyPathDisabled(@"import_hooks");
         return;
     }
+    // The document picker hook is build independent: it only routes a picked
+    // .amproj/.xml into the local engine and forwards every other selection.
     amproj_installNativeProjectPickerHook();
+    if (!amproj_runtimeUsesLegacyImportHooks()) {
+        // Build 865: launch and declared-URL delivery run through the public
+        // AppDelegate/Scene hooks instead of the 862 swizzles above, and the
+        // private native importer observation must stay off.
+        amproj_debugEvent(@"import.engine_hooks_865_scope", @{
+            @"picker_hook": @YES,
+            @"cold_launch_swizzles": @NO,
+            @"declared_url_swizzles": @NO
+        });
+        return;
+    }
     (void)amproj_installColdLaunchHook();
     (void)amproj_installRuntimeColdLaunchHook();
     (void)amproj_installDeclaredURLHooks();
@@ -17719,7 +17831,7 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                         interruptedStage], YES);
                 }
             }
-            if (amproj_runtimeUsesLegacyImportHooks()) {
+            if (amproj_runtimeUsesLocalImportEngine()) {
                 amproj_purgeOldDirectExports();
                 amproj_purgeOldImports();
                 if (!amproj_hasDeferredLaunchImportCandidates()) {
@@ -17874,7 +17986,7 @@ static void AMProjExportInit(void) {
             amproj_startStartupPaywallRescue();
             amproj_schedulePaywallScan(nil, @"did_become_active");
             amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active");
-            if (amproj_runtimeUsesLegacyImportHooks()) {
+            if (amproj_runtimeUsesLocalImportEngine()) {
                 // The launch URL is the current user action. Consume its deferred
                 // candidate first; only then inspect stale app-owned Inbox files.
                 amproj_retryDeferredLaunchImportCandidates();
