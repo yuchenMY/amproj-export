@@ -16,6 +16,15 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="ut
 
 
 class V865ProjectFlowSourceTests(unittest.TestCase):
+    def test_865_public_stage_uses_arc_safe_error_writeback(self):
+        start = EXPORT.index("static NSURL *amproj_stagePublic865ProjectURL(")
+        end = EXPORT.index("static BOOL amproj_captureSystemProjectURL", start)
+        stage = EXPORT[start:end]
+        self.assertIn("NSError *__autoreleasing *error", stage)
+        self.assertIn("if (error)", stage)
+        self.assertIn("__autoreleasing NSError *localError = nil", stage)
+        self.assertNotIn("error ?: &localError", stage)
+
     def test_865_packager_uses_version_neutral_cloud_contract(self):
         self.assertIn("cloud_payload_contract", MIGRATION)
         self.assertNotIn("import build_862_direct_package", MIGRATION)

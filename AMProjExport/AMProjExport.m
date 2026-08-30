@@ -123,6 +123,8 @@ static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID)
 static void amproj_installImportHook(void);
 static void amproj_installPublic865ImportHooks(void);
 static void amproj_installPublic865SceneHooksForClass(Class cls);
+static void amproj_recordPublic865LaunchNativeRoute(
+    NSDictionary *launchOptions, NSString *source, BOOL forwarded);
 static void amproj_installNativeProjectPickerHook(void);
 static Class amproj_declaredAppDelegateClass(void);
 static void amproj_installApplicationDelegateHook(void);
@@ -11897,7 +11899,7 @@ static void amproj_removeFailedDeferredLaunchCandidateForURL(NSURL *URL,
 
 static NSURL *amproj_stagePublic865ProjectURL(
     NSURL *URL, NSString *source, NSDictionary *options,
-    BOOL securityScopeAlreadyActive, NSError **error) {
+    BOOL securityScopeAlreadyActive, NSError *__autoreleasing *error) {
     if (!amproj_runtimeUsesPublic865ImportHooks() ||
         !amproj_isIncomingProjectURL(URL, options)) {
         return nil;
@@ -11905,12 +11907,20 @@ static NSURL *amproj_stagePublic865ProjectURL(
     NSString *filename = [options[@"AMProjOriginalFilename"]
         isKindOfClass:NSString.class] ? options[@"AMProjOriginalFilename"]
                                       : URL.lastPathComponent;
-    NSError *localError = nil;
-    NSError **errorTarget = error ?: &localError;
-    NSURL *stagedURL = AMProjV865ProjectFlowStageIncomingDocument(
-        URL, filename, source.length ? source : @"public_document_callback",
-        securityScopeAlreadyActive, errorTarget);
-    NSError *reportedError = error ? *error : localError;
+    NSURL *stagedURL = nil;
+    NSError *reportedError = nil;
+    if (error) {
+        stagedURL = AMProjV865ProjectFlowStageIncomingDocument(
+            URL, filename, source.length ? source : @"public_document_callback",
+            securityScopeAlreadyActive, error);
+        reportedError = *error;
+    } else {
+        __autoreleasing NSError *localError = nil;
+        stagedURL = AMProjV865ProjectFlowStageIncomingDocument(
+            URL, filename, source.length ? source : @"public_document_callback",
+            securityScopeAlreadyActive, &localError);
+        reportedError = localError;
+    }
     amproj_logCriticalEvent(@"import.865_public_stage", @{
         @"source": source ?: @"public_document_callback",
         @"filename": filename ?: @"",
