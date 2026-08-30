@@ -10662,7 +10662,7 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                                        options:0
                                          range:NSMakeRange(sceneRange.location, 400)];
     if (modifiedRange.location != NSNotFound && modifiedRange.location < rootTagRange.location) {
-        NSRange valueStart = NSMaxRange(modifiedRange);
+        NSUInteger valueStart = NSMaxRange(modifiedRange);
         NSRange valueEnd = [xml rangeOfString:@"\\\""
                                       options:0
                                         range:NSMakeRange(valueStart,
@@ -10681,7 +10681,7 @@ static NSData *amproj_v865StoreRewriteSceneXML(
     if (titleOut) {
         NSRange titleRange = [xml rangeOfString:@"title=\\\""];
         if (titleRange.location != NSNotFound && titleRange.location < 600) {
-            NSRange start = NSMaxRange(titleRange);
+            NSUInteger start = NSMaxRange(titleRange);
             NSRange end = [xml rangeOfString:@"\\\""
                                      options:0
                                        range:NSMakeRange(start, MIN(xml.length - start, 200))];
@@ -11206,7 +11206,7 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                 amproj_markImportTransactionState(
                     transactionID, AMProjImportTransactionCreatingProject);
             }
-            NSString *storeName = [name copy] ?: @"project.amproj";
+            NSString *storeName = [originalName copy] ?: @"project.amproj";
             NSString *storeTransactionID = [transactionID copy];
             NSURL *storeURL = [URL copy];
             amproj_showImportStatusForTransaction(
