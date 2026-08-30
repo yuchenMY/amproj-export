@@ -10,6 +10,32 @@ static NSString *const AMProjV865BreadcrumbFilename = @"last-handoff.plist";
 static const void *AMProjV865BrokerKey = &AMProjV865BrokerKey;
 static const unsigned long long AMProjV865MaximumDocumentBytes = 512ULL * 1024ULL * 1024ULL;
 
+@interface AMProjV865ProjectFlowRequest ()
+@property(nonatomic, readwrite, getter=isCancelled) BOOL cancelled;
+@end
+
+@implementation AMProjV865ProjectFlowRequest
+
+@synthesize cancelled = _cancelled;
+
+- (BOOL)isCancelled {
+    @synchronized (self) {
+        return _cancelled;
+    }
+}
+
+- (void)cancel {
+    @synchronized (self) {
+        _cancelled = YES;
+    }
+}
+
+@end
+
+static NSError *AMProjV865StageError(NSInteger code, NSString *message);
+typedef void (^AMProjV865RouteCompletion)(
+    AMProjV865ProjectHandoffStatus status, NSError * _Nullable error);
+
 static dispatch_queue_t AMProjV865StagingQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t onceToken;
@@ -34,6 +60,58 @@ static NSObject *AMProjV865HandoffLock(void) {
 
 static AMProjV865ProjectHandoffStatus amproj_v865LastHandoffStatus =
     AMProjV865ProjectHandoffStatusFailed;
+
+static NSObject *AMProjV865RequestRegistryLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static NSMutableDictionary<NSString *, AMProjV865ProjectFlowRequest *>
+*AMProjV865RequestRegistry(void) {
+    static NSMutableDictionary<NSString *, AMProjV865ProjectFlowRequest *> *requests;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ requests = [NSMutableDictionary dictionary]; });
+    return requests;
+}
+
+static NSString *AMProjV865RequestKey(NSURL *URL) {
+    if (!URL.isFileURL || !URL.path.length) return nil;
+    return URL.URLByStandardizingPath.path;
+}
+
+static void AMProjV865RegisterRequest(NSURL *URL,
+                                      AMProjV865ProjectFlowRequest *request) {
+    NSString *key = AMProjV865RequestKey(URL);
+    if (!key.length || !request) return;
+    @synchronized (AMProjV865RequestRegistryLock()) {
+        AMProjV865RequestRegistry()[key] = request;
+    }
+}
+
+static void AMProjV865UnregisterRequest(NSURL *URL,
+                                        AMProjV865ProjectFlowRequest *request) {
+    NSString *key = AMProjV865RequestKey(URL);
+    if (!key.length) return;
+    @synchronized (AMProjV865RequestRegistryLock()) {
+        AMProjV865ProjectFlowRequest *current = AMProjV865RequestRegistry()[key];
+        if (!request || current == request) {
+            [AMProjV865RequestRegistry() removeObjectForKey:key];
+        }
+    }
+}
+
+void AMProjV865ProjectFlowCancelDocument(NSURL *fileURL) {
+    NSString *key = AMProjV865RequestKey(fileURL);
+    if (!key.length) return;
+    AMProjV865ProjectFlowRequest *request = nil;
+    @synchronized (AMProjV865RequestRegistryLock()) {
+        request = AMProjV865RequestRegistry()[key];
+        [AMProjV865RequestRegistry() removeObjectForKey:key];
+    }
+    [request cancel];
+}
 
 NSString *AMProjV865ProjectFlowHandoffStatusString(
     AMProjV865ProjectHandoffStatus status) {
@@ -258,6 +336,7 @@ static NSURL *AMProjV865CopyDocument(NSURL *source, NSString *filename,
 @property(nonatomic, strong) NSURL *stagedURL;
 @property(nonatomic, weak) UIViewController *presenter;
 @property(nonatomic, strong) NSURL *cleanupDirectory;
+@property(nonatomic, strong) AMProjV865ProjectFlowRequest *request;
 @property(nonatomic) BOOL nativeRouteInFlight;
 @property(nonatomic) BOOL fallbackPresented;
 - (void)scheduleCleanup;
@@ -306,14 +385,24 @@ static UIViewController *AMProjV865PresenterForBroker(
 }
 
 static BOOL AMProjV865PresentOpenInFallback(
-    AMProjV865DocumentBroker *broker, UIViewController *presenter) {
+    AMProjV865DocumentBroker *broker, UIViewController *presenter,
+    AMProjV865RouteCompletion completion) {
+    NSError *(^cancelError)(void) = ^{
+        return AMProjV865StageError(6, @"The project handoff was cancelled");
+    };
     if (!broker || broker.fallbackPresented || !presenter ||
-        !presenter.viewIfLoaded.window || !broker.stagedURL) {
-        if (broker.stagedURL) {
+        !presenter.viewIfLoaded.window || !broker.stagedURL ||
+        broker.request.isCancelled) {
+        if (broker && broker.stagedURL) {
+            NSError *error = broker.request.isCancelled
+                ? cancelError() : AMProjV865StageError(
+                    7, @"No visible presenter is available for the project handoff");
             AMProjV865WriteHandoffBreadcrumb(
                 AMProjV865ProjectHandoffStatusFailed, broker.stagedURL,
-                broker.stagedURL.lastPathComponent, @"fallback_presenter_unavailable", nil);
+                broker.stagedURL.lastPathComponent,
+                broker.request.isCancelled ? @"cancelled" : @"fallback_presenter_unavailable", nil);
             [broker scheduleCleanup];
+            if (completion) completion(AMProjV865ProjectHandoffStatusFailed, error);
         }
         return NO;
     }
@@ -331,11 +420,13 @@ static BOOL AMProjV865PresentOpenInFallback(
                                                    inView:presenter.view animated:YES];
     if (!presented) {
         broker.fallbackPresented = NO;
+        NSError *error = AMProjV865StageError(8, @"The system could not present the project handoff menu");
         AMProjV865WriteHandoffBreadcrumb(
             AMProjV865ProjectHandoffStatusFailed, broker.stagedURL,
             broker.stagedURL.lastPathComponent, @"open_in_unavailable", nil);
         [broker scheduleCleanup];
         NSLog(@"[AMProjExport] 865 project handoff staged; no Open In target is available");
+        if (completion) completion(AMProjV865ProjectHandoffStatusFailed, error);
     } else {
         AMProjV865WriteHandoffBreadcrumb(
             AMProjV865ProjectHandoffStatusFallbackPresented, broker.stagedURL,
@@ -346,25 +437,34 @@ static BOOL AMProjV865PresentOpenInFallback(
             broker.stagedURL.lastPathComponent, @"open_in_requires_user_selection",
             @{ @"route_status": @"fallback_presented" });
         NSLog(@"[AMProjExport] 865 project handoff presented through native Open In fallback");
+        if (completion) completion(AMProjV865ProjectHandoffStatusFallbackPresented, nil);
     }
     return presented;
 }
 
 static BOOL AMProjV865PresentStagedDocument(NSURL *stagedURL,
-                                            UIViewController *presenter) {
+                                            UIViewController *presenter,
+                                            AMProjV865ProjectFlowRequest *request,
+                                            AMProjV865RouteCompletion completion) {
     if (!stagedURL || !presenter || !presenter.viewIfLoaded.window ||
-        !AMProjV865ProjectFlowIsRuntimeSupported()) {
+        !AMProjV865ProjectFlowIsRuntimeSupported() || request.isCancelled) {
         if (stagedURL) {
+            NSError *error = request.isCancelled
+                ? AMProjV865StageError(6, @"The project handoff was cancelled")
+                : AMProjV865StageError(7, @"No visible presenter is available for the project handoff");
             AMProjV865WriteHandoffBreadcrumb(
                 AMProjV865ProjectHandoffStatusFailed, stagedURL,
-                stagedURL.lastPathComponent, @"no_visible_presenter", nil);
+                stagedURL.lastPathComponent,
+                request.isCancelled ? @"cancelled" : @"no_visible_presenter", nil);
             AMProjV865ScheduleDirectoryCleanup(stagedURL.URLByDeletingLastPathComponent);
+            if (completion) completion(AMProjV865ProjectHandoffStatusFailed, error);
         }
         return NO;
     }
     AMProjV865DocumentBroker *broker = [AMProjV865DocumentBroker new];
     broker.stagedURL = stagedURL;
     broker.cleanupDirectory = stagedURL.URLByDeletingLastPathComponent;
+    broker.request = request;
     broker.presenter = presenter;
     objc_setAssociatedObject(presenter, AMProjV865BrokerKey, broker,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -381,6 +481,15 @@ static BOOL AMProjV865PresentStagedDocument(NSURL *stagedURL,
             completionHandler:^(BOOL success) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 broker.nativeRouteInFlight = NO;
+                if (broker.request.isCancelled) {
+                    AMProjV865WriteHandoffBreadcrumb(
+                        AMProjV865ProjectHandoffStatusFailed, broker.stagedURL,
+                        broker.stagedURL.lastPathComponent, @"cancelled_after_route_start", nil);
+                    [broker scheduleCleanup];
+                    if (completion) completion(AMProjV865ProjectHandoffStatusFailed,
+                        AMProjV865StageError(6, @"The project handoff was cancelled"));
+                    return;
+                }
                 if (success) {
                     AMProjV865WriteHandoffBreadcrumb(
                         AMProjV865ProjectHandoffStatusRouteAccepted,
@@ -394,22 +503,18 @@ static BOOL AMProjV865PresentStagedDocument(NSURL *stagedURL,
                     NSLog(@"[AMProjExport] 865 native document URL route accepted: %@",
                           stagedURL.lastPathComponent ?: @"project");
                     [broker scheduleCleanup];
+                    if (completion) completion(AMProjV865ProjectHandoffStatusRouteAccepted, nil);
                     return;
                 }
                 UIViewController *fallback = AMProjV865PresenterForBroker(broker);
-                if (!fallback || !AMProjV865PresentOpenInFallback(broker, fallback)) {
-                    AMProjV865WriteHandoffBreadcrumb(
-                        AMProjV865ProjectHandoffStatusFailed,
-                        broker.stagedURL, broker.stagedURL.lastPathComponent,
-                        @"native_route_declined_and_fallback_unavailable", nil);
-                    [broker scheduleCleanup];
+                if (!fallback || !AMProjV865PresentOpenInFallback(broker, fallback, completion)) {
                     NSLog(@"[AMProjExport] 865 native document URL route declined and no fallback presenter is available");
                 }
             });
         }];
         return YES;
     }
-    return AMProjV865PresentOpenInFallback(broker, presenter);
+    return AMProjV865PresentOpenInFallback(broker, presenter, completion);
 }
 
 BOOL AMProjV865ProjectFlowIsProjectPackageController(UIViewController *controller) {
@@ -450,12 +555,27 @@ static void AMProjV865CompleteStage(
 }
 
 static void AMProjV865ScheduleStagedPresentation(
-    NSURL *stagedURL, UIViewController *presenter) {
-    if (!stagedURL) return;
+    NSURL *stagedURL, UIViewController *presenter,
+    AMProjV865ProjectFlowRequest *request,
+    AMProjV865RouteCompletion completion) {
+    if (!stagedURL) {
+        if (completion) completion(AMProjV865ProjectHandoffStatusFailed,
+            AMProjV865StageError(1, @"The downloaded project is not a readable file URL"));
+        return;
+    }
     __weak UIViewController *weakPresenter = presenter;
     dispatch_async(dispatch_get_main_queue(), ^{
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
+            if (request.isCancelled) {
+                AMProjV865WriteHandoffBreadcrumb(
+                    AMProjV865ProjectHandoffStatusFailed, stagedURL,
+                    stagedURL.lastPathComponent, @"cancelled_before_route", nil);
+                AMProjV865ScheduleDirectoryCleanup(stagedURL.URLByDeletingLastPathComponent);
+                if (completion) completion(AMProjV865ProjectHandoffStatusFailed,
+                    AMProjV865StageError(6, @"The project handoff was cancelled"));
+                return;
+            }
             UIViewController *owner = AMProjV865ForegroundPresenter();
             UIViewController *candidate = weakPresenter;
             if (!owner && candidate.viewIfLoaded.window) {
@@ -467,18 +587,22 @@ static void AMProjV865ScheduleStagedPresentation(
                     stagedURL.lastPathComponent, @"no_visible_presenter_after_delay", nil);
                 AMProjV865ScheduleDirectoryCleanup(stagedURL.URLByDeletingLastPathComponent);
                 NSLog(@"[AMProjExport] 865 project handoff staged without a visible presenter");
+                if (completion) completion(AMProjV865ProjectHandoffStatusFailed,
+                    AMProjV865StageError(7, @"No visible presenter is available for the project handoff"));
                 return;
             }
-            (void)AMProjV865PresentStagedDocument(stagedURL, owner);
+            (void)AMProjV865PresentStagedDocument(stagedURL, owner, request, completion);
         });
     });
 }
 
-void AMProjV865ProjectFlowStageDocumentAsync(
+AMProjV865ProjectFlowRequest *AMProjV865ProjectFlowStageDocumentAsync(
     NSURL *fileURL, NSString *filename, UIViewController *presenter,
     AMProjV865ProjectFlowStageCompletion completion) {
+    AMProjV865ProjectFlowRequest *request = [AMProjV865ProjectFlowRequest new];
     BOOL runtimeSupported = AMProjV865ProjectFlowIsRuntimeSupported();
     if (!runtimeSupported || !fileURL.isFileURL) {
+        [request cancel];
         NSError *error = AMProjV865StageError(
             1, @"The downloaded project is not a readable file URL");
         if (runtimeSupported) {
@@ -488,15 +612,17 @@ void AMProjV865ProjectFlowStageDocumentAsync(
         }
         AMProjV865CompleteStage(completion,
             AMProjV865ProjectHandoffStatusFailed, error);
-        return;
+        return request;
     }
     NSURL *source = [fileURL copy];
     NSString *requestedFilename = [filename copy];
+    AMProjV865RegisterRequest(source, request);
     __weak UIViewController *weakPresenter = presenter;
     NSObject *completionLock = [NSObject new];
     __block BOOL completionDelivered = NO;
     void (^completeOnce)(AMProjV865ProjectHandoffStatus, NSError *) =
         ^(AMProjV865ProjectHandoffStatus status, NSError *error) {
+            AMProjV865UnregisterRequest(source, request);
             @synchronized (completionLock) {
                 if (completionDelivered) return;
                 completionDelivered = YES;
@@ -517,13 +643,25 @@ void AMProjV865ProjectFlowStageDocumentAsync(
                 completeOnce(AMProjV865ProjectHandoffStatusFailed, error);
                 return;
             }
+            if (request.isCancelled) {
+                AMProjV865WriteHandoffBreadcrumb(
+                    AMProjV865ProjectHandoffStatusFailed, stagedURL,
+                    stagedURL.lastPathComponent, @"cancelled_after_staging", nil);
+                AMProjV865ScheduleDirectoryCleanup(stagedURL.URLByDeletingLastPathComponent);
+                completeOnce(AMProjV865ProjectHandoffStatusFailed,
+                    AMProjV865StageError(6, @"The project handoff was cancelled"));
+                return;
+            }
             AMProjV865WriteHandoffBreadcrumb(
                 AMProjV865ProjectHandoffStatusStaged, stagedURL,
                 stagedURL.lastPathComponent, nil, @{ @"route": @"pending" });
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try {
-                    AMProjV865ScheduleStagedPresentation(stagedURL, weakPresenter);
-                    completeOnce(AMProjV865ProjectHandoffStatusStaged, nil);
+                    AMProjV865ScheduleStagedPresentation(
+                        stagedURL, weakPresenter, request,
+                        ^(AMProjV865ProjectHandoffStatus status, NSError *routeError) {
+                            completeOnce(status, routeError);
+                        });
                 } @catch (NSException *exception) {
                     NSError *error = AMProjV865StageError(
                         5, @"The project handoff raised an exception while routing");
@@ -568,6 +706,7 @@ void AMProjV865ProjectFlowStageDocumentAsync(
             completeOnce(AMProjV865ProjectHandoffStatusFailed, error);
         }
     });
+    return request;
 }
 
 AMProjV865ProjectHandoffStatus AMProjV865ProjectFlowStageDocument(
@@ -605,7 +744,7 @@ AMProjV865ProjectHandoffStatus AMProjV865ProjectFlowStageDocument(
     AMProjV865WriteHandoffBreadcrumb(
         AMProjV865ProjectHandoffStatusStaged, stagedURL,
         stagedURL.lastPathComponent, nil, @{ @"route": @"pending" });
-    AMProjV865ScheduleStagedPresentation(stagedURL, presenter);
+    AMProjV865ScheduleStagedPresentation(stagedURL, presenter, nil, nil);
     return AMProjV865ProjectHandoffStatusStaged;
 }
 

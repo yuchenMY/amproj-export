@@ -35,14 +35,31 @@ AMProjV865ProjectFlowLastHandoffStatus(void);
 
 /*
  * Stages a downloaded document on a serial utility queue. The completion is
- * delivered on the main thread after the atomic copy completes, before the
- * public UIKit document handoff is attempted. A staged result means that the
- * caller may release its original download directory; it does not mean that
- * Alight Motion has imported the project.
+ * delivered on the main thread after the atomic copy and the first UIKit
+ * handoff attempt complete. A staged result means that the receiving route
+ * was established and the caller may release its original download directory;
+ * it does not mean that Alight Motion has imported the project.
  */
 typedef void (^AMProjV865ProjectFlowStageCompletion)(
     AMProjV865ProjectHandoffStatus status, NSError * _Nullable error);
-FOUNDATION_EXPORT void AMProjV865ProjectFlowStageDocumentAsync(
+
+/*
+ * A request can be invalidated while staging is queued or while UIKit waits
+ * for a visible presenter. Cancellation is idempotent and prevents a timed
+ * out cloud download from opening a project after the caller has shown an
+ * error. The returned object may be ignored by callers that do not need
+ * cancellation.
+ */
+@interface AMProjV865ProjectFlowRequest : NSObject
+@property(nonatomic, readonly, getter=isCancelled) BOOL cancelled;
+- (void)cancel;
+@end
+
+FOUNDATION_EXPORT void AMProjV865ProjectFlowCancelDocument(
+    NSURL *fileURL);
+
+FOUNDATION_EXPORT AMProjV865ProjectFlowRequest *
+AMProjV865ProjectFlowStageDocumentAsync(
     NSURL *fileURL, NSString * _Nullable filename,
     UIViewController * _Nullable presenter,
     AMProjV865ProjectFlowStageCompletion _Nullable completion);

@@ -983,6 +983,7 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("completionCalled", project_download)
         self.assertIn("AMCloudProjectHandoffTimeout", project_download)
         self.assertIn('cloud.project_handoff_timeout', project_download)
+        self.assertIn("AMProjV865ProjectFlowCancelDocument(URL)", project_download)
         self.assertIn('cloud.project_handoff_manager_deallocated', project_download)
         self.assertIn('cloud.project_handoff_completion_exception', project_download)
 

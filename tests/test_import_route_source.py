@@ -3063,7 +3063,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         cloud = SOURCE[SOURCE.index('static void amproj_importCloudPackage') :]
         self.assertIn('if (amproj_runtimeIsBuild865())', cloud)
         self.assertIn('AMProjV865ProjectFlowStageDocumentAsync', cloud)
-        self.assertIn('AMProjV865ProjectHandoffStatusStaged', cloud)
+        self.assertIn('AMProjV865ProjectHandoffStatusRouteAccepted', cloud)
+        self.assertIn('AMProjV865ProjectHandoffStatusFallbackPresented', cloud)
         self.assertIn('@"handoff_status":', cloud)
         self.assertIn('@"import_confirmed": @NO', cloud)
         self.assertNotIn('AMProjV865ProjectFlowQueueDownloadedProject', cloud)

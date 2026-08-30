@@ -2,6 +2,7 @@
 #import "AMCloudPlugins.h"
 #import "AMDebugTransport.h"
 #import "AMEditorCustomization.h"
+#import "AMProjV865ProjectFlow.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <QuartzCore/QuartzCore.h>
@@ -3320,6 +3321,10 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                         completionCalled = YES;
                     }
                     if (timedOut) {
+                        // The 865 flow may still have a delayed UIKit route queued.
+                        // Invalidate it before presenting the retry error so a late
+                        // main-queue callback cannot open a timed-out project.
+                        AMProjV865ProjectFlowCancelDocument(URL);
                         AMCloudDiagnostic(@"cloud.project_handoff_timeout", @{
                             @"filename": filename ?: @"project.amproj",
                             @"timeout_seconds": @(AMCloudProjectHandoffTimeout)

@@ -89,7 +89,7 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn("AMProjV865ProjectHandoffStatusFailed", FLOW)
 
     def test_865_async_staging_contains_an_exception_boundary_and_one_shot_completion(self):
-        start = FLOW.index("void AMProjV865ProjectFlowStageDocumentAsync")
+        start = FLOW.index("AMProjV865ProjectFlowStageDocumentAsync(")
         end = FLOW.index("AMProjV865ProjectHandoffStatus AMProjV865ProjectFlowStageDocument", start)
         async_stage = FLOW[start:end]
         self.assertIn("__block BOOL completionDelivered = NO", async_stage)
@@ -100,9 +100,12 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn('@"exception":', async_stage)
         self.assertIn('@"reason":', async_stage)
         self.assertIn("completeOnce(AMProjV865ProjectHandoffStatusFailed, error)", async_stage)
+        self.assertIn("AMProjV865ProjectFlowRequest", async_stage)
+        self.assertIn("request.isCancelled", async_stage)
+        self.assertIn("AMProjV865UnregisterRequest", async_stage)
 
     def test_865_async_main_queue_route_has_an_exception_boundary(self):
-        start = FLOW.index("void AMProjV865ProjectFlowStageDocumentAsync")
+        start = FLOW.index("AMProjV865ProjectFlowStageDocumentAsync(")
         end = FLOW.index("AMProjV865ProjectHandoffStatus AMProjV865ProjectFlowStageDocument", start)
         async_stage = FLOW[start:end]
         self.assertIn(
@@ -112,6 +115,7 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         self.assertIn('@"phase": @"main_queue_route"', async_stage)
         self.assertIn("865 project handoff route exception", async_stage)
         self.assertIn("AMProjV865ScheduleDirectoryCleanup(", async_stage)
+        self.assertIn("request.isCancelled", async_stage)
 
     def test_865_copy_and_completion_boundaries_clean_up_and_swallow_callback_exceptions(self):
         copy_start = FLOW.index("static NSURL *AMProjV865CopyDocument")
@@ -176,7 +180,8 @@ class V865ProjectFlowSourceTests(unittest.TestCase):
         cloud = EXPORT[EXPORT.index("static void amproj_importCloudPackage") :]
         self.assertIn("amproj_runtimeIsBuild865()", cloud)
         self.assertIn("AMProjV865ProjectFlowStageDocumentAsync", cloud)
-        self.assertIn("AMProjV865ProjectHandoffStatusStaged", cloud)
+        self.assertIn("AMProjV865ProjectHandoffStatusRouteAccepted", cloud)
+        self.assertIn("AMProjV865ProjectHandoffStatusFallbackPresented", cloud)
         self.assertIn('@"handoff_status":', cloud)
         self.assertIn('@"import_confirmed": @NO', cloud)
         self.assertNotIn("AMProjV865ProjectFlowQueueDownloadedProject", cloud)

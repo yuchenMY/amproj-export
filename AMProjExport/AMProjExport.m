@@ -11323,7 +11323,9 @@ static void amproj_importCloudPackage(NSURL *URL, NSString *filename,
         AMProjV865ProjectFlowStageDocumentAsync(
             URL, filename.length ? filename : @"project.amproj", nil,
             ^(AMProjV865ProjectHandoffStatus handoffStatus, NSError *error) {
-                BOOL staged = handoffStatus == AMProjV865ProjectHandoffStatusStaged;
+                BOOL staged = handoffStatus == AMProjV865ProjectHandoffStatusRouteAccepted ||
+                    handoffStatus == AMProjV865ProjectHandoffStatusFallbackPresented ||
+                    handoffStatus == AMProjV865ProjectHandoffStatusUnverified;
                 amproj_debugEvent(@"cloud.import_865_handoff", @{
                     @"staged": @(staged),
                     @"handoff_status":
