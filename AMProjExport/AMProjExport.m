@@ -10519,7 +10519,7 @@ static NSString *amproj_v865StoreSHA1ForFile(NSURL *fileURL) {
 // Returns the store XML bytes; referenced dependency names are appended to
 // `dependenciesOut` as dictionaries {name, sha1, size}.
 static NSData *amproj_v865StoreRewriteSceneXML(
-    NSURL *nativeXMLURL, NSURL *extractionDirectory,
+    NSURL *nativeXMLURL, NSURL *extractionDirectory, BOOL asTemplate,
     NSMutableArray<NSDictionary<NSString *, id> *> *dependenciesOut,
     NSMutableArray<NSString *> *fontsOut, NSString **titleOut,
     NSError **error) {
@@ -10629,27 +10629,43 @@ static NSData *amproj_v865StoreRewriteSceneXML(
 
     // The project store does not use PackageImporter media signatures.
     NSRegularExpression *sigRegex = [NSRegularExpression
-        regularExpressionWithPattern:@"\\s+sig=\\\"[^\\\"]*\\\""
+        regularExpressionWithPattern:@"\\+sig=\"[^\"]*\""
                              options:0 error:nil];
     [sigRegex replaceMatchesInString:xml options:0
                                range:NSMakeRange(0, xml.length)
                           withTemplate:@""];
 
-    // Imports land in the Projects tab: drop any template linkage and refresh
-    // the ordering timestamp.
+    // Classification markers mirror the files Alight Motion itself keeps on
+    // device: projects carry neither `type` nor `templateLink`; imported
+    // templates carry a (possibly stale) templateLink and no `type`.
     NSRegularExpression *templateLinkRegex = [NSRegularExpression
-        regularExpressionWithPattern:@"\\s+templateLink=\\\"[^\\\"]*\\\""
+        regularExpressionWithPattern:@"\\+templateLink=\"[^\"]*\""
                              options:0 error:nil];
     [templateLinkRegex replaceMatchesInString:xml options:0
                                         range:NSMakeRange(0, xml.length)
                                    withTemplate:@""];
+    NSRegularExpression *typeRegex = [NSRegularExpression
+        regularExpressionWithPattern:@"\\+type=\"[^\"]*\""
+                             options:0 error:nil];
+    [typeRegex replaceMatchesInString:xml options:0
+                                range:NSMakeRange(0, xml.length)
+                           withTemplate:@""];
+    if (asTemplate) {
+        NSRange sceneInsert = [xml rangeOfString:@"<scene"];
+        if (sceneInsert.location != NSNotFound) {
+            [xml insertString:[NSString stringWithFormat:
+                @" templateLink=\"file:///amproj-import/%@/project.amproj\"",
+                NSUUID.UUID.UUIDString]
+                      atIndex:sceneInsert.location + 6];
+        }
+    }
 
     NSRange sceneRange = [xml rangeOfString:@"<scene"];
     if (sceneRange.location == NSNotFound) {
         if (error) *error = [NSError errorWithDomain:@"com.amproj.865.store"
                                                 code:2
                                             userInfo:@{NSLocalizedDescriptionKey:
-                                                @"场景 XML 缺少根节点"}];
+                                                @"\u573a\u666f XML \u7f3a\u5c11\u6839\u8282\u70b9"}];
         return nil;
     }
     NSString *nowMilliseconds = [NSString stringWithFormat:@"%lld",
@@ -10658,33 +10674,42 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                                       options:0
                                         range:NSMakeRange(sceneRange.location,
                                                           xml.length - sceneRange.location)];
-    NSRange modifiedRange = [xml rangeOfString:@"modifiedTime=\\\""
+    NSRange modifiedRange = [xml rangeOfString:@"modifiedTime=\""
                                        options:0
-                                         range:NSMakeRange(sceneRange.location, 400)];
-    if (modifiedRange.location != NSNotFound && modifiedRange.location < rootTagRange.location) {
+                                         range:NSMakeRange(sceneRange.location,
+                                                           rootTagRange.location - sceneRange.location)];
+    if (modifiedRange.location != NSNotFound) {
         NSUInteger valueStart = NSMaxRange(modifiedRange);
-        NSRange valueEnd = [xml rangeOfString:@"\\\""
+        NSRange valueEnd = [xml rangeOfString:@"\""
                                       options:0
                                         range:NSMakeRange(valueStart,
-                                                          xml.length - valueStart)];
+                                                          rootTagRange.location - valueStart)];
         if (valueEnd.location != NSNotFound) {
             [xml replaceCharactersInRange:NSMakeRange(valueStart,
                                                       valueEnd.location - valueStart)
                                withString:nowMilliseconds];
         }
     } else {
-        [xml insertString:[NSString stringWithFormat:@" modifiedTime=\\\"%@\\\"",
+        [xml insertString:[NSString stringWithFormat:@" modifiedTime=\"%@\"",
                            nowMilliseconds]
                   atIndex:sceneRange.location + 6];
+        rootTagRange = [xml rangeOfString:@">"
+                                  options:0
+                                    range:NSMakeRange(sceneRange.location,
+                                                      xml.length - sceneRange.location)];
     }
 
     if (titleOut) {
-        NSRange titleRange = [xml rangeOfString:@"title=\\\""];
-        if (titleRange.location != NSNotFound && titleRange.location < 600) {
+        NSRange titleRange = [xml rangeOfString:@"title=\""
+                                        options:0
+                                          range:NSMakeRange(sceneRange.location,
+                                                            rootTagRange.location - sceneRange.location)];
+        if (titleRange.location != NSNotFound) {
             NSUInteger start = NSMaxRange(titleRange);
-            NSRange end = [xml rangeOfString:@"\\\""
+            NSRange end = [xml rangeOfString:@"\""
                                      options:0
-                                       range:NSMakeRange(start, MIN(xml.length - start, 200))];
+                                       range:NSMakeRange(start,
+                                                         rootTagRange.location - start)];
             if (end.location != NSNotFound) {
                 NSString *title = [xml substringWithRange:NSMakeRange(start,
                                                                       end.location - start)];
@@ -10695,6 +10720,87 @@ static NSData *amproj_v865StoreRewriteSceneXML(
         }
     }
     return [xml dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+// The Projects/"Your Templates" lists render from a persisted scene-summary
+// cache that Alight Motion rebuilds only on launch. Appending our entry here
+// makes a freshly written project visible as soon as the user switches tabs.
+static void amproj_v865StoreUpdateSummaryCache(NSString *storeUUID,
+                                               NSString *title,
+                                               BOOL asTemplate,
+                                               NSData *storeXML) {
+    if (!storeUUID.length) return;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *raw = [defaults stringForKey:@"cached_scene_summary_raw"];
+    NSMutableDictionary *document = nil;
+    if (raw.length) {
+        NSData *rawData = [raw dataUsingEncoding:NSUTF8StringEncoding];
+        if (rawData) {
+            NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:rawData
+                                                                   options:0 error:nil];
+            if ([parsed isKindOfClass:NSDictionary.class]) {
+                document = [parsed mutableCopy];
+            }
+        }
+    }
+    if (!document) document = [NSMutableDictionary dictionary];
+    NSMutableArray *scenes = [[document[@"scenes"] isKindOfClass:NSArray.class]
+        ? [NSMutableArray arrayWithArray:document[@"scenes"]]
+        : [NSMutableArray array]];
+    for (NSDictionary *scene in scenes) {
+        if ([scene[@"i"] isKindOfClass:NSString.class] &&
+            [scene[@"i"] isEqualToString:storeUUID]) {
+            return; // already indexed
+        }
+    }
+    NSURL *storeURL = [amproj_v865StoreLibraryURL()
+        URLByAppendingPathComponent:[storeUUID stringByAppendingPathExtension:@"xml"]];
+    NSString *xml = [NSString stringWithContentsOfURL:storeURL
+                                             encoding:NSUTF8StringEncoding
+                                                error:nil];
+    NSInteger sceneWidth = 0;
+    NSInteger sceneHeight = 0;
+    NSInteger sceneTotalTime = 0;
+    if (xml.length) {
+        for (NSString *attribute in (@[ @"width", @"height", @"totalTime" ])) {
+            NSRange attributeRange = [xml rangeOfString:
+                [NSString stringWithFormat:@"%@=\"", attribute]];
+            if (attributeRange.location == NSNotFound ||
+                attributeRange.location > 500) continue;
+            NSUInteger valueStart = NSMaxRange(attributeRange);
+            NSRange valueEnd = [xml rangeOfString:@"\""
+                                          options:0
+                                            range:NSMakeRange(valueStart,
+                                                MIN(xml.length - valueStart, 64))];
+            if (valueEnd.location == NSNotFound) continue;
+            NSInteger value = [xml substringWithRange:
+                NSMakeRange(valueStart, valueEnd.location - valueStart)].integerValue;
+            if ([attribute isEqualToString:@"width"]) sceneWidth = value;
+            else if ([attribute isEqualToString:@"height"]) sceneHeight = value;
+            else sceneTotalTime = value;
+        }
+    }
+    [scenes addObject:@{ // mirrors the entries Alight Motion itself writes
+        @"tht": @{@"native": @(-1)},
+        @"": @NO,
+        @"tt": @{@"native": @(sceneTotalTime)},
+        @"isTemplate": @(asTemplate),
+        @"w": @(sceneWidth),
+        @"st": @"scene",
+        @"ta": @0,
+        @"h": @(sceneHeight),
+        @"x": @(storeXML.length),
+        @"i": storeUUID,
+        @"tv": @0,
+        @"t": title.length ? title : @""
+    }];
+    NSData *updated = [NSJSONSerialization dataWithJSONObject:@{@"scenes": scenes}
+                                                      options:0 error:nil];
+    if (!updated) return;
+    NSString *updatedRaw = [[NSString alloc] initWithData:updated
+                                                 encoding:NSUTF8StringEncoding];
+    if (updatedRaw.length) [defaults setObject:updatedRaw
+                                        forKey:@"cached_scene_summary_raw"];
 }
 
 static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
@@ -10732,7 +10838,7 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
     NSString *title = nil;
     NSError *rewriteError = nil;
     NSData *storeXML = amproj_v865StoreRewriteSceneXML(
-        nativeXMLURL, extractionDirectory,
+        nativeXMLURL, extractionDirectory, asTemplate,
         dependencies, fonts, &title, &rewriteError);
     if (!storeXML) {
         amproj_logCriticalEvent(@"import.865_store_rewrite_failed", @{
@@ -10801,25 +10907,36 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
                                                    encoding:NSUTF8StringEncoding
                                                       error:&verifyError];
     NSUInteger referenceCount = 0;
-    NSUInteger missingDependencies = 0;
+    NSUInteger missingWrittenDependencies = 0;
+    NSMutableSet<NSString *> *writtenNames = [NSMutableSet set];
+    for (NSDictionary<NSString *, id> *dependency in dependencies) {
+        NSString *dependencyName = [dependency[@"name"] isKindOfClass:NSString.class]
+            ? dependency[@"name"] : nil;
+        if (dependencyName.length) [writtenNames addObject:dependencyName];
+    }
     if (verifyXML) {
         NSRegularExpression *verifyRegex = [NSRegularExpression
-            regularExpressionWithPattern:@"am-internal:///([^\\\"]*)\""
+            regularExpressionWithPattern:@"am-internal:///([^\"]*)\""
                                  options:0 error:nil];
         for (NSTextCheckingResult *match in [verifyRegex
                 matchesInString:verifyXML options:0
                           range:NSMakeRange(0, verifyXML.length)]) {
             referenceCount++;
-            NSString *name = [verifyXML substringWithRange:[match rangeAtIndex:1]];
-            if (![name containsString:@"."] ||
-                ![manager fileExistsAtPath:[dependenciesDirectory
-                    URLByAppendingPathComponent:name].path]) {
-                missingDependencies++;
+            NSString *reference = [verifyXML substringWithRange:[match rangeAtIndex:1]];
+            if (![writtenNames containsObject:reference]) continue;
+            if (![manager fileExistsAtPath:[dependenciesDirectory
+                URLByAppendingPathComponent:reference].path]) {
+                missingWrittenDependencies++;
             }
         }
     }
-    BOOL verified = verifyXML.length > 0 && missingDependencies == 0;
-    if (verified && titleOut) *titleOut = title.length ? [title copy] : nil;
+    BOOL rootScenePresent = [verifyXML rangeOfString:@"<scene"].location != NSNotFound;
+    BOOL verified = rootScenePresent && verifyXML.length > 0 &&
+        missingWrittenDependencies == 0;
+    if (verified) {
+        amproj_v865StoreUpdateSummaryCache(storeUUID, title, asTemplate, storeXML);
+        if (titleOut) *titleOut = title.length ? [title copy] : nil;
+    }
     [manager removeItemAtURL:workDirectory error:nil];
     amproj_logCriticalEvent(@"import.865_store_write_completed", @{
         @"filename": originalName ?: @"",
@@ -11209,8 +11326,53 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
             NSString *storeName = [originalName copy] ?: @"project.amproj";
             NSString *storeTransactionID = [transactionID copy];
             NSURL *storeURL = [URL copy];
+            BOOL storeIsTemplate = [storeName.pathExtension.lowercaseString
+                isEqualToString:@"xml"];
+            NSString *storeDestination = storeIsTemplate ? @"您的模板" : @"项目";
             amproj_showImportStatusForTransaction(
                 @"AMProj · 3/4 正在写入 Alight Motion 项目库", NO, transactionID);
+            void (^presentStoreResult)(BOOL written, NSString *projectTitle) =
+                ^(BOOL written, NSString *projectTitle) {
+                AMProjImportTransaction *finished =
+                    amproj_importTransactionForID(storeTransactionID);
+                NSString *shownTitle = projectTitle.length ? projectTitle
+                    : storeName.stringByDeletingPathExtension;
+                if (written) {
+                    amproj_writeImportBreadcrumb(storeTransactionID,
+                                                 finished.fingerprint,
+                                                 @"completed",
+                                                 @"865_project_store",
+                                                 nil, nil, nil);
+                    amproj_showImportStatusForTransaction(
+                        [NSString stringWithFormat:
+                            @"AMProj · 导入完成：《%@》已加入%@，切换过去即可看到",
+                            shownTitle, storeDestination],
+                        NO, storeTransactionID);
+                    amproj_releaseImportTransaction(storeTransactionID, YES);
+                } else {
+                    amproj_retryImportURL = finished.archiveURL ?: storeURL;
+                    amproj_retryImportName = [storeName copy];
+                    amproj_writeImportBreadcrumb(storeTransactionID,
+                                                 finished.fingerprint,
+                                                 @"failed",
+                                                 @"865_project_store",
+                                                 nil, nil,
+                                                 @"写入 Alight Motion 项目库失败，缓存包已保留");
+                    amproj_showImportStatusForTransaction(
+                        storeIsTemplate
+                            ? @"AMProj · XML 写入失败，缓存文件已保留"
+                            : @"AMProj · 项目包写入失败，缓存包已保留",
+                        YES, storeTransactionID);
+                    amproj_presentImportErrorOfferingPickerWithTitle(
+                        storeIsTemplate
+                            ? @"XML 校验通过，但写入 Alight Motion 项目库时失败，缓存文件已保留。可点击“重试”。"
+                            : @"项目包校验通过，但写入 Alight Motion 项目库时失败，缓存包已保留。可点击“重试”。",
+                        storeIsTemplate ? @"无法导入 XML" : @"无法导入 .amproj",
+                        YES);
+                    amproj_releaseImportTransaction(storeTransactionID, NO);
+                }
+                amproj_resumeQueuedImports(@"865_store_done");
+            };
             void (^storeDenied)(NSError *) = ^(NSError *error) {
                 NSString *reason = error.localizedDescription.length
                     ? error.localizedDescription : @"iOS 导入权限未开通";
@@ -11243,38 +11405,7 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                     BOOL written = amproj_write865ProjectStoreImport(
                         storeURL, storeName, storeTransactionID, &projectTitle);
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        AMProjImportTransaction *finished =
-                            amproj_importTransactionForID(storeTransactionID);
-                        if (written) {
-                            amproj_writeImportBreadcrumb(storeTransactionID,
-                                                         finished.fingerprint,
-                                                         @"completed",
-                                                         @"865_project_store",
-                                                         nil, nil, nil);
-                            amproj_showImportStatusForTransaction(
-                                [NSString stringWithFormat:
-                                    @"AMProj · 4/4 已写入项目《%@》（865 直写）。若列表未立即出现，请重启应用",
-                                    projectTitle ?: storeName],
-                                NO, storeTransactionID);
-                            amproj_releaseImportTransaction(storeTransactionID, YES);
-                        } else {
-                            amproj_retryImportURL = finished.archiveURL ?: storeURL;
-                            amproj_retryImportName = [storeName copy];
-                            amproj_writeImportBreadcrumb(storeTransactionID,
-                                                         finished.fingerprint,
-                                                         @"failed",
-                                                         @"865_project_store",
-                                                         nil, nil,
-                                                         @"写入 Alight Motion 项目库失败，缓存包已保留");
-                            amproj_showImportStatusForTransaction(
-                                @"AMProj · 865 直写导入失败，缓存包已保留",
-                                YES, storeTransactionID);
-                            amproj_presentImportErrorOfferingPicker(
-                                @"项目包校验通过，但写入 Alight Motion 项目库时失败，缓存包已保留。可点击“重试”。",
-                                YES);
-                            amproj_releaseImportTransaction(storeTransactionID, NO);
-                        }
-                        amproj_resumeQueuedImports(@"865_store_done");
+                        presentStoreResult(written, projectTitle);
                     });
                 });
             });
@@ -11284,38 +11415,7 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                 BOOL written = amproj_write865ProjectStoreImport(
                     storeURL, storeName, storeTransactionID, &projectTitle);
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    AMProjImportTransaction *finished =
-                        amproj_importTransactionForID(storeTransactionID);
-                    if (written) {
-                        amproj_writeImportBreadcrumb(storeTransactionID,
-                                                     finished.fingerprint,
-                                                     @"completed",
-                                                     @"865_project_store",
-                                                     nil, nil, nil);
-                        amproj_showImportStatusForTransaction(
-                            [NSString stringWithFormat:
-                                @"AMProj · 4/4 已写入项目《%@》（865 直写）。若列表未立即出现，请重启应用",
-                                projectTitle ?: storeName],
-                            NO, storeTransactionID);
-                        amproj_releaseImportTransaction(storeTransactionID, YES);
-                    } else {
-                        amproj_retryImportURL = finished.archiveURL ?: storeURL;
-                        amproj_retryImportName = [storeName copy];
-                        amproj_writeImportBreadcrumb(storeTransactionID,
-                                                     finished.fingerprint,
-                                                     @"failed",
-                                                     @"865_project_store",
-                                                     nil, nil,
-                                                     @"写入 Alight Motion 项目库失败，缓存包已保留");
-                        amproj_showImportStatusForTransaction(
-                            @"AMProj · 865 直写导入失败，缓存包已保留",
-                            YES, storeTransactionID);
-                        amproj_presentImportErrorOfferingPicker(
-                            @"项目包校验通过，但写入 Alight Motion 项目库时失败，缓存包已保留。可点击“重试”。",
-                            YES);
-                        amproj_releaseImportTransaction(storeTransactionID, NO);
-                    }
-                    amproj_resumeQueuedImports(@"865_store_done");
+                    presentStoreResult(written, projectTitle);
                 });
             });
 #endif
