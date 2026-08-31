@@ -1855,7 +1855,8 @@ static BOOL AMHomeUIIsBrandLogoCandidate(UIImageView *imageView, UIWindow *windo
     if (!image || image.size.height < 12 || image.size.height > 60) return NO;
     if (image.size.width < image.size.height * 2.5) return NO;
     CGRect frameInWindow = [imageView convertRect:imageView.bounds toView:window];
-    if (CGRectIsNull(frameInWindow) || frameInWindow.maxY > 140) return NO;
+    if (CGRectIsNull(frameInWindow) ||
+        CGRectGetMaxY(frameInWindow) > 140) return NO;
     CGFloat centerX = CGRectGetMidX(frameInWindow);
     if (fabs(centerX - window.bounds.size.width / 2.0) >
         window.bounds.size.width * 0.2) return NO;
@@ -2012,7 +2013,7 @@ static BOOL AMHomeUICellContainsAboutLabel(UIView *view) {
     if ([view isKindOfClass:UILabel.class]) {
         UILabel *label = (UILabel *)view;
         if ([label.text stringByTrimmingCharactersInSet:
-                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                [NSCharacterSet whitespaceAndNewlineCharacterSet]]
                 isEqualToString:@"关于"]) return YES;
     }
     for (UIView *subview in view.subviews) {
