@@ -1867,75 +1867,48 @@ static UIImage *AMHomeUIBrandLogoImageForSize(CGSize size, CGFloat scale) {
     CGFloat pixelWidth = MAX(size.width * scale, 1.0);
     CGFloat pixelHeight = MAX(size.height * scale, 1.0);
     UIFont *chineseFont = [UIFont fontWithName:@"PingFangSC-Semibold"
-                                          size:pixelHeight * 0.58]
-        ?: [UIFont systemFontOfSize:pixelHeight * 0.58
+                                          size:pixelHeight * 0.52]
+        ?: [UIFont systemFontOfSize:pixelHeight * 0.52
                              weight:UIFontWeightSemibold];
     UIFontDescriptor *latinDescriptor = [[[UIFont
-        systemFontOfSize:pixelHeight * 0.60 weight:UIFontWeightBold]
+        systemFontOfSize:pixelHeight * 0.56 weight:UIFontWeightBold]
         fontDescriptor] fontDescriptorWithDesign:
         UIFontDescriptorSystemDesignRounded];
     UIFont *latinFont = [UIFont fontWithDescriptor:latinDescriptor
-                                              size:pixelHeight * 0.60];
+                                              size:pixelHeight * 0.56];
     NSDictionary *chineseAttributes = @{
         NSFontAttributeName: chineseFont,
-        NSKernAttributeName: @(pixelHeight * 0.02),
+        NSForegroundColorAttributeName: [UIColor
+            colorWithRed:0x39 / 255.0 green:0xC5 / 255.0 blue:0xBB / 255.0
+                         alpha:1.0],
     };
     NSDictionary *latinAttributes = @{
         NSFontAttributeName: latinFont,
-        NSKernAttributeName: @(pixelHeight * 0.01),
+        NSForegroundColorAttributeName: [UIColor
+            colorWithRed:0x66 / 255.0 green:0xCC / 255.0 blue:0xFF / 255.0
+                         alpha:1.0],
     };
-    NSAttributedString *brandText = [[NSAttributedString alloc]
-        initWithString:AMHomeUIBrandText
-            attributes:chineseAttributes];
-    // Measure the "AM" tail separately so the total width is accurate.
-    CGSize chineseSize = [AMHomeUIBrandText sizeWithAttributes:chineseAttributes];
+    CGSize chineseSize = [@"猫鹤" sizeWithAttributes:chineseAttributes];
     CGSize latinSize = [@"AM" sizeWithAttributes:latinAttributes];
-    CGFloat textWidth = chineseSize.width + latinSize.width * 0.96;
+    CGFloat textWidth = chineseSize.width + latinSize.width * 0.92;
     CGFloat textHeight = MAX(chineseSize.height, latinSize.height);
     if (textWidth <= 0 || textHeight <= 0) return nil;
 
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat new];
-    format.scale = 1.0; // work in raw pixels for exact sizing
+    format.scale = 1.0;
     format.opaque = NO;
     UIGraphicsImageRenderer *renderer =
         [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(pixelWidth, pixelHeight)
                                               format:format];
-    UIImage *logoImage = [renderer imageWithActions:
+    return [renderer imageWithActions:
         ^(UIGraphicsImageRendererContext *renderContext) {
-            CGContextRef context = renderContext.CGContext;
-            // Draw the text once as an alpha mask.
-            CGContextSetFillColorWithColor(context, [UIColor blackColor].CGColor);
             CGPoint textOrigin = CGPointMake((pixelWidth - textWidth) / 2.0,
                                              (pixelHeight - textHeight) / 2.0);
-            [brandText drawAtPoint:textOrigin];
+            [@"猫鹤" drawAtPoint:textOrigin withAttributes:chineseAttributes];
             [@"AM" drawAtPoint:CGPointMake(textOrigin.x + chineseSize.width,
                                            textOrigin.y + (textHeight - latinSize.height) / 2.0)
                 withAttributes:latinAttributes];
-
-            CGImageRef mask = CGBitmapContextCreateImage(context);
-            if (!mask) return;
-            CGContextClearRect(context, CGRectMake(0, 0, pixelWidth, pixelHeight));
-            CGContextSetFillColorWithColor(context, [UIColor whiteColor].CGColor);
-            CGContextFillRect(context, CGRectMake(0, 0, pixelWidth, pixelHeight));
-            CGContextClipToMask(context, CGRectMake(0, 0, pixelWidth, pixelHeight), mask);
-            CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-            NSArray *gradientColors = @[(id)[UIColor
-                colorWithRed:0x39 / 255.0 green:0xC5 / 255.0 blue:0xBB / 255.0
-                             alpha:1.0].CGColor,
-                (id)[UIColor colorWithRed:0x66 / 255.0 green:0xCC / 255.0 blue:0xFF / 255.0
-                             alpha:1.0].CGColor];
-            CGGradientRef gradient = CGGradientCreateWithColors(space,
-                (__bridge CFArrayRef)gradientColors, nil);
-            if (gradient) {
-                CGContextDrawLinearGradient(context, gradient,
-                    CGPointMake(0, pixelHeight / 2.0),
-                    CGPointMake(pixelWidth, pixelHeight / 2.0), 0);
-                CGGradientRelease(gradient);
-            }
-            CGColorSpaceRelease(space);
-            CGImageRelease(mask);
         }];
-    return logoImage;
 }
 
 static void AMHomeUIApplyBrandLogoInView(UIView *view, NSMutableArray<UIImageView *> *pending) {
@@ -1945,6 +1918,38 @@ static void AMHomeUIApplyBrandLogoInView(UIView *view, NSMutableArray<UIImageVie
     }
     for (UIView *subview in view.subviews) {
         AMHomeUIApplyBrandLogoInView(subview, pending);
+    }
+}
+
+static void AMHomeUIDeactivateMenuControl(UIView *view) {
+    if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)view;
+        NSString *identity = [NSString stringWithFormat:@"%@ %@",
+            button.accessibilityLabel ?: @"", button.accessibilityIdentifier ?: @""];
+        UIImage *image = button.currentImage ?: button.imageForState:UIControlStateNormal;
+        NSString *assetName = image.imageAsset ? (image.imageAsset.name ?: @"") : @"";
+        if ([identity.lowercaseString containsString:@"menu"] ||
+            [assetName.lowercaseString containsString:@"menu"]) {
+            button.hidden = YES;
+            button.userInteractionEnabled = NO;
+            button.accessibilityElementsHidden = YES;
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        AMHomeUIDeactivateMenuControl(subview);
+    }
+}
+
+static void AMHomeUIDisableDrawerEdgeGestures(UIView *view) {
+    for (UIGestureRecognizer *gesture in view.gestureRecognizers ?: @[]) {
+        if ([gesture isKindOfClass:[UIScreenEdgePanGestureRecognizer class]] &&
+            gesture.enabled) {
+            gesture.enabled = NO;
+            NSLog(@"[AMHomeUI] disabled a drawer edge-pan gesture");
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        AMHomeUIDisableDrawerEdgeGestures(subview);
     }
 }
 
@@ -1970,6 +1975,8 @@ static void AMHomeUIApplyBrandLogoEverywhere(void) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         NSLog(@"[AMHomeUI] replaced the header wordmark with 猫鹤AM");
     }
+    AMHomeUIDeactivateMenuControl(window);
+    AMHomeUIDisableDrawerEdgeGestures(window);
 }
 
 // MARK: - Settings drawer row cut (everything below 关于)

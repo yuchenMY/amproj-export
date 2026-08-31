@@ -77,6 +77,8 @@ static UIViewController* amproj_shareVCRecursive(
     UIViewController *controller, NSUInteger depth,
     NSMutableSet<NSValue *> *visited, uint8_t *selectedExportOption);
 static UIViewController* amproj_topViewController(UIViewController *controller);
+static void amproj_noteIncomingGrantLoss(NSString *name, BOOL isXML);
+static void amproj_clearIncomingGrantLoss(NSString *name);
 static NSString* amproj_currentProjectTitle(UIViewController *shareController);
 static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source);
 
@@ -3600,6 +3602,9 @@ static void amproj_releaseImportTransaction(NSString *transactionID, BOOL succes
                                     : AMProjImportTransactionFailed;
         transaction.updatedAt = now;
         if (success) {
+            amproj_clearIncomingGrantLoss(transaction.name);
+        }
+        if (success) {
             if (transaction.fingerprint.length) {
                 amproj_importTombstones[transaction.fingerprint] = @(now);
             }
@@ -4051,6 +4056,85 @@ typedef NS_ENUM(NSInteger, AMProjImportFileError) {
 
 static NSString* amproj_copyDiagnosticSummary(NSError *error);
 
+// QQ/File Provider grants frequently expire between the launch-options
+// delivery and the actual copy (errno 1 / NSCocoaErrorDomain 257). QQ then
+// re-delivers the very same document through the openURL callback with a
+// fresh grant, so the first failed copy must stay silent and simply wait
+// for that redelivery. Only if no redelivery (or successful import)
+// arrives in time does a single concise alert appear.
+static NSObject *amproj_pendingRedeliveryLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static NSMutableDictionary<NSString *, NSNumber *> *amproj_pendingRedeliveryDeadlines(void) {
+    static NSMutableDictionary<NSString *, NSNumber *> *map;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ map = [NSMutableDictionary dictionary]; });
+    return map;
+}
+
+static NSString *amproj_pendingRedeliveryKey(NSString *name) {
+    return (name.length ? name : @"project").lowercaseString ?: @"";
+}
+
+static void amproj_noteIncomingGrantLoss(NSString *name, BOOL isXML) {
+    if (!name.length) return;
+    NSString *key = amproj_pendingRedeliveryKey(name);
+    CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 10.0;
+    BOOL scheduleCheck = NO;
+    @synchronized (amproj_pendingRedeliveryLock()) {
+        scheduleCheck = amproj_pendingRedeliveryDeadlines()[key] == nil;
+        amproj_pendingRedeliveryDeadlines()[key] = @(deadline);
+    }
+    amproj_logCriticalEvent(@"import.grant_loss_awaiting_redelivery", @{
+        @"filename": name ?: @"",
+        @"kind": isXML ? @"xml" : @"amproj"
+    });
+    if (!scheduleCheck) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(10.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        BOOL stillPending = NO;
+        @synchronized (amproj_pendingRedeliveryLock()) {
+            NSNumber *stored = amproj_pendingRedeliveryDeadlines()[key];
+            stillPending = stored != nil &&
+                stored.doubleValue <= CFAbsoluteTimeGetCurrent();
+            if (stillPending) [amproj_pendingRedeliveryDeadlines() removeObjectForKey:key];
+        }
+        if (!stillPending) return;
+        amproj_showImportStatus([NSString stringWithFormat:
+            @"AMProj · 未能读取《%@》，请回到 QQ 重新用其他应用打开一次",
+            name], YES);
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:isXML ? @"无法导入 XML" : @"无法导入 .amproj"
+            message:[NSString stringWithFormat:
+                @"QQ 提供的《%@》已过期，无法读取。请回到 QQ 重新选择“用其他应用打开”。",
+                name]
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"知道了"
+            style:UIAlertActionStyleDefault handler:nil]];
+        UIViewController *presenter = amproj_topViewController(
+            amproj_keyWindow().rootViewController);
+        if (presenter && !presenter.presentedViewController &&
+            presenter.viewIfLoaded.window) {
+            orig_presentVC(presenter,
+                @selector(presentViewController:animated:completion:),
+                alert, YES, nil);
+        }
+    });
+}
+
+static void amproj_clearIncomingGrantLoss(NSString *name) {
+    if (!name.length) return;
+    @synchronized (amproj_pendingRedeliveryLock()) {
+        [amproj_pendingRedeliveryDeadlines()
+            removeObjectForKey:amproj_pendingRedeliveryKey(name)];
+    }
+}
+
 static NSString* amproj_visibleImportFileError(NSError *error) {
     NSString *message = nil;
     switch (error.code) {
@@ -4086,13 +4170,9 @@ static NSString* amproj_visibleImportFileError(NSError *error) {
             message = @"\u9879\u76ee\u5305\u8bfb\u53d6\u5931\u8d25";
             break;
     }
-    NSString *diagnostics = amproj_copyDiagnosticSummary(error);
-    if (diagnostics.length) {
-        return [NSString stringWithFormat:@"AMProj \u00b7 %@ (E%ld \u00b7 %@)",
-                                          message, (long)error.code, diagnostics];
-    }
-    return [NSString stringWithFormat:@"AMProj \u00b7 %@ (E%ld)",
-                                      message, (long)error.code];
+    // User-facing text never carries NSError details, errno values or
+    // internal diagnostics; those stay in the debug event stream only.
+    return [NSString stringWithFormat:@"AMProj \u00b7 %@", message];
 }
 
 static NSError* amproj_importFileError(AMProjImportFileError code,
@@ -11856,25 +11936,26 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
                 @"attempts": copyError.userInfo[@"copy_attempts"] ?: @[],
                 @"posix_errno": copyError.userInfo[@"posix_errno"] ?: @0
             });
+            BOOL providerGrantLost = readableAfterScope == NO &&
+                ([copyError.domain isEqualToString:NSCocoaErrorDomain] &&
+                 (copyError.code == 257 || copyError.code == 513 ||
+                  copyError.code == 260 || copyError.code == 256));
+            if (providerGrantLost) {
+                // QQ re-delivers the same document through openURL with a
+                // fresh grant; stay silent here and let that delivery import.
+                amproj_noteIncomingGrantLoss(originalName,
+                    importKind == AMProjImportKindXMLTemplate);
+                return AMProjIncomingURLFailed;
+            }
             if (!silentErrors) {
                 amproj_showImportStatusForTransaction(
                     amproj_visibleImportFileError(copyError), YES, transactionID);
             }
-            NSString *diagnostics = amproj_copyDiagnosticSummary(copyError);
             NSString *documentName = importKind == AMProjImportKindXMLTemplate
                 ? @"XML 文件" : @"项目包";
             NSString *message = [NSString stringWithFormat:
                 @"无法读取 QQ 或文件 App 提供的%@，请返回后重新打开一次。",
                 documentName];
-            message = [message stringByAppendingFormat:
-                @"\n\n上下文：%@，scope=%@，openInPlace=%@，before=%@，after=%@，coordinated=%@",
-                source ?: @"unknown", scoped ? @"1" : @"0",
-                requestedOpenInPlace ? @"1" : @"0",
-                readableBeforeScope ? @"1" : @"0", readableAfterScope ? @"1" : @"0",
-                coordinatedReadable ? @"1" : @"0"];
-            if (diagnostics.length) {
-                message = [message stringByAppendingFormat:@"\n\n诊断：%@", diagnostics];
-            }
             if (!silentErrors) {
                 amproj_presentImportErrorForKind(message, importKind, YES);
             }
@@ -16571,6 +16652,17 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
 #endif
     if (!amproj_runtimeUsesLegacyImportHooks()) {
+        // The native settings drawer (menu button / edge swipe / programmatic)
+        // presents these controllers; the drawer was removed from the product,
+        // so the presentation is refused outright.
+        if (amproj_runtimeIsBuild865() &&
+            AMProjClassIsSettingsDrawer([controller class])) {
+            amproj_logCriticalEvent(@"settings.drawer_presentation_suppressed", @{
+                @"controller": NSStringFromClass(controller.class) ?: @""
+            });
+            if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+            return;
+        }
         if (amproj_isIPAFireWelcome(controller)) {
             // Some signed 6.2.58 packages present the IPAFire welcome screen
             // as a regular controller rather than an alert. Suppress it
@@ -18541,6 +18633,98 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
     });
 }
 
+// MARK: - Third-party crack welcome suppression (Blatant)
+
+// The Blatant crack dylibs (blatantroll/blatantsPatch) decrypt their welcome
+// controller at runtime, so the class cannot be matched by name statically.
+// class_getImageName survives encryption: any UIViewController class defined
+// inside those images belongs to the crack, and its presentation or window
+// takeover is suppressed before it can draw a single frame.
+static BOOL AMProjClassIsFromCrackDylib(Class cls) {
+    for (Class current = cls; current; current = class_getSuperclass(current)) {
+        const char *imageName = class_getImageName(current);
+        if (!imageName) continue;
+        NSString *path = [[NSString alloc] initWithCString:imageName
+                                                  encoding:NSUTF8StringEncoding];
+        NSString *fileName = path.lastPathComponent.lowercaseString ?: @"";
+        if ([fileName hasPrefix:@"blatantroll"] ||
+            [fileName hasPrefix:@"blatantspatch"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void (*orig_UIWindowMakeKeyAndVisible)(id, SEL) = NULL;
+static void hooked_UIWindowMakeKeyAndVisible(id self, SEL _cmd) {
+    UIViewController *root = ((UIWindow *)self).rootViewController;
+    if (root && AMProjClassIsFromCrackDylib(root.class)) {
+        amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
+            @"via": @"makeKeyAndVisible",
+            @"class": NSStringFromClass(root.class) ?: @""
+        });
+        return;
+    }
+    orig_UIWindowMakeKeyAndVisible(self, _cmd);
+}
+
+static void (*orig_UIWindowSetRootViewController)(id, SEL, UIViewController *) = NULL;
+static void hooked_UIWindowSetRootViewController(id self, SEL _cmd,
+                                                 UIViewController *controller) {
+    if (controller && AMProjClassIsFromCrackDylib(controller.class)) {
+        amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
+            @"via": @"setRootViewController",
+            @"class": NSStringFromClass(controller.class) ?: @""
+        });
+        return;
+    }
+    orig_UIWindowSetRootViewController(self, _cmd, controller);
+}
+
+static void amproj_installCrackWelcomeSuppressors(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (!amproj_runtimeIsBuild865()) return;
+        Method makeKeyMethod = class_getInstanceMethod(UIWindow.class,
+            NSSelectorFromString(@"makeKeyAndVisible"));
+        if (makeKeyMethod) {
+            orig_UIWindowMakeKeyAndVisible = (void (*)(id, SEL))method_setImplementation(
+                makeKeyMethod, (IMP)hooked_UIWindowMakeKeyAndVisible);
+        }
+        Method rootMethod = class_getInstanceMethod(UIWindow.class,
+            NSSelectorFromString(@"setRootViewController:"));
+        if (rootMethod) {
+            orig_UIWindowSetRootViewController = (void (*)(id, SEL, UIViewController *))
+                method_setImplementation(rootMethod,
+                    (IMP)hooked_UIWindowSetRootViewController);
+        }
+        NSLog(@"[AMProjExport] crack welcome suppressors installed");
+    });
+}
+
+// MARK: - Native settings drawer removal (Build 865)
+
+// Every entry into the drawer funnels through one presentation: the menu
+// button and the edge gesture both end in presenting SettingsNC (or its
+// container/child VCs). Suppressing that presentation plus removing the
+// button and disabling the edge gesture removes the drawer without touching
+// the editor's own settings controllers.
+static BOOL AMProjClassIsSettingsDrawer(Class cls) {
+    for (Class current = cls; current; current = class_getSuperclass(current)) {
+        NSString *name = NSStringFromClass(current) ?: @"";
+        if ([name isEqualToString:@"_TtC12AlightMotion10SettingsNC"] ||
+            [name isEqualToString:@"AlightMotion.SettingsNC"] ||
+            [name isEqualToString:@"_TtC12AlightMotion19SettingsContainerVC"] ||
+            [name isEqualToString:@"AlightMotion.SettingsContainerVC"] ||
+            [name isEqualToString:@"_TtC12AlightMotion10SettingsVC"] ||
+            [name isEqualToString:@"AlightMotion.SettingsVC"]) {
+            return YES;
+        }
+        if (current == UIViewController.class) break;
+    }
+    return NO;
+}
+
 __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
@@ -18552,6 +18736,7 @@ static void AMProjExportInit(void) {
         NSLog(@"[AMProjExport] ===== Loading v44 =====");
 #endif
         NSLog(@"%@", kAMProjCloudStabilityContract);
+        amproj_installCrackWelcomeSuppressors();
 #if AMPROJ_CLOUD_SYNC
         AMCloudSyncInstallPluginHooksEarly();
 #endif
