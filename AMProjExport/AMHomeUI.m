@@ -2012,7 +2012,7 @@ static void AMHomeUISettingsRecordAboutIndex(NSInteger section, NSInteger row) {
 static BOOL AMHomeUICellContainsAboutLabel(UIView *view) {
     if ([view isKindOfClass:UILabel.class]) {
         UILabel *label = (UILabel *)view;
-        if ([label.text stringByTrimmingCharactersInSet:
+        if ([[label.text stringByTrimmingCharactersInSet:
                 [NSCharacterSet whitespaceAndNewlineCharacterSet]]
                 isEqualToString:@"关于"]) return YES;
     }
