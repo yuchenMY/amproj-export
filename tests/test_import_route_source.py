@@ -3194,7 +3194,11 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('UIWindowDidBecomeKeyNotification', SOURCE)
         self.assertIn('UIWindowDidBecomeVisibleNotification', SOURCE)
         self.assertIn('UIApplicationWillEnterForegroundNotification', SOURCE)
-        self.assertIn('hide_window_without_root', SOURCE)
+        # Rootless overlay windows go through the bounded silent bypass; the
+        # old hide-in-place mutation no longer exists.
+        self.assertIn(
+            'amproj_bypassGateWindow(window, source ?: @"window_scan",\n'
+            '                    @"IPAFire welcome");', SOURCE)
         self.assertIn('amproj_IPAFireAppendLayerText', SOURCE)
         self.assertIn('CATextLayer.class', SOURCE)
         self.assertIn('hooked_windowMakeKeyAndVisible', SOURCE)
@@ -3206,7 +3210,11 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn('BOOL hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);', scan)
         self.assertIn('if (!window.rootViewController)', scan)
-        self.assertIn('window.hidden = YES;', scan)
+        # Window-level handling is delegated to the bounded gate bypass; the
+        # scan itself never disables interaction on a whole window (that is
+        # what froze the app against the re-showing crack module).
+        self.assertIn('amproj_bypassGateWindow(window', scan)
+        self.assertNotIn('window.userInteractionEnabled = NO;', scan)
 
     def test_build_865_removes_blatant_license_overlay_at_display_source(self):
         # The Blatant welcome page and the continue-entrance splash are built
@@ -3242,11 +3250,43 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # dismissed so they cannot swallow touches.
         self.assertIn('hooked_UIWindowSetHidden', SOURCE)
         self.assertIn('@"setHidden:"', SOURCE)
+        # The gate must never render a frame: every show path fires the
+        # silent bypass instead of hiding a visible window after the fact.
+        self.assertIn('amproj_windowCarriesCrackGate(window)', SOURCE)
+        bypass = function_body(
+            'static void amproj_bypassGateWindow',
+            'static const void *amproj_IPAFireRootHiddenKey',
+        )
+        self.assertIn('amproj_fireGateSkipControl(window)', bypass)
+        self.assertIn('amproj_ensureApplicationKeyWindow()', bypass)
+        self.assertIn('window.hidden = YES;', bypass)
+        self.assertNotIn('userInteractionEnabled', bypass)
+        fire = function_body(
+            'static BOOL amproj_fireGateSkipControl',
+            '// After any gate handling there must always be',
+        )
+        self.assertIn('sendActionsForControlEvents:UIControlEventTouchUpInside', fire)
+        make_key = function_body(
+            'static void hooked_UIWindowMakeKeyAndVisible',
+            'static void (*orig_UIWindowSetRootViewController)',
+        )
+        self.assertIn('amproj_windowCarriesCrackGate(window)', make_key)
+        self.assertIn('amproj_bypassGateWindow(window', make_key)
+        # Normal windows must still reach the original implementation; only
+        # gate windows are diverted into the silent bypass above.
+        self.assertIn('orig_UIWindowMakeKeyAndVisible(self, _cmd);', make_key)
+        set_hidden = function_body(
+            'static void hooked_UIWindowSetHidden',
+            'static void amproj_installCrackWelcomeSuppressors',
+        )
+        self.assertIn('amproj_windowCarriesCrackGate(window)', set_hidden)
+        self.assertIn('return;', set_hidden)
         window_hooks = function_body(
             'static void hooked_UIWindowSetRootViewController',
             'static void (*orig_UIWindowSetHidden)',
         )
-        self.assertIn('resignKeyWindow', window_hooks)
+        self.assertIn('amproj_ensureApplicationKeyWindow()', window_hooks)
+        self.assertNotIn('resignKeyWindow', window_hooks)
         scan = function_body(
             'static void amproj_suppressIPAFireWelcomeWindows',
             'static void amproj_scheduleIPAFireWelcomeSuppression',

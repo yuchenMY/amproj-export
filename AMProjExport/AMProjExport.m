@@ -14460,6 +14460,156 @@ static BOOL amproj_windowContainsWebView(UIView *view, NSUInteger depth) {
     return NO;
 }
 
+#pragma mark - Crack gate bypass
+
+// Device syslog for the frozen build proved both earlier strategies wrong:
+// hide-only deadlocks the app (the crack re-shows its gate immediately,
+// 6153 suppressions in 110s, while no window stays key and every touch is
+// dropped), and letting the gate render at all is exactly what must not
+// happen. The gate window is therefore never allowed to become visible: the
+// show paths (makeKeyAndVisible / setHidden / root swap) are blocked and the
+// gate's own continue/close control is fired silently while the window is
+// still hidden, so the crack state machine completes with zero rendered
+// frames and the application window keeps key status throughout.
+
+static BOOL amproj_gateWindowCollectButtons(UIView *view, NSUInteger depth,
+                                            NSMutableArray<UIButton *> *out) {
+    if (!view || depth > 24) return NO;
+    if ([view isKindOfClass:UIButton.class]) {
+        [out addObject:(UIButton *)view];
+        if (out.count >= 32) return YES;
+    }
+    for (UIView *subview in view.subviews) {
+        if (amproj_gateWindowCollectButtons(subview, depth + 1, out)) return YES;
+    }
+    return NO;
+}
+
+// A gate window is any window whose controller chain or view tree was built
+// by the injected license module. The root can be nil when the crack adds
+// its views directly, so the whole window tree is inspected.
+static BOOL amproj_windowCarriesCrackGate(UIWindow *window) {
+    if (!window) return NO;
+    if (AMProjPresentationChainHasCrackController(window.rootViewController)) {
+        return YES;
+    }
+    return AMProjViewHierarchyHasCrackClass(window, 0);
+}
+
+// Fires the gate's own skip control: prefer the literal continue-entrance
+// title, then the bottom full-width button layout, then the small top-left
+// close button. sendActionsForControlEvents reaches every target the crack
+// wired, so its own state machine performs the completion and dismissal
+// while the window stays invisible.
+static BOOL amproj_fireGateSkipControl(UIWindow *window) {
+    if (!window || !NSThread.isMainThread) return NO;
+    UIViewController *root = window.rootViewController;
+    if (root && !root.viewIfLoaded) {
+        // Force the gate's own viewDidLoad so its controls exist; the window
+        // stays hidden, so nothing is rendered by this.
+        [root view];
+    }
+    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+    amproj_gateWindowCollectButtons(window, 0, buttons);
+    if (!buttons.count) return NO;
+    CGFloat width = window.bounds.size.width ?: 1.0;
+    CGFloat height = window.bounds.size.height ?: 1.0;
+    UIButton *picked = nil;
+    NSString *continueTitle = @"\u7ee7\u7eed\u8fdb\u5165";
+    for (UIButton *button in buttons) {
+        NSString *title = button.currentTitle ?: @"";
+        if ([title containsString:continueTitle]) {
+            picked = button;
+            break;
+        }
+    }
+    if (!picked) {
+        for (UIButton *button in buttons) {
+            if (button.window != window) continue;
+            CGRect frame = [window convertRect:button.bounds fromView:button];
+            CGFloat centerRatio = CGRectGetMidY(frame) / height;
+            CGFloat widthRatio = CGRectGetWidth(frame) / width;
+            if (centerRatio > 0.70 && widthRatio > 0.40) {
+                picked = button;
+                break;
+            }
+        }
+    }
+    if (!picked) {
+        for (UIButton *button in buttons) {
+            if (button.window != window) continue;
+            CGRect frame = [window convertRect:button.bounds fromView:button];
+            if (CGRectGetMinX(frame) < 0.15 * width &&
+                CGRectGetMinY(frame) < 0.15 * height &&
+                CGRectGetWidth(frame) < 0.2 * width) {
+                picked = button;
+                break;
+            }
+        }
+    }
+    if (!picked) return NO;
+    [picked sendActionsForControlEvents:UIControlEventTouchUpInside];
+    return YES;
+}
+
+// After any gate handling there must always be a usable key window, even if
+// the gate window was the only key candidate and is now blocked.
+static void amproj_ensureApplicationKeyWindow(void) {
+    if (!NSThread.isMainThread) return;
+    UIWindow *key = amproj_keyWindow();
+    if (key && !key.hidden) return;
+    UIWindow *best = nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (window.hidden || !window.rootViewController) continue;
+        if (window.windowLevel > UIWindowLevelNormal) continue;
+        if (!best || window.windowLevel < best.windowLevel) best = window;
+    }
+#pragma clang diagnostic pop
+    if (best && !best.isKeyWindow) [best makeKeyWindow];
+}
+
+static const void *amproj_gateWindowRoundsKey =
+    &amproj_gateWindowRoundsKey;
+static const void *amproj_gateWindowLastRoundKey =
+    &amproj_gateWindowLastRoundKey;
+
+// One silent bypass round per gate window: fire the skip control on the
+// hidden window and restore the application key window. Bounded to three
+// rounds with a two second cooldown per window object so a crack retry loop
+// can never turn this into busy work.
+static void amproj_bypassGateWindow(UIWindow *window, NSString *source,
+                                    NSString *fingerprint) {
+    if (!window || !NSThread.isMainThread) return;
+    NSNumber *rounds = objc_getAssociatedObject(
+        window, amproj_gateWindowRoundsKey);
+    NSDate *lastRound = objc_getAssociatedObject(
+        window, amproj_gateWindowLastRoundKey);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (lastRound && now - lastRound.timeIntervalSinceReferenceDate < 2.0) {
+        amproj_ensureApplicationKeyWindow();
+        return;
+    }
+    if (rounds.unsignedIntegerValue >= 3) {
+        amproj_ensureApplicationKeyWindow();
+        return;
+    }
+    objc_setAssociatedObject(window, amproj_gateWindowRoundsKey,
+        @(rounds.integerValue + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(window, amproj_gateWindowLastRoundKey,
+        [NSDate date], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    BOOL fired = amproj_fireGateSkipControl(window);
+    window.hidden = YES;
+    amproj_ensureApplicationKeyWindow();
+    amproj_logCriticalEvent(@"popup.suppressed", @{
+        @"fingerprint": fingerprint ?: @"crack gate",
+        @"source": source ?: @"gate_bypass",
+        @"skip_fired": @(fired),
+        @"round": @(rounds.integerValue + 1)
+    });
+}
+
 // Some IPAFire builds install the welcome page directly as the key window's
 // root view. In that layout there is no child overlay to remove. Hide only a
 // strict, startup-only fingerprint and reveal the view once its markers are
@@ -14617,23 +14767,15 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
         // The Blatant license overlay is fingerprinted by its classes before
         // any text walk: its controllers and views decrypt at runtime and may
         // never expose readable labels. Only separate overlay windows above
-        // the normal level are removed here; the app's own window keeps its
+        // the normal level are bypassed here; the app's own window keeps its
         // native lifecycle.
         if (window.windowLevel > UIWindowLevelNormal) {
             UIViewController *topForCrack =
                 amproj_topViewController(window.rootViewController);
             if (AMProjPresentationChainHasCrackController(topForCrack) ||
                 AMProjViewHierarchyHasCrackClass(window, 0)) {
-                amproj_logCriticalEvent(@"popup.suppressed", @{
-                    @"fingerprint": @"Blatant license overlay",
-                    @"source": source ?: @"window_scan",
-                    @"window_level": @(window.windowLevel),
-                    @"controller": NSStringFromClass(
-                        window.rootViewController.class) ?: @""
-                });
-                window.hidden = YES;
-                window.userInteractionEnabled = NO;
-                if (window.isKeyWindow) [window resignKeyWindow];
+                amproj_bypassGateWindow(window, source ?: @"window_scan",
+                    @"Blatant license overlay");
                 continue;
             }
             // Crack controllers registered at runtime have no image name, so
@@ -14647,14 +14789,8 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
             if (window.rootViewController && topForWeb &&
                 !topForWeb.presentingViewController &&
                 amproj_windowContainsWebView(window, 0)) {
-                amproj_logCriticalEvent(@"popup.suppressed", @{
-                    @"fingerprint": @"Blatant license overlay",
-                    @"source": source ?: @"window_scan_webview",
-                    @"window_level": @(window.windowLevel)
-                });
-                window.hidden = YES;
-                window.userInteractionEnabled = NO;
-                if (window.isKeyWindow) [window resignKeyWindow];
+                amproj_bypassGateWindow(window, source ?: @"window_scan_webview",
+                    @"Blatant license overlay");
                 continue;
             }
         }
@@ -14667,14 +14803,8 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
             BOOL containsWebView = amproj_windowContainsWebView(window, 0);
             if ((hasWindowFingerprint || containsWebView) &&
                 (window != keyWindow || window.windowLevel > UIWindowLevelNormal)) {
-                amproj_logCriticalEvent(@"popup.suppressed", @{
-                    @"fingerprint": @"IPAFire welcome",
-                    @"source": source ?: @"window_scan",
-                    @"window_level": @(window.windowLevel),
-                    @"mutation": @"hide_window_without_root"
-                });
-                window.hidden = YES;
-                window.userInteractionEnabled = NO;
+                amproj_bypassGateWindow(window, source ?: @"window_scan",
+                    @"IPAFire welcome");
             }
             continue;
         }
@@ -14686,16 +14816,11 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
                 continue;
             }
             // IPAFire can use a separate alert-level window instead of a
-            // presented controller. Hide only that identified overlay, never
-            // the normal application key window.
+            // presented controller. Bypass only that identified overlay,
+            // never the normal application key window.
             if (window != keyWindow && window.windowLevel > UIWindowLevelNormal) {
-                amproj_logCriticalEvent(@"popup.suppressed", @{
-                    @"fingerprint": @"IPAFire welcome",
-                    @"source": source ?: @"window_scan",
-                    @"window_level": @(window.windowLevel)
-                });
-                window.hidden = YES;
-                window.userInteractionEnabled = NO;
+                amproj_bypassGateWindow(window, source ?: @"window_scan",
+                    @"IPAFire welcome");
                 continue;
             }
 
@@ -14710,7 +14835,6 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
                     @"controller": NSStringFromClass(top.class) ?: @""
                 });
                 overlay.hidden = YES;
-                overlay.userInteractionEnabled = NO;
             } else if (rootView && amproj_IPAFireViewContainsMarker(rootView, 0)) {
                 // The root-view layout has no smaller subtree to remove. The
                 // fingerprint is strict and limited to build 865 startup, so
@@ -14725,20 +14849,14 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
         UIView *overlay = amproj_IPAFireFindOverlayView(rootView, 0);
         if (window != keyWindow && window.windowLevel > UIWindowLevelNormal &&
             (hasWindowFingerprint || overlay)) {
-            amproj_logCriticalEvent(@"popup.suppressed", @{
-                @"fingerprint": @"IPAFire welcome",
-                @"source": source ?: @"window_scan",
-                @"window_level": @(window.windowLevel)
-            });
-            window.hidden = YES;
-            window.userInteractionEnabled = NO;
+            amproj_bypassGateWindow(window, source ?: @"window_scan",
+                @"IPAFire welcome");
         } else if (overlay && overlay != rootView && overlay != window) {
             amproj_logCriticalEvent(@"popup.suppressed", @{
                 @"fingerprint": @"IPAFire welcome",
                 @"source": source ?: @"root_overlay_scan"
             });
             overlay.hidden = YES;
-            overlay.userInteractionEnabled = NO;
         } else if (overlay == rootView &&
                    amproj_IPAFireViewContainsMarker(rootView, 0)) {
             amproj_IPAFireHideRootViewTemporarily(rootView, source);
@@ -16718,8 +16836,10 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     // The Blatant license module (Frameworks/AlightMotion.dylib) presents its
     // welcome and continue-entrance pages as regular controllers. Their
     // classes decrypt at runtime, so the image-name chain is the fingerprint,
-    // not any text or class name. Block before presentation so no frame of
-    // either page can ever reach the screen.
+    // not any text or class name. The presentation is blocked so no frame of
+    // either page can reach the screen, and the gate's own continue control
+    // is fired on the not-yet-presented view so the crack state machine still
+    // completes and the app proceeds as if the page had been confirmed.
     if (AMProjPresentationChainHasCrackController(controller) ||
         (controller.viewIfLoaded &&
          AMProjViewHierarchyHasCrackClass(controller.viewIfLoaded, 0))) {
@@ -16728,6 +16848,13 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             @"source": @"pre_presentation",
             @"controller": NSStringFromClass(controller.class) ?: @""
         });
+        UIView *gateView = controller.viewIfLoaded;
+        if (gateView) {
+            amproj_bypassGateWindow(gateView.window, @"pre_presentation",
+                @"crack gate");
+        } else {
+            amproj_ensureApplicationKeyWindow();
+        }
         if (completion) dispatch_async(dispatch_get_main_queue(), completion);
         return;
     }
@@ -18779,17 +18906,16 @@ static BOOL AMProjViewHierarchyHasCrackClass(UIView *view, NSUInteger depth) {
 static void (*orig_UIWindowMakeKeyAndVisible)(id, SEL) = NULL;
 static void hooked_UIWindowMakeKeyAndVisible(id self, SEL _cmd) {
     UIWindow *window = (UIWindow *)self;
-    UIViewController *root = window.rootViewController;
-    // The crack's controller may sit below a stock container (navigation
-    // controller), so the child chain is inspected as well.
-    if ((root && AMProjPresentationChainHasCrackController(root)) ||
-        AMProjViewHierarchyHasCrackClass(root.viewIfLoaded, 0)) {
+    // The gate must never render a single frame and never hold key status:
+    // the crack module retries makeKeyAndVisible in a tight loop (~1.4s on
+    // device), and granting any of those attempts is what froze the app.
+    if (amproj_windowCarriesCrackGate(window)) {
         amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
             @"via": @"makeKeyAndVisible",
-            @"class": NSStringFromClass(root.class) ?: @""
+            @"class": NSStringFromClass(window.rootViewController.class) ?: @""
         });
-        // Leaving the window unshown is enough: a UIWindow that never receives
-        // makeKeyAndVisible stays hidden and never renders a frame.
+        amproj_bypassGateWindow(window, @"makeKeyAndVisible",
+            @"crack gate");
         return;
     }
     orig_UIWindowMakeKeyAndVisible(self, _cmd);
@@ -18806,16 +18932,16 @@ static void hooked_UIWindowSetRootViewController(id self, SEL _cmd,
             @"via": @"setRootViewController",
             @"class": NSStringFromClass(controller.class) ?: @""
         });
-        // The crack may already have made its overlay window key and visible
-        // before assigning a root. An empty key window at alert level would
-        // swallow every touch, so the window is dismissed here. Alight
-        // Motion's own window (normal level) is left alone: skipping the root
-        // swap already restored its previous controller.
+        // Drive the crack state machine forward while nothing is visible,
+        // then keep the overlay window hidden. Alight Motion's own window
+        // (normal level) is left alone: skipping the root swap already
+        // restored its previous controller.
+        amproj_bypassGateWindow(window, @"setRootViewController",
+            @"crack gate");
         if (!window.hidden && window.windowLevel > UIWindowLevelNormal) {
             window.hidden = YES;
-            window.userInteractionEnabled = NO;
-            if (window.isKeyWindow) [window resignKeyWindow];
         }
+        amproj_ensureApplicationKeyWindow();
         return;
     }
     orig_UIWindowSetRootViewController(self, _cmd, controller);
@@ -18823,18 +18949,19 @@ static void hooked_UIWindowSetRootViewController(id self, SEL _cmd,
 
 static void (*orig_UIWindowSetHidden)(id, SEL, BOOL) = NULL;
 static void hooked_UIWindowSetHidden(id self, SEL _cmd, BOOL hidden) {
-    // Some crack builds skip makeKeyAndVisible and reveal their overlay with
-    // window.hidden = NO directly. Block only that reveal; normal hiding and
-    // every non-crack window pass through untouched.
+    // Every reveal path is blocked for a gate window, including windows with
+    // no root controller whose subviews were built by the crack. The window
+    // therefore never renders a frame; the bypass fires its controls while
+    // it stays hidden.
     if (!hidden) {
         UIWindow *window = (UIWindow *)self;
-        UIViewController *root = window.rootViewController;
-        if ((root && AMProjPresentationChainHasCrackController(root)) ||
-            AMProjViewHierarchyHasCrackClass(root.viewIfLoaded, 0)) {
+        if (amproj_windowCarriesCrackGate(window)) {
             amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
                 @"via": @"setHidden",
-                @"class": NSStringFromClass(root.class) ?: @""
+                @"class": NSStringFromClass(window.rootViewController.class) ?: @""
             });
+            amproj_bypassGateWindow(window, @"setHidden",
+                @"crack gate");
             return;
         }
     }
