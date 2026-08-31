@@ -1760,6 +1760,7 @@ static void AMHomeUIAttachAttempt(NSUInteger attempt) {
     }
     @try {
         AMHomeUIControllerKind attachedKind = AMHomeUIAttach();
+        AMHomeUIApplyBrandLogoEverywhere();
         if (attempt == 60) {
             NSLog(@"[AMHomeUI] MainVC.containerView not ready; continuing low-frequency discovery");
         }
@@ -1814,7 +1815,9 @@ static void AMHomeUIScheduleAvatarRefreshes(void) {
 
 static void AMHomeUIActivateSafely(void) {
     @try {
+        AMHomeUIInstallSettingsSwizzles();
         AMHomeUIScheduleAttachAttempts();
+        AMHomeUIApplyBrandLogoEverywhere();
         AMHomeUIRefreshAvatarEverywhere();
     } @catch (NSException *exception) {
         AMHomeUIAttachLoopRunning = NO;
@@ -1829,6 +1832,229 @@ static void AMHomeUIScheduleActivation(NSTimeInterval delay) {
                    dispatch_get_main_queue(), ^{
         AMHomeUIActivateSafely();
     });
+}
+
+// MARK: - Brand logo (猫鹤AM)
+
+// The native home header shows Alight Motion's wordmark from the asset
+// catalog. Replace every image view that uses one of those assets with a
+// locally rendered 猫鹤AM wordmark in the requested Miku-green / Tianyi-blue
+// gradient, rendered at the original image's pixel size so the existing
+// layout keeps its geometry.
+static NSString * const AMHomeUIBrandText = @"猫鹤AM";
+
+static NSArray<NSString *> *AMHomeUIReplacedLogoAssetNames(void) {
+    return @[@"ac_alightmotion_logo_white", @"ic_alight_logo_white"];
+}
+
+static UIImage *AMHomeUIBrandLogoImageForSize(CGSize size, CGFloat scale) {
+    CGFloat pixelWidth = MAX(size.width * scale, 1.0);
+    CGFloat pixelHeight = MAX(size.height * scale, 1.0);
+    UIFont *chineseFont = [UIFont fontWithName:@"PingFangSC-Semibold"
+                                          size:pixelHeight * 0.58]
+        ?: [UIFont systemFontOfSize:pixelHeight * 0.58
+                             weight:UIFontWeightSemibold];
+    UIFont *latinFont = [UIFont systemFontOfSize:pixelHeight * 0.60
+                                           weight:UIFontWeightBold
+                                            design:UIFontDescriptorDesignRounded];
+    NSDictionary *chineseAttributes = @{
+        NSFontAttributeName: chineseFont,
+        NSKernAttributeName: @(pixelHeight * 0.02),
+    };
+    NSDictionary *latinAttributes = @{
+        NSFontAttributeName: latinFont,
+        NSKernAttributeName: @(pixelHeight * 0.01),
+    };
+    NSAttributedString *brandText = [[NSAttributedString alloc]
+        initWithString:AMHomeUIBrandText
+            attributes:chineseAttributes];
+    // Measure the "AM" tail separately so the total width is accurate.
+    CGSize chineseSize = [AMHomeUIBrandText sizeWithAttributes:chineseAttributes];
+    CGSize latinSize = [@"AM" sizeWithAttributes:latinAttributes];
+    CGFloat textWidth = chineseSize.width + latinSize.width * 0.96;
+    CGFloat textHeight = MAX(chineseSize.height, latinSize.height);
+    if (textWidth <= 0 || textHeight <= 0) return nil;
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat new];
+    format.scale = 1.0; // work in raw pixels for exact sizing
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer =
+        [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(pixelWidth, pixelHeight)
+                                              format:format];
+    UIImage *logoImage = [renderer imageWithActions:
+        ^(UIGraphicsImageRendererContext *renderContext) {
+            CGContextRef context = renderContext.CGContext;
+            // Draw the text once as an alpha mask.
+            CGContextSetFillColorWithColor(context, [UIColor blackColor].CGColor);
+            CGPoint textOrigin = CGPointMake((pixelWidth - textWidth) / 2.0,
+                                             (pixelHeight - textHeight) / 2.0);
+            [brandText drawAtPoint:textOrigin];
+            [@"AM" drawAtPoint:CGPointMake(textOrigin.x + chineseSize.width,
+                                           textOrigin.y + (textHeight - latinSize.height) / 2.0)
+                withAttributes:latinAttributes];
+
+            CGImage *mask = CGBitmapContextCreateImage(context);
+            if (!mask) return;
+            CGContextClearRect(context, CGRectMake(0, 0, pixelWidth, pixelHeight));
+            CGContextSetFillColorWithColor(context, [UIColor whiteColor].CGColor);
+            CGContextFillRect(context, CGRectMake(0, 0, pixelWidth, pixelHeight));
+            CGContextClipToMask(context, CGRectMake(0, 0, pixelWidth, pixelHeight), mask);
+            CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+            NSArray *gradientColors = @[(id)[UIColor
+                colorWithRed:0x39 / 255.0 green:0xC5 / 255.0 blue:0xBB / 255.0
+                             alpha:1.0].CGColor,
+                (id)[UIColor colorWithRed:0x66 / 255.0 green:0xCC / 255.0 blue:0xFF / 255.0
+                             alpha:1.0].CGColor];
+            CGGradientRef gradient = CGGradientCreateWithColors(space,
+                (__bridge CFArrayRef)gradientColors, nil);
+            if (gradient) {
+                CGContextDrawLinearGradient(context, gradient,
+                    CGPointMake(0, pixelHeight / 2.0),
+                    CGPointMake(pixelWidth, pixelHeight / 2.0), 0);
+                CGGradientRelease(gradient);
+            }
+            CGColorSpaceRelease(space);
+            CGImageRelease(mask);
+        }];
+    return logoImage;
+}
+
+static void AMHomeUIApplyBrandLogoInView(UIView *view, NSMutableArray<UIImageView *> *pending) {
+    if ([view isKindOfClass:UIImageView.class]) {
+        UIImageView *imageView = (UIImageView *)view;
+        NSString *assetName = imageView.image.imageAsset.name ?: @"";
+        if ([AMHomeUIReplacedLogoAssetNames() containsObject:assetName]) {
+            [pending addObject:imageView];
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        AMHomeUIApplyBrandLogoInView(subview, pending);
+    }
+}
+
+static void AMHomeUIApplyBrandLogoEverywhere(void) {
+    UIWindow *window = AMHomeUIKeyWindow();
+    if (!window) return;
+    NSMutableArray<UIImageView *> *pending = [NSMutableArray array];
+    AMHomeUIApplyBrandLogoInView(window, pending);
+    for (UIImageView *imageView in pending) {
+        CGSize targetSize = imageView.image.size;
+        if (targetSize.width <= 1 || targetSize.height <= 1) {
+            targetSize = imageView.bounds.size;
+        }
+        CGFloat scale = imageView.image.scale > 0 ? imageView.image.scale
+                                                  : UIScreen.mainScreen.scale;
+        UIImage *brandLogo = AMHomeUIBrandLogoImageForSize(targetSize, scale);
+        if (!brandLogo) continue;
+        imageView.image = [brandLogo
+            imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+        imageView.tintColor = nil;
+        NSLog(@"[AMHomeUI] replaced logo asset with the 猫鹤AM wordmark");
+    }
+}
+
+// MARK: - Settings drawer row cut (everything below 关于)
+
+static BOOL AMHomeUISettingsSwizzled = NO;
+static NSInteger (*orig_SettingsNumberOfRows)(id, SEL, UITableView *, NSInteger) = NULL;
+static UITableViewCell *(*orig_SettingsCellForRow)(id, SEL, UITableView *, NSIndexPath *) = NULL;
+static NSInteger AMHomeUISettingsAboutSection = -1;
+static NSInteger AMHomeUISettingsAboutRow = -1;
+
+static NSString *AMHomeUISettingsAboutDefaultsKey(void) {
+    NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:
+        @"CFBundleVersion"] ?: @"";
+    return [NSString stringWithFormat:@"amhome_settings_about_index.%@", version];
+}
+
+static void AMHomeUISettingsLoadAboutIndex(void) {
+    if (AMHomeUISettingsAboutSection >= 0) return;
+    NSDictionary *stored = [NSUserDefaults.standardUserDefaults
+        dictionaryForKey:AMHomeUISettingsAboutDefaultsKey()];
+    if ([stored[@"section"] isKindOfClass:NSNumber.class] &&
+        [stored[@"row"] isKindOfClass:NSNumber.class]) {
+        AMHomeUISettingsAboutSection = [stored[@"section"] integerValue];
+        AMHomeUISettingsAboutRow = [stored[@"row"] integerValue];
+    }
+}
+
+static void AMHomeUISettingsRecordAboutIndex(NSInteger section, NSInteger row) {
+    if (AMHomeUISettingsAboutSection == section &&
+        AMHomeUISettingsAboutRow == row) return;
+    AMHomeUISettingsAboutSection = section;
+    AMHomeUISettingsAboutRow = row;
+    [NSUserDefaults.standardUserDefaults setObject:@{
+        @"section": @(section), @"row": @(row)
+    } forKey:AMHomeUISettingsAboutDefaultsKey()];
+    NSLog(@"[AMHomeUI] settings: rows below 关于 will be hidden (section=%ld row=%ld)",
+          (long)section, (long)row);
+}
+
+static BOOL AMHomeUICellContainsAboutLabel(UIView *view) {
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        if ([label.text stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"关于"]) return YES;
+    }
+    for (UIView *subview in view.subviews) {
+        if (AMHomeUICellContainsAboutLabel(subview)) return YES;
+    }
+    return NO;
+}
+
+static BOOL AMHomeUICellIsAboutRow(UITableViewCell *cell) {
+    if (!cell) return NO;
+    NSString *className = NSStringFromClass(cell.class) ?: @"";
+    if ([className containsString:@"About"]) return YES;
+    return AMHomeUICellContainsAboutLabel(cell.contentView);
+}
+
+static NSInteger AMHomeUIHookedSettingsNumberOfRows(id self, SEL _cmd,
+                                                   UITableView *tableView,
+                                                   NSInteger section) {
+    NSInteger count = orig_SettingsNumberOfRows(self, _cmd, tableView, section);
+    AMHomeUISettingsLoadAboutIndex();
+    if (AMHomeUISettingsAboutSection == section &&
+        AMHomeUISettingsAboutRow >= 0 &&
+        AMHomeUISettingsAboutRow + 1 < count) {
+        return AMHomeUISettingsAboutRow + 1;
+    }
+    return count;
+}
+
+static UITableViewCell *AMHomeUIHookedSettingsCellForRow(id self, SEL _cmd,
+                                                        UITableView *tableView,
+                                                        NSIndexPath *indexPath) {
+    UITableViewCell *cell = orig_SettingsCellForRow(self, _cmd, tableView, indexPath);
+    if (AMHomeUISettingsAboutSection < 0 &&
+        AMHomeUICellIsAboutRow(cell)) {
+        AMHomeUISettingsRecordAboutIndex(indexPath.section, indexPath.row);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [tableView reloadData];
+        });
+    }
+    return cell;
+}
+
+static void AMHomeUIInstallSettingsSwizzles(void) {
+    if (AMHomeUISettingsSwizzled) return;
+    Class settingsClass = objc_getClass("_TtC12AlightMotion10SettingsVC");
+    if (!settingsClass) settingsClass = objc_getClass("AlightMotion.SettingsVC");
+    if (!settingsClass) return;
+    Method rowsMethod = class_getInstanceMethod(settingsClass,
+        NSSelectorFromString(@"tableView:numberOfRowsInSection:"));
+    Method cellMethod = class_getInstanceMethod(settingsClass,
+        NSSelectorFromString(@"tableView:cellForRowAtIndexPath:"));
+    if (!rowsMethod || !cellMethod) return;
+    orig_SettingsNumberOfRows = (NSInteger (*)(id, SEL, UITableView *, NSInteger))
+        method_setImplementation(rowsMethod,
+            (IMP)AMHomeUIHookedSettingsNumberOfRows);
+    orig_SettingsCellForRow = (UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))
+        method_setImplementation(cellMethod,
+            (IMP)AMHomeUIHookedSettingsCellForRow);
+    AMHomeUISettingsSwizzled = YES;
+    NSLog(@"[AMHomeUI] SettingsVC row swizzles installed");
 }
 
 void AMHomeUIInstall(void) {
