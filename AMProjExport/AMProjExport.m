@@ -10808,6 +10808,10 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
                                               NSString *transactionID,
                                               NSString * _Nullable * _Nullable titleOut) {
     NSFileManager *manager = NSFileManager.defaultManager;
+    // XML presets land in "Your Templates" (matching Alight Motion's own
+    // upload semantics); full packages become regular projects.
+    BOOL asTemplate = [originalName.pathExtension.lowercaseString
+        isEqualToString:@"xml"];
     NSURL *workDirectory = [[[NSURL fileURLWithPath:NSTemporaryDirectory()
                                          isDirectory:YES]
         URLByAppendingPathComponent:@"amproj_store_865" isDirectory:YES]
