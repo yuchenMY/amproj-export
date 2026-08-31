@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
+#import <CoreText/CoreText.h>
 #import <string.h>
 
 static NSString *const AMHomeUIURLString =
@@ -35,7 +36,11 @@ static AMHomeUIController *AMHomeUIEmbeddedController;
 static NSArray<NSLayoutConstraint *> *AMHomeUIEmbeddedConstraints;
 static BOOL AMHomeUIAttachLoopRunning;
 static void AMHomeUIApplyBrandLogoEverywhere(void);
-static void AMHomeUIInstallSettingsSwizzles(void);
+static BOOL AMHomeUIIsBuild865(void) {
+    NSString *build = [NSBundle.mainBundle objectForInfoDictionaryKey:
+        @"CFBundleVersion"];
+    return [build isEqualToString:@"865"];
+}
 
 static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView);
 static BOOL AMHomeUIEmbeddedConstraintsAreActive(void);
@@ -1817,7 +1822,7 @@ static void AMHomeUIScheduleAvatarRefreshes(void) {
 
 static void AMHomeUIActivateSafely(void) {
     @try {
-        AMHomeUIInstallSettingsSwizzles();
+        AMHomeUIInstallSettingsDrawerTrim();
         AMHomeUIScheduleAttachAttempts();
         AMHomeUIApplyBrandLogoEverywhere();
         AMHomeUIRefreshAvatarEverywhere();
@@ -1863,35 +1868,58 @@ static BOOL AMHomeUIIsBrandLogoCandidate(UIImageView *imageView, UIWindow *windo
     return YES;
 }
 
+// The brand fonts ship inside the app bundle (Payload/AlightMotion.app) and
+// are registered into the process scope on first use; UIFont is then created
+// from each font's internal PostScript name, never from the file name.
+static BOOL AMHomeUIBrandFontsRegistered = NO;
+static NSString * const AMHomeUIBrandChineseFontName = @"luoliti";
+static NSString * const AMHomeUIBrandLatinFontName = @"Cat";
+
+static void AMHomeUIRegisterBrandFonts(void) {
+    if (AMHomeUIBrandFontsRegistered) return;
+    AMHomeUIBrandFontsRegistered = YES;
+    for (NSString *resource in (@[ @"CatBrand-AM.otf", @"LoliCN.ttf" ])) {
+        NSURL *fontURL = [NSBundle.mainBundle URLForResource:
+            [resource stringByDeletingPathExtension]
+            withExtension:resource.pathExtension];
+        if (!fontURL) {
+            NSLog(@"[AMHomeUI] brand font missing from bundle: %@", resource);
+            continue;
+        }
+        CFErrorRef registrationError = NULL;
+        BOOL registered = CTFontManagerRegisterFontsForURL(
+            (__bridge CFURLRef)fontURL, kCTFontManagerScopeProcess,
+            &registrationError);
+        NSLog(@"[AMHomeUI] brand font %@ registered=%d", resource, registered);
+    }
+}
+
 static UIImage *AMHomeUIBrandLogoImageForSize(CGSize size, CGFloat scale) {
+    AMHomeUIRegisterBrandFonts();
     CGFloat pixelWidth = MAX(size.width * scale, 1.0);
     CGFloat pixelHeight = MAX(size.height * scale, 1.0);
-    UIFont *chineseFont = [UIFont fontWithName:@"PingFangSC-Semibold"
-                                          size:pixelHeight * 0.52]
-        ?: [UIFont systemFontOfSize:pixelHeight * 0.52
-                             weight:UIFontWeightSemibold];
-    UIFontDescriptor *latinDescriptor = [[[UIFont
-        systemFontOfSize:pixelHeight * 0.56 weight:UIFontWeightBold]
-        fontDescriptor] fontDescriptorWithDesign:
-        UIFontDescriptorSystemDesignRounded];
-    UIFont *latinFont = [UIFont fontWithDescriptor:latinDescriptor
-                                              size:pixelHeight * 0.56];
-    NSDictionary *chineseAttributes = @{
-        NSFontAttributeName: chineseFont,
-        NSForegroundColorAttributeName: [UIColor
-            colorWithRed:0x39 / 255.0 green:0xC5 / 255.0 blue:0xBB / 255.0
-                         alpha:1.0],
-    };
-    NSDictionary *latinAttributes = @{
-        NSFontAttributeName: latinFont,
-        NSForegroundColorAttributeName: [UIColor
-            colorWithRed:0x66 / 255.0 green:0xCC / 255.0 blue:0xFF / 255.0
-                         alpha:1.0],
-    };
+    // The rendered wordmark is 15-20% smaller than the original asset's box.
+    CGFloat textHeight = pixelHeight * 0.44;
+    UIFont *chineseFont = [UIFont fontWithName:AMHomeUIBrandChineseFontName
+                                          size:textHeight]
+        ?: [UIFont fontWithName:@"PingFangSC-Semibold" size:textHeight]
+        ?: [UIFont systemFontOfSize:textHeight weight:UIFontWeightSemibold];
+    UIFont *latinFont = [UIFont fontWithName:AMHomeUIBrandLatinFontName
+                                        size:textHeight * 1.02]
+        ?: [UIFont systemFontOfSize:textHeight * 1.02 weight:UIFontWeightBold];
+    UIColor *chineseColor = [UIColor colorWithRed:0x39 / 255.0
+                                            green:0xC5 / 255.0
+                                             blue:0xBB / 255.0 alpha:1.0];
+    UIColor *latinColor = [UIColor colorWithRed:0x66 / 255.0
+                                           green:0xCC / 255.0
+                                            blue:0xFF / 255.0 alpha:1.0];
+    NSDictionary *chineseAttributes = @{ NSFontAttributeName: chineseFont,
+        NSForegroundColorAttributeName: chineseColor };
+    NSDictionary *latinAttributes = @{ NSFontAttributeName: latinFont,
+        NSForegroundColorAttributeName: latinColor };
     CGSize chineseSize = [@"猫鹤" sizeWithAttributes:chineseAttributes];
     CGSize latinSize = [@"AM" sizeWithAttributes:latinAttributes];
     CGFloat textWidth = chineseSize.width + latinSize.width * 0.92;
-    CGFloat textHeight = MAX(chineseSize.height, latinSize.height);
     if (textWidth <= 0 || textHeight <= 0) return nil;
 
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat new];
@@ -1903,11 +1931,14 @@ static UIImage *AMHomeUIBrandLogoImageForSize(CGSize size, CGFloat scale) {
     return [renderer imageWithActions:
         ^(UIGraphicsImageRendererContext *renderContext) {
             (void)renderContext;
-            CGPoint textOrigin = CGPointMake((pixelWidth - textWidth) / 2.0,
-                                             (pixelHeight - textHeight) / 2.0);
-            [@"猫鹤" drawAtPoint:textOrigin withAttributes:chineseAttributes];
-            [@"AM" drawAtPoint:CGPointMake(textOrigin.x + chineseSize.width,
-                                           textOrigin.y + (textHeight - latinSize.height) / 2.0)
+            // Baseline-align both runs; the renderer context is top-left.
+            CGFloat baseline = MAX(chineseFont.ascender, latinFont.ascender);
+            [@"猫鹤" drawAtPoint:CGPointMake((pixelWidth - textWidth) / 2.0,
+                                           baseline - chineseFont.ascender)
+                withAttributes:chineseAttributes];
+            [@"AM" drawAtPoint:CGPointMake((pixelWidth - textWidth) / 2.0 +
+                                           chineseSize.width,
+                                           baseline - latinFont.ascender)
                 withAttributes:latinAttributes];
         }];
 }
@@ -1919,35 +1950,6 @@ static void AMHomeUIApplyBrandLogoInView(UIView *view, NSMutableArray<UIImageVie
     }
     for (UIView *subview in view.subviews) {
         AMHomeUIApplyBrandLogoInView(subview, pending);
-    }
-}
-
-static void AMHomeUIDeactivateMenuControl(UIView *view) {
-    if ([view isKindOfClass:UIButton.class]) {
-        UIButton *button = (UIButton *)view;
-        NSString *identity = [NSString stringWithFormat:@"%@ %@",
-            button.accessibilityLabel ?: @"", button.accessibilityIdentifier ?: @""];
-        if ([identity.lowercaseString containsString:@"menu"]) {
-            button.hidden = YES;
-            button.userInteractionEnabled = NO;
-            button.accessibilityElementsHidden = YES;
-        }
-    }
-    for (UIView *subview in view.subviews) {
-        AMHomeUIDeactivateMenuControl(subview);
-    }
-}
-
-static void AMHomeUIDisableDrawerEdgeGestures(UIView *view) {
-    for (UIGestureRecognizer *gesture in view.gestureRecognizers ?: @[]) {
-        if ([gesture isKindOfClass:[UIScreenEdgePanGestureRecognizer class]] &&
-            gesture.enabled) {
-            gesture.enabled = NO;
-            NSLog(@"[AMHomeUI] disabled a drawer edge-pan gesture");
-        }
-    }
-    for (UIView *subview in view.subviews) {
-        AMHomeUIDisableDrawerEdgeGestures(subview);
     }
 }
 
@@ -1973,118 +1975,123 @@ static void AMHomeUIApplyBrandLogoEverywhere(void) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         NSLog(@"[AMHomeUI] replaced the header wordmark with 猫鹤AM");
     }
-    AMHomeUIDeactivateMenuControl(window);
-    AMHomeUIDisableDrawerEdgeGestures(window);
 }
 
-// MARK: - Settings drawer row cut (everything below 关于)
+// MARK: - Settings drawer: hide every group below 关于
 
-static BOOL AMHomeUISettingsSwizzled = NO;
-static NSInteger (*orig_SettingsNumberOfRows)(id, SEL, UITableView *, NSInteger) = NULL;
-static UITableViewCell *(*orig_SettingsCellForRow)(id, SEL, UITableView *, NSIndexPath *) = NULL;
-static NSInteger AMHomeUISettingsAboutSection = -1;
-static NSInteger AMHomeUISettingsAboutRow = -1;
+// The drawer is a container (dimmView + containerView) whose content groups
+// are built at viewDidLoad. After layout, the row showing the localized
+// About title is located, and every sibling view positioned below it inside
+// containerView is hidden — the drawer then naturally ends at 关于.
+static void *AMHomeUIDrawerTrimmedKey = &AMHomeUIDrawerTrimmedKey;
 
-static NSString *AMHomeUISettingsAboutDefaultsKey(void) {
-    NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:
-        @"CFBundleVersion"] ?: @"";
-    return [NSString stringWithFormat:@"amhome_settings_about_index.%@", version];
+static UIView *AMHomeUIDrawerContainerView(UIViewController *controller) {
+    if (!controller) return nil;
+    id value = [controller valueForKey:@"containerView"];
+    return [value isKindOfClass:UIView.class] ? value : nil;
 }
 
-static void AMHomeUISettingsLoadAboutIndex(void) {
-    if (AMHomeUISettingsAboutSection >= 0) return;
-    NSDictionary *stored = [NSUserDefaults.standardUserDefaults
-        dictionaryForKey:AMHomeUISettingsAboutDefaultsKey()];
-    if ([stored[@"section"] isKindOfClass:NSNumber.class] &&
-        [stored[@"row"] isKindOfClass:NSNumber.class]) {
-        AMHomeUISettingsAboutSection = [stored[@"section"] integerValue];
-        AMHomeUISettingsAboutRow = [stored[@"row"] integerValue];
-    }
-}
-
-static void AMHomeUISettingsRecordAboutIndex(NSInteger section, NSInteger row) {
-    if (AMHomeUISettingsAboutSection == section &&
-        AMHomeUISettingsAboutRow == row) return;
-    AMHomeUISettingsAboutSection = section;
-    AMHomeUISettingsAboutRow = row;
-    [NSUserDefaults.standardUserDefaults setObject:@{
-        @"section": @(section), @"row": @(row)
-    } forKey:AMHomeUISettingsAboutDefaultsKey()];
-    NSLog(@"[AMHomeUI] settings: rows below 关于 will be hidden (section=%ld row=%ld)",
-          (long)section, (long)row);
-}
-
-static BOOL AMHomeUICellContainsAboutLabel(UIView *view) {
+static UILabel *AMHomeUIFindAboutLabel(UIView *view, NSUInteger depth) {
+    if (!view || depth > 12) return nil;
     if ([view isKindOfClass:UILabel.class]) {
         UILabel *label = (UILabel *)view;
-        if ([[label.text stringByTrimmingCharactersInSet:
-                [NSCharacterSet whitespaceAndNewlineCharacterSet]]
-                isEqualToString:@"关于"]) return YES;
+        NSString *text = [label.text stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString *localized = [NSLocalizedString(@"about", @"")
+            stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([text isEqualToString:localized] ||
+            [text isEqualToString:@"关于"]) {
+            return label;
+        }
     }
     for (UIView *subview in view.subviews) {
-        if (AMHomeUICellContainsAboutLabel(subview)) return YES;
+        UILabel *found = AMHomeUIFindAboutLabel(subview, depth + 1);
+        if (found) return found;
     }
-    return NO;
+    return nil;
 }
 
-static BOOL AMHomeUICellIsAboutRow(UITableViewCell *cell) {
-    if (!cell) return NO;
-    NSString *className = NSStringFromClass(cell.class) ?: @"";
-    if ([className containsString:@"About"]) return YES;
-    return AMHomeUICellContainsAboutLabel(cell.contentView);
-}
-
-static NSInteger AMHomeUIHookedSettingsNumberOfRows(id self, SEL _cmd,
-                                                   UITableView *tableView,
-                                                   NSInteger section) {
-    NSInteger count = orig_SettingsNumberOfRows(self, _cmd, tableView, section);
-    AMHomeUISettingsLoadAboutIndex();
-    if (AMHomeUISettingsAboutSection == section &&
-        AMHomeUISettingsAboutRow >= 0 &&
-        AMHomeUISettingsAboutRow + 1 < count) {
-        return AMHomeUISettingsAboutRow + 1;
+static void AMHomeUITrimDrawerBelowAbout(UIView *containerView,
+                                         NSMutableArray<NSString *> *log) {
+    UILabel *aboutLabel = AMHomeUIFindAboutLabel(containerView, 0);
+    if (!aboutLabel) return;
+    UIView *aboutCard = aboutLabel;
+    while (aboutCard.superview && aboutCard.superview != containerView) {
+        aboutCard = aboutCard.superview;
     }
-    return count;
+    CGFloat cutY = aboutCard.frame.minY + 1.0;
+    for (UIView *child in [containerView.subviews copy]) {
+        if (child == aboutCard || child.hidden) continue;
+        if (child.frame.minY >= cutY) {
+            child.hidden = YES;
+            [log addObject:[NSString stringWithFormat:@"%@ y=%.0f",
+                NSStringFromClass(child.class), child.frame.minY]];
+        }
+    }
 }
 
-static UITableViewCell *AMHomeUIHookedSettingsCellForRow(id self, SEL _cmd,
-                                                        UITableView *tableView,
-                                                        NSIndexPath *indexPath) {
-    UITableViewCell *cell = orig_SettingsCellForRow(self, _cmd, tableView, indexPath);
-    if (AMHomeUISettingsAboutSection < 0 &&
-        AMHomeUICellIsAboutRow(cell)) {
-        AMHomeUISettingsRecordAboutIndex(indexPath.section, indexPath.row);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [tableView reloadData];
+static void AMHomeUIScheduleDrawerTrim(UIViewController *controller) {
+    UIView *containerView = AMHomeUIDrawerContainerView(controller);
+    if (!containerView) return;
+    if ([objc_getAssociatedObject(controller, AMHomeUIDrawerTrimmedKey) boolValue]) {
+        return;
+    }
+    objc_setAssociatedObject(controller, AMHomeUIDrawerTrimmedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    for (NSNumber *delay in @[@0.45, @1.0, @1.8, @3.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIView *liveContainer = AMHomeUIDrawerContainerView(controller);
+            if (!liveContainer || !liveContainer.window) return;
+            NSMutableArray<NSString *> *log = [NSMutableArray array];
+            AMHomeUITrimDrawerBelowAbout(liveContainer, log);
+            NSLog(@"[AMHomeUI] drawer trim pass (%.1fs): hidden %@",
+                  delay.doubleValue, log);
         });
     }
-    return cell;
 }
 
-static void AMHomeUIInstallSettingsSwizzles(void) {
-    if (AMHomeUISettingsSwizzled) return;
-    Class settingsClass = objc_getClass("_TtC12AlightMotion10SettingsVC");
-    if (!settingsClass) settingsClass = objc_getClass("AlightMotion.SettingsVC");
-    if (!settingsClass) return;
-    Method rowsMethod = class_getInstanceMethod(settingsClass,
-        NSSelectorFromString(@"tableView:numberOfRowsInSection:"));
-    Method cellMethod = class_getInstanceMethod(settingsClass,
-        NSSelectorFromString(@"tableView:cellForRowAtIndexPath:"));
-    if (!rowsMethod || !cellMethod) return;
-    orig_SettingsNumberOfRows = (NSInteger (*)(id, SEL, UITableView *, NSInteger))
-        method_setImplementation(rowsMethod,
-            (IMP)AMHomeUIHookedSettingsNumberOfRows);
-    orig_SettingsCellForRow = (UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))
-        method_setImplementation(cellMethod,
-            (IMP)AMHomeUIHookedSettingsCellForRow);
-    AMHomeUISettingsSwizzled = YES;
-    NSLog(@"[AMHomeUI] SettingsVC row swizzles installed");
+static void (*orig_SettingsContainerViewDidLoad)(id, SEL) = NULL;
+
+static void hooked_SettingsContainerViewDidLoad(id self, SEL _cmd) {
+    if (orig_SettingsContainerViewDidLoad) {
+        orig_SettingsContainerViewDidLoad(self, _cmd);
+    }
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMHomeUIScheduleDrawerTrim((UIViewController *)self);
+        });
+        return;
+    }
+    AMHomeUIScheduleDrawerTrim((UIViewController *)self);
+}
+
+static void AMHomeUIInstallSettingsDrawerTrim(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (!AMHomeUIIsBuild865()) return;
+        Class containerClass = objc_getClass(
+            "_TtC12AlightMotion19SettingsContainerVC");
+        if (!containerClass) {
+            containerClass = objc_getClass("AlightMotion.SettingsContainerVC");
+        }
+        if (!containerClass) return;
+        Method method = class_getInstanceMethod(containerClass,
+            NSSelectorFromString(@"viewDidLoad"));
+        if (!method) return;
+        orig_SettingsContainerViewDidLoad = (void (*)(id, SEL))method_setImplementation(
+            method, (IMP)hooked_SettingsContainerViewDidLoad);
+        NSLog(@"[AMHomeUI] settings drawer trim installed");
+    });
 }
 
 void AMHomeUIInstall(void) {
     NSLog(@"[AMHomeUI] linked install requested");
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        AMHomeUIInstallSettingsDrawerTrim();
         [NSNotificationCenter.defaultCenter
             addObserverForName:UIApplicationDidBecomeActiveNotification
                         object:nil queue:NSOperationQueue.mainQueue

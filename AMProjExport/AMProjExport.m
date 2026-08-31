@@ -79,7 +79,6 @@ static UIViewController* amproj_shareVCRecursive(
 static UIViewController* amproj_topViewController(UIViewController *controller);
 static void amproj_noteIncomingGrantLoss(NSString *name, BOOL isXML);
 static void amproj_clearIncomingGrantLoss(NSString *name);
-static BOOL AMProjClassIsSettingsDrawer(Class cls);
 static BOOL AMProjClassIsFromCrackDylib(Class cls);
 static NSString* amproj_currentProjectTitle(UIViewController *shareController);
 static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source);
@@ -3480,7 +3479,7 @@ static BOOL amproj_claimImportTransaction(NSURL *URL, NSString *name,
         NSArray<NSString *> *expired = [amproj_importTombstones.allKeys
             filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:
                 ^BOOL(NSString *candidate, NSDictionary *_) {
-            return now - amproj_importTombstones[candidate].doubleValue > 15.0;
+            return now - amproj_importTombstones[candidate].doubleValue > 6.0;
         }]];
         [amproj_importTombstones removeObjectsForKeys:expired];
         NSString *ownerID = amproj_importKeyOwners[key];
@@ -3537,6 +3536,7 @@ static BOOL amproj_claimImportTransaction(NSURL *URL, NSString *name,
         transaction.updatedAt = now;
         amproj_importTransactions[transaction.transactionID] = transaction;
         amproj_importKeyOwners[key] = transaction.transactionID;
+        amproj_clearIncomingGrantLoss(transaction.name);
         if (transactionID) *transactionID = transaction.transactionID;
         return YES;
     }
@@ -16654,17 +16654,6 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
 #endif
     if (!amproj_runtimeUsesLegacyImportHooks()) {
-        // The native settings drawer (menu button / edge swipe / programmatic)
-        // presents these controllers; the drawer was removed from the product,
-        // so the presentation is refused outright.
-        if (amproj_runtimeIsBuild865() &&
-            AMProjClassIsSettingsDrawer([controller class])) {
-            amproj_logCriticalEvent(@"settings.drawer_presentation_suppressed", @{
-                @"controller": NSStringFromClass(controller.class) ?: @""
-            });
-            if (completion) dispatch_async(dispatch_get_main_queue(), completion);
-            return;
-        }
         if (amproj_isIPAFireWelcome(controller)) {
             // Some signed 6.2.58 packages present the IPAFire welcome screen
             // as a regular controller rather than an alert. Suppress it
@@ -18702,29 +18691,6 @@ static void amproj_installCrackWelcomeSuppressors(void) {
         }
         NSLog(@"[AMProjExport] crack welcome suppressors installed");
     });
-}
-
-// MARK: - Native settings drawer removal (Build 865)
-
-// Every entry into the drawer funnels through one presentation: the menu
-// button and the edge gesture both end in presenting SettingsNC (or its
-// container/child VCs). Suppressing that presentation plus removing the
-// button and disabling the edge gesture removes the drawer without touching
-// the editor's own settings controllers.
-static BOOL AMProjClassIsSettingsDrawer(Class cls) {
-    for (Class current = cls; current; current = class_getSuperclass(current)) {
-        NSString *name = NSStringFromClass(current) ?: @"";
-        if ([name isEqualToString:@"_TtC12AlightMotion10SettingsNC"] ||
-            [name isEqualToString:@"AlightMotion.SettingsNC"] ||
-            [name isEqualToString:@"_TtC12AlightMotion19SettingsContainerVC"] ||
-            [name isEqualToString:@"AlightMotion.SettingsContainerVC"] ||
-            [name isEqualToString:@"_TtC12AlightMotion10SettingsVC"] ||
-            [name isEqualToString:@"AlightMotion.SettingsVC"]) {
-            return YES;
-        }
-        if (current == UIViewController.class) break;
-    }
-    return NO;
 }
 
 __attribute__((constructor))
