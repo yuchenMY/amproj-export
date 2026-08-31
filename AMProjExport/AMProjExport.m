@@ -10744,9 +10744,9 @@ static void amproj_v865StoreUpdateSummaryCache(NSString *storeUUID,
         }
     }
     if (!document) document = [NSMutableDictionary dictionary];
-    NSMutableArray *scenes = [[document[@"scenes"] isKindOfClass:NSArray.class]
+    NSMutableArray *scenes = [document[@"scenes"] isKindOfClass:NSArray.class]
         ? [NSMutableArray arrayWithArray:document[@"scenes"]]
-        : [NSMutableArray array]];
+        : [NSMutableArray array];
     for (NSDictionary *scene in scenes) {
         if ([scene[@"i"] isKindOfClass:NSString.class] &&
             [scene[@"i"] isEqualToString:storeUUID]) {
@@ -10947,7 +10947,7 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
         @"media_copied": @(copiedMedia),
         @"fonts_installed": @(fonts.count),
         @"references": @(referenceCount),
-        @"missing_dependencies": @(missingDependencies),
+        @"missing_dependencies": @(missingWrittenDependencies),
         @"verified": @(verified),
         @"import_completed": @YES,
         @"route": @"865_project_store"
