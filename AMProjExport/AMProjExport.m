@@ -79,6 +79,8 @@ static UIViewController* amproj_shareVCRecursive(
 static UIViewController* amproj_topViewController(UIViewController *controller);
 static void amproj_noteIncomingGrantLoss(NSString *name, BOOL isXML);
 static void amproj_clearIncomingGrantLoss(NSString *name);
+static BOOL AMProjClassIsSettingsDrawer(Class cls);
+static BOOL AMProjClassIsFromCrackDylib(Class cls);
 static NSString* amproj_currentProjectTitle(UIViewController *shareController);
 static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source);
 
