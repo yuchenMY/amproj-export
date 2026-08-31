@@ -3189,7 +3189,8 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active")', SOURCE)
         self.assertIn('amproj_IPAFireHideRootViewTemporarily', SOURCE)
         self.assertIn('for (NSNumber *delay in @[@0.05, @0.25, @0.60, @0.75,', SOURCE)
-        self.assertIn('@1.25, @1.75, @2.50, @3.50])', SOURCE)
+        self.assertIn('@1.25, @1.75, @2.50, @3.50,', SOURCE)
+        self.assertIn('@5.0, @7.0, @9.0, @12.0, @16.0, @21.0])', SOURCE)
         self.assertIn('UIWindowDidBecomeKeyNotification', SOURCE)
         self.assertIn('UIWindowDidBecomeVisibleNotification', SOURCE)
         self.assertIn('UIApplicationWillEnterForegroundNotification', SOURCE)
@@ -3206,6 +3207,52 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('BOOL hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);', scan)
         self.assertIn('if (!window.rootViewController)', scan)
         self.assertIn('window.hidden = YES;', scan)
+
+    def test_build_865_removes_blatant_license_overlay_at_display_source(self):
+        # The Blatant welcome page and the continue-entrance splash are built
+        # by the injected Frameworks/AlightMotion.dylib license module, not by
+        # blatantroll/blatantsPatch. Its classes and strings decrypt at
+        # runtime, so suppression keys on the class image name and blocks the
+        # display entry points before any frame can render.
+        self.assertIn('[fileName isEqualToString:@"alightmotion.dylib"]', SOURCE)
+        self.assertIn(
+            'static BOOL AMProjPresentationChainHasCrackController('
+            'UIViewController *controller);', SOURCE)
+        self.assertIn(
+            'static BOOL AMProjViewHierarchyHasCrackClass(UIView *view, '
+            'NSUInteger depth);', SOURCE)
+        present = function_body(
+            'static void hooked_presentVC',
+            '#if AMPROJ_DEBUG',
+        )
+        crack = present.index('AMProjPresentationChainHasCrackController')
+        account = present.index('AMCloudSyncReplacementForNativeAccountPresentation')
+        self.assertLess(crack, account)
+        # The continue-entrance splash and the countdown are single-marker
+        # fingerprints; neither string exists in the app's own localization.
+        detector = source_body(
+            SOURCE,
+            'static BOOL amproj_IPAFireTextMatches',
+            'static BOOL amproj_IPAFireViewContainsMarker',
+        )
+        self.assertIn('closing in', detector)
+        self.assertIn('\\u7ee7\\u7eed\\u8fdb\\u5165', detector)
+        # A dedicated window reveal path (window.hidden = NO) is intercepted
+        # as well, and empty key windows left by a blocked root swap are
+        # dismissed so they cannot swallow touches.
+        self.assertIn('hooked_UIWindowSetHidden', SOURCE)
+        self.assertIn('@"setHidden:"', SOURCE)
+        window_hooks = function_body(
+            'static void hooked_UIWindowSetRootViewController',
+            'static void (*orig_UIWindowSetHidden)',
+        )
+        self.assertIn('resignKeyWindow', window_hooks)
+        scan = function_body(
+            'static void amproj_suppressIPAFireWelcomeWindows',
+            'static void amproj_scheduleIPAFireWelcomeSuppression',
+        )
+        self.assertIn('window_scan_webview', scan)
+        self.assertIn('amproj_windowContainsWebView', scan)
 
     def test_engine_builds_scan_inboxes_and_replay_deferred_urls(self):
         # 865 joined the local import engine: Inbox files and deferred launch

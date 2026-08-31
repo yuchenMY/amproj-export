@@ -80,6 +80,8 @@ static UIViewController* amproj_topViewController(UIViewController *controller);
 static void amproj_noteIncomingGrantLoss(NSString *name, BOOL isXML);
 static void amproj_clearIncomingGrantLoss(NSString *name);
 static BOOL AMProjClassIsFromCrackDylib(Class cls);
+static BOOL AMProjPresentationChainHasCrackController(UIViewController *controller);
+static BOOL AMProjViewHierarchyHasCrackClass(UIView *view, NSUInteger depth);
 static NSString* amproj_currentProjectTitle(UIViewController *shareController);
 static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source);
 
@@ -14329,6 +14331,15 @@ static BOOL amproj_IPAFireTextMatches(NSString *text) {
     if (![text isKindOfClass:NSString.class] || !text.length) return NO;
     NSString *normalized = text.lowercaseString;
     if ([normalized containsString:@"@ipafire"]) return YES;
+    // Blatant welcome page (Frameworks/AlightMotion.dylib license overlay):
+    // these markers never appear in Alight Motion's own localization tables,
+    // so any one of them alone is a reliable fingerprint.
+    if ([normalized containsString:@"cracked by"]) return YES;
+    if ([normalized containsString:@"instant certificates"]) return YES;
+    if ([normalized containsString:@"closing in"]) return YES;
+    // Blatant license splash (close button, spinner, continue button). The
+    // zh-Hans localization of the app does not contain this string.
+    if ([text containsString:@"\u7ee7\u7eed\u8fdb\u5165"]) return YES;
     BOOL hasWelcome = [normalized containsString:@"welcome"];
     BOOL hasCracked = [normalized containsString:@"cracked by blatant"] ||
         [normalized containsString:@"instant certificates"];
@@ -14433,6 +14444,20 @@ static UIView *amproj_IPAFireFindOverlayView(UIView *view, NSUInteger depth) {
         if (candidate) return candidate;
     }
     return amproj_IPAFireViewContainsMarker(view, depth) ? view : nil;
+}
+
+// A rootless overlay window hosting a web view never exposes UIKit label text
+// for the marker walk. Alight Motion always hosts web content below a root
+// controller, so a visible window without a root that contains a web view is
+// an injected overlay, never an application surface.
+static BOOL amproj_windowContainsWebView(UIView *view, NSUInteger depth) {
+    if (!view || depth > 24) return NO;
+    Class webViewClass = NSClassFromString(@"WKWebView");
+    if (webViewClass && [view isKindOfClass:webViewClass]) return YES;
+    for (UIView *subview in view.subviews) {
+        if (amproj_windowContainsWebView(subview, depth + 1)) return YES;
+    }
+    return NO;
 }
 
 // Some IPAFire builds install the welcome page directly as the key window's
@@ -14589,12 +14614,58 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
     for (UIWindow *window in windows) {
         if (window.hidden || window.alpha <= 0.01) continue;
 
+        // The Blatant license overlay is fingerprinted by its classes before
+        // any text walk: its controllers and views decrypt at runtime and may
+        // never expose readable labels. Only separate overlay windows above
+        // the normal level are removed here; the app's own window keeps its
+        // native lifecycle.
+        if (window.windowLevel > UIWindowLevelNormal) {
+            UIViewController *topForCrack =
+                amproj_topViewController(window.rootViewController);
+            if (AMProjPresentationChainHasCrackController(topForCrack) ||
+                AMProjViewHierarchyHasCrackClass(window, 0)) {
+                amproj_logCriticalEvent(@"popup.suppressed", @{
+                    @"fingerprint": @"Blatant license overlay",
+                    @"source": source ?: @"window_scan",
+                    @"window_level": @(window.windowLevel),
+                    @"controller": NSStringFromClass(
+                        window.rootViewController.class) ?: @""
+                });
+                window.hidden = YES;
+                window.userInteractionEnabled = NO;
+                if (window.isKeyWindow) [window resignKeyWindow];
+                continue;
+            }
+            // Crack controllers registered at runtime have no image name, so
+            // the class walk above can miss them. A standalone overlay window
+            // (nothing presented onto its root) that hosts web content is
+            // injected: Alight Motion's own web surfaces are always presented
+            // controllers or live inside the normal-level key window. This is
+            // how the welcome page renders when its strings are unreadable.
+            UIViewController *topForWeb =
+                amproj_topViewController(window.rootViewController);
+            if (window.rootViewController && topForWeb &&
+                !topForWeb.presentingViewController &&
+                amproj_windowContainsWebView(window, 0)) {
+                amproj_logCriticalEvent(@"popup.suppressed", @{
+                    @"fingerprint": @"Blatant license overlay",
+                    @"source": source ?: @"window_scan_webview",
+                    @"window_level": @(window.windowLevel)
+                });
+                window.hidden = YES;
+                window.userInteractionEnabled = NO;
+                if (window.isKeyWindow) [window resignKeyWindow];
+                continue;
+            }
+        }
+
         // A signed helper can briefly expose the page from an independent
         // UIWindow before assigning a root controller. Inspect the window
         // itself so that layout is not required for the startup fingerprint.
         BOOL hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);
         if (!window.rootViewController) {
-            if (hasWindowFingerprint &&
+            BOOL containsWebView = amproj_windowContainsWebView(window, 0);
+            if ((hasWindowFingerprint || containsWebView) &&
                 (window != keyWindow || window.windowLevel > UIWindowLevelNormal)) {
                 amproj_logCriticalEvent(@"popup.suppressed", @{
                     @"fingerprint": @"IPAFire welcome",
@@ -14680,8 +14751,13 @@ static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source) {
     NSString *sourceSnapshot = [source copy] ?: @"startup";
     dispatch_async(dispatch_get_main_queue(), ^{
         amproj_suppressIPAFireWelcomeWindows(sourceSnapshot);
+        // The license splash appears only after its server round-trip
+        // finishes, which on a slow network happens well past the first
+        // seconds of launch. Keep the horizon wide; each pass is a cheap
+        // class-name scan over visible windows.
         for (NSNumber *delay in @[@0.05, @0.25, @0.60, @0.75,
-                                  @1.25, @1.75, @2.50, @3.50]) {
+                                  @1.25, @1.75, @2.50, @3.50,
+                                  @5.0, @7.0, @9.0, @12.0, @16.0, @21.0]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                           (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
@@ -16637,6 +16713,22 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
     if (![NSThread isMainThread] || !controller || !orig_presentVC) {
         amproj_forwardPresentation(self, _cmd, controller, animated, completion);
+        return;
+    }
+    // The Blatant license module (Frameworks/AlightMotion.dylib) presents its
+    // welcome and continue-entrance pages as regular controllers. Their
+    // classes decrypt at runtime, so the image-name chain is the fingerprint,
+    // not any text or class name. Block before presentation so no frame of
+    // either page can ever reach the screen.
+    if (AMProjPresentationChainHasCrackController(controller) ||
+        (controller.viewIfLoaded &&
+         AMProjViewHierarchyHasCrackClass(controller.viewIfLoaded, 0))) {
+        amproj_logCriticalEvent(@"popup.suppressed", @{
+            @"fingerprint": @"Blatant license overlay",
+            @"source": @"pre_presentation",
+            @"controller": NSStringFromClass(controller.class) ?: @""
+        });
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
         return;
     }
 #if AMPROJ_CLOUD_SYNC
@@ -18626,11 +18718,16 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
 
 // MARK: - Third-party crack welcome suppression (Blatant)
 
-// The Blatant crack dylibs (blatantroll/blatantsPatch) decrypt their welcome
-// controller at runtime, so the class cannot be matched by name statically.
-// class_getImageName survives encryption: any UIViewController class defined
-// inside those images belongs to the crack, and its presentation or window
-// takeover is suppressed before it can draw a single frame.
+// The Blatant crack welcome page is not built by blatantroll/blatantsPatch.
+// Static analysis of this package located the actual builder: the injected
+// Frameworks/AlightMotion.dylib license module (BBAES-encrypted strings,
+// bb_handlePopupButtonPress:, and a UIWindow at _UIWindowLevelAlert). It
+// decrypts its controller and strings at runtime, so the class cannot be
+// matched by name statically. class_getImageName survives encryption: any
+// UIViewController class defined inside that image belongs to the crack,
+// and its presentation or window takeover is suppressed before it can draw
+// a single frame. The injected dylib is distinguished from the main
+// executable (both named "AlightMotion") by the ".dylib" suffix.
 static BOOL AMProjClassIsFromCrackDylib(Class cls) {
     for (Class current = cls; current; current = class_getSuperclass(current)) {
         const char *imageName = class_getImageName(current);
@@ -18639,21 +18736,60 @@ static BOOL AMProjClassIsFromCrackDylib(Class cls) {
                                                   encoding:NSUTF8StringEncoding];
         NSString *fileName = path.lastPathComponent.lowercaseString ?: @"";
         if ([fileName hasPrefix:@"blatantroll"] ||
-            [fileName hasPrefix:@"blatantspatch"]) {
+            [fileName hasPrefix:@"blatantspatch"] ||
+            [fileName isEqualToString:@"alightmotion.dylib"]) {
             return YES;
         }
     }
     return NO;
 }
 
+// The crack may wrap its controller in a stock UINavigationController, so
+// the presentation target itself can carry a UIKit image name. Walk the
+// child chain (bounded) before allowing a presentation through.
+static BOOL AMProjPresentationChainHasCrackController(
+    UIViewController *controller) {
+    UIViewController *current = controller;
+    for (NSUInteger depth = 0; current && depth < 8; depth++) {
+        if (AMProjClassIsFromCrackDylib(current.class)) return YES;
+        if ([current isKindOfClass:UINavigationController.class]) {
+            for (UIViewController *child in
+                     ((UINavigationController *)current).viewControllers) {
+                if (AMProjClassIsFromCrackDylib(child.class)) return YES;
+            }
+        }
+        current = current.presentedViewController;
+    }
+    return NO;
+}
+
+// Views constructed by crack classes are instances of their own UIView/CALayer
+// subclasses, so a window can be fingerprinted without reading any text. This
+// covers pages whose labels are encrypted, drawn, or hosted in a web view.
+static BOOL AMProjViewHierarchyHasCrackClass(UIView *view, NSUInteger depth) {
+    if (!view || depth > 24) return NO;
+    if (AMProjClassIsFromCrackDylib(view.class)) return YES;
+    if (view.layer && AMProjClassIsFromCrackDylib(view.layer.class)) return YES;
+    for (UIView *subview in view.subviews) {
+        if (AMProjViewHierarchyHasCrackClass(subview, depth + 1)) return YES;
+    }
+    return NO;
+}
+
 static void (*orig_UIWindowMakeKeyAndVisible)(id, SEL) = NULL;
 static void hooked_UIWindowMakeKeyAndVisible(id self, SEL _cmd) {
-    UIViewController *root = ((UIWindow *)self).rootViewController;
-    if (root && AMProjClassIsFromCrackDylib(root.class)) {
+    UIWindow *window = (UIWindow *)self;
+    UIViewController *root = window.rootViewController;
+    // The crack's controller may sit below a stock container (navigation
+    // controller), so the child chain is inspected as well.
+    if ((root && AMProjPresentationChainHasCrackController(root)) ||
+        AMProjViewHierarchyHasCrackClass(root.viewIfLoaded, 0)) {
         amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
             @"via": @"makeKeyAndVisible",
             @"class": NSStringFromClass(root.class) ?: @""
         });
+        // Leaving the window unshown is enough: a UIWindow that never receives
+        // makeKeyAndVisible stays hidden and never renders a frame.
         return;
     }
     orig_UIWindowMakeKeyAndVisible(self, _cmd);
@@ -18662,14 +18798,47 @@ static void hooked_UIWindowMakeKeyAndVisible(id self, SEL _cmd) {
 static void (*orig_UIWindowSetRootViewController)(id, SEL, UIViewController *) = NULL;
 static void hooked_UIWindowSetRootViewController(id self, SEL _cmd,
                                                  UIViewController *controller) {
-    if (controller && AMProjClassIsFromCrackDylib(controller.class)) {
+    UIWindow *window = (UIWindow *)self;
+    if (controller &&
+        (AMProjPresentationChainHasCrackController(controller) ||
+         AMProjClassIsFromCrackDylib(controller.class))) {
         amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
             @"via": @"setRootViewController",
             @"class": NSStringFromClass(controller.class) ?: @""
         });
+        // The crack may already have made its overlay window key and visible
+        // before assigning a root. An empty key window at alert level would
+        // swallow every touch, so the window is dismissed here. Alight
+        // Motion's own window (normal level) is left alone: skipping the root
+        // swap already restored its previous controller.
+        if (!window.hidden && window.windowLevel > UIWindowLevelNormal) {
+            window.hidden = YES;
+            window.userInteractionEnabled = NO;
+            if (window.isKeyWindow) [window resignKeyWindow];
+        }
         return;
     }
     orig_UIWindowSetRootViewController(self, _cmd, controller);
+}
+
+static void (*orig_UIWindowSetHidden)(id, SEL, BOOL) = NULL;
+static void hooked_UIWindowSetHidden(id self, SEL _cmd, BOOL hidden) {
+    // Some crack builds skip makeKeyAndVisible and reveal their overlay with
+    // window.hidden = NO directly. Block only that reveal; normal hiding and
+    // every non-crack window pass through untouched.
+    if (!hidden) {
+        UIWindow *window = (UIWindow *)self;
+        UIViewController *root = window.rootViewController;
+        if ((root && AMProjPresentationChainHasCrackController(root)) ||
+            AMProjViewHierarchyHasCrackClass(root.viewIfLoaded, 0)) {
+            amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
+                @"via": @"setHidden",
+                @"class": NSStringFromClass(root.class) ?: @""
+            });
+            return;
+        }
+    }
+    orig_UIWindowSetHidden(self, _cmd, hidden);
 }
 
 static void amproj_installCrackWelcomeSuppressors(void) {
@@ -18688,6 +18857,13 @@ static void amproj_installCrackWelcomeSuppressors(void) {
             orig_UIWindowSetRootViewController = (void (*)(id, SEL, UIViewController *))
                 method_setImplementation(rootMethod,
                     (IMP)hooked_UIWindowSetRootViewController);
+        }
+        Method hiddenMethod = class_getInstanceMethod(UIWindow.class,
+            NSSelectorFromString(@"setHidden:"));
+        if (hiddenMethod) {
+            orig_UIWindowSetHidden = (void (*)(id, SEL, BOOL))
+                method_setImplementation(hiddenMethod,
+                    (IMP)hooked_UIWindowSetHidden);
         }
         NSLog(@"[AMProjExport] crack welcome suppressors installed");
     });
