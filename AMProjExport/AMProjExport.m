@@ -2208,6 +2208,39 @@ static void (*orig_presentVC)(id, SEL, UIViewController *, BOOL, void (^)(void))
 static void (*orig_shareNCOnTapExport)(id, SEL, id) = NULL;
 static void (*orig_navigationPush)(id, SEL, UIViewController *, BOOL) = NULL;
 
+// Build 865 moved the share-screen export selection out of ObjC ivars, so the
+// 862 option-reading hook cannot tell which export option is selected. What
+// can be observed safely is the tap itself: ShareNC still exposes an ObjC
+// `onTapExport:`. Recording its timestamp lets the presentation hook tell a
+// login gate that Alight Motion raised for the just-tapped package export
+// apart from unrelated sign-in prompts.
+static CFAbsoluteTime amproj_865ShareExportTapAt = 0;
+static void (*orig_shareNCTap865)(id, SEL, id) = NULL;
+
+static void hooked_shareNCTap865(id self, SEL _cmd, id sender) {
+    amproj_865ShareExportTapAt = CFAbsoluteTimeGetCurrent();
+    if (orig_shareNCTap865) orig_shareNCTap865(self, _cmd, sender);
+}
+
+static void amproj_install865ShareTapHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (!amproj_runtimeIsBuild865()) return;
+        Class shareClass = objc_getClass("_TtC12AlightMotion7ShareNC");
+        if (!shareClass) shareClass = objc_getClass("AlightMotion.ShareNC");
+        if (!shareClass) return;
+        Method method = class_getInstanceMethod(shareClass,
+            NSSelectorFromString(@"onTapExport:"));
+        if (!method) return;
+        orig_shareNCTap865 = (void (*)(id, SEL, id))method_setImplementation(
+            method, (IMP)hooked_shareNCTap865);
+        amproj_logCriticalEvent(@"direct.865_share_tap_hook", @{
+            @"installed": @YES,
+            @"class": NSStringFromClass(shareClass) ?: @""
+        });
+    });
+}
+
 @interface AMProjActivityItemSource : NSObject <UIActivityItemSource>
 @property(nonatomic, strong) NSURL *fileURL;
 @end
@@ -16583,6 +16616,40 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         // the verified 862 ABI; touching them has caused XML picker/export
         // crashes even though the original presentation itself is valid.
         //
+        // The package-share login gate: Alight Motion raises this alert from
+        // ShareNC's export tap when the selected option is the project package
+        // and no AM account is signed in. The message is matched through its
+        // localization key, and only while the tap is still fresh, so other
+        // sign-in prompts and other export options are untouched. Bypassing it
+        // hands the package export to the plugin's own .amproj flow.
+        if (amproj_runtimeIsBuild865() &&
+            [controller isKindOfClass:UIAlertController.class] &&
+            !amproj_directRequest) {
+            UIAlertController *gateAlert = (UIAlertController *)controller;
+            NSString *expectedGateMessage = NSLocalizedString(
+                @"sign_in_for_package_share_msg", @"");
+            BOOL tapIsRecent = amproj_865ShareExportTapAt > 0 &&
+                CFAbsoluteTimeGetCurrent() - amproj_865ShareExportTapAt < 3.0;
+            if (expectedGateMessage.length &&
+                [gateAlert.message isEqualToString:expectedGateMessage] &&
+                tapIsRecent &&
+                [self isKindOfClass:UIViewController.class] &&
+                ((UIViewController *)self).viewIfLoaded.window) {
+                UIViewController *exportPresenter = (UIViewController *)self;
+                amproj_865ShareExportTapAt = 0;
+                amproj_logCriticalEvent(@"direct.865_login_wall_bypassed", @{
+                    @"presenter": NSStringFromClass(exportPresenter.class) ?: @""
+                });
+                if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+                NSString *exportTitle =
+                    amproj_currentProjectTitle(exportPresenter) ?: @"";
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    amproj_startDirectExport(
+                        exportPresenter, nil, animated, nil, exportTitle);
+                });
+                return;
+            }
+        }
         // The one exception is the document picker delegate proxy: with the
         // local engine enabled, a picked .amproj/.xml must enter the plugin's
         // transaction chain instead of Alight Motion's online upload page.
@@ -18313,6 +18380,7 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
         amproj_installPresentationHook();
         if (amproj_runtimeIsBuild865()) {
             AMProjV865ProjectFlowInstall();
+            amproj_install865ShareTapHook();
         }
         amproj_armPaywallStartupFallback();
         amproj_startStartupPaywallRescue();
