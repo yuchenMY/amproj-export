@@ -42,6 +42,8 @@ static BOOL AMHomeUIIsBuild865(void) {
     return [build isEqualToString:@"865"];
 }
 
+static void AMHomeUIInstallSettingsDrawerTrim(void);
+
 static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView);
 static BOOL AMHomeUIEmbeddedConstraintsAreActive(void);
 static UIView *AMHomeUIDirectChildContainingView(UIView *hostView,
@@ -2020,13 +2022,13 @@ static void AMHomeUITrimDrawerBelowAbout(UIView *containerView,
     while (aboutCard.superview && aboutCard.superview != containerView) {
         aboutCard = aboutCard.superview;
     }
-    CGFloat cutY = aboutCard.frame.minY + 1.0;
+    CGFloat cutY = CGRectGetMinY(aboutCard.frame) + 1.0;
     for (UIView *child in [containerView.subviews copy]) {
         if (child == aboutCard || child.hidden) continue;
-        if (child.frame.minY >= cutY) {
+        if (CGRectGetMinY(child.frame) >= cutY) {
             child.hidden = YES;
             [log addObject:[NSString stringWithFormat:@"%@ y=%.0f",
-                NSStringFromClass(child.class), child.frame.minY]];
+                NSStringFromClass(child.class), CGRectGetMinY(child.frame)]];
         }
     }
 }
