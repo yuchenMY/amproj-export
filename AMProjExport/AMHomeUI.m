@@ -1902,6 +1902,7 @@ static UIImage *AMHomeUIBrandLogoImageForSize(CGSize size, CGFloat scale) {
                                               format:format];
     return [renderer imageWithActions:
         ^(UIGraphicsImageRendererContext *renderContext) {
+            (void)renderContext;
             CGPoint textOrigin = CGPointMake((pixelWidth - textWidth) / 2.0,
                                              (pixelHeight - textHeight) / 2.0);
             [@"猫鹤" drawAtPoint:textOrigin withAttributes:chineseAttributes];
@@ -1926,10 +1927,7 @@ static void AMHomeUIDeactivateMenuControl(UIView *view) {
         UIButton *button = (UIButton *)view;
         NSString *identity = [NSString stringWithFormat:@"%@ %@",
             button.accessibilityLabel ?: @"", button.accessibilityIdentifier ?: @""];
-        UIImage *image = button.currentImage ?: button.imageForState:UIControlStateNormal;
-        NSString *assetName = image.imageAsset ? (image.imageAsset.name ?: @"") : @"";
-        if ([identity.lowercaseString containsString:@"menu"] ||
-            [assetName.lowercaseString containsString:@"menu"]) {
+        if ([identity.lowercaseString containsString:@"menu"]) {
             button.hidden = YES;
             button.userInteractionEnabled = NO;
             button.accessibilityElementsHidden = YES;
