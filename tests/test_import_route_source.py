@@ -2421,7 +2421,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn("NSLibraryDirectory", resolver)
         self.assertIn('amproj_resourceLookupEventName(reference)', resolver)
         self.assertIn('@"direct.font_resource"', SOURCE)
-        self.assertNotIn("CoreText", MAKEFILE)
+        # CoreText is required by AMHomeUI for brand-font registration; the
+        # project import/export library itself must stay CoreText-free.
+        self.assertNotIn("-framework CoreText", MAKEFILE.split("AMHomeUI.dylib:")[0])
 
     def test_incomplete_resource_archive_is_rejected_before_native_bridge(self):
         body = function_body(

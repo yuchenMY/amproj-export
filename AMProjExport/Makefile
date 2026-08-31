@@ -40,7 +40,8 @@ legacy-loader: AMMeowLoader.dylib
 AMHomeUI.dylib: AMHomeUI.m AMHomeUI.h
 	$(CC) $(CFLAGS) -Wall -Wextra -Werror -o $@ AMHomeUI.m \
 		-framework Foundation -framework UIKit -framework QuartzCore \
-		-framework CoreGraphics -framework WebKit -install_name @rpath/AMHomeUI.dylib
+		-framework CoreGraphics -framework WebKit -framework CoreText \
+		-install_name @rpath/AMHomeUI.dylib
 	@ls -la $@
 
 clean:
