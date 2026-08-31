@@ -34,6 +34,8 @@ static __weak UIView *AMHomeUIEmbeddedHostView;
 static AMHomeUIController *AMHomeUIEmbeddedController;
 static NSArray<NSLayoutConstraint *> *AMHomeUIEmbeddedConstraints;
 static BOOL AMHomeUIAttachLoopRunning;
+static void AMHomeUIApplyBrandLogoEverywhere(void);
+static void AMHomeUIInstallSettingsSwizzles(void);
 
 static BOOL AMHomeUIAttachToHost(UIViewController *controller, UIView *hostView);
 static BOOL AMHomeUIEmbeddedConstraintsAreActive(void);
@@ -1843,8 +1845,21 @@ static void AMHomeUIScheduleActivation(NSTimeInterval delay) {
 // layout keeps its geometry.
 static NSString * const AMHomeUIBrandText = @"猫鹤AM";
 
-static NSArray<NSString *> *AMHomeUIReplacedLogoAssetNames(void) {
-    return @[@"ac_alightmotion_logo_white", @"ic_alight_logo_white"];
+static void *AMHomeUIBrandReplacedKey = &AMHomeUIBrandReplacedKey;
+
+// The wordmark has no public asset name at runtime, so candidates are found by
+// shape: a wide, short image in the upper part of the screen, horizontally
+// centered (the home header sits between the menu button and the avatar).
+static BOOL AMHomeUIIsBrandLogoCandidate(UIImageView *imageView, UIWindow *window) {
+    UIImage *image = imageView.image;
+    if (!image || image.size.height < 12 || image.size.height > 60) return NO;
+    if (image.size.width < image.size.height * 2.5) return NO;
+    CGRect frameInWindow = [imageView convertRect:imageView.bounds toView:window];
+    if (CGRectIsNull(frameInWindow) || frameInWindow.maxY > 140) return NO;
+    CGFloat centerX = CGRectGetMidX(frameInWindow);
+    if (fabs(centerX - window.bounds.size.width / 2.0) >
+        window.bounds.size.width * 0.2) return NO;
+    return YES;
 }
 
 static UIImage *AMHomeUIBrandLogoImageForSize(CGSize size, CGFloat scale) {
@@ -1854,9 +1869,12 @@ static UIImage *AMHomeUIBrandLogoImageForSize(CGSize size, CGFloat scale) {
                                           size:pixelHeight * 0.58]
         ?: [UIFont systemFontOfSize:pixelHeight * 0.58
                              weight:UIFontWeightSemibold];
-    UIFont *latinFont = [UIFont systemFontOfSize:pixelHeight * 0.60
-                                           weight:UIFontWeightBold
-                                            design:UIFontDescriptorDesignRounded];
+    UIFontDescriptor *latinDescriptor = [[[UIFont
+        systemFontOfSize:pixelHeight * 0.60 weight:UIFontWeightBold]
+        fontDescriptor] fontDescriptorWithDesign:
+        UIFontDescriptorSystemDesignRounded];
+    UIFont *latinFont = [UIFont fontWithDescriptor:latinDescriptor
+                                              size:pixelHeight * 0.60];
     NSDictionary *chineseAttributes = @{
         NSFontAttributeName: chineseFont,
         NSKernAttributeName: @(pixelHeight * 0.02),
@@ -1893,7 +1911,7 @@ static UIImage *AMHomeUIBrandLogoImageForSize(CGSize size, CGFloat scale) {
                                            textOrigin.y + (textHeight - latinSize.height) / 2.0)
                 withAttributes:latinAttributes];
 
-            CGImage *mask = CGBitmapContextCreateImage(context);
+            CGImageRef mask = CGBitmapContextCreateImage(context);
             if (!mask) return;
             CGContextClearRect(context, CGRectMake(0, 0, pixelWidth, pixelHeight));
             CGContextSetFillColorWithColor(context, [UIColor whiteColor].CGColor);
@@ -1920,12 +1938,9 @@ static UIImage *AMHomeUIBrandLogoImageForSize(CGSize size, CGFloat scale) {
 }
 
 static void AMHomeUIApplyBrandLogoInView(UIView *view, NSMutableArray<UIImageView *> *pending) {
-    if ([view isKindOfClass:UIImageView.class]) {
-        UIImageView *imageView = (UIImageView *)view;
-        NSString *assetName = imageView.image.imageAsset.name ?: @"";
-        if ([AMHomeUIReplacedLogoAssetNames() containsObject:assetName]) {
-            [pending addObject:imageView];
-        }
+    if ([view isKindOfClass:UIImageView.class] &&
+        ![objc_getAssociatedObject(view, AMHomeUIBrandReplacedKey) boolValue]) {
+        [pending addObject:(UIImageView *)view];
     }
     for (UIView *subview in view.subviews) {
         AMHomeUIApplyBrandLogoInView(subview, pending);
@@ -1938,6 +1953,7 @@ static void AMHomeUIApplyBrandLogoEverywhere(void) {
     NSMutableArray<UIImageView *> *pending = [NSMutableArray array];
     AMHomeUIApplyBrandLogoInView(window, pending);
     for (UIImageView *imageView in pending) {
+        if (!AMHomeUIIsBrandLogoCandidate(imageView, window)) continue;
         CGSize targetSize = imageView.image.size;
         if (targetSize.width <= 1 || targetSize.height <= 1) {
             targetSize = imageView.bounds.size;
@@ -1949,7 +1965,9 @@ static void AMHomeUIApplyBrandLogoEverywhere(void) {
         imageView.image = [brandLogo
             imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
         imageView.tintColor = nil;
-        NSLog(@"[AMHomeUI] replaced logo asset with the 猫鹤AM wordmark");
+        objc_setAssociatedObject(imageView, AMHomeUIBrandReplacedKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSLog(@"[AMHomeUI] replaced the header wordmark with 猫鹤AM");
     }
 }
 
