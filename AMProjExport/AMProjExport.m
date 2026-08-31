@@ -14575,39 +14575,125 @@ static const void *amproj_gateWindowRoundsKey =
 static const void *amproj_gateWindowLastRoundKey =
     &amproj_gateWindowLastRoundKey;
 
-// One silent bypass round per gate window: fire the skip control on the
-// hidden window and restore the application key window. Bounded to three
-// rounds with a two second cooldown per window object so a crack retry loop
-// can never turn this into busy work.
-static void amproj_bypassGateWindow(UIWindow *window, NSString *source,
-                                    NSString *fingerprint) {
-    if (!window || !NSThread.isMainThread) return;
+// Device syslog for the frozen build and for the first bypass attempt fixed
+// the design: the crack state machine only advances when its window runs a
+// real native lifecycle (root assigned, controls wired), and it retries the
+// show in a tight loop. Each gate window therefore gets a bounded number of
+// native cycles: the show call proceeds exactly as the crack expects, and
+// within the same runloop turn — before Core Animation commits — the cycle
+// completes by hiding the window again and firing its continue/close control.
+// No frame of the gate ever reaches the display, the crack finishes its own
+// flow, and the application window is re-keyed every time.
+
+// Returns YES when this hook may call the original implementation once more.
+static BOOL amproj_gateCycleBegin(UIWindow *window) {
+    if (!window) return NO;
     NSNumber *rounds = objc_getAssociatedObject(
         window, amproj_gateWindowRoundsKey);
-    NSDate *lastRound = objc_getAssociatedObject(
+    NSDate *lastCycle = objc_getAssociatedObject(
         window, amproj_gateWindowLastRoundKey);
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (lastRound && now - lastRound.timeIntervalSinceReferenceDate < 2.0) {
-        amproj_ensureApplicationKeyWindow();
-        return;
+    if (lastCycle &&
+        now - lastCycle.timeIntervalSinceReferenceDate < 3.0) {
+        return NO;
     }
-    if (rounds.unsignedIntegerValue >= 3) {
-        amproj_ensureApplicationKeyWindow();
-        return;
-    }
+    if (rounds.unsignedIntegerValue >= 4) return NO;
     objc_setAssociatedObject(window, amproj_gateWindowRoundsKey,
         @(rounds.integerValue + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(window, amproj_gateWindowLastRoundKey,
         [NSDate date], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
+}
+
+static void amproj_gateCycleEnd(UIWindow *window, NSString *via) {
+    if (!window) return;
     BOOL fired = amproj_fireGateSkipControl(window);
     window.hidden = YES;
     amproj_ensureApplicationKeyWindow();
+    NSNumber *rounds = objc_getAssociatedObject(
+        window, amproj_gateWindowRoundsKey);
+    amproj_logCriticalEvent(@"popup.suppressed", @{
+        @"fingerprint": @"crack gate",
+        @"via": via ?: @"cycle",
+        @"skip_fired": @(fired),
+        @"round": @(rounds.integerValue)
+    });
+}
+
+// Window-sweep and presentation paths cannot replay the original call, so a
+// gate that is already visible is fired and hidden here under the same
+// budget and cooldown as the hook-driven cycles.
+static void amproj_bypassGateWindow(UIWindow *window, NSString *source,
+                                    NSString *fingerprint) {
+    if (!window || !NSThread.isMainThread) return;
+    if (!amproj_gateCycleBegin(window)) {
+        amproj_ensureApplicationKeyWindow();
+        return;
+    }
+    BOOL fired = amproj_fireGateSkipControl(window);
+    window.hidden = YES;
+    amproj_ensureApplicationKeyWindow();
+    NSNumber *rounds = objc_getAssociatedObject(
+        window, amproj_gateWindowRoundsKey);
     amproj_logCriticalEvent(@"popup.suppressed", @{
         @"fingerprint": fingerprint ?: @"crack gate",
         @"source": source ?: @"gate_bypass",
         @"skip_fired": @(fired),
-        @"round": @(rounds.integerValue + 1)
+        @"round": @(rounds.integerValue)
     });
+}
+
+#pragma mark - Startup subscription wall fingerprint
+
+// The subscription wall still opens on top of the app during startup. Its
+// SwiftUI class names change between builds (the previous outer/presenter
+// matchers no longer fire), so the fingerprint is textual: none of these
+// strings appears anywhere else in the app's localization tables.
+static BOOL amproj_startupPaywallTextMatches(NSString *text) {
+    if (![text isKindOfClass:NSString.class] || !text.length) return NO;
+    if ([text containsString:@"\u65e0\u9650\u5236\u7f16\u8f91"]) return YES;
+    if ([text containsString:@"\u5df2\u7ecf\u8d2d\u4e70\u4e86\u5417"]) return YES;
+    if ([text.lowercaseString containsString:@"let's create"]) return YES;
+    return NO;
+}
+
+static BOOL amproj_viewContainsStartupPaywallMarkers(UIView *view,
+                                                     NSUInteger depth) {
+    if (!view || depth > 24) return NO;
+    NSMutableString *content = [NSMutableString stringWithCapacity:256];
+    amproj_IPAFireAppendViewText(view, content, depth);
+    amproj_IPAFireAppendLayerText(view.layer, content, depth);
+    return amproj_startupPaywallTextMatches(content);
+}
+
+// Dismisses the presented subscription wall chain while the startup fallback
+// window is active. The dismissal follows the same completing path the
+// paywall machinery uses (present-then-dismiss), so the startup coordinator
+// still observes a finished paywall flow.
+static void amproj_dismissStartupPaywallIfVisible(NSString *source) {
+    if (!NSThread.isMainThread) return;
+    if (amproj_paywallStartupFallbackUntil <= 0 ||
+        CFAbsoluteTimeGetCurrent() >= amproj_paywallStartupFallbackUntil) {
+        return;
+    }
+    UIViewController *top = amproj_topViewController(
+        amproj_keyWindow().rootViewController);
+    for (NSUInteger depth = 0; top && depth < 8; depth++) {
+        if (amproj_viewContainsStartupPaywallMarkers(
+                top.viewIfLoaded, 0)) {
+            UIViewController *presenter = top.presentingViewController;
+            if (presenter) {
+                amproj_logCriticalEvent(@"startup.paywall_dismissed", @{
+                    @"source": source ?: @"window_scan",
+                    @"controller": NSStringFromClass(top.class) ?: @""
+                });
+                [presenter dismissViewControllerAnimated:NO
+                                             completion:nil];
+            }
+            return;
+        }
+        top = top.presentingViewController;
+    }
 }
 
 // Some IPAFire builds install the welcome page directly as the key window's
@@ -14761,6 +14847,13 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
 
     UIWindow *keyWindow = amproj_keyWindow();
     if (keyWindow && ![windows containsObject:keyWindow]) [windows addObject:keyWindow];
+
+    // The startup subscription wall is presented on the application's own
+    // window, so it never surfaces as a separate overlay window. Dismiss the
+    // presented chain by its textual fingerprint while the startup window is
+    // active; later, intentionally opened subscription screens are untouched.
+    amproj_dismissStartupPaywallIfVisible(source);
+
     for (UIWindow *window in windows) {
         if (window.hidden || window.alpha <= 0.01) continue;
 
@@ -14869,12 +14962,12 @@ static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source) {
     NSString *sourceSnapshot = [source copy] ?: @"startup";
     dispatch_async(dispatch_get_main_queue(), ^{
         amproj_suppressIPAFireWelcomeWindows(sourceSnapshot);
-        // The license splash appears only after its server round-trip
-        // finishes, which on a slow network happens well past the first
-        // seconds of launch. Keep the horizon wide; each pass is a cheap
-        // class-name scan over visible windows.
-        for (NSNumber *delay in @[@0.05, @0.25, @0.60, @0.75,
-                                  @1.25, @1.75, @2.50, @3.50,
+        // Both startup overlays appear while the previous one is still
+        // animating, so the early horizon is dense. Each pass is a bounded
+        // class-name and text scan over visible windows.
+        for (NSNumber *delay in @[@0.05, @0.15, @0.25, @0.35, @0.45,
+                                  @0.60, @0.75, @1.0, @1.25, @1.5, @1.75,
+                                  @2.0, @2.5, @3.0, @3.5,
                                   @5.0, @7.0, @9.0, @12.0, @16.0, @21.0]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                           (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
@@ -17209,6 +17302,27 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     orig_presentVC(self, _cmd, controller, animated, completion);
+    // During the startup window, a just-presented controller is checked once
+    // against the subscription-wall fingerprint. The SwiftUI class names of
+    // the wall changed between builds, so this post-presentation probe is
+    // what guarantees the wall closes within the same flow that opened it.
+    if (amproj_paywallStartupFallbackUntil > 0 &&
+        CFAbsoluteTimeGetCurrent() < amproj_paywallStartupFallbackUntil &&
+        [controller isKindOfClass:UIViewController.class]) {
+        UIViewController *presented = controller;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (presented.presentingViewController &&
+                amproj_viewContainsStartupPaywallMarkers(
+                    presented.viewIfLoaded, 0)) {
+                amproj_logCriticalEvent(@"startup.paywall_dismissed", @{
+                    @"source": @"post_presentation",
+                    @"controller": NSStringFromClass(presented.class) ?: @""
+                });
+                [presented.presentingViewController
+                    dismissViewControllerAnimated:NO completion:nil];
+            }
+        });
+    }
 #if AMPROJ_CLOUD_SYNC
     if (isShareExportHost) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -18906,16 +19020,22 @@ static BOOL AMProjViewHierarchyHasCrackClass(UIView *view, NSUInteger depth) {
 static void (*orig_UIWindowMakeKeyAndVisible)(id, SEL) = NULL;
 static void hooked_UIWindowMakeKeyAndVisible(id self, SEL _cmd) {
     UIWindow *window = (UIWindow *)self;
-    // The gate must never render a single frame and never hold key status:
-    // the crack module retries makeKeyAndVisible in a tight loop (~1.4s on
-    // device), and granting any of those attempts is what froze the app.
+    // The gate never stays on screen: a bounded number of native cycles let
+    // the crack wire its own controls, then the window is hidden again inside
+    // the same runloop turn (no rendered frame) while its continue control
+    // fires. Everything else is denied and the app window keeps key status.
     if (amproj_windowCarriesCrackGate(window)) {
-        amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
-            @"via": @"makeKeyAndVisible",
-            @"class": NSStringFromClass(window.rootViewController.class) ?: @""
-        });
-        amproj_bypassGateWindow(window, @"makeKeyAndVisible",
-            @"crack gate");
+        if (amproj_gateCycleBegin(window)) {
+            amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
+                @"via": @"makeKeyAndVisible",
+                @"class": NSStringFromClass(
+                    window.rootViewController.class) ?: @""
+            });
+            orig_UIWindowMakeKeyAndVisible(self, _cmd);
+            amproj_gateCycleEnd(window, @"makeKeyAndVisible");
+        } else {
+            amproj_ensureApplicationKeyWindow();
+        }
         return;
     }
     orig_UIWindowMakeKeyAndVisible(self, _cmd);
@@ -18928,20 +19048,20 @@ static void hooked_UIWindowSetRootViewController(id self, SEL _cmd,
     if (controller &&
         (AMProjPresentationChainHasCrackController(controller) ||
          AMProjClassIsFromCrackDylib(controller.class))) {
-        amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
-            @"via": @"setRootViewController",
-            @"class": NSStringFromClass(controller.class) ?: @""
-        });
-        // Drive the crack state machine forward while nothing is visible,
-        // then keep the overlay window hidden. Alight Motion's own window
-        // (normal level) is left alone: skipping the root swap already
-        // restored its previous controller.
-        amproj_bypassGateWindow(window, @"setRootViewController",
-            @"crack gate");
-        if (!window.hidden && window.windowLevel > UIWindowLevelNormal) {
-            window.hidden = YES;
+        // Let the gate root attach during a bounded native cycle so its
+        // controls are wired, then hide the window inside the same runloop
+        // turn. Alight Motion's own window (normal level) never hosts a crack
+        // root: skipping the swap keeps its previous controller.
+        if (amproj_gateCycleBegin(window)) {
+            amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
+                @"via": @"setRootViewController",
+                @"class": NSStringFromClass(controller.class) ?: @""
+            });
+            orig_UIWindowSetRootViewController(self, _cmd, controller);
+            amproj_gateCycleEnd(window, @"setRootViewController");
+        } else {
+            amproj_ensureApplicationKeyWindow();
         }
-        amproj_ensureApplicationKeyWindow();
         return;
     }
     orig_UIWindowSetRootViewController(self, _cmd, controller);
@@ -18949,19 +19069,24 @@ static void hooked_UIWindowSetRootViewController(id self, SEL _cmd,
 
 static void (*orig_UIWindowSetHidden)(id, SEL, BOOL) = NULL;
 static void hooked_UIWindowSetHidden(id self, SEL _cmd, BOOL hidden) {
-    // Every reveal path is blocked for a gate window, including windows with
-    // no root controller whose subviews were built by the crack. The window
-    // therefore never renders a frame; the bypass fires its controls while
-    // it stays hidden.
+    // Every reveal path for a gate window runs through the bounded cycle:
+    // the window shows exactly long enough for the crack to wire its
+    // controls (the hide lands before Core Animation commits), then it is
+    // never shown again.
     if (!hidden) {
         UIWindow *window = (UIWindow *)self;
         if (amproj_windowCarriesCrackGate(window)) {
-            amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
-                @"via": @"setHidden",
-                @"class": NSStringFromClass(window.rootViewController.class) ?: @""
-            });
-            amproj_bypassGateWindow(window, @"setHidden",
-                @"crack gate");
+            if (amproj_gateCycleBegin(window)) {
+                amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
+                    @"via": @"setHidden",
+                    @"class": NSStringFromClass(
+                        window.rootViewController.class) ?: @""
+                });
+                orig_UIWindowSetHidden(self, _cmd, hidden);
+                amproj_gateCycleEnd(window, @"setHidden");
+            } else {
+                amproj_ensureApplicationKeyWindow();
+            }
             return;
         }
     }

@@ -3188,8 +3188,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertNotIn('wrappedCompletion', present)
         self.assertIn('amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active")', SOURCE)
         self.assertIn('amproj_IPAFireHideRootViewTemporarily', SOURCE)
-        self.assertIn('for (NSNumber *delay in @[@0.05, @0.25, @0.60, @0.75,', SOURCE)
-        self.assertIn('@1.25, @1.75, @2.50, @3.50,', SOURCE)
+        self.assertIn(
+            'for (NSNumber *delay in @[@0.05, @0.15, @0.25, @0.35, @0.45,', SOURCE)
+        self.assertIn('@0.60, @0.75, @1.0, @1.25, @1.5, @1.75,', SOURCE)
+        self.assertIn('@2.0, @2.5, @3.0, @3.5,', SOURCE)
         self.assertIn('@5.0, @7.0, @9.0, @12.0, @16.0, @21.0])', SOURCE)
         self.assertIn('UIWindowDidBecomeKeyNotification', SOURCE)
         self.assertIn('UIWindowDidBecomeVisibleNotification', SOURCE)
@@ -3266,15 +3268,21 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             '// After any gate handling there must always be',
         )
         self.assertIn('sendActionsForControlEvents:UIControlEventTouchUpInside', fire)
+        self.assertIn('static BOOL amproj_gateCycleBegin(UIWindow *window)', SOURCE)
+        self.assertIn(
+            'static void amproj_gateCycleEnd(UIWindow *window, NSString *via)',
+            SOURCE)
         make_key = function_body(
             'static void hooked_UIWindowMakeKeyAndVisible',
             'static void (*orig_UIWindowSetRootViewController)',
         )
         self.assertIn('amproj_windowCarriesCrackGate(window)', make_key)
-        self.assertIn('amproj_bypassGateWindow(window', make_key)
-        # Normal windows must still reach the original implementation; only
-        # gate windows are diverted into the silent bypass above.
+        # Normal windows must still reach the original implementation; gate
+        # windows get a bounded native cycle that hides before any commit.
+        self.assertIn('amproj_gateCycleBegin(window)', make_key)
         self.assertIn('orig_UIWindowMakeKeyAndVisible(self, _cmd);', make_key)
+        self.assertIn(
+            "amproj_gateCycleEnd(window, @\"makeKeyAndVisible\")", make_key)
         set_hidden = function_body(
             'static void hooked_UIWindowSetHidden',
             'static void amproj_installCrackWelcomeSuppressors',
@@ -3293,6 +3301,34 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         )
         self.assertIn('window_scan_webview', scan)
         self.assertIn('amproj_windowContainsWebView', scan)
+
+    def test_startup_subscription_wall_dismissed_by_text_fingerprint(self):
+        # The paywall's SwiftUI class names changed between builds, so the
+        # startup dismissal keys on its own marketing strings, none of which
+        # exists in the app's localization tables. It is only active during
+        # the startup fallback window so later, intentional subscription
+        # screens still open.
+        self.assertIn('amproj_startupPaywallTextMatches', SOURCE)
+        self.assertIn(
+            'static BOOL amproj_viewContainsStartupPaywallMarkers('
+            'UIView *view,', SOURCE)
+        detector = function_body(
+            'static BOOL amproj_startupPaywallTextMatches',
+            'static BOOL amproj_viewContainsStartupPaywallMarkers',
+        )
+        self.assertIn('\\u65e0\\u9650\\u5236\\u7f16\\u8f91', detector)
+        self.assertIn('\\u5df2\\u7ecf\\u8d2d\\u4e70\\u4e86\\u5417', detector)
+        self.assertIn("let's create", detector)
+        dismiss = function_body(
+            'static void amproj_dismissStartupPaywallIfVisible',
+            'static void amproj_suppressIPAFireWelcomeWindows',
+        )
+        self.assertIn('amproj_paywallStartupFallbackUntil', dismiss)
+        self.assertIn('dismissViewControllerAnimated:NO', dismiss)
+        # Both the sweep and the presentation hook dismiss the wall.
+        self.assertIn('amproj_dismissStartupPaywallIfVisible(source);', SOURCE)
+        self.assertIn('@"startup.paywall_dismissed"', SOURCE)
+        self.assertIn('@"post_presentation"', SOURCE)
 
     def test_engine_builds_scan_inboxes_and_replay_deferred_urls(self):
         # 865 joined the local import engine: Inbox files and deferred launch
