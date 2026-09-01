@@ -50,7 +50,7 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r15-ae4292f-faithful";
+static NSString *const kAMProjGateDefenseRound = @"r16-gate-visual";
 // Master switch for every crack-funnel interception (window hooks, gate
 // cycles, funnel sweep, intro autoclose, sweep ladder). The window-level
 // rounds were verified to suppress the funnel visually, but their synthetic
@@ -58,7 +58,13 @@ static NSString *const kAMProjGateDefenseRound = @"r15-ae4292f-faithful";
 // were observed dropping the member entitlement (watermark and members-only
 // effects returned). Disabled here so the crack flow runs exactly as the
 // known-good ae4292f base; flip to YES to restore the defense.
-static BOOL amproj_gateDefenseActive = NO;
+static BOOL amproj_gateDefenseActive = YES;
+// The accessibility-based activations (funnel sweep continue taps, intro
+// close activation) raced the crack module's license state machine and were
+// observed dropping the member entitlement. They stay disarmed even while
+// the visual defense is on.
+static BOOL amproj_funnelSweepEnabled = NO;
+static BOOL amproj_introAutocloseEnabled = NO;
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
 static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
@@ -16769,7 +16775,7 @@ static BOOL amproj_funnelActivateContinueInView(
     NSString *source);
 
 static void amproj_funnelSweep(NSString *source) {
-    if (!amproj_gateDefenseActive) return;
+    if (!amproj_gateDefenseActive || !amproj_funnelSweepEnabled) return;
     if (!NSThread.isMainThread) return;
     NSString *sourceSnapshot = [source copy] ?: @"funnel_sweep";
 
@@ -17488,6 +17494,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             // the way a user would, with a hard dismiss as the fallback so
             // the launch always proceeds to main.
             if (!amproj_gateDefenseActive) return;
+            if (!amproj_introAutocloseEnabled) return;
             if ([presentedName containsString:@"IntroFlowNavigation"]) {
                 NSInteger rounds = [objc_getAssociatedObject(presented,
                     amproj_introCloseRoundsKey) integerValue];
@@ -19175,7 +19182,7 @@ static void amproj_exportPresentedChainDiagnostics(
         if (!docs.length) return;
         NSString *path = [docs stringByAppendingPathComponent:
             @"amproj_chain.txt"];
-        NSString *line = [NSString stringWithFormat:@"%@ r15 | %@\n",
+        NSString *line = [NSString stringWithFormat:@"%@ r16 | %@\n",
             [NSDate date], [classes componentsJoinedByString:@" | "]];
         NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
         if (handle) {

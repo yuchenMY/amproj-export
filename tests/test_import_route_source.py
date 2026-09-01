@@ -3317,57 +3317,40 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('amproj_windowContainsWebView', scan)
 
     def test_startup_wall_is_left_to_the_crack_native_skip(self):
-        # The repack's crack module auto-skips the intro flow and its
-        # subscription step (handleIntroFlowHook* in the main binary) - that
-        # is why the stock package never showed a wall. Rounds of blocking
-        # those presentations deadlocked the launch (r11: endless spinner
-        # plus a vibration loop), so the plugin must not touch them.
-        self.assertNotIn('amproj_controllerIsStartupPaywall', SOURCE)
-        self.assertNotIn('amproj_dismissStartupPaywallIfVisible', SOURCE)
-        self.assertNotIn('startup.paywall_blocked', SOURCE)
-        self.assertNotIn('startup.paywall_dismissed', SOURCE)
-        self.assertNotIn('startup.intro_blocked', SOURCE)
-        # Flags seeded by earlier rounds conflicted with the crack's own
-        # state machine; they are removed at startup instead.
-        self.assertIn(
-            'removeObjectForKey:@"hasOnboardingFlowBeenCompleted"];', SOURCE)
-        self.assertIn(
-            'removeObjectForKey:@"hasSkippedIntro"];', SOURCE)
-        self.assertNotIn(
-            'setBool:YES forKey:@"hasOnboardingFlowBeenCompleted"', SOURCE)
-        # The chain export stays as the on-device evidence channel.
-        self.assertIn(
-            'amproj_exportPresentedChainDiagnostics(classes);', SOURCE)
-        self.assertIn('r15 | %@', SOURCE)
-        # The intro flow is no longer blocked (that deadlocked r11): it is
-        # allowed to present, then its own close control is activated and a
-        # bounded dismiss is the fallback.
-        self.assertIn(
-            'static BOOL amproj_activateIntroCloseControl('
-            'UIViewController *intro) {', SOURCE)
-        self.assertIn(
-            'containsString:@"IntroFlowNavigation"]', SOURCE)
-        self.assertIn('startup.intro_autoclose', SOURCE)
-        self.assertIn('startup.intro_dismissed', SOURCE)
-        # Slow-license nights hold the launch callback open while the funnel
-        # renders, so the funnel sweep is scheduled from the constructor with
-        # absolute delays and activates the continue control directly.
-        self.assertIn(
-            'static void amproj_funnelSweep(NSString *source) {', SOURCE)
-        self.assertIn(
-            'static BOOL amproj_funnelActivateContinueInView(', SOURCE)
-        self.assertIn('startup.funnel_continue', SOURCE)
-        # The funnel sweep exists but is permanently disarmed: its synthetic
-        # activations raced the crack's license state machine and dropped
-        # the member entitlement.
+        # The crack module's license state machine owns the intro flow and
+        # its subscription step; synthetic activations (accessibility taps,
+        # flag seeding) raced it and dropped the member entitlement. The
+        # defense is visual-only: the funnel pages are hidden, the gate's
+        # own continue button is activated once exactly like a user tap,
+        # and every accessibility-based activation stays disarmed.
+        self.assertIn('static BOOL amproj_gateDefenseActive = YES;', SOURCE)
+        self.assertIn('static BOOL amproj_funnelSweepEnabled = NO;', SOURCE)
+        self.assertIn('static BOOL amproj_introAutocloseEnabled = NO;', SOURCE)
         sweep = function_body(
             'static void amproj_funnelSweep',
             '// Activates a visible bottom-area control',
         )
-        self.assertIn('if (!amproj_gateDefenseActive) return;', sweep)
-        self.assertIn('amproj_gateDefenseActive = NO;', SOURCE)
         self.assertIn(
-            'if (!amproj_gateDefenseActive) return;', SOURCE)
+            'if (!amproj_gateDefenseActive || !amproj_funnelSweepEnabled) return;',
+            sweep)
+        probe = function_body(
+            'static void hooked_presentVC',
+            '#if AMPROJ_DEBUG',
+        )
+        self.assertIn('if (!amproj_introAutocloseEnabled) return;', probe)
+        # The polluted onboarding flags are restored once, then never
+        # touched again so crack or app writes always persist.
+        self.assertIn(
+            'boolForKey:@"amproj_onboarding_flags_restored_r15"]) {', SOURCE)
+        self.assertIn(
+            'removeObjectForKey:@"hasOnboardingFlowBeenCompleted"];', SOURCE)
+        # The gate continue activation is title-matched to the crack's own
+        # button, so the welcome page is never driven synthetically.
+        gate = function_body(
+            'static BOOL amproj_fireGateSkipControl',
+            'static void amproj_ensureApplicationKeyWindow',
+        )
+        self.assertIn('containsString:continueTitle', gate)
 
     def test_engine_builds_scan_inboxes_and_replay_deferred_urls(self):
         # 865 joined the local import engine: Inbox files and deferred launch
