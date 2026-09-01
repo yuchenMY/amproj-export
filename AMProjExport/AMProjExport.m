@@ -19315,6 +19315,65 @@ static void amproj_exportPresentedChainDiagnostics(
     }
 }
 
+static BOOL AMProjNoopBoolIMP(__unused id self, __unused SEL _cmd) {
+    return YES;
+}
+
+static void AMProjNoopVoidIMP(id self, SEL _cmd);
+
+// MARK: - Funnel haptic suppression
+
+// The welcome/gate pages live inside the injected license module (the only
+// UI-capable crack dylib) and buzz the haptic generators while their hidden
+// lifecycle runs. During the funnel window the fire methods of the system
+// feedback generators are no-ops; editor haptics after the window are
+// untouched.
+static CFAbsoluteTime amproj_hapticSuppressUntil = 0;
+
+static void amproj_extendHapticSuppression(void) {
+    CFAbsoluteTime target = CFAbsoluteTimeGetCurrent() + 10.0;
+    CFAbsoluteTime cap = CFAbsoluteTimeGetCurrent() + 90.0;
+    if (target > amproj_hapticSuppressUntil) amproj_hapticSuppressUntil = target;
+    if (amproj_hapticSuppressUntil > cap) amproj_hapticSuppressUntil = cap;
+}
+
+static void amproj_installFunnelHapticSuppressor(void) {
+    @try {
+        NSDictionary<NSString *, NSArray<NSString *> *> *targets = @{
+            @"UIImpactFeedbackGenerator":
+                @[@"impactOccurred", @"impactOccurredWithIntensity:"],
+            @"UINotificationFeedbackGenerator":
+                @[@"notificationOccurred:"],
+            @"UISelectionFeedbackGenerator": @[@"selectionChanged"],
+        };
+        for (NSString *className in targets) {
+            Class cls = NSClassFromString(className);
+            if (!cls) continue;
+            for (NSString *selName in targets[className]) {
+                SEL sel = NSSelectorFromString(selName);
+                Method method = class_getInstanceMethod(cls, sel);
+                if (method) {
+                    method_setImplementation(method,
+                        (IMP)AMProjNoopVoidIMP);
+                }
+            }
+        }
+        Class engineClass = NSClassFromString(@"CHHapticEngine");
+        if (engineClass) {
+            for (NSString *selName in @[@"start", @"startWithCompletionHandler:"]) {
+                SEL sel = NSSelectorFromString(selName);
+                Method method = class_getInstanceMethod(engineClass, sel);
+                if (method) {
+                    method_setImplementation(method,
+                        (IMP)AMProjNoopBoolIMP);
+                }
+            }
+        }
+        NSLog(@"[AMProjExport] funnel haptic suppressor installed");
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 // MARK: - Third-party crack welcome suppression (Blatant)
 
 // The system rating prompt opens on its own session milestone. Every
@@ -19413,7 +19472,8 @@ static void hooked_UIWindowMakeKeyAndVisible(id self, SEL _cmd) {
     // fires. Everything else is denied and the app window keeps key status.
     if (amproj_windowCarriesCrackGate(window)) {
         if (amproj_gateCycleBegin(window)) {
-            amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
+            amproj_extendHapticSuppression();
+        amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
                 @"via": @"makeKeyAndVisible",
                 @"class": NSStringFromClass(
                     window.rootViewController.class) ?: @""
@@ -19444,7 +19504,8 @@ static void hooked_UIWindowSetRootViewController(id self, SEL _cmd,
         // turn. Alight Motion's own window (normal level) never hosts a crack
         // root: skipping the swap keeps its previous controller.
         if (amproj_gateCycleBegin(window)) {
-            amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
+            amproj_extendHapticSuppression();
+        amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
                 @"via": @"setRootViewController",
                 @"class": NSStringFromClass(controller.class) ?: @""
             });
@@ -19471,7 +19532,8 @@ static void hooked_UIWindowSetHidden(id self, SEL _cmd, BOOL hidden) {
         UIWindow *window = (UIWindow *)self;
         if (amproj_windowCarriesCrackGate(window)) {
             if (amproj_gateCycleBegin(window)) {
-                amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
+                amproj_extendHapticSuppression();
+        amproj_logCriticalEvent(@"startup.crack_welcome_suppressed", @{
                     @"via": @"setHidden",
                     @"class": NSStringFromClass(
                         window.rootViewController.class) ?: @""
@@ -19542,6 +19604,8 @@ static void AMProjExportInit(void) {
                 setBool:YES forKey:@"amproj_onboarding_flags_restored_r15"];
         }
         amproj_installRatingPromptSuppressor();
+        amproj_installFunnelHapticSuppressor();
+        amproj_hapticSuppressUntil = CFAbsoluteTimeGetCurrent() + 25.0;
         NSLog(@"[AMProjExport] gate defense round: %@",
               kAMProjGateDefenseRound);
 #if AMPROJ_DEBUG

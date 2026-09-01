@@ -3357,6 +3357,14 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn(
             'amproj_syncMemberFlags(@"did_become_active");', SOURCE)
         self.assertIn('member.embedded_state_applied', SOURCE)
+        # The funnel pages vibrate through the system haptic generators while
+        # their hidden lifecycle runs; the fire methods are no-ops during the
+        # funnel window only, so editor haptics stay intact afterwards.
+        self.assertIn(
+            'static void amproj_installFunnelHapticSuppressor(void) {', SOURCE)
+        self.assertIn('amproj_extendHapticSuppression();', SOURCE)
+        self.assertIn('"impactOccurred", @"impactOccurredWithIntensity:"',
+                      SOURCE)
         probe = function_body(
             'static void hooked_presentVC',
             '#if AMPROJ_DEBUG',
