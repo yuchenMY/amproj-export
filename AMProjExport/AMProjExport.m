@@ -14686,6 +14686,7 @@ static BOOL amproj_controllerIsStartupPaywall(UIViewController *controller) {
 // paywall machinery uses (present-then-dismiss), so the startup coordinator
 // still observes a finished paywall flow.
 static NSUInteger amproj_paywallChainDiagnostics;
+static NSUInteger amproj_startupPaywallDismissCount;
 
 static void amproj_dismissStartupPaywallIfVisible(NSString *source) {
     if (!NSThread.isMainThread) return;
@@ -14693,6 +14694,10 @@ static void amproj_dismissStartupPaywallIfVisible(NSString *source) {
         CFAbsoluteTimeGetCurrent() >= amproj_paywallStartupFallbackUntil) {
         return;
     }
+    // The presentation hook blocks the wall at the source; this sweep path
+    // is only a backstop for presentations that bypass the hook, and it is
+    // hard-capped so a dismiss/re-present loop can never strobe the screen.
+    if (amproj_startupPaywallDismissCount >= 5) return;
     UIViewController *top = amproj_topViewController(
         amproj_keyWindow().rootViewController);
     UIViewController *matched = nil;
@@ -14705,6 +14710,7 @@ static void amproj_dismissStartupPaywallIfVisible(NSString *source) {
         // and its tiers child leave the screen together.
         UIViewController *presenter = matched.presentingViewController;
         if (presenter) {
+            amproj_startupPaywallDismissCount++;
             amproj_logCriticalEvent(@"startup.paywall_dismissed", @{
                 @"source": source ?: @"window_scan",
                 @"controller": NSStringFromClass(matched.class) ?: @""
@@ -16990,6 +16996,22 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         if (completion) dispatch_async(dispatch_get_main_queue(), completion);
         return;
     }
+    // The subscription wall is blocked at the source instead of being
+    // dismissed after the fact: on device, dismiss-and-represent turned into
+    // a 3506-round strobe (each dismissal made the app re-present the wall,
+    // which re-triggered the crack gate). The completion still fires so the
+    // startup coordinator treats the paywall flow as finished.
+    if (amproj_paywallStartupFallbackUntil > 0 &&
+        CFAbsoluteTimeGetCurrent() < amproj_paywallStartupFallbackUntil &&
+        [controller isKindOfClass:UIViewController.class] &&
+        amproj_controllerIsStartupPaywall(controller)) {
+        amproj_logCriticalEvent(@"startup.paywall_blocked", @{
+            @"source": @"pre_presentation",
+            @"controller": NSStringFromClass(controller.class) ?: @""
+        });
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        return;
+    }
 #if AMPROJ_CLOUD_SYNC
     UIViewController *accountReplacement = nil;
     if ([self isKindOfClass:UIViewController.class]) {
@@ -17350,8 +17372,10 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         [controller isKindOfClass:UIViewController.class]) {
         UIViewController *presented = controller;
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (amproj_startupPaywallDismissCount >= 5) return;
             if (presented.presentingViewController &&
                 amproj_controllerIsStartupPaywall(presented)) {
+                amproj_startupPaywallDismissCount++;
                 amproj_logCriticalEvent(@"startup.paywall_dismissed", @{
                     @"source": @"post_presentation",
                     @"controller": NSStringFromClass(presented.class) ?: @""
@@ -19072,6 +19096,10 @@ static void hooked_UIWindowMakeKeyAndVisible(id self, SEL _cmd) {
             orig_UIWindowMakeKeyAndVisible(self, _cmd);
             amproj_gateCycleEnd(window, @"makeKeyAndVisible");
         } else {
+            // Budget spent: never let the gate linger on screen either.
+            if (!window.hidden && window.windowLevel > UIWindowLevelNormal) {
+                window.hidden = YES;
+            }
             amproj_ensureApplicationKeyWindow();
         }
         return;
@@ -19098,6 +19126,9 @@ static void hooked_UIWindowSetRootViewController(id self, SEL _cmd,
             orig_UIWindowSetRootViewController(self, _cmd, controller);
             amproj_gateCycleEnd(window, @"setRootViewController");
         } else {
+            if (!window.hidden && window.windowLevel > UIWindowLevelNormal) {
+                window.hidden = YES;
+            }
             amproj_ensureApplicationKeyWindow();
         }
         return;
@@ -19123,6 +19154,9 @@ static void hooked_UIWindowSetHidden(id self, SEL _cmd, BOOL hidden) {
                 orig_UIWindowSetHidden(self, _cmd, hidden);
                 amproj_gateCycleEnd(window, @"setHidden");
             } else {
+                if (!window.hidden && window.windowLevel > UIWindowLevelNormal) {
+                    window.hidden = YES;
+                }
                 amproj_ensureApplicationKeyWindow();
             }
             return;
