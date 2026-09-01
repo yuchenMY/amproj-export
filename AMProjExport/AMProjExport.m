@@ -50,7 +50,7 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r18-cloud-member";
+static NSString *const kAMProjGateDefenseRound = @"r19-haptic-suppressed";
 // Master switch for every crack-funnel interception (window hooks, gate
 // cycles, funnel sweep, intro autoclose, sweep ladder). The window-level
 // rounds were verified to suppress the funnel visually, but their synthetic
@@ -19298,7 +19298,7 @@ static void amproj_exportPresentedChainDiagnostics(
         if (!docs.length) return;
         NSString *path = [docs stringByAppendingPathComponent:
             @"amproj_chain.txt"];
-        NSString *line = [NSString stringWithFormat:@"%@ r18 | %@\n",
+        NSString *line = [NSString stringWithFormat:@"%@ r19 | %@\n",
             [NSDate date], [classes componentsJoinedByString:@" | "]];
         NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
         if (handle) {
