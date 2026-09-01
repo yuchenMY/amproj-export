@@ -3325,7 +3325,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # and every accessibility-based activation stays disarmed.
         self.assertIn('static BOOL amproj_gateDefenseActive = YES;', SOURCE)
         self.assertIn('static BOOL amproj_funnelSweepEnabled = NO;', SOURCE)
-        self.assertIn('static BOOL amproj_introAutocloseEnabled = NO;', SOURCE)
+        self.assertIn('static BOOL amproj_introAutocloseEnabled = YES;', SOURCE)
+        self.assertIn(
+            "the user's own manual X-close never did", SOURCE)
         sweep = function_body(
             'static void amproj_funnelSweep',
             '// Activates a visible bottom-area control',
@@ -3338,6 +3340,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             '#if AMPROJ_DEBUG',
         )
         self.assertIn('if (!amproj_introAutocloseEnabled) return;', probe)
+        self.assertIn('if (!amproj_gateDefenseActive || !amproj_funnelSweepEnabled) return;', sweep)
         # The polluted onboarding flags are restored once, then never
         # touched again so crack or app writes always persist.
         self.assertIn(

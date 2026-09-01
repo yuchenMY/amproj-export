@@ -50,7 +50,7 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r16-gate-visual";
+static NSString *const kAMProjGateDefenseRound = @"r17-intro-x-close";
 // Master switch for every crack-funnel interception (window hooks, gate
 // cycles, funnel sweep, intro autoclose, sweep ladder). The window-level
 // rounds were verified to suppress the funnel visually, but their synthetic
@@ -64,7 +64,11 @@ static BOOL amproj_gateDefenseActive = YES;
 // observed dropping the member entitlement. They stay disarmed even while
 // the visual defense is on.
 static BOOL amproj_funnelSweepEnabled = NO;
-static BOOL amproj_introAutocloseEnabled = NO;
+static BOOL amproj_introAutocloseEnabled = YES;
+// r14 evidence: activating the paywall's continue control dropped the
+// member entitlement, but the user's own manual X-close never did. Only
+// the X-close path is therefore automated; the continue activation stays
+// banned in the funnel sweep.
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
 static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
