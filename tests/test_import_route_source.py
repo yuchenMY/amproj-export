@@ -3189,10 +3189,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active")', SOURCE)
         self.assertIn('amproj_IPAFireHideRootViewTemporarily', SOURCE)
         self.assertIn(
-            'for (NSNumber *delay in @[@0.05, @0.15, @0.25, @0.35, @0.45,', SOURCE)
-        self.assertIn('@0.60, @0.75, @1.0, @1.25, @1.5, @1.75,', SOURCE)
-        self.assertIn('@2.0, @2.5, @3.0, @3.5,', SOURCE)
-        self.assertIn('@5.0, @7.0, @9.0, @12.0, @16.0, @21.0])', SOURCE)
+            'for (NSNumber *delay in @[@0.05, @0.3, @1.0, @2.0,', SOURCE)
+        self.assertIn('@4.0, @8.0, @15.0, @21.0])', SOURCE)
+        # The expensive text walk never runs on the app's own window.
+        scan = function_body(
+            'static void amproj_suppressIPAFireWelcomeWindows',
+            'static void amproj_scheduleIPAFireWelcomeSuppression',
+        )
+        walk_gate = scan.index('BOOL hasWindowFingerprint = NO;')
+        level_gate = scan.index('window.windowLevel > UIWindowLevelNormal', walk_gate)
+        self.assertLess(walk_gate, level_gate)
         self.assertIn('UIWindowDidBecomeKeyNotification', SOURCE)
         self.assertIn('UIWindowDidBecomeVisibleNotification', SOURCE)
         self.assertIn('UIApplicationWillEnterForegroundNotification', SOURCE)
@@ -3210,7 +3216,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             'static void amproj_suppressIPAFireWelcomeWindows',
             'static void amproj_scheduleIPAFireWelcomeSuppression',
         )
-        self.assertIn('BOOL hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);', scan)
+        # The text walk is gated to overlay windows; the app's own window is
+        # never walked (that walk dominated the main thread).
+        self.assertIn('BOOL hasWindowFingerprint = NO;', scan)
+        self.assertIn(
+            'hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);',
+            scan)
         self.assertIn('if (!window.rootViewController)', scan)
         # Window-level handling is delegated to the bounded gate bypass; the
         # scan itself never disables interaction on a whole window (that is
@@ -3224,7 +3235,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # blatantroll/blatantsPatch. Its classes and strings decrypt at
         # runtime, so suppression keys on the class image name and blocks the
         # display entry points before any frame can render.
-        self.assertIn('[fileName isEqualToString:@"alightmotion.dylib"]', SOURCE)
+        self.assertIn('strcasecmp(base, "alightmotion.dylib")', SOURCE)
+        # The detector runs on every view and layer of every window, so it
+        # must not allocate NSStrings per class.
+        self.assertIn('const char *base = strrchr(imageName', SOURCE)
         self.assertIn(
             'static BOOL AMProjPresentationChainHasCrackController('
             'UIViewController *controller);', SOURCE)
@@ -3358,6 +3372,17 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             'if (amproj_startupPaywallDismissCount >= 5) return;', SOURCE)
         self.assertIn(
             'static NSUInteger amproj_startupPaywallDismissCount;', SOURCE)
+        # The intro flow (IntroFlowNavigation, no Paywall in its class name)
+        # hosts the first-launch subscription step and re-appears after a
+        # data wipe. Seeding its completion flags before the app reads them
+        # makes every launch land directly on the main UI.
+        self.assertIn(
+            'setBool:YES forKey:@"hasOnboardingFlowBeenCompleted"];', SOURCE)
+        self.assertIn('setBool:YES forKey:@"hasSkippedIntro"];', SOURCE)
+        # The view-text probe runs once per class, not per presentation.
+        self.assertIn(
+            'static NSMutableSet<NSString *> *amproj_paywallProbedClasses;',
+            SOURCE)
         # Escaping walls report their real class names through a file that
         # survives the syslog redaction.
         self.assertIn(

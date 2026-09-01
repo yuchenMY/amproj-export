@@ -30,6 +30,7 @@
 #import <zlib.h>
 #import <stdatomic.h>
 #import <string.h>
+#import <strings.h>
 #import <math.h>
 #import <float.h>
 #import <errno.h>
@@ -14683,6 +14684,14 @@ static BOOL amproj_controllerIsStartupPaywall(UIViewController *controller) {
         CFAbsoluteTimeGetCurrent() >= amproj_paywallStartupFallbackUntil) {
         return NO;
     }
+    // One full view-text probe per class; every later presentation of the
+    // same class pays a set lookup instead of a tree walk.
+    static NSMutableSet<NSString *> *amproj_paywallProbedClasses;
+    if (!amproj_paywallProbedClasses) {
+        amproj_paywallProbedClasses = [NSMutableSet set];
+    }
+    if ([amproj_paywallProbedClasses containsObject:name]) return NO;
+    [amproj_paywallProbedClasses addObject:name];
     return amproj_viewContainsStartupPaywallMarkers(
         controller.viewIfLoaded, 0);
 }
@@ -14985,9 +14994,13 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
         }
 
         // A signed helper can briefly expose the page from an independent
-        // UIWindow before assigning a root controller. Inspect the window
-        // itself so that layout is not required for the startup fingerprint.
-        BOOL hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);
+        // UIWindow before assigning a root controller. The text walk is only
+        // affordable on overlay windows; walking the app's own (SwiftUI-heavy)
+        // window on every pass dominated the main thread.
+        BOOL hasWindowFingerprint = NO;
+        if (window.windowLevel > UIWindowLevelNormal) {
+            hasWindowFingerprint = amproj_IPAFireViewContainsMarker(window, 0);
+        }
         if (!window.rootViewController) {
             BOOL containsWebView = amproj_windowContainsWebView(window, 0);
             if ((hasWindowFingerprint || containsWebView) &&
@@ -15058,13 +15071,11 @@ static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source) {
     NSString *sourceSnapshot = [source copy] ?: @"startup";
     dispatch_async(dispatch_get_main_queue(), ^{
         amproj_suppressIPAFireWelcomeWindows(sourceSnapshot);
-        // Both startup overlays appear while the previous one is still
-        // animating, so the early horizon is dense. Each pass is a bounded
-        // class-name and text scan over visible windows.
-        for (NSNumber *delay in @[@0.05, @0.15, @0.25, @0.35, @0.45,
-                                  @0.60, @0.75, @1.0, @1.25, @1.5, @1.75,
-                                  @2.0, @2.5, @3.0, @3.5,
-                                  @5.0, @7.0, @9.0, @12.0, @16.0, @21.0]) {
+        // With the intro flow seeded away and the gate handled by the class
+        // hooks, these passes are a cheap safety net; the early ones stay
+        // dense for overlays that appear during launch.
+        for (NSNumber *delay in @[@0.05, @0.3, @1.0, @2.0,
+                                  @4.0, @8.0, @15.0, @21.0]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                           (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
@@ -17032,10 +17043,10 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     // not any text or class name. The presentation is blocked so no frame of
     // either page can reach the screen, and the gate's own continue control
     // is fired on the not-yet-presented view so the crack state machine still
-    // completes and the app proceeds as if the page had been confirmed.
-    if (AMProjPresentationChainHasCrackController(controller) ||
-        (controller.viewIfLoaded &&
-         AMProjViewHierarchyHasCrackClass(controller.viewIfLoaded, 0))) {
+    // completes and the app proceeds as if the page had been confirmed. Only
+    // the class chain is checked here: a per-presentation view-tree walk on
+    // large controllers stalled the main thread.
+    if (AMProjPresentationChainHasCrackController(controller)) {
         amproj_logCriticalEvent(@"popup.suppressed", @{
             @"fingerprint": @"Blatant license overlay",
             @"source": @"pre_presentation",
@@ -19084,19 +19095,18 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
 // UIViewController class defined inside that image belongs to the crack,
 // and its presentation or window takeover is suppressed before it can draw
 // a single frame. The injected dylib is distinguished from the main
-// executable (both named "AlightMotion") by the ".dylib" suffix.
+// executable (both named "AlightMotion") by the ".dylib" suffix. The match
+// is done on the C string directly: this walks every view and layer of
+// every window, so per-class NSString allocations are unaffordable.
 static BOOL AMProjClassIsFromCrackDylib(Class cls) {
     for (Class current = cls; current; current = class_getSuperclass(current)) {
         const char *imageName = class_getImageName(current);
         if (!imageName) continue;
-        NSString *path = [[NSString alloc] initWithCString:imageName
-                                                  encoding:NSUTF8StringEncoding];
-        NSString *fileName = path.lastPathComponent.lowercaseString ?: @"";
-        if ([fileName hasPrefix:@"blatantroll"] ||
-            [fileName hasPrefix:@"blatantspatch"] ||
-            [fileName isEqualToString:@"alightmotion.dylib"]) {
-            return YES;
-        }
+        const char *base = strrchr(imageName, '/');
+        base = base ? base + 1 : imageName;
+        if (strncasecmp(base, "blatantroll", 11) == 0) return YES;
+        if (strncasecmp(base, "blatantspatch", 13) == 0) return YES;
+        if (strcasecmp(base, "alightmotion.dylib") == 0) return YES;
     }
     return NO;
 }
@@ -19250,6 +19260,18 @@ static void amproj_installCrackWelcomeSuppressors(void) {
 __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
+        // First-launch onboarding (IntroFlow) gates the app behind a
+        // multi-page wizard whose final step is the subscription wall; after
+        // a fresh install or a data wipe it re-appears and its huge SwiftUI
+        // tree is also what the startup sweeps had to re-walk every pass.
+        // Seeding the completion flags before Alight Motion reads them makes
+        // every launch form - first install, cleared data, reinstall, cold
+        // or warm - go straight to the main UI. Presentation-level only: no
+        // purchase, license, or account state is touched.
+        [[NSUserDefaults standardUserDefaults]
+            setBool:YES forKey:@"hasOnboardingFlowBeenCompleted"];
+        [[NSUserDefaults standardUserDefaults]
+            setBool:YES forKey:@"hasSkippedIntro"];
 #if AMPROJ_DEBUG
         NSLog(@"[AMProjExport] ===== Loading v44-debug =====");
 #elif AMPROJ_TELEMETRY
