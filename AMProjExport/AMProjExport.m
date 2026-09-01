@@ -14672,13 +14672,67 @@ static BOOL amproj_viewContainsStartupPaywallMarkers(UIView *view,
 
 // SwiftUI text is invisible to the UIKit label walk, so the controller class
 // name is the reliable half of the fingerprint. Every subscription surface
-// in this app carries "Paywall" in its class name.
+// in this app carries "Paywall" in its class name, and that check is active
+// permanently; the (expensive) view-text probe only runs inside the startup
+// fallback window.
 static BOOL amproj_controllerIsStartupPaywall(UIViewController *controller) {
     if (!controller) return NO;
     NSString *name = NSStringFromClass(controller.class) ?: @"";
     if ([name containsString:@"Paywall"]) return YES;
+    if (amproj_paywallStartupFallbackUntil <= 0 ||
+        CFAbsoluteTimeGetCurrent() >= amproj_paywallStartupFallbackUntil) {
+        return NO;
+    }
     return amproj_viewContainsStartupPaywallMarkers(
         controller.viewIfLoaded, 0);
+}
+
+// The blocked wall's owner retries the presentation in a tight loop; logging
+// every attempt once dominated the main thread with unified-log I/O. One
+// line per controller class is enough to identify it on device.
+static NSMutableSet<NSString *> *amproj_paywallBlockedClasses;
+
+static BOOL amproj_logPaywallBlockedOnce(UIViewController *controller,
+                                         NSString *source) {
+    NSString *name = NSStringFromClass(controller.class) ?: @"";
+    if (!amproj_paywallBlockedClasses) {
+        amproj_paywallBlockedClasses = [NSMutableSet set];
+    }
+    if ([amproj_paywallBlockedClasses containsObject:name]) return NO;
+    [amproj_paywallBlockedClasses addObject:name];
+    amproj_logCriticalEvent(@"startup.paywall_blocked", @{
+        @"source": source ?: @"pre_presentation",
+        @"controller": name
+    });
+    return YES;
+}
+
+// Escaping walls report their presented-chain class names to a file in the
+// app's Documents directory; the syslog redacts dictionary values, so this
+// file is the only way to read real class names back on Windows.
+static void amproj_exportPresentedChainDiagnostics(
+    NSArray<NSString *> *classes) {
+    @try {
+        NSString *docs = NSSearchPathForDirectoriesInDomains(
+            NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        if (!docs.length) return;
+        NSString *path = [docs stringByAppendingPathComponent:
+            @"amproj_chain.txt"];
+        NSString *line = [NSString stringWithFormat:@"%@ | %@\n",
+            [NSDate date], [classes componentsJoinedByString:@" | "]];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (handle) {
+            [handle seekToEndOfFile];
+            [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [handle closeFile];
+        } else {
+            [line writeToFile:path
+                   atomically:YES
+                     encoding:NSUTF8StringEncoding
+                        error:nil];
+        }
+    } @catch (__unused NSException *exception) {
+    }
 }
 
 // Dismisses the presented subscription wall chain while the startup fallback
@@ -14730,6 +14784,7 @@ static void amproj_dismissStartupPaywallIfVisible(NSString *source) {
             [classes addObject:NSStringFromClass(cursor.class) ?: @""];
             cursor = cursor.presentingViewController;
         }
+        amproj_exportPresentedChainDiagnostics(classes);
         amproj_logCriticalEvent(@"startup.presented_chain", @{
             @"source": source ?: @"window_scan",
             @"classes": classes
@@ -16996,20 +17051,19 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         if (completion) dispatch_async(dispatch_get_main_queue(), completion);
         return;
     }
-    // The subscription wall is blocked at the source instead of being
-    // dismissed after the fact: on device, dismiss-and-represent turned into
-    // a 3506-round strobe (each dismissal made the app re-present the wall,
-    // which re-triggered the crack gate). The completion still fires so the
-    // startup coordinator treats the paywall flow as finished.
-    if (amproj_paywallStartupFallbackUntil > 0 &&
-        CFAbsoluteTimeGetCurrent() < amproj_paywallStartupFallbackUntil &&
-        [controller isKindOfClass:UIViewController.class] &&
+    // The subscription wall is blocked at the source, permanently, instead
+    // of being dismissed after the fact: on device, dismiss-and-represent
+    // turned into a 3506-round strobe, and a blocked wall whose completion
+    // kept firing made its owner retry in a hot loop (the reported lag).
+    // The completion fires once per class so the startup coordinator still
+    // observes a finished paywall flow; retry fuel is swallowed.
+    if ([controller isKindOfClass:UIViewController.class] &&
         amproj_controllerIsStartupPaywall(controller)) {
-        amproj_logCriticalEvent(@"startup.paywall_blocked", @{
-            @"source": @"pre_presentation",
-            @"controller": NSStringFromClass(controller.class) ?: @""
-        });
-        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        BOOL firstAttempt = amproj_logPaywallBlockedOnce(
+            controller, @"pre_presentation");
+        if (firstAttempt && completion) {
+            dispatch_async(dispatch_get_main_queue(), completion);
+        }
         return;
     }
 #if AMPROJ_CLOUD_SYNC

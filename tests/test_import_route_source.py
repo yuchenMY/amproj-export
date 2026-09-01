@@ -3346,13 +3346,22 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # The wall never presents at all: the presentation is blocked at the
         # source (dismiss-and-represent strobed 3506 times on device), with
         # the post-presentation probe only as a capped backstop.
-        self.assertIn('@"startup.paywall_blocked"', probe)
+        self.assertIn('amproj_logPaywallBlockedOnce(', probe)
         self.assertIn('amproj_controllerIsStartupPaywall(controller)', probe)
         self.assertIn('amproj_controllerIsStartupPaywall(presented)', probe)
+        # The block is permanent and rate-limited: one log line per class,
+        # completion fired once so the owner cannot spin on retries.
+        self.assertIn(
+            'static BOOL amproj_logPaywallBlockedOnce(UIViewController *controller,', SOURCE)
+        self.assertIn('if (firstAttempt && completion) {', probe)
         self.assertIn(
             'if (amproj_startupPaywallDismissCount >= 5) return;', SOURCE)
         self.assertIn(
             'static NSUInteger amproj_startupPaywallDismissCount;', SOURCE)
+        # Escaping walls report their real class names through a file that
+        # survives the syslog redaction.
+        self.assertIn(
+            'amproj_exportPresentedChainDiagnostics(classes);', SOURCE)
         # Both the sweep and the presentation hook dismiss the wall.
         self.assertIn('amproj_dismissStartupPaywallIfVisible(source);', SOURCE)
         self.assertIn('@"startup.paywall_dismissed"', SOURCE)
