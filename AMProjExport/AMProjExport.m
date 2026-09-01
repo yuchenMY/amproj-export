@@ -17062,6 +17062,33 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         if (completion) dispatch_async(dispatch_get_main_queue(), completion);
         return;
     }
+    // The first-launch intro flow (IntroFlowNavigation) is presented as a
+    // modal and hosts the subscription step; seeding the completion flags
+    // does not stop its presentation after a data wipe. Block it by class
+    // name so neither the wizard nor its wall can ever appear, and let the
+    // presenting coordinator observe a finished flow once.
+    if ([controller isKindOfClass:UIViewController.class]) {
+        NSString *presentedName = NSStringFromClass(controller.class) ?: @"";
+        if ([presentedName containsString:@"IntroFlowNavigation"]) {
+            BOOL firstAttempt = NO;
+            static NSMutableSet<NSString *> *blockedIntroClasses;
+            if (!blockedIntroClasses) {
+                blockedIntroClasses = [NSMutableSet set];
+            }
+            if (![blockedIntroClasses containsObject:presentedName]) {
+                [blockedIntroClasses addObject:presentedName];
+                firstAttempt = YES;
+                amproj_logCriticalEvent(@"startup.intro_blocked", @{
+                    @"source": @"pre_presentation",
+                    @"controller": presentedName
+                });
+            }
+            if (firstAttempt && completion) {
+                dispatch_async(dispatch_get_main_queue(), completion);
+            }
+            return;
+        }
+    }
     // The subscription wall is blocked at the source, permanently, instead
     // of being dismissed after the fact: on device, dismiss-and-represent
     // turned into a 3506-round strobe, and a blocked wall whose completion
