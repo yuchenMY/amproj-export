@@ -50,7 +50,7 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r17-intro-x-close";
+static NSString *const kAMProjGateDefenseRound = @"r18-cloud-member";
 // Master switch for every crack-funnel interception (window hooks, gate
 // cycles, funnel sweep, intro autoclose, sweep ladder). The window-level
 // rounds were verified to suppress the funnel visually, but their synthetic
@@ -16690,6 +16690,118 @@ static void hooked_navigationPush(id self, SEL _cmd,
     }
 }
 
+// MARK: - Cloud-controlled member state
+
+// The repack's own user system (am.meowcr.cn) controls the entitlement
+// flags: it serves member_flags.json under the API base and whoever edits
+// that file in the user system controls every device. The plugin fetches it
+// at launch and on activations; when it is unreachable the verified
+// embedded defaults apply once so fresh installs still land as members.
+// Values already present on the device are only overwritten when the cloud
+// responds, so cloud state always wins and local user data is never lost.
+static NSString *const AMProjMemberFlagsURL =
+    @"https://am.meowcr.cn/api/member_flags.json";
+
+static void amproj_applyMemberFlags(NSDictionary *flags) {
+    if (!flags.count || !NSThread.isMainThread) return;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    for (NSString *key in flags) {
+        id value = flags[key];
+        if ([value isKindOfClass:NSNumber.class] ||
+            [value isKindOfClass:NSString.class] ||
+            [value isKindOfClass:NSArray.class] ||
+            [value isKindOfClass:NSDictionary.class]) {
+            [defaults setObject:value forKey:key];
+        }
+    }
+    [defaults synchronize];
+}
+
+static void amproj_writeEmbeddedMemberStateIfAbsent(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if ([defaults objectForKey:@"is_member"] != nil) return;
+    NSDictionary *state = @{
+        @"is_member": @YES,
+        @"is_premium_member": @YES,
+        @"is_max_member": @YES,
+        @"is_pro_member": @YES,
+        @"is_subscribed": @YES,
+        @"has_subscription": @YES,
+        @"has_watermark": @NO,
+        @"should_add_watermark": @NO,
+        @"should_show_watermark": @NO,
+        @"watermark_enabled": @NO,
+        @"is_authenticated": @YES,
+        @"is_logged_in": @YES,
+        @"has_logged_in": @YES,
+        @"account_created": @YES,
+        @"is_first_launch": @NO,
+        @"is_first_session": @NO,
+        @"GID_AppHasRunBefore": @YES,
+        @"GID_MigrationCheckPerformed": @YES,
+        @"templates_tab_seen": @YES,
+        @"cloud_projects_subtab_seen": @YES,
+        @"template_editor_seen": @YES,
+        @"forcedSubscriptionTierKey": @"Cloud Subscriber",
+        @"forced_subscription_tier_key": @"Cloud Subscriber",
+        @"active_subscriptions_override":
+            @[@"alightcreative.motion.1y_1y_t10"],
+        @"active_benefits": @[@"RemoveWatermark", @"MemberEffects",
+            @"ProjectPack", @"advancedEasing", @"layerParenting",
+            @"cameraObject"],
+        @"PaywallInteractionStorage.appCloseBeforeFirstPaywallCount": @294,
+        @"user_mode": @2,
+        @"project_package_freeuser_maxdownloadsize": @5242880,
+    };
+    for (NSString *key in state) {
+        if ([defaults objectForKey:key] == nil) {
+            [defaults setObject:state[key] forKey:key];
+        }
+    }
+    [defaults synchronize];
+    amproj_logCriticalEvent(@"member.embedded_state_applied", @{});
+}
+
+static void amproj_fetchMemberFlags(void) {
+    NSURL *URL = [NSURL URLWithString:AMProjMemberFlagsURL];
+    if (!URL) return;
+    [[[NSURLSession sessionWithConfiguration:
+        NSURLSessionConfiguration.ephemeralSessionConfiguration]
+        dataTaskWithURL:URL
+      completionHandler:^(NSData *data, NSURLResponse *response,
+                          NSError *error) {
+        if (!data.length || error) return;
+        id payload = nil;
+        @try {
+            payload = [NSJSONSerialization JSONObjectWithData:data
+                                                      options:0 error:nil];
+        } @catch (__unused NSException *exception) {
+            return;
+        }
+        if (![payload isKindOfClass:NSDictionary.class]) return;
+        NSDictionary *payloadDict = payload;
+        BOOL enabled = [payloadDict[@"enabled"] boolValue];
+        NSDictionary *flags = payloadDict[@"flags"];
+        if (![flags isKindOfClass:NSDictionary.class]) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (enabled) amproj_applyMemberFlags(flags);
+        });
+    }] resume];
+}
+
+static CFAbsoluteTime amproj_lastMemberFlagSync = 0;
+
+static void amproj_syncMemberFlags(NSString *source) {
+    if (!NSThread.isMainThread) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - amproj_lastMemberFlagSync < 300.0) return;
+    amproj_lastMemberFlagSync = now;
+    amproj_logCriticalEvent(@"member.flags_sync", @{
+        @"source": source ?: @"unknown"
+    });
+    amproj_fetchMemberFlags();
+}
+
 static void amproj_forwardPresentation(id self, SEL _cmd,
                                        UIViewController *controller,
                                        BOOL animated,
@@ -19186,7 +19298,7 @@ static void amproj_exportPresentedChainDiagnostics(
         if (!docs.length) return;
         NSString *path = [docs stringByAppendingPathComponent:
             @"amproj_chain.txt"];
-        NSString *line = [NSString stringWithFormat:@"%@ r16 | %@\n",
+        NSString *line = [NSString stringWithFormat:@"%@ r18 | %@\n",
             [NSDate date], [classes componentsJoinedByString:@" | "]];
         NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
         if (handle) {
@@ -19441,6 +19553,20 @@ static void AMProjExportInit(void) {
 #endif
         NSLog(@"%@", kAMProjCloudStabilityContract);
         amproj_installCrackWelcomeSuppressors();
+        // Member state: embedded defaults for fresh installs, then the
+        // cloud user system's member_flags.json controls the entitlements
+        // (the user edits that file server-side; devices follow).
+        amproj_writeEmbeddedMemberStateIfAbsent();
+        amproj_syncMemberFlags(@"launch");
+        for (NSNumber *delay in @[@15, @45, @90]) {
+            dispatch_after(dispatch_time(
+                DISPATCH_TIME_NOW,
+                (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                dispatch_get_main_queue(), ^{
+                amproj_syncMemberFlags([NSString stringWithFormat:
+                    @"launch+%@s", delay]);
+            });
+        }
 #if AMPROJ_CLOUD_SYNC
         AMCloudSyncInstallPluginHooksEarly();
 #endif
@@ -19551,6 +19677,7 @@ static void AMProjExportInit(void) {
             amproj_armPaywallStartupFallback();
             amproj_startStartupPaywallRescue();
             amproj_schedulePaywallScan(nil, @"did_become_active");
+            amproj_syncMemberFlags(@"did_become_active");
             amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active");
             if (amproj_runtimeUsesLocalImportEngine()) {
                 // The launch URL is the current user action. Consume its deferred

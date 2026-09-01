@@ -3335,6 +3335,28 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn(
             'if (!amproj_gateDefenseActive || !amproj_funnelSweepEnabled) return;',
             sweep)
+        # The member entitlement is controlled by the user's own cloud user
+        # system: the plugin fetches member_flags.json from the API base and
+        # applies it; embedded verified defaults cover offline fresh
+        # installs; existing device values only change when the cloud says
+        # so.
+        self.assertIn(
+            'static void amproj_fetchMemberFlags(void) {', SOURCE)
+        self.assertIn(
+            'static void amproj_applyMemberFlags(NSDictionary *flags) {',
+            SOURCE)
+        self.assertIn(
+            'static void amproj_writeEmbeddedMemberStateIfAbsent(void) {',
+            SOURCE)
+        self.assertIn(
+            'https://am.meowcr.cn/api/member_flags.json', SOURCE)
+        self.assertIn(
+            'if ([defaults objectForKey:@"is_member"] != nil) return;',
+            SOURCE)
+        self.assertIn('amproj_syncMemberFlags(@"launch");', SOURCE)
+        self.assertIn(
+            'amproj_syncMemberFlags(@"did_become_active");', SOURCE)
+        self.assertIn('member.embedded_state_applied', SOURCE)
         probe = function_body(
             'static void hooked_presentVC',
             '#if AMPROJ_DEBUG',
