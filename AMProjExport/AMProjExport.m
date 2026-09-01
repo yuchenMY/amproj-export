@@ -50,7 +50,7 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r11-4a49e147-plus";
+static NSString *const kAMProjGateDefenseRound = @"r12-native-flow";
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
 static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
@@ -106,10 +106,6 @@ static NSURL* amproj_directExportRoot(void);
 // the startup paywall machinery, but the gate-bypass helpers above reference
 // it earlier.
 static CFAbsoluteTime amproj_paywallStartupFallbackUntil;
-// The view-text probe is far more expensive than the class check (a full
-// subtree walk per new class on the main thread), so it gets a much shorter
-// window; the class-name fingerprint carries the match after that.
-static CFAbsoluteTime amproj_paywallViewProbeUntil;
 static BOOL amproj_URLIsInDocumentsInbox(NSURL *URL);
 static NSString* amproj_normalizedFilePath(NSURL *URL);
 static AMProjIncomingURLResult amproj_handleIncomingProjectURL(
@@ -14656,159 +14652,6 @@ static void amproj_bypassGateWindow(UIWindow *window, NSString *source,
     });
 }
 
-#pragma mark - Startup subscription wall fingerprint
-
-// The subscription wall still opens on top of the app during startup. Its
-// SwiftUI class names change between builds (the previous outer/presenter
-// matchers no longer fire), so the fingerprint is textual: none of these
-// strings appears anywhere else in the app's localization tables.
-static BOOL amproj_startupPaywallTextMatches(NSString *text) {
-    if (![text isKindOfClass:NSString.class] || !text.length) return NO;
-    if ([text containsString:@"\u65e0\u9650\u5236\u7f16\u8f91"]) return YES;
-    if ([text containsString:@"\u5df2\u7ecf\u8d2d\u4e70\u4e86\u5417"]) return YES;
-    if ([text.lowercaseString containsString:@"let's create"]) return YES;
-    return NO;
-}
-
-static BOOL amproj_viewContainsStartupPaywallMarkers(UIView *view,
-                                                     NSUInteger depth) {
-    if (!view || depth > 24) return NO;
-    NSMutableString *content = [NSMutableString stringWithCapacity:256];
-    amproj_IPAFireAppendViewText(view, content, depth);
-    amproj_IPAFireAppendLayerText(view.layer, content, depth);
-    return amproj_startupPaywallTextMatches(content);
-}
-
-// SwiftUI text is invisible to the UIKit label walk, so the controller class
-// name is the reliable half of the fingerprint. Every subscription surface
-// in this app carries "Paywall" in its class name, and that check is active
-// permanently; the (expensive) view-text probe only runs inside the startup
-// fallback window.
-static BOOL amproj_controllerIsStartupPaywall(UIViewController *controller) {
-    if (!controller) return NO;
-    NSString *name = NSStringFromClass(controller.class) ?: @"";
-    if ([name containsString:@"Paywall"]) return YES;
-    if (amproj_paywallViewProbeUntil <= 0 ||
-        CFAbsoluteTimeGetCurrent() >= amproj_paywallViewProbeUntil) {
-        return NO;
-    }
-    // One full view-text probe per class; every later presentation of the
-    // same class pays a set lookup instead of a tree walk.
-    static NSMutableSet<NSString *> *amproj_paywallProbedClasses;
-    if (!amproj_paywallProbedClasses) {
-        amproj_paywallProbedClasses = [NSMutableSet set];
-    }
-    if ([amproj_paywallProbedClasses containsObject:name]) return NO;
-    [amproj_paywallProbedClasses addObject:name];
-    return amproj_viewContainsStartupPaywallMarkers(
-        controller.viewIfLoaded, 0);
-}
-
-// The blocked wall's owner retries the presentation in a tight loop; logging
-// every attempt once dominated the main thread with unified-log I/O. One
-// line per controller class is enough to identify it on device.
-static NSMutableSet<NSString *> *amproj_paywallBlockedClasses;
-
-static BOOL amproj_logPaywallBlockedOnce(UIViewController *controller,
-                                         NSString *source) {
-    NSString *name = NSStringFromClass(controller.class) ?: @"";
-    if (!amproj_paywallBlockedClasses) {
-        amproj_paywallBlockedClasses = [NSMutableSet set];
-    }
-    if ([amproj_paywallBlockedClasses containsObject:name]) return NO;
-    [amproj_paywallBlockedClasses addObject:name];
-    amproj_logCriticalEvent(@"startup.paywall_blocked", @{
-        @"source": source ?: @"pre_presentation",
-        @"controller": name
-    });
-    return YES;
-}
-
-// Escaping walls report their presented-chain class names to a file in the
-// app's Documents directory; the syslog redacts dictionary values, so this
-// file is the only way to read real class names back on Windows.
-static void amproj_exportPresentedChainDiagnostics(
-    NSArray<NSString *> *classes) {
-    @try {
-        NSString *docs = NSSearchPathForDirectoriesInDomains(
-            NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        if (!docs.length) return;
-        NSString *path = [docs stringByAppendingPathComponent:
-            @"amproj_chain.txt"];
-        NSString *line = [NSString stringWithFormat:@"%@ r11 | %@\n",
-            [NSDate date], [classes componentsJoinedByString:@" | "]];
-        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (handle) {
-            [handle seekToEndOfFile];
-            [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-            [handle closeFile];
-        } else {
-            [line writeToFile:path
-                   atomically:YES
-                     encoding:NSUTF8StringEncoding
-                        error:nil];
-        }
-    } @catch (__unused NSException *exception) {
-    }
-}
-
-// Dismisses the presented subscription wall chain while the startup fallback
-// window is active. The dismissal follows the same completing path the
-// paywall machinery uses (present-then-dismiss), so the startup coordinator
-// still observes a finished paywall flow.
-static NSUInteger amproj_paywallChainDiagnostics;
-static NSUInteger amproj_startupPaywallDismissCount;
-
-static void amproj_dismissStartupPaywallIfVisible(NSString *source) {
-    if (!NSThread.isMainThread) return;
-    if (amproj_paywallStartupFallbackUntil <= 0 ||
-        CFAbsoluteTimeGetCurrent() >= amproj_paywallStartupFallbackUntil) {
-        return;
-    }
-    // The presentation hook blocks the wall at the source; this sweep path
-    // is only a backstop for presentations that bypass the hook, and it is
-    // hard-capped so a dismiss/re-present loop can never strobe the screen.
-    if (amproj_startupPaywallDismissCount >= 5) return;
-    UIViewController *top = amproj_topViewController(
-        amproj_keyWindow().rootViewController);
-    UIViewController *matched = nil;
-    for (NSUInteger depth = 0; top && depth < 8; depth++) {
-        if (amproj_controllerIsStartupPaywall(top)) matched = top;
-        top = top.presentingViewController;
-    }
-    if (matched) {
-        // Dismiss the highest matching node so an outer loading container
-        // and its tiers child leave the screen together.
-        UIViewController *presenter = matched.presentingViewController;
-        if (presenter) {
-            amproj_startupPaywallDismissCount++;
-            amproj_logCriticalEvent(@"startup.paywall_dismissed", @{
-                @"source": source ?: @"window_scan",
-                @"controller": NSStringFromClass(matched.class) ?: @""
-            });
-            [presenter dismissViewControllerAnimated:NO completion:nil];
-        }
-        return;
-    }
-    // Log the presented chain a few times so a wall whose class name escapes
-    // both fingerprints still reports itself on device.
-    if (amproj_paywallChainDiagnostics < 3) {
-        amproj_paywallChainDiagnostics++;
-        NSMutableArray<NSString *> *classes = [NSMutableArray array];
-        UIViewController *cursor = amproj_topViewController(
-            amproj_keyWindow().rootViewController);
-        for (NSUInteger depth = 0; cursor && depth < 8; depth++) {
-            [classes addObject:NSStringFromClass(cursor.class) ?: @""];
-            cursor = cursor.presentingViewController;
-        }
-        amproj_exportPresentedChainDiagnostics(classes);
-        amproj_logCriticalEvent(@"startup.presented_chain", @{
-            @"source": source ?: @"window_scan",
-            @"classes": classes
-        });
-    }
-}
-
 // Some IPAFire builds install the welcome page directly as the key window's
 // root view. In that layout there is no child overlay to remove. Hide only a
 // strict, startup-only fingerprint and reveal the view once its markers are
@@ -14960,12 +14803,6 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
 
     UIWindow *keyWindow = amproj_keyWindow();
     if (keyWindow && ![windows containsObject:keyWindow]) [windows addObject:keyWindow];
-
-    // The startup subscription wall is presented on the application's own
-    // window, so it never surfaces as a separate overlay window. Dismiss the
-    // presented chain by its textual fingerprint while the startup window is
-    // active; later, intentionally opened subscription screens are untouched.
-    amproj_dismissStartupPaywallIfVisible(source);
 
     for (UIWindow *window in windows) {
         if (window.hidden || window.alpha <= 0.01) continue;
@@ -15130,7 +14967,6 @@ static void amproj_armPaywallStartupFallback(void) {
         // well past the previous 120s window, which is why it survived. The
         // dismissal window now covers the whole startup funnel.
         amproj_paywallStartupFallbackUntil = now + 600.0;
-        amproj_paywallViewProbeUntil = now + 60.0;
         amproj_startupPaywallSuppressionUntil = now + 30.0;
         amproj_startupPaywallState = AMProjStartupPaywallStateArmed;
     }
@@ -17071,48 +16907,9 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         if (completion) dispatch_async(dispatch_get_main_queue(), completion);
         return;
     }
-    // The first-launch intro flow (IntroFlowNavigation) is presented as a
-    // modal and hosts the subscription step; seeding the completion flags
-    // does not stop its presentation after a data wipe. Block it by class
-    // name so neither the wizard nor its wall can ever appear, and let the
-    // presenting coordinator observe a finished flow once.
-    if ([controller isKindOfClass:UIViewController.class]) {
-        NSString *presentedName = NSStringFromClass(controller.class) ?: @"";
-        if ([presentedName containsString:@"IntroFlowNavigation"]) {
-            BOOL firstAttempt = NO;
-            static NSMutableSet<NSString *> *blockedIntroClasses;
-            if (!blockedIntroClasses) {
-                blockedIntroClasses = [NSMutableSet set];
-            }
-            if (![blockedIntroClasses containsObject:presentedName]) {
-                [blockedIntroClasses addObject:presentedName];
-                firstAttempt = YES;
-                amproj_logCriticalEvent(@"startup.intro_blocked", @{
-                    @"source": @"pre_presentation",
-                    @"controller": presentedName
-                });
-            }
-            if (firstAttempt && completion) {
-                dispatch_async(dispatch_get_main_queue(), completion);
-            }
-            return;
-        }
-    }
-    // The subscription wall is blocked at the source, permanently, instead
-    // of being dismissed after the fact: on device, dismiss-and-represent
-    // turned into a 3506-round strobe, and a blocked wall whose completion
-    // kept firing made its owner retry in a hot loop (the reported lag).
-    // The completion fires once per class so the startup coordinator still
-    // observes a finished paywall flow; retry fuel is swallowed.
-    if ([controller isKindOfClass:UIViewController.class] &&
-        amproj_controllerIsStartupPaywall(controller)) {
-        BOOL firstAttempt = amproj_logPaywallBlockedOnce(
-            controller, @"pre_presentation");
-        if (firstAttempt && completion) {
-            dispatch_async(dispatch_get_main_queue(), completion);
-        }
-        return;
-    }
+    // The subscription wall and the intro flow are auto-skipped by the
+    // repack's own crack module (handleIntroFlowHook*); intercepting those
+    // presentations deadlocked the launch. They are no longer touched here.
 #if AMPROJ_CLOUD_SYNC
     UIViewController *accountReplacement = nil;
     if ([self isKindOfClass:UIViewController.class]) {
@@ -17490,22 +17287,6 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                     cursor = cursor.presentingViewController;
                 }
                 amproj_exportPresentedChainDiagnostics(classes);
-            }
-            if (amproj_paywallStartupFallbackUntil <= 0 ||
-                CFAbsoluteTimeGetCurrent() >=
-                    amproj_paywallStartupFallbackUntil) {
-                return;
-            }
-            if (amproj_startupPaywallDismissCount >= 5) return;
-            if (presented.presentingViewController &&
-                amproj_controllerIsStartupPaywall(presented)) {
-                amproj_startupPaywallDismissCount++;
-                amproj_logCriticalEvent(@"startup.paywall_dismissed", @{
-                    @"source": @"post_presentation",
-                    @"controller": NSStringFromClass(presented.class) ?: @""
-                });
-                [presented.presentingViewController
-                    dismissViewControllerAnimated:NO completion:nil];
             }
         });
     }
@@ -19143,6 +18924,35 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
     });
 }
 
+// Escaping modals report their presented-chain class names to a file in the
+// app's Documents directory; the syslog redacts dictionary values, so this
+// file is the only way to read real class names back on Windows. Lines
+// carry the defense round so a stale install is provable on device.
+static void amproj_exportPresentedChainDiagnostics(
+    NSArray<NSString *> *classes) {
+    @try {
+        NSString *docs = NSSearchPathForDirectoriesInDomains(
+            NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        if (!docs.length) return;
+        NSString *path = [docs stringByAppendingPathComponent:
+            @"amproj_chain.txt"];
+        NSString *line = [NSString stringWithFormat:@"%@ r12 | %@\n",
+            [NSDate date], [classes componentsJoinedByString:@" | "]];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (handle) {
+            [handle seekToEndOfFile];
+            [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [handle closeFile];
+        } else {
+            [line writeToFile:path
+                   atomically:YES
+                     encoding:NSUTF8StringEncoding
+                        error:nil];
+        }
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 // MARK: - Third-party crack welcome suppression (Blatant)
 
 // The system rating prompt opens on its own session milestone. Every
@@ -19349,18 +19159,17 @@ static void amproj_installCrackWelcomeSuppressors(void) {
 __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
-        // First-launch onboarding (IntroFlow) gates the app behind a
-        // multi-page wizard whose final step is the subscription wall; after
-        // a fresh install or a data wipe it re-appears and its huge SwiftUI
-        // tree is also what the startup sweeps had to re-walk every pass.
-        // Seeding the completion flags before Alight Motion reads them makes
-        // every launch form - first install, cleared data, reinstall, cold
-        // or warm - go straight to the main UI. Presentation-level only: no
-        // purchase, license, or account state is touched.
+        // The repack's own crack module already auto-skips the intro flow
+        // and its subscription step (handleIntroFlowHook* in the main
+        // binary) - that is why the stock package never showed a wall.
+        // Seeding onboarding flags or blocking those presentations fights
+        // that hook and deadlocks the launch (r11: endless spinner plus a
+        // vibration loop). The flags seeded by earlier rounds are removed
+        // here so the crack's own state machine runs exactly as shipped.
         [[NSUserDefaults standardUserDefaults]
-            setBool:YES forKey:@"hasOnboardingFlowBeenCompleted"];
+            removeObjectForKey:@"hasOnboardingFlowBeenCompleted"];
         [[NSUserDefaults standardUserDefaults]
-            setBool:YES forKey:@"hasSkippedIntro"];
+            removeObjectForKey:@"hasSkippedIntro"];
         amproj_installRatingPromptSuppressor();
         NSLog(@"[AMProjExport] gate defense round: %@",
               kAMProjGateDefenseRound);

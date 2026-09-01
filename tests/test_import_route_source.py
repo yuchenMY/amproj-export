@@ -3316,100 +3316,29 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('window_scan_webview', scan)
         self.assertIn('amproj_windowContainsWebView', scan)
 
-    def test_startup_subscription_wall_dismissed_by_text_fingerprint(self):
-        # The paywall's SwiftUI class names changed between builds, so the
-        # startup dismissal keys on its own marketing strings, none of which
-        # exists in the app's localization tables. It is only active during
-        # the startup fallback window so later, intentional subscription
-        # screens still open.
-        self.assertIn('amproj_startupPaywallTextMatches', SOURCE)
+    def test_startup_wall_is_left_to_the_crack_native_skip(self):
+        # The repack's crack module auto-skips the intro flow and its
+        # subscription step (handleIntroFlowHook* in the main binary) - that
+        # is why the stock package never showed a wall. Rounds of blocking
+        # those presentations deadlocked the launch (r11: endless spinner
+        # plus a vibration loop), so the plugin must not touch them.
+        self.assertNotIn('amproj_controllerIsStartupPaywall', SOURCE)
+        self.assertNotIn('amproj_dismissStartupPaywallIfVisible', SOURCE)
+        self.assertNotIn('startup.paywall_blocked', SOURCE)
+        self.assertNotIn('startup.paywall_dismissed', SOURCE)
+        self.assertNotIn('startup.intro_blocked', SOURCE)
+        # Flags seeded by earlier rounds conflicted with the crack's own
+        # state machine; they are removed at startup instead.
         self.assertIn(
-            'static BOOL amproj_viewContainsStartupPaywallMarkers('
-            'UIView *view,', SOURCE)
-        detector = function_body(
-            'static BOOL amproj_startupPaywallTextMatches',
-            'static BOOL amproj_viewContainsStartupPaywallMarkers',
-        )
-        self.assertIn('\\u65e0\\u9650\\u5236\\u7f16\\u8f91', detector)
-        self.assertIn('\\u5df2\\u7ecf\\u8d2d\\u4e70\\u4e86\\u5417', detector)
-        self.assertIn("let's create", detector)
-        # The wall presents minutes after launch (after the crack gate
-        # finishes), so the dismissal window covers the whole startup funnel.
-        self.assertIn('amproj_paywallStartupFallbackUntil = now + 600.0;', SOURCE)
-        # SwiftUI text is invisible to the label walk, so the class name is
-        # the reliable fingerprint half.
+            'removeObjectForKey:@"hasOnboardingFlowBeenCompleted"];', SOURCE)
         self.assertIn(
-            'static BOOL amproj_controllerIsStartupPaywall('
-            'UIViewController *controller) {', SOURCE)
-        self.assertIn(
-            '[name containsString:@"Paywall"]', SOURCE)
-        # The sweep dismisses the highest matching node and reports the
-        # presented chain when neither fingerprint matches.
-        dismiss = function_body(
-            'static void amproj_dismissStartupPaywallIfVisible',
-            'static void amproj_suppressIPAFireWelcomeWindows',
-        )
-        self.assertIn('amproj_paywallStartupFallbackUntil', dismiss)
-        self.assertIn('dismissViewControllerAnimated:NO', dismiss)
-        self.assertIn('amproj_controllerIsStartupPaywall(top)', dismiss)
-        self.assertIn('startup.presented_chain', dismiss)
-        probe = function_body(
-            'static void hooked_presentVC',
-            '#if AMPROJ_DEBUG',
-        )
-        # The wall never presents at all: the presentation is blocked at the
-        # source (dismiss-and-represent strobed 3506 times on device), with
-        # the post-presentation probe only as a capped backstop.
-        self.assertIn('amproj_logPaywallBlockedOnce(', probe)
-        self.assertIn('amproj_controllerIsStartupPaywall(controller)', probe)
-        self.assertIn('amproj_controllerIsStartupPaywall(presented)', probe)
-        # The block is permanent and rate-limited: one log line per class,
-        # completion fired once so the owner cannot spin on retries.
-        self.assertIn(
-            'static BOOL amproj_logPaywallBlockedOnce(UIViewController *controller,', SOURCE)
-        self.assertIn('if (firstAttempt && completion) {', probe)
-        self.assertIn(
-            'if (amproj_startupPaywallDismissCount >= 5) return;', SOURCE)
-        self.assertIn(
-            'static NSUInteger amproj_startupPaywallDismissCount;', SOURCE)
-        # The intro flow (IntroFlowNavigation, no Paywall in its class name)
-        # hosts the first-launch subscription step and re-appears after a
-        # data wipe. Seeding its completion flags before the app reads them
-        # makes every launch land directly on the main UI.
-        self.assertIn(
-            'setBool:YES forKey:@"hasOnboardingFlowBeenCompleted"];', SOURCE)
-        self.assertIn('setBool:YES forKey:@"hasSkippedIntro"];', SOURCE)
-        # The view-text probe runs once per class, not per presentation.
-        self.assertIn(
-            'static NSMutableSet<NSString *> *amproj_paywallProbedClasses;',
-            SOURCE)
-        # Escaping walls report their real class names through a file that
-        # survives the syslog redaction.
+            'removeObjectForKey:@"hasSkippedIntro"];', SOURCE)
+        self.assertNotIn(
+            'setBool:YES forKey:@"hasOnboardingFlowBeenCompleted"', SOURCE)
+        # The chain export stays as the on-device evidence channel.
         self.assertIn(
             'amproj_exportPresentedChainDiagnostics(classes);', SOURCE)
-        # Every presented chain is exported once per class so any escaping
-        # modal reports itself on device without waiting for a sweep pass.
-        self.assertIn(
-            'static NSMutableSet<NSString *> *amproj_chainExportedClasses;',
-            SOURCE)
-        # The system rating prompt never appears.
-        self.assertIn(
-            'static void amproj_installRatingPromptSuppressor(void) {', SOURCE)
-        self.assertIn(
-            'amproj_installRatingPromptSuppressor();', SOURCE)
-        self.assertIn(
-            'if (strstr(sel, "requestReview")) {', SOURCE)
-        # The installed build identifies itself in the constructor banner and
-        # in every chain-export line, so a stale install is provable on
-        # device instead of guessed.
-        self.assertIn(
-            'kAMProjGateDefenseRound = @"r11-4a49e147-plus";', SOURCE)
-        self.assertIn('gate defense round:', SOURCE)
-        self.assertIn('%@ r11 | %@', SOURCE)
-        # Both the sweep and the presentation hook dismiss the wall.
-        self.assertIn('amproj_dismissStartupPaywallIfVisible(source);', SOURCE)
-        self.assertIn('@"startup.paywall_dismissed"', SOURCE)
-        self.assertIn('@"post_presentation"', SOURCE)
+        self.assertIn('r12 | %@', SOURCE)
 
     def test_engine_builds_scan_inboxes_and_replay_deferred_urls(self):
         # 865 joined the local import engine: Inbox files and deferred launch
