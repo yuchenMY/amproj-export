@@ -102,6 +102,10 @@ static NSURL* amproj_directExportRoot(void);
 // the startup paywall machinery, but the gate-bypass helpers above reference
 // it earlier.
 static CFAbsoluteTime amproj_paywallStartupFallbackUntil;
+// The view-text probe is far more expensive than the class check (a full
+// subtree walk per new class on the main thread), so it gets a much shorter
+// window; the class-name fingerprint carries the match after that.
+static CFAbsoluteTime amproj_paywallViewProbeUntil;
 static BOOL amproj_URLIsInDocumentsInbox(NSURL *URL);
 static NSString* amproj_normalizedFilePath(NSURL *URL);
 static AMProjIncomingURLResult amproj_handleIncomingProjectURL(
@@ -14680,8 +14684,8 @@ static BOOL amproj_controllerIsStartupPaywall(UIViewController *controller) {
     if (!controller) return NO;
     NSString *name = NSStringFromClass(controller.class) ?: @"";
     if ([name containsString:@"Paywall"]) return YES;
-    if (amproj_paywallStartupFallbackUntil <= 0 ||
-        CFAbsoluteTimeGetCurrent() >= amproj_paywallStartupFallbackUntil) {
+    if (amproj_paywallViewProbeUntil <= 0 ||
+        CFAbsoluteTimeGetCurrent() >= amproj_paywallViewProbeUntil) {
         return NO;
     }
     // One full view-text probe per class; every later presentation of the
@@ -15122,6 +15126,7 @@ static void amproj_armPaywallStartupFallback(void) {
         // well past the previous 120s window, which is why it survived. The
         // dismissal window now covers the whole startup funnel.
         amproj_paywallStartupFallbackUntil = now + 600.0;
+        amproj_paywallViewProbeUntil = now + 60.0;
         amproj_startupPaywallSuppressionUntil = now + 30.0;
         amproj_startupPaywallState = AMProjStartupPaywallStateArmed;
     }
