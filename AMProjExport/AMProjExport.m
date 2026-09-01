@@ -102,6 +102,8 @@ static NSString* amproj_serializeLayer(id layer, NSMutableSet<NSValue*> *visited
 static NSString* amproj_tagForType(NSString *type);
 static UIWindow* amproj_keyWindow(void);
 static NSURL* amproj_directExportRoot(void);
+static void amproj_exportPresentedChainDiagnostics(
+    NSArray<NSString *> *classes);
 // Startup paywall fallback window; the initializing definition lives with
 // the startup paywall machinery, but the gate-bypass helpers above reference
 // it earlier.
