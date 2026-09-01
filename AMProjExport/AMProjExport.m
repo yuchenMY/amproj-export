@@ -50,7 +50,7 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r13-intro-autoclose";
+static NSString *const kAMProjGateDefenseRound = @"r14-funnel-sweep";
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
 static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
@@ -16743,6 +16743,119 @@ static BOOL amproj_activateIntroCloseControl(UIViewController *intro) {
 
 static const void *amproj_introCloseRoundsKey = &amproj_introCloseRoundsKey;
 
+// MARK: - Startup funnel sweep
+
+// On slow-license nights the crack module holds didFinishLaunching open
+// while its funnel (intro wall, gate spinner) renders as plain SwiftUI
+// content inside the hosting hierarchy - no presentViewController, no
+// window takeover, and the sweep ladder keyed off the deferred launch
+// callback never runs. This sweep is scheduled from the constructor with
+// absolute delays instead, so it fires regardless of that callback. It
+// only closes funnel surfaces: the intro flow's own close control, and a
+// bottom-area continue button activated through accessibility.
+static NSUInteger amproj_funnelContinueActivations = 0;
+
+static void amproj_funnelSweep(NSString *source) {
+    if (!NSThread.isMainThread) return;
+    NSString *sourceSnapshot = [source copy] ?: @"funnel_sweep";
+
+    // 1) Close any presented or embedded intro flow.
+    NSMutableArray<UIViewController *> *funnelHosts = [NSMutableArray array];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            UIViewController *cursor = window.rootViewController;
+            for (NSUInteger depth = 0; cursor && depth < 8; depth++) {
+                NSString *name = NSStringFromClass(cursor.class) ?: @"";
+                if ([name containsString:@"IntroFlowNavigation"] &&
+                    ![funnelHosts containsObject:cursor]) {
+                    [funnelHosts addObject:cursor];
+                }
+                UIViewController *next = cursor.presentedViewController;
+                if (!next) {
+                    for (UIViewController *child in
+                             cursor.childViewControllers) {
+                        if (!next) next = child;
+                    }
+                }
+                cursor = next;
+            }
+        }
+    }
+    for (UIViewController *host in funnelHosts) {
+        BOOL activated = amproj_activateIntroCloseControl(host);
+        amproj_logCriticalEvent(@"startup.funnel_intro_close", @{
+            @"source": sourceSnapshot,
+            @"activated": @(activated)
+        });
+    }
+
+    // 2) Fire a visible bottom-area continue button through accessibility.
+    if (amproj_funnelContinueActivations >= 12) return;
+    CGFloat screenHeight = UIScreen.mainScreen.bounds.size.height ?: 1.0;
+    CGFloat screenWidth = UIScreen.mainScreen.bounds.size.width ?: 1.0;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.hidden) continue;
+            if (amproj_funnelActivateContinueInView(
+                    window, 0, screenHeight, screenWidth, sourceSnapshot)) {
+                return;
+            }
+        }
+    }
+}
+
+// Activates a visible bottom-area control whose label is the continue
+// entrance; the funnel pages render it as SwiftUI, so accessibility is the
+// only reliable handle.
+static BOOL amproj_funnelActivateContinueInView(
+    UIView *view, NSUInteger depth, CGFloat screenHeight, CGFloat screenWidth,
+    NSString *source) {
+    if (!view || depth > 24) return NO;
+    if (amproj_funnelContinueActivations >= 12) return NO;
+    NSMutableArray *candidates = [NSMutableArray array];
+    for (id element in view.accessibilityElements ?: @[]) {
+        [candidates addObject:element];
+    }
+    [candidates addObject:view];
+    NSString *continueTitle = @"\u7ee7\u7eed\u8fdb\u5165";
+    for (id candidate in candidates) {
+        NSString *label = nil;
+        if ([candidate respondsToSelector:@selector(accessibilityLabel)]) {
+            id value = [(id)candidate accessibilityLabel];
+            if ([value isKindOfClass:NSString.class]) label = value;
+        }
+        if (![label containsString:continueTitle]) continue;
+        CGRect frame = CGRectNull;
+        if ([candidate respondsToSelector:@selector(accessibilityFrame)]) {
+            frame = [(id)candidate accessibilityFrame];
+        } else if ([candidate isKindOfClass:UIView.class]) {
+            frame = [(UIView *)candidate convertRect:((UIView *)candidate).bounds
+                                              toView:nil];
+        }
+        if (CGRectIsNull(frame) || CGRectIsEmpty(frame)) continue;
+        if (CGRectGetMidY(frame) / screenHeight < 0.65 ||
+            CGRectGetWidth(frame) / screenWidth < 0.4) {
+            continue;
+        }
+        if ([(id)candidate accessibilityActivate]) {
+            amproj_funnelContinueActivations++;
+            amproj_logCriticalEvent(@"startup.funnel_continue", @{
+                @"source": source ?: @"funnel_sweep"
+            });
+            return YES;
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        if (amproj_funnelActivateContinueInView(
+                subview, depth + 1, screenHeight, screenWidth, source)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static BOOL amproj_isNativeImportFailureAlert(UIViewController *controller,
                                               NSString **titleOut,
                                               NSString **messageOut) {
@@ -19046,7 +19159,7 @@ static void amproj_exportPresentedChainDiagnostics(
         if (!docs.length) return;
         NSString *path = [docs stringByAppendingPathComponent:
             @"amproj_chain.txt"];
-        NSString *line = [NSString stringWithFormat:@"%@ r13 | %@\n",
+        NSString *line = [NSString stringWithFormat:@"%@ r14 | %@\n",
             [NSDate date], [classes componentsJoinedByString:@" | "]];
         NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
         if (handle) {
@@ -19292,6 +19405,19 @@ static void AMProjExportInit(void) {
 #endif
         NSLog(@"%@", kAMProjCloudStabilityContract);
         amproj_installCrackWelcomeSuppressors();
+        // Slow-license nights hold the launch callback open while the crack
+        // funnel (intro wall, gate spinner) renders; the funnel sweep must
+        // not depend on that callback, so it is scheduled from here with
+        // absolute delays instead.
+        for (NSNumber *delay in @[@10, @20, @30, @45, @60, @90, @120]) {
+            dispatch_after(dispatch_time(
+                DISPATCH_TIME_NOW,
+                (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                dispatch_get_main_queue(), ^{
+                amproj_funnelSweep([NSString stringWithFormat:
+                    @"launch+%@s", delay]);
+            });
+        }
 #if AMPROJ_CLOUD_SYNC
         AMCloudSyncInstallPluginHooksEarly();
 #endif
