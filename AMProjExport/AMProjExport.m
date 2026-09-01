@@ -50,7 +50,15 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r14-funnel-sweep";
+static NSString *const kAMProjGateDefenseRound = @"r15-ae4292f-faithful";
+// Master switch for every crack-funnel interception (window hooks, gate
+// cycles, funnel sweep, intro autoclose, sweep ladder). The window-level
+// rounds were verified to suppress the funnel visually, but their synthetic
+// control activations race the crack module's own license state machine and
+// were observed dropping the member entitlement (watermark and members-only
+// effects returned). Disabled here so the crack flow runs exactly as the
+// known-good ae4292f base; flip to YES to restore the defense.
+static BOOL amproj_gateDefenseActive = NO;
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
 static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
@@ -14914,6 +14922,7 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
 }
 
 static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source) {
+    if (!amproj_gateDefenseActive) return;
     if (!amproj_runtimeIsBuild865()) return;
     NSString *sourceSnapshot = [source copy] ?: @"startup";
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -16760,6 +16769,7 @@ static BOOL amproj_funnelActivateContinueInView(
     NSString *source);
 
 static void amproj_funnelSweep(NSString *source) {
+    if (!amproj_gateDefenseActive) return;
     if (!NSThread.isMainThread) return;
     NSString *sourceSnapshot = [source copy] ?: @"funnel_sweep";
 
@@ -17075,7 +17085,8 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     // completes and the app proceeds as if the page had been confirmed. Only
     // the class chain is checked here: a per-presentation view-tree walk on
     // large controllers stalled the main thread.
-    if (AMProjPresentationChainHasCrackController(controller)) {
+    if (amproj_gateDefenseActive &&
+        AMProjPresentationChainHasCrackController(controller)) {
         amproj_logCriticalEvent(@"popup.suppressed", @{
             @"fingerprint": @"Blatant license overlay",
             @"source": @"pre_presentation",
@@ -17476,6 +17487,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             // wire its controls, then activate its top-left close control
             // the way a user would, with a hard dismiss as the fallback so
             // the launch always proceeds to main.
+            if (!amproj_gateDefenseActive) return;
             if ([presentedName containsString:@"IntroFlowNavigation"]) {
                 NSInteger rounds = [objc_getAssociatedObject(presented,
                     amproj_introCloseRoundsKey) integerValue];
@@ -19163,7 +19175,7 @@ static void amproj_exportPresentedChainDiagnostics(
         if (!docs.length) return;
         NSString *path = [docs stringByAppendingPathComponent:
             @"amproj_chain.txt"];
-        NSString *line = [NSString stringWithFormat:@"%@ r14 | %@\n",
+        NSString *line = [NSString stringWithFormat:@"%@ r15 | %@\n",
             [NSDate date], [classes componentsJoinedByString:@" | "]];
         NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
         if (handle) {
@@ -19358,6 +19370,7 @@ static void hooked_UIWindowSetHidden(id self, SEL _cmd, BOOL hidden) {
 static void amproj_installCrackWelcomeSuppressors(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        if (!amproj_gateDefenseActive) return;
         if (!amproj_runtimeIsBuild865()) return;
         Method makeKeyMethod = class_getInstanceMethod(UIWindow.class,
             NSSelectorFromString(@"makeKeyAndVisible"));
@@ -19393,10 +19406,18 @@ static void AMProjExportInit(void) {
         // that hook and deadlocks the launch (r11: endless spinner plus a
         // vibration loop). The flags seeded by earlier rounds are removed
         // here so the crack's own state machine runs exactly as shipped.
-        [[NSUserDefaults standardUserDefaults]
-            removeObjectForKey:@"hasOnboardingFlowBeenCompleted"];
-        [[NSUserDefaults standardUserDefaults]
-            removeObjectForKey:@"hasSkippedIntro"];
+        // Earlier rounds seeded YES into these flags; restore their
+        // pristine (absent) state exactly once, then never touch them again
+        // so writes from the crack module or the app always persist.
+        if (![[NSUserDefaults standardUserDefaults]
+                boolForKey:@"amproj_onboarding_flags_restored_r15"]) {
+            [[NSUserDefaults standardUserDefaults]
+                removeObjectForKey:@"hasOnboardingFlowBeenCompleted"];
+            [[NSUserDefaults standardUserDefaults]
+                removeObjectForKey:@"hasSkippedIntro"];
+            [[NSUserDefaults standardUserDefaults]
+                setBool:YES forKey:@"amproj_onboarding_flags_restored_r15"];
+        }
         amproj_installRatingPromptSuppressor();
         NSLog(@"[AMProjExport] gate defense round: %@",
               kAMProjGateDefenseRound);
@@ -19409,19 +19430,6 @@ static void AMProjExportInit(void) {
 #endif
         NSLog(@"%@", kAMProjCloudStabilityContract);
         amproj_installCrackWelcomeSuppressors();
-        // Slow-license nights hold the launch callback open while the crack
-        // funnel (intro wall, gate spinner) renders; the funnel sweep must
-        // not depend on that callback, so it is scheduled from here with
-        // absolute delays instead.
-        for (NSNumber *delay in @[@10, @20, @30, @45, @60, @90, @120]) {
-            dispatch_after(dispatch_time(
-                DISPATCH_TIME_NOW,
-                (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
-                dispatch_get_main_queue(), ^{
-                amproj_funnelSweep([NSString stringWithFormat:
-                    @"launch+%@s", delay]);
-            });
-        }
 #if AMPROJ_CLOUD_SYNC
         AMCloudSyncInstallPluginHooksEarly();
 #endif

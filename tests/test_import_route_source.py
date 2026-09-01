@@ -3338,7 +3338,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # The chain export stays as the on-device evidence channel.
         self.assertIn(
             'amproj_exportPresentedChainDiagnostics(classes);', SOURCE)
-        self.assertIn('r14 | %@', SOURCE)
+        self.assertIn('r15 | %@', SOURCE)
         # The intro flow is no longer blocked (that deadlocked r11): it is
         # allowed to present, then its own close control is activated and a
         # bounded dismiss is the fallback.
@@ -3357,8 +3357,17 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn(
             'static BOOL amproj_funnelActivateContinueInView(', SOURCE)
         self.assertIn('startup.funnel_continue', SOURCE)
+        # The funnel sweep exists but is permanently disarmed: its synthetic
+        # activations raced the crack's license state machine and dropped
+        # the member entitlement.
+        sweep = function_body(
+            'static void amproj_funnelSweep',
+            '// Activates a visible bottom-area control',
+        )
+        self.assertIn('if (!amproj_gateDefenseActive) return;', sweep)
+        self.assertIn('amproj_gateDefenseActive = NO;', SOURCE)
         self.assertIn(
-            'amproj_funnelSweep([NSString stringWithFormat:', SOURCE)
+            'if (!amproj_gateDefenseActive) return;', SOURCE)
 
     def test_engine_builds_scan_inboxes_and_replay_deferred_urls(self):
         # 865 joined the local import engine: Inbox files and deferred launch
