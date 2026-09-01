@@ -16755,6 +16755,10 @@ static const void *amproj_introCloseRoundsKey = &amproj_introCloseRoundsKey;
 // bottom-area continue button activated through accessibility.
 static NSUInteger amproj_funnelContinueActivations = 0;
 
+static BOOL amproj_funnelActivateContinueInView(
+    UIView *view, NSUInteger depth, CGFloat screenHeight, CGFloat screenWidth,
+    NSString *source);
+
 static void amproj_funnelSweep(NSString *source) {
     if (!NSThread.isMainThread) return;
     NSString *sourceSnapshot = [source copy] ?: @"funnel_sweep";
