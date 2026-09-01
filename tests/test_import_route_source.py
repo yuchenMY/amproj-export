@@ -3399,6 +3399,13 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             'amproj_installRatingPromptSuppressor();', SOURCE)
         self.assertIn(
             'if (strstr(sel, "requestReview")) {', SOURCE)
+        # The installed build identifies itself in the constructor banner and
+        # in every chain-export line, so a stale install is provable on
+        # device instead of guessed.
+        self.assertIn(
+            'kAMProjGateDefenseRound = @"r11-4a49e147-plus";', SOURCE)
+        self.assertIn('gate defense round:', SOURCE)
+        self.assertIn('%@ r11 | %@', SOURCE)
         # Both the sweep and the presentation hook dismiss the wall.
         self.assertIn('amproj_dismissStartupPaywallIfVisible(source);', SOURCE)
         self.assertIn('@"startup.paywall_dismissed"', SOURCE)

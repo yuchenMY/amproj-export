@@ -47,6 +47,10 @@
 #endif
 
 static NSString *const kAMProjPluginVersion = @"44";
+// Bumped every defense round; the constructor banner and the chain export
+// file both carry it so the installed build can be identified on device
+// without guessing.
+static NSString *const kAMProjGateDefenseRound = @"r11-4a49e147-plus";
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
 static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
@@ -14731,7 +14735,7 @@ static void amproj_exportPresentedChainDiagnostics(
         if (!docs.length) return;
         NSString *path = [docs stringByAppendingPathComponent:
             @"amproj_chain.txt"];
-        NSString *line = [NSString stringWithFormat:@"%@ | %@\n",
+        NSString *line = [NSString stringWithFormat:@"%@ r11 | %@\n",
             [NSDate date], [classes componentsJoinedByString:@" | "]];
         NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
         if (handle) {
@@ -19358,6 +19362,8 @@ static void AMProjExportInit(void) {
         [[NSUserDefaults standardUserDefaults]
             setBool:YES forKey:@"hasSkippedIntro"];
         amproj_installRatingPromptSuppressor();
+        NSLog(@"[AMProjExport] gate defense round: %@",
+              kAMProjGateDefenseRound);
 #if AMPROJ_DEBUG
         NSLog(@"[AMProjExport] ===== Loading v44-debug =====");
 #elif AMPROJ_TELEMETRY
