@@ -3387,6 +3387,18 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # survives the syslog redaction.
         self.assertIn(
             'amproj_exportPresentedChainDiagnostics(classes);', SOURCE)
+        # Every presented chain is exported once per class so any escaping
+        # modal reports itself on device without waiting for a sweep pass.
+        self.assertIn(
+            'static NSMutableSet<NSString *> *amproj_chainExportedClasses;',
+            SOURCE)
+        # The system rating prompt never appears.
+        self.assertIn(
+            'static void amproj_installRatingPromptSuppressor(void) {', SOURCE)
+        self.assertIn(
+            'amproj_installRatingPromptSuppressor();', SOURCE)
+        self.assertIn(
+            'if (strstr(sel, "requestReview")) {', SOURCE)
         # Both the sweep and the presentation hook dismiss the wall.
         self.assertIn('amproj_dismissStartupPaywallIfVisible(source);', SOURCE)
         self.assertIn('@"startup.paywall_dismissed"', SOURCE)

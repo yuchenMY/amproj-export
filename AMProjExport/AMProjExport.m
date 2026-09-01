@@ -17432,11 +17432,34 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     // against the subscription-wall fingerprint. The SwiftUI class names of
     // the wall changed between builds, so this post-presentation probe is
     // what guarantees the wall closes within the same flow that opened it.
-    if (amproj_paywallStartupFallbackUntil > 0 &&
-        CFAbsoluteTimeGetCurrent() < amproj_paywallStartupFallbackUntil &&
-        [controller isKindOfClass:UIViewController.class]) {
+    if ([controller isKindOfClass:UIViewController.class]) {
         UIViewController *presented = controller;
         dispatch_async(dispatch_get_main_queue(), ^{
+            // Export every presented chain once per class: the syslog
+            // redacts dictionary values, so this file is how a modal whose
+            // fingerprint escaped reports its real class names.
+            NSString *presentedName = NSStringFromClass(presented.class) ?: @"";
+            static NSMutableSet<NSString *> *amproj_chainExportedClasses;
+            if (!amproj_chainExportedClasses) {
+                amproj_chainExportedClasses = [NSMutableSet set];
+            }
+            if (presentedName.length &&
+                ![amproj_chainExportedClasses containsObject:presentedName] &&
+                amproj_chainExportedClasses.count < 24) {
+                [amproj_chainExportedClasses addObject:presentedName];
+                NSMutableArray<NSString *> *classes = [NSMutableArray array];
+                UIViewController *cursor = presented;
+                for (NSUInteger depth = 0; cursor && depth < 8; depth++) {
+                    [classes addObject:NSStringFromClass(cursor.class) ?: @""];
+                    cursor = cursor.presentingViewController;
+                }
+                amproj_exportPresentedChainDiagnostics(classes);
+            }
+            if (amproj_paywallStartupFallbackUntil <= 0 ||
+                CFAbsoluteTimeGetCurrent() >=
+                    amproj_paywallStartupFallbackUntil) {
+                return;
+            }
             if (amproj_startupPaywallDismissCount >= 5) return;
             if (presented.presentingViewController &&
                 amproj_controllerIsStartupPaywall(presented)) {
@@ -19086,6 +19109,36 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
 
 // MARK: - Third-party crack welcome suppression (Blatant)
 
+// The system rating prompt opens on its own session milestone. Every
+// requestReview entry point on SKStoreReviewController is replaced with a
+// no-op so no variant of the prompt - legacy class method, instance method,
+// or the SwiftUI bridge - can appear. requestReview returns void, so a
+// plain no-op IMP is signature-safe for all arities on arm64.
+static void AMProjNoopVoidIMP(__unused id self, __unused SEL _cmd) {}
+
+static void amproj_installRatingPromptSuppressor(void) {
+    @try {
+        Class cls = NSClassFromString(@"SKStoreReviewController");
+        if (!cls) return;
+        Class meta = object_getClass(cls);
+        for (Class level in @[meta, cls]) {
+            unsigned int count = 0;
+            Method *methods = class_copyMethodList(level, &count);
+            for (unsigned int i = 0; i < count; i++) {
+                const char *sel = sel_getName(method_getName(methods[i]));
+                if (strstr(sel, "requestReview")) {
+                    method_setImplementation(methods[i],
+                                             (IMP)AMProjNoopVoidIMP);
+                    NSLog(@"[AMProjExport] rating prompt blocked: %s%s",
+                          level == meta ? "+" : "-", sel);
+                }
+            }
+            free(methods);
+        }
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 // The Blatant crack welcome page is not built by blatantroll/blatantsPatch.
 // Static analysis of this package located the actual builder: the injected
 // Frameworks/AlightMotion.dylib license module (BBAES-encrypted strings,
@@ -19272,6 +19325,7 @@ static void AMProjExportInit(void) {
             setBool:YES forKey:@"hasOnboardingFlowBeenCompleted"];
         [[NSUserDefaults standardUserDefaults]
             setBool:YES forKey:@"hasSkippedIntro"];
+        amproj_installRatingPromptSuppressor();
 #if AMPROJ_DEBUG
         NSLog(@"[AMProjExport] ===== Loading v44-debug =====");
 #elif AMPROJ_TELEMETRY
