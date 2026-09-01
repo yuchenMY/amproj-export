@@ -50,7 +50,7 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r12-native-flow";
+static NSString *const kAMProjGateDefenseRound = @"r13-intro-autoclose";
 static NSString *const kAMProjCloudStabilityContract =
     @"[AMProjExport] v44-stable:semantic-option-7,no-native-activity-fallback";
 static const ptrdiff_t AMProjShareVCSelectedExportOptionOffset = 0x120;
@@ -16678,6 +16678,71 @@ static void amproj_forwardPresentation(id self, SEL _cmd,
     if (orig_presentVC) orig_presentVC(self, _cmd, controller, animated, completion);
 }
 
+// MARK: - Intro flow auto-close
+
+// The intro flow (IntroFlowNavigation) hosts the subscription step and is
+// presented by the crack module's own startup funnel; blocking its
+// presentation deadlocked the launch (r11) and the crack's auto-skip does
+// not always run. After it presents, its top-left close control is
+// activated through accessibility - the same tap a user would make - and a
+// final dismiss is the fallback, so the launch always proceeds to main.
+static BOOL amproj_introCloseCandidateMatches(id element, UIView *hostView) {
+    CGRect frame = CGRectNull;
+    if ([element respondsToSelector:@selector(accessibilityFrame)]) {
+        frame = [(id)element accessibilityFrame];
+    } else if ([element isKindOfClass:UIView.class]) {
+        frame = [(UIView *)element convertRect:((UIView *)element).bounds
+                                        toView:nil];
+    }
+    if (CGRectIsNull(frame) || CGRectIsEmpty(frame)) return NO;
+    NSString *label = nil;
+    if ([element respondsToSelector:@selector(accessibilityLabel)]) {
+        id value = [(id)element accessibilityLabel];
+        if ([value isKindOfClass:NSString.class]) label = value;
+    }
+    CGFloat screenWidth = UIScreen.mainScreen.bounds.size.width ?: 1.0;
+    CGFloat screenHeight = UIScreen.mainScreen.bounds.size.height ?: 1.0;
+    if (label.length) {
+        NSString *normalized = label.lowercaseString;
+        if ([normalized containsString:@"关闭"] ||
+            [normalized containsString:@"close"] ||
+            [normalized containsString:@"skip"] ||
+            [normalized containsString:@"跳过"]) {
+            return YES;
+        }
+    }
+    // The round close button sits in the top-left corner of every intro
+    // page and is small by design.
+    return (frame.origin.x < 0.15 * screenWidth &&
+            frame.origin.y < 0.15 * screenHeight &&
+            frame.size.width < 0.2 * screenWidth &&
+            frame.size.height < 0.2 * screenHeight);
+}
+
+static void amproj_introCollectCloseCandidates(
+    UIView *view, NSUInteger depth, NSMutableArray *out) {
+    if (!view || depth > 24) return;
+    for (id element in view.accessibilityElements ?: @[]) {
+        if (amproj_introCloseCandidateMatches(element, view)) [out addObject:element];
+    }
+    if (amproj_introCloseCandidateMatches(view, nil)) [out addObject:view];
+    for (UIView *subview in view.subviews) {
+        amproj_introCollectCloseCandidates(subview, depth + 1, out);
+    }
+}
+
+static BOOL amproj_activateIntroCloseControl(UIViewController *intro) {
+    if (!intro.viewIfLoaded || !NSThread.isMainThread) return NO;
+    NSMutableArray *candidates = [NSMutableArray array];
+    amproj_introCollectCloseCandidates(intro.viewIfLoaded, 0, candidates);
+    for (id candidate in candidates) {
+        if ([(id)candidate accessibilityActivate]) return YES;
+    }
+    return NO;
+}
+
+static const void *amproj_introCloseRoundsKey = &amproj_introCloseRoundsKey;
+
 static BOOL amproj_isNativeImportFailureAlert(UIViewController *controller,
                                               NSString **titleOut,
                                               NSString **messageOut) {
@@ -17289,6 +17354,49 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                     cursor = cursor.presentingViewController;
                 }
                 amproj_exportPresentedChainDiagnostics(classes);
+            }
+            // The intro flow hosts the subscription step. Let it render and
+            // wire its controls, then activate its top-left close control
+            // the way a user would, with a hard dismiss as the fallback so
+            // the launch always proceeds to main.
+            if ([presentedName containsString:@"IntroFlowNavigation"]) {
+                NSInteger rounds = [objc_getAssociatedObject(presented,
+                    amproj_introCloseRoundsKey) integerValue];
+                if (rounds < 3) {
+                    objc_setAssociatedObject(presented,
+                        amproj_introCloseRoundsKey, @(rounds + 1),
+                        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    UIViewController *intro = presented;
+                    for (NSNumber *delay in @[@1.2, @2.5]) {
+                        dispatch_after(dispatch_time(
+                            DISPATCH_TIME_NOW,
+                            (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                            dispatch_get_main_queue(), ^{
+                            BOOL activated = amproj_activateIntroCloseControl(
+                                intro);
+                            amproj_logCriticalEvent(
+                                @"startup.intro_autoclose", @{
+                                @"delay": delay,
+                                @"activated": @(activated),
+                                @"round": @(rounds + 1)
+                            });
+                        });
+                    }
+                    dispatch_after(dispatch_time(
+                        DISPATCH_TIME_NOW, (int64_t)(4.5 * NSEC_PER_SEC)),
+                        dispatch_get_main_queue(), ^{
+                        if (intro.presentingViewController) {
+                            amproj_logCriticalEvent(
+                                @"startup.intro_dismissed", @{
+                                @"controller": NSStringFromClass(
+                                    intro.class) ?: @""
+                            });
+                            [intro.presentingViewController
+                                dismissViewControllerAnimated:YES
+                                                   completion:nil];
+                        }
+                    });
+                }
             }
         });
     }
@@ -18938,7 +19046,7 @@ static void amproj_exportPresentedChainDiagnostics(
         if (!docs.length) return;
         NSString *path = [docs stringByAppendingPathComponent:
             @"amproj_chain.txt"];
-        NSString *line = [NSString stringWithFormat:@"%@ r12 | %@\n",
+        NSString *line = [NSString stringWithFormat:@"%@ r13 | %@\n",
             [NSDate date], [classes componentsJoinedByString:@" | "]];
         NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
         if (handle) {

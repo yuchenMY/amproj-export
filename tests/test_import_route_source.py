@@ -3338,7 +3338,17 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # The chain export stays as the on-device evidence channel.
         self.assertIn(
             'amproj_exportPresentedChainDiagnostics(classes);', SOURCE)
-        self.assertIn('r12 | %@', SOURCE)
+        self.assertIn('r13 | %@', SOURCE)
+        # The intro flow is no longer blocked (that deadlocked r11): it is
+        # allowed to present, then its own close control is activated and a
+        # bounded dismiss is the fallback.
+        self.assertIn(
+            'static BOOL amproj_activateIntroCloseControl('
+            'UIViewController *intro) {', SOURCE)
+        self.assertIn(
+            'containsString:@"IntroFlowNavigation"]', SOURCE)
+        self.assertIn('startup.intro_autoclose', SOURCE)
+        self.assertIn('startup.intro_dismissed', SOURCE)
 
     def test_engine_builds_scan_inboxes_and_replay_deferred_urls(self):
         # 865 joined the local import engine: Inbox files and deferred launch
