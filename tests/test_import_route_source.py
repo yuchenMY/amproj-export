@@ -3319,12 +3319,31 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('\\u65e0\\u9650\\u5236\\u7f16\\u8f91', detector)
         self.assertIn('\\u5df2\\u7ecf\\u8d2d\\u4e70\\u4e86\\u5417', detector)
         self.assertIn("let's create", detector)
+        # The wall presents minutes after launch (after the crack gate
+        # finishes), so the dismissal window covers the whole startup funnel.
+        self.assertIn('amproj_paywallStartupFallbackUntil = now + 600.0;', SOURCE)
+        # SwiftUI text is invisible to the label walk, so the class name is
+        # the reliable fingerprint half.
+        self.assertIn(
+            'static BOOL amproj_controllerIsStartupPaywall('
+            'UIViewController *controller) {', SOURCE)
+        self.assertIn(
+            '[name containsString:@"Paywall"]', SOURCE)
+        # The sweep dismisses the highest matching node and reports the
+        # presented chain when neither fingerprint matches.
         dismiss = function_body(
             'static void amproj_dismissStartupPaywallIfVisible',
             'static void amproj_suppressIPAFireWelcomeWindows',
         )
         self.assertIn('amproj_paywallStartupFallbackUntil', dismiss)
         self.assertIn('dismissViewControllerAnimated:NO', dismiss)
+        self.assertIn('amproj_controllerIsStartupPaywall(top)', dismiss)
+        self.assertIn('startup.presented_chain', dismiss)
+        probe = function_body(
+            'static void hooked_presentVC',
+            '#if AMPROJ_DEBUG',
+        )
+        self.assertIn('amproj_controllerIsStartupPaywall(presented)', probe)
         # Both the sweep and the presentation hook dismiss the wall.
         self.assertIn('amproj_dismissStartupPaywallIfVisible(source);', SOURCE)
         self.assertIn('@"startup.paywall_dismissed"', SOURCE)

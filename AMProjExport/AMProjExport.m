@@ -14670,10 +14670,23 @@ static BOOL amproj_viewContainsStartupPaywallMarkers(UIView *view,
     return amproj_startupPaywallTextMatches(content);
 }
 
+// SwiftUI text is invisible to the UIKit label walk, so the controller class
+// name is the reliable half of the fingerprint. Every subscription surface
+// in this app carries "Paywall" in its class name.
+static BOOL amproj_controllerIsStartupPaywall(UIViewController *controller) {
+    if (!controller) return NO;
+    NSString *name = NSStringFromClass(controller.class) ?: @"";
+    if ([name containsString:@"Paywall"]) return YES;
+    return amproj_viewContainsStartupPaywallMarkers(
+        controller.viewIfLoaded, 0);
+}
+
 // Dismisses the presented subscription wall chain while the startup fallback
 // window is active. The dismissal follows the same completing path the
 // paywall machinery uses (present-then-dismiss), so the startup coordinator
 // still observes a finished paywall flow.
+static NSUInteger amproj_paywallChainDiagnostics;
+
 static void amproj_dismissStartupPaywallIfVisible(NSString *source) {
     if (!NSThread.isMainThread) return;
     if (amproj_paywallStartupFallbackUntil <= 0 ||
@@ -14682,21 +14695,39 @@ static void amproj_dismissStartupPaywallIfVisible(NSString *source) {
     }
     UIViewController *top = amproj_topViewController(
         amproj_keyWindow().rootViewController);
+    UIViewController *matched = nil;
     for (NSUInteger depth = 0; top && depth < 8; depth++) {
-        if (amproj_viewContainsStartupPaywallMarkers(
-                top.viewIfLoaded, 0)) {
-            UIViewController *presenter = top.presentingViewController;
-            if (presenter) {
-                amproj_logCriticalEvent(@"startup.paywall_dismissed", @{
-                    @"source": source ?: @"window_scan",
-                    @"controller": NSStringFromClass(top.class) ?: @""
-                });
-                [presenter dismissViewControllerAnimated:NO
-                                             completion:nil];
-            }
-            return;
-        }
+        if (amproj_controllerIsStartupPaywall(top)) matched = top;
         top = top.presentingViewController;
+    }
+    if (matched) {
+        // Dismiss the highest matching node so an outer loading container
+        // and its tiers child leave the screen together.
+        UIViewController *presenter = matched.presentingViewController;
+        if (presenter) {
+            amproj_logCriticalEvent(@"startup.paywall_dismissed", @{
+                @"source": source ?: @"window_scan",
+                @"controller": NSStringFromClass(matched.class) ?: @""
+            });
+            [presenter dismissViewControllerAnimated:NO completion:nil];
+        }
+        return;
+    }
+    // Log the presented chain a few times so a wall whose class name escapes
+    // both fingerprints still reports itself on device.
+    if (amproj_paywallChainDiagnostics < 3) {
+        amproj_paywallChainDiagnostics++;
+        NSMutableArray<NSString *> *classes = [NSMutableArray array];
+        UIViewController *cursor = amproj_topViewController(
+            amproj_keyWindow().rootViewController);
+        for (NSUInteger depth = 0; cursor && depth < 8; depth++) {
+            [classes addObject:NSStringFromClass(cursor.class) ?: @""];
+            cursor = cursor.presentingViewController;
+        }
+        amproj_logCriticalEvent(@"startup.presented_chain", @{
+            @"source": source ?: @"window_scan",
+            @"classes": classes
+        });
     }
 }
 
@@ -15014,7 +15045,11 @@ static void amproj_armPaywallStartupFallback(void) {
     if (![NSThread isMainThread]) return;
     if (amproj_paywallStartupFallbackUntil <= 0) {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        amproj_paywallStartupFallbackUntil = now + 120.0;
+        // Device timeline (17:48 launch): the crack gate completes around
+        // 17:48:33, and the subscription wall is only presented at ~17:51 —
+        // well past the previous 120s window, which is why it survived. The
+        // dismissal window now covers the whole startup funnel.
+        amproj_paywallStartupFallbackUntil = now + 600.0;
         amproj_startupPaywallSuppressionUntil = now + 30.0;
         amproj_startupPaywallState = AMProjStartupPaywallStateArmed;
     }
@@ -17316,8 +17351,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         UIViewController *presented = controller;
         dispatch_async(dispatch_get_main_queue(), ^{
             if (presented.presentingViewController &&
-                amproj_viewContainsStartupPaywallMarkers(
-                    presented.viewIfLoaded, 0)) {
+                amproj_controllerIsStartupPaywall(presented)) {
                 amproj_logCriticalEvent(@"startup.paywall_dismissed", @{
                     @"source": @"post_presentation",
                     @"controller": NSStringFromClass(presented.class) ?: @""
