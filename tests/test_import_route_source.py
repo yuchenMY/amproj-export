@@ -3368,7 +3368,7 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # the requester stops retrying (the r22-era no-op start made the
         # paywall and shape-library tier checks spin forever).
         self.assertIn(
-            'static void AMProjProductsStartNoop(SKProductsRequest *self, SEL _cmd) {',
+            'static void AMProjProductsStartNoop(SKProductsRequest *self,\n                                     __unused SEL _cmd) {',
             SOURCE)
         self.assertIn('productsRequest:self didReceiveResponse:response', SOURCE)
         self.assertIn(
