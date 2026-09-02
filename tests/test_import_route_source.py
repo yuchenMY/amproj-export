@@ -3357,6 +3357,12 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn(
             'amproj_syncMemberFlags(@"did_become_active");', SOURCE)
         self.assertIn('member.embedded_state_applied', SOURCE)
+        # The App Store sign-in dialog came from the paywall's product
+        # fetch; StoreKit requests are no-ops during the startup window.
+        self.assertIn(
+            'static void amproj_installStoreKitSuppressor(void) {', SOURCE)
+        self.assertIn('storekit suppressor installed', SOURCE)
+        self.assertIn('NSSelectorFromString(@"start")', SOURCE)
         # The funnel pages vibrate through the system haptic generators while
         # their hidden lifecycle runs; the fire methods are no-ops during the
         # funnel window only, so editor haptics stay intact afterwards.

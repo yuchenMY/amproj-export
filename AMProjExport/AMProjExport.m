@@ -50,7 +50,7 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r19-haptic-suppressed";
+static NSString *const kAMProjGateDefenseRound = @"r21-storekit-blocked";
 // Master switch for every crack-funnel interception (window hooks, gate
 // cycles, funnel sweep, intro autoclose, sweep ladder). The window-level
 // rounds were verified to suppress the funnel visually, but their synthetic
@@ -19321,6 +19321,28 @@ static BOOL AMProjNoopBoolIMP(__unused id self, __unused SEL _cmd) {
 
 static void AMProjNoopVoidIMP(id self, SEL _cmd);
 
+// MARK: - StoreKit request suppression
+
+// Premium is flag-driven in this repack; nothing legitimately needs the
+// App Store. The paywall's product fetch is what raised the "登录 Apple
+// 账户" dialog, so StoreKit requests are no-ops during the startup window.
+static CFAbsoluteTime amproj_storeKitSuppressUntil = 0;
+
+static void amproj_installStoreKitSuppressor(void) {
+    @try {
+        Class cls = NSClassFromString(@"SKRequest");
+        if (!cls) return;
+        Method method = class_getInstanceMethod(cls,
+            NSSelectorFromString(@"start"));
+        if (method) {
+            method_setImplementation(method, (IMP)AMProjNoopVoidIMP);
+        }
+        amproj_storeKitSuppressUntil = CFAbsoluteTimeGetCurrent() + 120.0;
+        NSLog(@"[AMProjExport] storekit suppressor installed");
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 // MARK: - Funnel haptic suppression
 
 // The welcome/gate pages live inside the injected license module (the only
@@ -19605,6 +19627,7 @@ static void AMProjExportInit(void) {
         }
         amproj_installRatingPromptSuppressor();
         amproj_installFunnelHapticSuppressor();
+        amproj_installStoreKitSuppressor();
         amproj_hapticSuppressUntil = CFAbsoluteTimeGetCurrent() + 25.0;
         NSLog(@"[AMProjExport] gate defense round: %@",
               kAMProjGateDefenseRound);
