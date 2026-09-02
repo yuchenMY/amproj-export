@@ -40,6 +40,21 @@ jobs:
             AhmadDev.m
           ls -la AhmadDev.dylib
 
+      - name: Compile MeowRotate3D.dylib (recon for 3D-rotate mod)
+        run: |
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
+            -dynamiclib \
+            -fobjc-arc \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -mios-version-min=12.0 \
+            -framework UIKit \
+            -framework Foundation \
+            -install_name @executable_path/Frameworks/MeowRotate3D.dylib \
+            -o MeowRotate3D.dylib \
+            MeowRotate3D.m
+          ls -la MeowRotate3D.dylib
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -47,3 +62,4 @@ jobs:
           path: |
             libWebHome.dylib
             AhmadDev.dylib
+            MeowRotate3D.dylib
