@@ -19333,7 +19333,8 @@ static void AMProjNoopVoidIMP(id self, SEL _cmd);
 // 账户" dialog, so StoreKit requests are no-ops during the startup window.
 static CFAbsoluteTime amproj_storeKitSuppressUntil = 0;
 
-static void AMProjProductsStartNoop(SKProductsRequest *self, SEL _cmd) {
+static void AMProjProductsStartNoop(SKProductsRequest *self,
+                                     __unused SEL _cmd) {
     // Return an empty product list asynchronously: the requester (paywall,
     // shape-library tier checks) observes a completed response and stops
     // retrying, instead of spinning forever on a suppressed request.
