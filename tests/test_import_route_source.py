@@ -3364,6 +3364,16 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn(
             'static void amproj_installStoreKitSuppressor(void) {', SOURCE)
         self.assertIn('storekit suppressor installed', SOURCE)
+        # The suppressed products request completes with an EMPTY response so
+        # the requester stops retrying (the r22-era no-op start made the
+        # paywall and shape-library tier checks spin forever).
+        self.assertIn(
+            'static void AMProjProductsStartNoop(SKProductsRequest *self, SEL _cmd) {',
+            SOURCE)
+        self.assertIn('productsRequest:self didReceiveResponse:response', SOURCE)
+        self.assertIn(
+            'class_replaceMethod(cls, NSSelectorFromString(@"start"),',
+            SOURCE)
         self.assertIn('NSSelectorFromString(@"start")', SOURCE)
         # The funnel pages vibrate through the system haptic generators while
         # their hidden lifecycle runs; the fire methods are no-ops during the

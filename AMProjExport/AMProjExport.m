@@ -50,7 +50,7 @@ static NSString *const kAMProjPluginVersion = @"44";
 // Bumped every defense round; the constructor banner and the chain export
 // file both carry it so the installed build can be identified on device
 // without guessing.
-static NSString *const kAMProjGateDefenseRound = @"r21-storekit-blocked";
+static NSString *const kAMProjGateDefenseRound = @"r24-storekit-empty-response";
 // Master switch for every crack-funnel interception (window hooks, gate
 // cycles, funnel sweep, intro autoclose, sweep ladder). The window-level
 // rounds were verified to suppress the funnel visually, but their synthetic
@@ -19332,15 +19332,39 @@ static void AMProjNoopVoidIMP(id self, SEL _cmd);
 // 账户" dialog, so StoreKit requests are no-ops during the startup window.
 static CFAbsoluteTime amproj_storeKitSuppressUntil = 0;
 
+static void AMProjProductsStartNoop(SKProductsRequest *self, SEL _cmd) {
+    // Return an empty product list asynchronously: the requester (paywall,
+    // shape-library tier checks) observes a completed response and stops
+    // retrying, instead of spinning forever on a suppressed request.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            id delegate = [(id)self delegate];
+            if (![delegate respondsToSelector:@selector(productsRequest:didReceiveResponse:)]) {
+                return;
+            }
+            NSSet *identifiers = nil;
+            if ([(id)self respondsToSelector:@selector(productIdentifiers)]) {
+                identifiers = [(id)self productIdentifiers];
+            }
+            Class responseClass = NSClassFromString(@"SKProductsResponse");
+            if (!responseClass) return;
+            SKProductsResponse *response =
+                [[responseClass alloc] initWithProductIdentifiers:
+                     identifiers ?: [NSSet set]];
+            [(id)delegate productsRequest:self didReceiveResponse:response];
+        } @catch (__unused NSException *exception) {
+        }
+    });
+}
+
 static void amproj_installStoreKitSuppressor(void) {
     @try {
-        Class cls = NSClassFromString(@"SKRequest");
+        Class cls = NSClassFromString(@"SKProductsRequest");
         if (!cls) return;
-        Method method = class_getInstanceMethod(cls,
-            NSSelectorFromString(@"start"));
-        if (method) {
-            method_setImplementation(method, (IMP)AMProjNoopVoidIMP);
-        }
+        // Override -start on SKProductsRequest only (class_replaceMethod adds
+        // the override without touching the SKRequest base implementation).
+        class_replaceMethod(cls, NSSelectorFromString(@"start"),
+                            (IMP)AMProjProductsStartNoop, "v@:@");
         amproj_storeKitSuppressUntil = CFAbsoluteTimeGetCurrent() + 120.0;
         NSLog(@"[AMProjExport] storekit suppressor installed");
     } @catch (__unused NSException *exception) {
