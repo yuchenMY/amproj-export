@@ -22,6 +22,7 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <QuartzCore/QuartzCore.h>
+#import <StoreKit/StoreKit.h>
 #import <Photos/Photos.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <dispatch/dispatch.h>
