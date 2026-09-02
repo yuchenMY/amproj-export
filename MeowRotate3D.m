@@ -193,7 +193,7 @@ static void AMProbeKVC(id obj, NSMutableString *out, int depth) {
                 [out appendFormat:@"  KVC %@.%@ = %@\n", AMClsName(obj), key, v];
             } else if ([v isKindOfClass:[NSArray class]] || [v isKindOfClass:[NSDictionary class]]) {
                 [out appendFormat:@"  KVC %@.%@ = <%@ count=%lu> %@\n", AMClsName(obj), key,
-                    AMClsName(v), (unsigned long)[(id)v count], AMDesc(v, 120)];
+                    AMClsName(v), (unsigned long)[(NSArray *)v count], AMDesc(v, 120)];
             } else if (![v isKindOfClass:[UIView class]] && ![v isKindOfClass:[UIColor class]]) {
                 [out appendFormat:@"  KVC %@.%@ -> <%@>\n", AMClsName(obj), key, AMClsName(v)];
                 if (depth < 1) AMProbeKVC(v, out, depth + 1);
