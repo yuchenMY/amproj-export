@@ -19344,15 +19344,10 @@ static void AMProjProductsStartNoop(SKProductsRequest *self,
             if (![delegate respondsToSelector:@selector(productsRequest:didReceiveResponse:)]) {
                 return;
             }
-            NSSet *identifiers = nil;
-            if ([(id)self respondsToSelector:@selector(productIdentifiers)]) {
-                identifiers = [(id)self productIdentifiers];
-            }
             Class responseClass = NSClassFromString(@"SKProductsResponse");
             if (!responseClass) return;
             SKProductsResponse *response =
-                [[responseClass alloc] initWithProductIdentifiers:
-                     identifiers ?: [NSSet set]];
+                [[responseClass alloc] initWithProductIdentifiers:[NSSet set]];
             [(id)delegate productsRequest:self didReceiveResponse:response];
         } @catch (__unused NSException *exception) {
         }

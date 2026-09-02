@@ -3371,6 +3371,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
             'static void AMProjProductsStartNoop(SKProductsRequest *self,\n                                     __unused SEL _cmd) {',
             SOURCE)
         self.assertIn('productsRequest:self didReceiveResponse:response', SOURCE)
+        # The response carries an empty identifier set; the requester observes
+        # a completed response and stops retrying.
+        self.assertIn('initWithProductIdentifiers:[NSSet set]', SOURCE)
         self.assertIn(
             'class_replaceMethod(cls, NSSelectorFromString(@"start"),',
             SOURCE)
