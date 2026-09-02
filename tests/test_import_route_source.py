@@ -3323,7 +3323,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # defense is visual-only: the funnel pages are hidden, the gate's
         # own continue button is activated once exactly like a user tap,
         # and every accessibility-based activation stays disarmed.
-        self.assertIn('static BOOL amproj_gateDefenseActive = YES;', SOURCE)
+        self.assertIn('static BOOL amproj_gateDefenseActive = NO;', SOURCE)
+        self.assertIn(
+            'Keep the machinery compiled but switched off.', SOURCE)
         self.assertIn('static BOOL amproj_funnelSweepEnabled = NO;', SOURCE)
         self.assertIn('static BOOL amproj_introAutocloseEnabled = YES;', SOURCE)
         self.assertIn(

@@ -58,7 +58,11 @@ static NSString *const kAMProjGateDefenseRound = @"r21-storekit-blocked";
 // were observed dropping the member entitlement (watermark and members-only
 // effects returned). Disabled here so the crack flow runs exactly as the
 // known-good ae4292f base; flip to YES to restore the defense.
-static BOOL amproj_gateDefenseActive = YES;
+// The crack module is a hollow stub in this package: there is no funnel to
+// defend against, and every interception here is pure false-positive risk
+// (the r22 black screen was this defense hiding the app's own window).
+// Keep the machinery compiled but switched off.
+static BOOL amproj_gateDefenseActive = NO;
 // The accessibility-based activations (funnel sweep continue taps, intro
 // close activation) raced the crack module's license state machine and were
 // observed dropping the member entitlement. They stay disarmed even while
