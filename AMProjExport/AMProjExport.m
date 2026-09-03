@@ -10745,6 +10745,70 @@ static NSData *amproj_v865StoreRewriteSceneXML(
             continue;
         }
 
+        // Legacy packages reference media as amproj:SHA1.ext (the file is
+        // one of the package's root-level resources, already extracted).
+        if ([value hasPrefix:@"amproj:"]) {
+            NSString *reference = [value substringFromIndex:7];
+            if (!reference.length || [reference containsString:@"/"] ||
+                [reference containsString:@".."]) {
+                continue;
+            }
+            NSURL *packaged = nil;
+            NSURL *extraction = extractionDirectory;
+            if (extraction) {
+                NSArray<NSURL *> *candidates = [NSFileManager.defaultManager
+                    contentsOfDirectoryAtURL:extraction
+                    includingPropertiesForKeys:@[NSURLIsRegularFileKey]
+                                       options:NSDirectoryEnumerationSkipsSubdirectoryDescendants
+                                         error:nil];
+                for (NSURL *candidate in candidates) {
+                    if ([candidate.lastPathComponent
+                            caseInsensitiveCompare:reference] == NSOrderedSame) {
+                        packaged = candidate;
+                        break;
+                    }
+                }
+            }
+            if (!packaged) {
+                NSURL *extractionCatalog = [extraction
+                    URLByAppendingPathComponent:@"BuiltinEffects"
+                                    isDirectory:YES];
+                if (extractionCatalog) {
+                    NSURL *candidate = [extractionCatalog
+                        URLByAppendingPathComponent:reference];
+                    if ([NSFileManager.defaultManager
+                            fileExistsAtURL:candidate.path]) {
+                        packaged = candidate;
+                    }
+                }
+            }
+            if (!packaged) {
+                // The package did not provide this resource; keep the
+                // reference untouched rather than pointing at nothing.
+                continue;
+            }
+            NSString *storeName = storeNamesByResource[reference];
+            if (!storeName) {
+                NSString *sha1 = amproj_v865StoreSHA1ForFile(packaged);
+                if (sha1.length != CC_SHA1_DIGEST_LENGTH * 2) continue;
+                NSString *extension = packaged.pathExtension.uppercaseString;
+                storeName = extension.length
+                    ? [NSString stringWithFormat:@"%@.%@", sha1, extension] : sha1;
+                storeNamesByResource[reference] = storeName;
+                NSNumber *fileSize = nil;
+                [packaged getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+                [dependenciesOut addObject:@{
+                    @"source": [packaged copy] ?: [NSNull null],
+                    @"name": storeName,
+                    @"sha1": sha1,
+                    @"size": fileSize ?: @0
+                }];
+            }
+            NSString *storeURI = [NSString stringWithFormat:
+                @"am-internal:///%@", storeName];
+            [xml replaceCharactersInRange:[match rangeAtIndex:1] withString:storeURI];
+            continue;
+        }
         NSURL *fileURL = nil;
         if ([value hasPrefix:@"file://"]) {
             fileURL = [NSURL URLWithString:value];
