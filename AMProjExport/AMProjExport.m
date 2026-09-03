@@ -10777,7 +10777,7 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                     NSURL *candidate = [extractionCatalog
                         URLByAppendingPathComponent:reference];
                     if ([NSFileManager.defaultManager
-                            fileExistsAtURL:candidate.path]) {
+                            fileExistsAtPath:candidate.path]) {
                         packaged = candidate;
                     }
                 }
