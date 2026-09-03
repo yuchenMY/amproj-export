@@ -15,12 +15,12 @@ TOKEN=$(cat "$TOKEN_FILE")
 GH_AUTH=$(printf "%s" "$TOKEN" | python -c "import sys,urllib.parse;print(urllib.parse.quote(sys.stdin.read().strip()))")
 USER=$(printf "protocol=https\nhost=github.com\n" | git credential fill 2>/dev/null | grep username= | cut -d= -f2)
 
-export HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890
+# 直连 (TUN 模式), 不再走 127.0.0.1:7890
 
 echo "== [2/6] 推送 gh_build 到分支 $BRANCH =="
 git remote remove ci 2>/dev/null || true
 git remote add ci "https://github.com/$REPO.git"
-git push ci "HEAD:refs/heads/$BRANCH" --force
+git -c http.proxy= -c https.proxy= push ci "HEAD:refs/heads/$BRANCH" --force
 
 echo "== [3/6] 等待 Actions 运行完成 =="
 RUN_ID=""

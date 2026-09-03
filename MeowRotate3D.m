@@ -156,7 +156,8 @@ static void AMDumpView(UIView *v, int depth, NSMutableString *out) {
     }
     for (UIGestureRecognizer *g in v.gestureRecognizers ?: @[]) {
         // _UIGestureRecognizerTarget 私有类, 用桩接口声明拿 target/action
-        for (id inv in g.targets ?: @[]) {
+        id grTargets = nil; @try { grTargets = [g valueForKey:@"targets"]; } @catch (NSException *e) {}
+        for (id inv in grTargets ?: @[]) {
             @try {
                 AMGRTargetStub *stub = (AMGRTargetStub *)inv;
                 id tgt = [stub target];
@@ -171,19 +172,24 @@ static void AMDumpView(UIView *v, int depth, NSMutableString *out) {
 
 // ============ KVC 探针 ============
 
-static NSArray<NSString *> *kModelKeys = @[
-    @"transform", @"rotation", @"orientation", @"location", @"pivot", @"scale",
-    @"skew", @"opacity", @"angle", @"selectedLayer", @"selection", @"layer",
-    @"layers", @"scene", @"document", @"editor", @"keyframes", @"value",
-    @"model", @"item", @"panel", @"dataSource", @"viewModel",
-];
+static NSArray<NSString *> *AMModelKeys(void) {
+    static NSArray *k = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        k = @[@"transform", @"rotation", @"orientation", @"location", @"pivot", @"scale",
+              @"skew", @"opacity", @"angle", @"selectedLayer", @"selection", @"layer",
+              @"layers", @"scene", @"document", @"editor", @"keyframes", @"value",
+              @"model", @"item", @"panel", @"dataSource", @"viewModel"];
+    });
+    return k;
+}
 
 static int gProbeDepth = 0;
 
 static void AMProbeKVC(id obj, NSMutableString *out, int depth) {
     if (!obj || depth > 2 || gProbeDepth > 400) return;
     gProbeDepth++;
-    for (NSString *key in kModelKeys) {
+    for (NSString *key in AMModelKeys()) {
         @try {
             if (![obj respondsToSelector:@selector(valueForKey:)]) continue;
             id v = [obj valueForKey:key];
