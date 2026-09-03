@@ -3363,21 +3363,23 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # fetch; StoreKit requests are no-ops during the startup window.
         self.assertIn(
             'static void amproj_installStoreKitSuppressor(void) {', SOURCE)
-        self.assertIn('storekit suppressor installed', SOURCE)
+        self.assertIn('storekit fail-fast installed', SOURCE)
         # The suppressed products request completes with an EMPTY response so
         # the requester stops retrying (the r22-era no-op start made the
         # paywall and shape-library tier checks spin forever).
         self.assertIn(
-            'static void AMProjProductsStartNoop(SKProductsRequest *self,\n                                     __unused SEL _cmd) {',
+            'static void AMProjStoreKitStartFail(SKRequest *self, SEL _cmd) {',
             SOURCE)
-        self.assertIn('productsRequest:self didReceiveResponse:response', SOURCE)
-        # The response carries an empty identifier set; the requester observes
-        # a completed response and stops retrying.
-        self.assertIn('initWithProductIdentifiers:[NSSet set]', SOURCE)
         self.assertIn(
-            'class_replaceMethod(cls, NSSelectorFromString(@"start"),',
+            'didFailWithError:[NSError errorWithDomain:@"AMProjStoreKitSuppressed"',
             SOURCE)
-        self.assertIn('NSSelectorFromString(@"start")', SOURCE)
+        self.assertIn(
+            'request:didFailWithError:', SOURCE)
+        self.assertIn(
+            'Method method = class_getInstanceMethod(cls,\n            NSSelectorFromString(@"start"));',
+            SOURCE)
+        self.assertIn('method_setImplementation(method, (IMP)AMProjStoreKitStartFail);',
+                      SOURCE)
         # The funnel pages vibrate through the system haptic generators while
         # their hidden lifecycle runs; the fire methods are no-ops during the
         # funnel window only, so editor haptics stay intact afterwards.

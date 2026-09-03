@@ -19333,37 +19333,34 @@ static void AMProjNoopVoidIMP(id self, SEL _cmd);
 // 账户" dialog, so StoreKit requests are no-ops during the startup window.
 static CFAbsoluteTime amproj_storeKitSuppressUntil = 0;
 
-static void AMProjProductsStartNoop(SKProductsRequest *self,
-                                     __unused SEL _cmd) {
-    // Return an empty product list asynchronously: the requester (paywall,
-    // shape-library tier checks) observes a completed response and stops
-    // retrying, instead of spinning forever on a suppressed request.
+static void AMProjStoreKitStartFail(SKRequest *self, SEL _cmd) {
+    // Fail every StoreKit request asynchronously through the standard
+    // delegate path: requesters observe a clean failure and stop waiting,
+    // instead of spinning forever or raising the App Store sign-in dialog.
     dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            id delegate = [(id)self delegate];
-            if (![delegate respondsToSelector:@selector(productsRequest:didReceiveResponse:)]) {
-                return;
-            }
-            Class responseClass = NSClassFromString(@"SKProductsResponse");
-            if (!responseClass) return;
-            SKProductsResponse *response =
-                [[responseClass alloc] initWithProductIdentifiers:[NSSet set]];
-            [(id)delegate productsRequest:self didReceiveResponse:response];
-        } @catch (__unused NSException *exception) {
+        id delegate = [(id)self delegate];
+        if (![delegate respondsToSelector:@selector(request:didFailWithError:)]) {
+            return;
         }
+        [(id)delegate request:self
+            didFailWithError:[NSError errorWithDomain:@"AMProjStoreKitSuppressed"
+                                                 code:1
+                                             userInfo:nil]];
     });
 }
 
 static void amproj_installStoreKitSuppressor(void) {
     @try {
-        Class cls = NSClassFromString(@"SKProductsRequest");
+        Class cls = NSClassFromString(@"SKRequest");
         if (!cls) return;
-        // Override -start on SKProductsRequest only (class_replaceMethod adds
-        // the override without touching the SKRequest base implementation).
-        class_replaceMethod(cls, NSSelectorFromString(@"start"),
-                            (IMP)AMProjProductsStartNoop, "v@:@");
-        amproj_storeKitSuppressUntil = CFAbsoluteTimeGetCurrent() + 120.0;
-        NSLog(@"[AMProjExport] storekit suppressor installed");
+        // Hook -start on the BASE class so every subclass (products,
+        // receipt refresh, payment) routes through the same fail-fast path.
+        Method method = class_getInstanceMethod(cls,
+            NSSelectorFromString(@"start"));
+        if (method) {
+            method_setImplementation(method, (IMP)AMProjStoreKitStartFail);
+        }
+        NSLog(@"[AMProjExport] storekit fail-fast installed");
     } @catch (__unused NSException *exception) {
     }
 }
