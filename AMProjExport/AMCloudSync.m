@@ -335,6 +335,8 @@ static NSString *AMCloudReadTokenMirror(void) {
     return token.length ? token : nil;
 }
 
+static BOOL AMCloudWriteTokenUnlocked(NSString *token);
+
 static NSString *AMCloudReadTokenUnlocked(void) {
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
