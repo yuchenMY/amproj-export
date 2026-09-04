@@ -5,6 +5,7 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <CoreText/CoreText.h>
+#import <os/log.h>
 #import <string.h>
 
 static NSString *const AMHomeUIURLString =
@@ -2114,39 +2115,56 @@ static void AMHomeUIHideTopLevelAncestor(UIView *node, UIView *root,
     }
 }
 
+static void AMHomeUIDumpViewTreeInto(UIView *view, NSUInteger depth,
+                                     NSMutableString *dump,
+                                     NSUInteger *visited) {
+    if (!view || *visited >= 220) return;
+    (*visited)++;
+    [dump appendFormat:@"%@%@ %@ %@ text=%@\n",
+        [@"" stringByPaddingToLength:MIN(depth, 14) * 2
+                         withString:@" " startingAtIndex:0],
+        NSStringFromClass(view.class),
+        NSStringFromCGRect(view.frame),
+        view.hidden ? @"HIDDEN" : @"shown",
+        AMHomeUIDrawerTextOfView(view)];
+    for (UIView *subview in view.subviews) {
+        AMHomeUIDumpViewTreeInto(subview, depth + 1, dump, visited);
+    }
+}
+
+// syslog 会把动态 NSLog 参数一律 redact 成 <private>，而新 clang 又禁止在
+// NSLog 上用 %{public}@——所以诊断 dump 走 os_log，并把长输出按 ~16 节点
+// 分块，避免超长行被 syslogd 截断。
 static void AMHomeUIDumpViewTree(UIView *root, NSString *tag) {
     if (!root) return;
     NSMutableString *dump = [NSMutableString stringWithFormat:
         @"%@ root=%@ frame=%@\n", tag, NSStringFromClass(root.class),
         NSStringFromCGRect(root.frame)];
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWith:@[ @0, root ]];
     NSUInteger visited = 0;
-    while (stack.count && visited < 220) {
-        NSUInteger depth = [stack[0] unsignedIntegerValue];
-        UIView *view = stack[1];
-        [stack removeObjectsInRange:NSMakeRange(0, 2)];
-        visited++;
-        [dump appendFormat:@"%@%@ %@ %@ text=%@\n",
-            [@"" stringByPaddingToLength:MIN(depth, 14) * 2
-                             withString:@" " startingAtIndex:0],
-            NSStringFromClass(view.class),
-            NSStringFromCGRect(view.frame),
-            view.hidden ? @"HIDDEN" : @"shown",
-            AMHomeUIDrawerTextOfView(view)];
-        for (UIView *subview in view.subviews) {
-            [stack addObjectsFromArray:@[ @(depth + 1), subview ]];
-        }
+    AMHomeUIDumpViewTreeInto(root, 0, dump, &visited);
+    NSRange remaining = NSMakeRange(0, dump.length);
+    NSUInteger chunkIndex = 0;
+    while (remaining.length) {
+        NSUInteger scan = MIN(remaining.length, (NSUInteger)900);
+        NSRange lineRange = [dump lineRangeForRange:
+            NSMakeRange(remaining.location, scan)];
+        NSUInteger take = NSMaxRange(lineRange) - remaining.location;
+        if (take > remaining.length) take = remaining.length;
+        os_log(OS_LOG_DEFAULT, "[AMHomeUI] drawer dump[%lu] %{public}@",
+               (unsigned long)chunkIndex++,
+               [dump substringWithRange:
+                   NSMakeRange(remaining.location, take)]);
+        remaining.location += take;
+        remaining.length -= take;
     }
-    if (stack.count) [dump appendString:@"…(truncated)\n"];
-    NSLog(@"[AMHomeUI] drawer dump %{public}@", dump);
 }
 
 static void AMHomeUITrimDrawerNow(UIViewController *controller, NSString *source) {
     UIView *containerView = AMHomeUIDrawerContainerView(controller);
     if (!containerView) {
-        NSLog(@"[AMHomeUI] drawer trim skipped (%{public}@): containerView "
-              @"not ready on %{public}@", source ?: @"",
-              NSStringFromClass(controller.class) ?: @"");
+        os_log(OS_LOG_DEFAULT, "[AMHomeUI] drawer trim skipped (%{public}@): "
+               "containerView not ready on %{public}@", source ?: @"",
+               NSStringFromClass(controller.class) ?: @"");
         return;
     }
     NSString *aboutVal = AMHomeUILocalizedOrLiteral(@"about", @"关于");
@@ -2168,11 +2186,12 @@ static void AMHomeUITrimDrawerNow(UIViewController *controller, NSString *source
             AMHomeUIDrawerTrimBelowNode(node, containerView, log);
         }
     }
-    NSLog(@"[AMHomeUI] drawer trim pass (%{public}@): about=%d help=%lu "
-          @"follow=%lu oss=%lu hidden %{public}@", source ?: @"",
-          aboutNode != nil, (unsigned long)found[helpVal].count,
-          (unsigned long)found[followVal].count,
-          (unsigned long)found[ossVal].count, log);
+    os_log(OS_LOG_DEFAULT, "[AMHomeUI] drawer trim pass (%{public}@): "
+           "about=%d help=%lu follow=%lu oss=%lu hidden %{public}@",
+           source ?: @"", aboutNode != nil,
+           (unsigned long)found[helpVal].count,
+           (unsigned long)found[followVal].count,
+           (unsigned long)found[ossVal].count, log);
     if (!aboutNode && !found[helpVal].count && !found[followVal].count &&
         !found[ossVal].count) {
         static dispatch_once_t dumpToken;
