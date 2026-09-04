@@ -17853,10 +17853,12 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         //
         // The package-share login gate: Alight Motion raises this alert from
         // ShareNC's export tap when the selected option is the project package
-        // and no AM account is signed in. The message is matched through its
-        // localization key, and only while the tap is still fresh, so other
-        // sign-in prompts and other export options are untouched. Bypassing it
-        // hands the package export to the plugin's own .amproj flow.
+        // and no AM account is signed in. The message is matched with all
+        // whitespace stripped (the runtime string's spacing has drifted from
+        // the shipped .strings), only while the tap is still fresh, and the
+        // presenter no longer has to be on screen yet — SwiftUI hosts fire
+        // this before their view lands in a window. Bypassing it hands the
+        // package export to the plugin's own .amproj flow.
         if (amproj_runtimeIsBuild865() &&
             [controller isKindOfClass:UIAlertController.class] &&
             !amproj_directRequest) {
@@ -17864,12 +17866,19 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             NSString *expectedGateMessage = NSLocalizedString(
                 @"sign_in_for_package_share_msg", @"");
             BOOL tapIsRecent = amproj_865ShareExportTapAt > 0 &&
-                CFAbsoluteTimeGetCurrent() - amproj_865ShareExportTapAt < 3.0;
-            if (expectedGateMessage.length &&
-                [gateAlert.message isEqualToString:expectedGateMessage] &&
-                tapIsRecent &&
-                [self isKindOfClass:UIViewController.class] &&
-                ((UIViewController *)self).viewIfLoaded.window) {
+                CFAbsoluteTimeGetCurrent() - amproj_865ShareExportTapAt < 5.0;
+            NSString *normalizedMessage = [[gateAlert.message
+                componentsSeparatedByCharactersInSet:
+                    NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                componentsJoinedByString:@""];
+            NSString *normalizedExpected = [[expectedGateMessage
+                componentsSeparatedByCharactersInSet:
+                    NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                componentsJoinedByString:@""];
+            BOOL messageMatches = normalizedExpected.length &&
+                [normalizedMessage isEqualToString:normalizedExpected];
+            if (tapIsRecent && messageMatches &&
+                [self isKindOfClass:UIViewController.class]) {
                 UIViewController *exportPresenter = (UIViewController *)self;
                 amproj_865ShareExportTapAt = 0;
                 amproj_logCriticalEvent(@"direct.865_login_wall_bypassed", @{
@@ -17883,6 +17892,19 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                         exportPresenter, nil, animated, nil, exportTitle);
                 });
                 return;
+            }
+            if (tapIsRecent) {
+                // Near-miss forensics: an alert inside the tap window that did
+                // not match tells us exactly how the gate drifted this build.
+                // os_log with %{public}@ — amproj_logCriticalEvent values are
+                // redacted by syslog.
+                os_log(OS_LOG_DEFAULT,
+                       "[AMProjExport] gate near-miss class=%{public}@ "
+                       "title=%{public}@ message=%{public}@ presenter=%{public}@",
+                       NSStringFromClass(controller.class) ?: @"",
+                       gateAlert.title ?: @"",
+                       gateAlert.message ?: @"",
+                       NSStringFromClass(self.class) ?: @"");
             }
         }
         // The one exception is the document picker delegate proxy: with the
@@ -19515,6 +19537,43 @@ static void amproj_installNavigationExportHook(void) {
     });
 }
 
+// 项目包导出登录墙的兜底：无论登录墙 alert 从哪条路径构建（SwiftUI 宿主
+// 也会落到 UIAlertController），只要 message 命中 sign_in_for_package_share
+// （空白不敏感），就不再添加"登入"按钮——墙变成一个无害的取消提示。
+static void (*orig_alertAddAction)(id, SEL, UIAlertAction *) = NULL;
+
+static NSString *AMProjNormalizedGateText(NSString *text) {
+    return [[text componentsSeparatedByCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]]
+        componentsJoinedByString:@""];
+}
+
+static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
+    @try {
+        NSString *expected = NSLocalizedString(
+            @"sign_in_for_package_share_msg", @"");
+        NSString *normalizedExpected = AMProjNormalizedGateText(expected);
+        NSString *normalizedMessage = AMProjNormalizedGateText(
+            [(UIAlertController *)self message] ?: @"");
+        if (normalizedExpected.length &&
+            [normalizedMessage isEqualToString:normalizedExpected]) {
+            NSString *title = [action title] ?: @"";
+            NSString *folded = title.lowercaseString;
+            if ([folded containsString:@"登入"] ||
+                [folded containsString:@"登录"] ||
+                [folded containsString:@"sign in"] ||
+                [folded containsString:@"log in"]) {
+                os_log(OS_LOG_DEFAULT, "[AMProjExport] gate login action "
+                       "stripped: %{public}@", title);
+                return;
+            }
+        }
+    } @catch (NSException *exception) {
+        // never break the host alert
+    }
+    if (orig_alertAddAction) orig_alertAddAction(self, _cmd, action);
+}
+
 static void amproj_installPresentationHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -19530,6 +19589,14 @@ static void amproj_installPresentationHook(void) {
                     orig_presentVC = (void *)previous;
                     NSLog(@"[AMProjExport] Hooked UIViewController.presentViewController");
                 }
+            }
+            Method addActionMethod = class_getInstanceMethod(
+                [UIAlertController class], @selector(addAction:));
+            if (addActionMethod) {
+                orig_alertAddAction =
+                    (void (*)(id, SEL, UIAlertAction *))method_setImplementation(
+                        addActionMethod, (IMP)hooked_alertAddAction);
+                NSLog(@"[AMProjExport] Hooked UIAlertController.addAction");
             }
         } @catch (NSException *exception) {
             NSLog(@"[AMProjExport] Presentation hook failed: %@", exception);
@@ -20347,6 +20414,12 @@ static void AMProjExportInit(void) {
             amproj_schedulePaywallScan(nil, @"did_become_active");
             amproj_syncMemberFlags(@"did_become_active");
             amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active");
+            // 导出页的"喜欢 Alight Motion 吗"评分弹窗由
+            // advanced_rating_and_review_first_session_number 触发（配置值
+            // 为 1，等于每会话必弹）。把它推到不可能达到的会话数上。
+            [[NSUserDefaults standardUserDefaults]
+                setDouble:999999.0
+                   forKey:@"advanced_rating_and_review_first_session_number"];
             if (amproj_runtimeUsesLocalImportEngine()) {
                 // The launch URL is the current user action. Consume its deferred
                 // candidate first; only then inspect stale app-owned Inbox files.
