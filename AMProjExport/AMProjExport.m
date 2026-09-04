@@ -11159,24 +11159,29 @@ static void amproj_locateDependencySamples(void) {
         @"CB0EF728DB857F1D53F79FE2B707E2F067DADDD3.MOV",
     ];
     NSFileManager *manager = NSFileManager.defaultManager;
-    NSDirectoryEnumerator *enumerator = [manager
-        enumeratorAtURL:[NSURL fileURLWithPath:NSHomeDirectory()]
-        includingPropertiesForKeys:@[NSURLIsRegularFileKey]
-                           options:0 error:nil];
+    NSDirectoryEnumerator<NSString *> *enumerator =
+        [manager enumeratorAtPath:NSHomeDirectory()];
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:8.0];
     NSUInteger visited = 0;
     NSMutableArray<NSString *> *hits = [NSMutableArray array];
     NSString *nativeDir = nil;
     NSString *oursDir = nil;
-    for (NSURL *url in enumerator) {
+    NSString *relative = nil;
+    while ((relative = [enumerator nextObject]) != nil) {
         if (++visited > 120000 || [deadline timeIntervalSinceNow] <= 0) break;
-        NSString *name = url.lastPathComponent;
+        NSString *name = relative.lastPathComponent;
         if ([name caseInsensitiveCompare:targets[0]] == NSOrderedSame) {
-            nativeDir = url.URLByDeletingLastPathComponent.path;
-            [hits addObject:url.path];
+            nativeDir = [[NSHomeDirectory()
+                stringByAppendingPathComponent:relative]
+                stringByDeletingLastPathComponent];
+            [hits addObject:[NSHomeDirectory()
+                stringByAppendingPathComponent:relative]];
         } else if ([name caseInsensitiveCompare:targets[1]] == NSOrderedSame) {
-            oursDir = url.URLByDeletingLastPathComponent.path;
-            [hits addObject:url.path];
+            oursDir = [[NSHomeDirectory()
+                stringByAppendingPathComponent:relative]
+                stringByDeletingLastPathComponent];
+            [hits addObject:[NSHomeDirectory()
+                stringByAppendingPathComponent:relative]];
         }
     }
     os_log(OS_LOG_DEFAULT, "[AMProjExport] dep locate visited=%lu "
