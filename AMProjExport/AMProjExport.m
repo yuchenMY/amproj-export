@@ -10626,10 +10626,11 @@ static void amproj_finishImportAuthorizationDenied(NSUInteger generation,
 
 // Alight Motion 865 keeps every project as `<UUID>.xml` directly inside the
 // app's Library directory, with media stored as
-// `Library/project-dependencies/<UPPERCASE_SHA1>.<EXT>` and referenced from the
-// scene XML through `am-internal:///<UPPERCASE_SHA1>.<EXT>`. A root scene with
-// a `templateLink` attribute is listed under "Your Templates"; without it the
-// document is a regular project. Verified on device (2026-08-31): writing a
+// `Library/project-dependencies/<UPPERCASE_SHA1>.<EXT>`. Scene XMLs reference
+// those files by absolute `file://` URLs into project-dependencies: the main
+// binary contains no trace of an `am-internal` scheme (0 string hits), and
+// projects written with that guessed scheme listed correctly but rendered
+// every image as a blank layer. Verified on device (2026-08-31): writing a
 // valid scene XML below Library made the running app index and list it on the
 // next launch. The writer below turns an already validated package into such a
 // project with no private ABI involvement.
@@ -10866,8 +10867,12 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                     @"size": fileSize ?: @0
                 }];
             }
-            NSString *storeURI = [NSString stringWithFormat:
-                @"am-internal:///%@", storeName];
+            // 主二进制不含 "am-internal" 字符串（0 命中），app 不认识这个
+            // scheme；媒体引用必须直接指向依赖目录的真实文件。
+            NSString *storeURI = [[amproj_v865StoreLibraryURL()
+                URLByAppendingPathComponent:@"project-dependencies"
+                              isDirectory:YES]
+                URLByAppendingPathComponent:storeName].absoluteString;
             [xml replaceCharactersInRange:[match rangeAtIndex:1] withString:storeURI];
             continue;
         }
@@ -10900,7 +10905,10 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                 @"size": fileSize ?: @0
             }];
         }
-        NSString *storeURI = [NSString stringWithFormat:@"am-internal:///%@", storeName];
+        NSString *storeURI = [[amproj_v865StoreLibraryURL()
+            URLByAppendingPathComponent:@"project-dependencies"
+                          isDirectory:YES]
+            URLByAppendingPathComponent:storeName].absoluteString;
         [xml replaceCharactersInRange:[match rangeAtIndex:1] withString:storeURI];
     }
 
@@ -11090,6 +11098,58 @@ static void amproj_v865StoreUpdateSummaryCache(NSString *storeUUID,
                                         forKey:@"cached_scene_summary_raw"];
 }
 
+// 采样 Library 下 store XML 的媒体 uri 并 public 输出——am-internal 已被
+// 证明不被主程序识别，app 自己保存的项目会揭示原生引用格式。
+static void amproj_logStoreMediaSamples(NSString *tag) {
+    NSURL *library = amproj_v865StoreLibraryURL();
+    NSArray<NSURL *> *files = [NSFileManager.defaultManager
+        contentsOfDirectoryAtURL:library
+        includingPropertiesForKeys:@[NSURLContentModificationDateKey]
+                           options:0 error:nil];
+    NSMutableArray<NSURL *> *xmls = [NSMutableArray array];
+    for (NSURL *url in files) {
+        if (![url.pathExtension.lowercaseString isEqualToString:@"xml"]) continue;
+        [xmls addObject:url];
+    }
+    if (!xmls.count) return;
+    [xmls sortUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
+        NSDate *da = nil, *db = nil;
+        [a getResourceValue:&da forKey:NSURLContentModificationDateKey error:nil];
+        [b getResourceValue:&db forKey:NSURLContentModificationDateKey error:nil];
+        return [db compare:da];
+    }];
+    NSRegularExpression *regex = [NSRegularExpression
+        regularExpressionWithPattern:@"uri=\\\"([^\\\"]*)\\\""
+                             options:0 error:nil];
+    NSUInteger shown = MIN(xmls.count, (NSUInteger)6);
+    for (NSURL *url in [xmls subarrayWithRange:NSMakeRange(0, shown)]) {
+        NSString *text = [NSString stringWithContentsOfURL:url
+                                                  encoding:NSUTF8StringEncoding
+                                                     error:nil];
+        if (!text.length) continue;
+        NSMutableSet<NSString *> *seen = [NSMutableSet set];
+        NSMutableArray<NSString *> *samples = [NSMutableArray array];
+        for (NSTextCheckingResult *match in [regex matchesInString:text
+            options:0 range:NSMakeRange(0, text.length)]) {
+            if (samples.count >= 8) break;
+            NSString *value = [text substringWithRange:[match rangeAtIndex:1]];
+            if (value.length > 90) {
+                value = [[value substringToIndex:90]
+                    stringByAppendingString:@"…"];
+            }
+            if ([seen containsObject:value]) continue;
+            [seen addObject:value];
+            [samples addObject:value];
+        }
+        if (samples.count) {
+            os_log(OS_LOG_DEFAULT,
+                   "[AMProjExport] store sample (%{public}@) %{public}@: %{public}@",
+                   tag, url.lastPathComponent,
+                   [samples componentsJoinedByString:@" | "]);
+        }
+    }
+}
+
 static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
                                               NSString *originalName,
                                               NSString *transactionID,
@@ -11206,7 +11266,8 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
     }
     if (verifyXML) {
         NSRegularExpression *verifyRegex = [NSRegularExpression
-            regularExpressionWithPattern:@"am-internal:///([^\"]*)\""
+            regularExpressionWithPattern:
+                @"project-dependencies/([^\"]*)\""
                                  options:0 error:nil];
         for (NSTextCheckingResult *match in [verifyRegex
                 matchesInString:verifyXML options:0
@@ -11233,6 +11294,17 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
            (unsigned long)dependencies.count, (unsigned long)copiedMedia,
            (unsigned long)referenceCount,
            (unsigned long)missingWrittenDependencies, verified);
+    amproj_logStoreMediaSamples(@"post-import");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(45.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        amproj_logStoreMediaSamples(@"rescan45");
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(150.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        amproj_logStoreMediaSamples(@"rescan150");
+    });
     amproj_logCriticalEvent(@"import.865_store_write_completed", @{
         @"filename": originalName ?: @"",
         @"transaction_id": transactionID ?: @"",
