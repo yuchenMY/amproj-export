@@ -11150,6 +11150,50 @@ static void amproj_logStoreMediaSamples(NSString *tag) {
     }
 }
 
+// 在整个沙盒里定位依赖文件的实际落盘位置。820224D5…PNG 是 app 自己导入
+// 照片时生成的原生依赖文件，它所在的目录就是 am-internal 加载器的搜索目录；
+// CB0EF728…MOV 是我们 r31 写入的副本，用于对照。
+static void amproj_locateDependencySamples(void) {
+    NSArray<NSString *> *targets = @[
+        @"820224D52494A5F881AB29A4C198DE2CAC875AB6.PNG",
+        @"CB0EF728DB857F1D53F79FE2B707E2F067DADDD3.MOV",
+    ];
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSDirectoryEnumerator *enumerator = [manager
+        enumeratorAtURL:[NSURL fileURLWithPath:NSHomeDirectory()]
+        includingPropertiesForKeys:@[NSURLIsRegularFileKey]
+                           options:0 error:nil];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:8.0];
+    NSUInteger visited = 0;
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    NSString *nativeDir = nil;
+    NSString *oursDir = nil;
+    for (NSURL *url in enumerator) {
+        if (++visited > 120000 || [deadline timeIntervalSinceNow] <= 0) break;
+        NSString *name = url.lastPathComponent;
+        if ([name caseInsensitiveCompare:targets[0]] == NSOrderedSame) {
+            nativeDir = url.URLByDeletingLastPathComponent.path;
+            [hits addObject:url.path];
+        } else if ([name caseInsensitiveCompare:targets[1]] == NSOrderedSame) {
+            oursDir = url.URLByDeletingLastPathComponent.path;
+            [hits addObject:url.path];
+        }
+    }
+    os_log(OS_LOG_DEFAULT, "[AMProjExport] dep locate visited=%lu "
+           "native_dir=%{public}@ ours_dir=%{public}@",
+           (unsigned long)visited, nativeDir ?: @"NOT_FOUND",
+           oursDir ?: @"NOT_FOUND");
+    if (nativeDir) {
+        NSArray<NSString *> *entries = [manager contentsOfDirectoryAtPath:nativeDir
+                                                                    error:nil];
+        NSUInteger shown = MIN(entries.count, (NSUInteger)12);
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] native dep dir listing %{public}@",
+               [entries subarrayWithRange:NSMakeRange(0, shown)]);
+    }
+    os_log(OS_LOG_DEFAULT, "[AMProjExport] dep hits %{public}@",
+           hits.count ? [hits componentsJoinedByString:@" | "] : @"NONE");
+}
+
 static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
                                               NSString *originalName,
                                               NSString *transactionID,
@@ -20000,6 +20044,14 @@ static void AMProjExportInit(void) {
             amproj_schedulePaywallScan(nil, @"did_become_active");
             amproj_syncMemberFlags(@"did_become_active");
             amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active");
+            static dispatch_once_t depLocateToken;
+            dispatch_once(&depLocateToken, ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)(12.0 * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+                        amproj_locateDependencySamples();
+                    });
+            });
             if (amproj_runtimeUsesLocalImportEngine()) {
                 // The launch URL is the current user action. Consume its deferred
                 // candidate first; only then inspect stale app-owned Inbox files.
