@@ -10627,13 +10627,13 @@ static void amproj_finishImportAuthorizationDenied(NSUInteger generation,
 // Alight Motion 865 keeps every project as `<UUID>.xml` directly inside the
 // app's Library directory, with media stored as
 // `Library/project-dependencies/<UPPERCASE_SHA1>.<EXT>`. Scene XMLs reference
-// those files by absolute `file://` URLs into project-dependencies: the main
-// binary contains no trace of an `am-internal` scheme (0 string hits), and
-// projects written with that guessed scheme listed correctly but rendered
-// every image as a blank layer. Verified on device (2026-08-31): writing a
-// valid scene XML below Library made the running app index and list it on the
-// next launch. The writer below turns an already validated package into such a
-// project with no private ABI involvement.
+// those files through `am-internal:///<UPPERCASE_SHA1>.<EXT>` — confirmed by
+// a native project the app itself wrote (r34 device log, 2026-09-04); the
+// loader resolves the container path itself, so the scheme survives
+// reinstall-induced container UUID changes. Verified on device (2026-08-31):
+// writing a valid scene XML below Library made the running app index and list
+// it on the next launch. The writer below turns an already validated package
+// into such a project with no private ABI involvement.
 static NSURL *amproj_v865StoreLibraryURL(void) {
     return [NSFileManager.defaultManager URLsForDirectory:NSLibraryDirectory
                                                 inDomains:NSUserDomainMask].firstObject;
@@ -10867,12 +10867,12 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                     @"size": fileSize ?: @0
                 }];
             }
-            // 主二进制不含 "am-internal" 字符串（0 命中），app 不认识这个
-            // scheme；媒体引用必须直接指向依赖目录的真实文件。
-            NSString *storeURI = [[amproj_v865StoreLibraryURL()
-                URLByAppendingPathComponent:@"project-dependencies"
-                              isDirectory:YES]
-                URLByAppendingPathComponent:storeName].absoluteString;
+            // r34 实证：app 原生项目写的引用就是 am-internal:///SHA1.EXT，
+            // 依赖文件就放 Library/project-dependencies（加载器自行换算容器
+            // 路径，重装换容器也不受影响）。file:// 绝对路径反而因重装换
+            // 容器而全部失效，弃用。
+            NSString *storeURI = [NSString stringWithFormat:
+                @"am-internal:///%@", storeName];
             [xml replaceCharactersInRange:[match rangeAtIndex:1] withString:storeURI];
             continue;
         }
@@ -10905,10 +10905,8 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                 @"size": fileSize ?: @0
             }];
         }
-        NSString *storeURI = [[amproj_v865StoreLibraryURL()
-            URLByAppendingPathComponent:@"project-dependencies"
-                          isDirectory:YES]
-            URLByAppendingPathComponent:storeName].absoluteString;
+        NSString *storeURI = [NSString stringWithFormat:
+            @"am-internal:///%@", storeName];
         [xml replaceCharactersInRange:[match rangeAtIndex:1] withString:storeURI];
     }
 
@@ -11199,6 +11197,53 @@ static void amproj_locateDependencySamples(void) {
            hits.count ? [hits componentsJoinedByString:@" | "] : @"NONE");
 }
 
+// 采样 Library 下 store XML 的完整 <media …> 标签并 public 输出——原生项目
+// 与我们导入项目的标签对照能揭示加载失败缺的字段（sig/type 等）。
+static void amproj_logMediaTagSamples(void) {
+    NSURL *library = amproj_v865StoreLibraryURL();
+    NSArray<NSURL *> *files = [NSFileManager.defaultManager
+        contentsOfDirectoryAtURL:library
+        includingPropertiesForKeys:@[NSURLContentModificationDateKey]
+                           options:0 error:nil];
+    NSMutableArray<NSURL *> *xmls = [NSMutableArray array];
+    for (NSURL *url in files) {
+        if (![url.pathExtension.lowercaseString isEqualToString:@"xml"]) continue;
+        [xmls addObject:url];
+    }
+    [xmls sortUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
+        NSDate *da = nil, *db = nil;
+        [a getResourceValue:&da forKey:NSURLContentModificationDateKey error:nil];
+        [b getResourceValue:&db forKey:NSURLContentModificationDateKey error:nil];
+        return [db compare:da];
+    }];
+    NSRegularExpression *regex = [NSRegularExpression
+        regularExpressionWithPattern:@"<media\\b[^>]*>"
+                             options:NSRegularExpressionCaseInsensitive
+                               error:nil];
+    NSUInteger shown = MIN(xmls.count, (NSUInteger)6);
+    for (NSURL *url in [xmls subarrayWithRange:NSMakeRange(0, shown)]) {
+        NSString *text = [NSString stringWithContentsOfURL:url
+                                                  encoding:NSUTF8StringEncoding
+                                                     error:nil];
+        if (!text.length) continue;
+        NSMutableArray<NSString *> *tags = [NSMutableArray array];
+        for (NSTextCheckingResult *match in [regex matchesInString:text
+            options:0 range:NSMakeRange(0, text.length)]) {
+            if (tags.count >= 2) break;
+            NSString *tag = [text substringWithRange:match.range];
+            if (tag.length > 320) {
+                tag = [[tag substringToIndex:320] stringByAppendingString:@"…"];
+            }
+            [tags addObject:tag];
+        }
+        if (tags.count) {
+            os_log(OS_LOG_DEFAULT, "[AMProjExport] media tag (%{public}@): %{public}@",
+                   url.lastPathComponent,
+                   [tags componentsJoinedByString:@" || "]);
+        }
+    }
+}
+
 static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
                                               NSString *originalName,
                                               NSString *transactionID,
@@ -11315,8 +11360,7 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
     }
     if (verifyXML) {
         NSRegularExpression *verifyRegex = [NSRegularExpression
-            regularExpressionWithPattern:
-                @"project-dependencies/([^\"]*)\""
+            regularExpressionWithPattern:@"am-internal:///([^\"]*)\""
                                  options:0 error:nil];
         for (NSTextCheckingResult *match in [verifyRegex
                 matchesInString:verifyXML options:0
@@ -20055,6 +20099,7 @@ static void AMProjExportInit(void) {
                     (int64_t)(12.0 * NSEC_PER_SEC)),
                     dispatch_get_main_queue(), ^{
                         amproj_locateDependencySamples();
+                        amproj_logMediaTagSamples();
                     });
             });
             if (amproj_runtimeUsesLocalImportEngine()) {
