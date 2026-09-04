@@ -307,6 +307,34 @@ static void AMCloudAuthInitializeUnlocked(void) {
     AMCloudPluginsSetAuthorizationGeneration(AMCloudAuthGeneration);
 }
 
+// Keychain 的访问组跟随签名团队：LCSign 换证书重签后旧 token 直接失联，
+// 用户每次重装都被登出。token 镜像一份到 Library/（重装随数据迁移保留），
+// Keychain 优先、文件兜底、读通后自愈回写。
+static NSURL *AMCloudTokenMirrorURL(void) {
+    NSURL *library = [NSFileManager.defaultManager
+        URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
+    return [library URLByAppendingPathComponent:@"amproj-cloud-token"];
+}
+
+static void AMCloudWriteTokenMirror(NSString *token) {
+    if (!token.length) return;
+    NSURL *url = AMCloudTokenMirrorURL();
+    [NSFileManager.defaultManager createDirectoryAtURL:url.URLByDeletingLastPathComponent
+          withIntermediateDirectories:YES attributes:nil error:nil];
+    [token writeToFile:url.path atomically:YES
+           encoding:NSUTF8StringEncoding error:nil];
+    [NSFileManager.defaultManager setAttributes:
+        @{NSFilePosixPermissions: @0600} ofItemAtPath:url.path error:nil];
+}
+
+static NSString *AMCloudReadTokenMirror(void) {
+    NSURL *url = AMCloudTokenMirrorURL();
+    NSString *token = [NSString stringWithContentsOfURL:url
+                                               encoding:NSUTF8StringEncoding
+                                                  error:nil];
+    return token.length ? token : nil;
+}
+
 static NSString *AMCloudReadTokenUnlocked(void) {
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
@@ -317,10 +345,18 @@ static NSString *AMCloudReadTokenUnlocked(void) {
     };
     CFTypeRef result = NULL;
     OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    if (status != errSecSuccess || !result) return nil;
-    NSData *data = CFBridgingRelease(result);
-    NSString *token = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    return token.length ? token : nil;
+    if (status == errSecSuccess && result) {
+        NSData *data = CFBridgingRelease(result);
+        NSString *token = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (token.length) return token;
+    }
+    // Keychain 因重签换团队失联时的兜底：从 Library 镜像恢复并回写。
+    NSString *mirrored = AMCloudReadTokenMirror();
+    if (mirrored.length) {
+        AMCloudWriteTokenUnlocked(mirrored);
+        AMCloudDiagnostic(@"cloud.token.restored_from_mirror", @{});
+    }
+    return mirrored;
 }
 
 static BOOL AMCloudWriteTokenUnlocked(NSString *token) {
@@ -342,6 +378,7 @@ static BOOL AMCloudWriteTokenUnlocked(NSString *token) {
         [insert addEntriesFromDictionary:values];
         status = SecItemAdd((__bridge CFDictionaryRef)insert, NULL);
     }
+    AMCloudWriteTokenMirror(token);
     return status == errSecSuccess;
 }
 
