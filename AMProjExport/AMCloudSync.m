@@ -8,6 +8,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <Security/Security.h>
 #import <WebKit/WebKit.h>
+#import <os/log.h>
 #import <objc/runtime.h>
 
 static NSString *const AMCloudAPIBase = @"https://am.meowcr.cn/api";
