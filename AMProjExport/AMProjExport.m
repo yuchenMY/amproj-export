@@ -11024,7 +11024,7 @@ static NSData *amproj_v865StoreRewriteSceneXML(
         NSRegularExpression *tempFileRegex = [NSRegularExpression
             regularExpressionWithPattern:
                 [NSString stringWithFormat:
-                    @"file://(?:private)?%@/([^\"<&\\s]+)", escapedPath]
+                    @"file://(?:/private)?%@/([^\"<&\\s]+)", escapedPath]
                              options:0 error:nil];
         NSMutableArray<NSTextCheckingResult *> *tempMatches = [[tempFileRegex
             matchesInString:xml options:0 range:NSMakeRange(0, xml.length)]
