@@ -3998,18 +3998,40 @@ void AMCloudAuthorizeFeature(NSString *feature, UIViewController *presenter,
         deny(AMCloudError(401, @"请先登录猫鹤账户；iOS 权限由管理员后台开通"));
         return;
     }
-    [manager.client authorizeFeature:feature completion:^(__unused id data, NSError *error) {
-        AMCloudDiagnostic(@"cloud.authorization.result", @{
-            @"feature": feature ?: @"",
-            @"allowed": @(error == nil),
-            @"error_code": @(error.code)
-        });
-        if (error) {
-            deny(error);
-            return;
-        }
-        if (completion) completion(YES, nil);
-    }];
+    // 网络瞬断（蜂窝/Wi-Fi 切换、DNS 抖动）会以 NSURLErrorDomain 报
+    // "似乎已断开与互联网的连接"，后台权限明明是开着的——先自动重试两次
+    // 再报告，且文案如实区分网络失败与未授权。
+    __block NSInteger networkRetriesLeft = 2;
+    void (^attemptAuthorization)(void);
+    __weak AMCloudManager *weakManager = manager;
+    attemptAuthorization = ^{
+        [weakManager.client authorizeFeature:feature
+                                  completion:^(__unused id data, NSError *error) {
+            BOOL networkFailure = error != nil &&
+                [error.domain isEqualToString:NSURLErrorDomain];
+            if (networkFailure && networkRetriesLeft > 0) {
+                networkRetriesLeft--;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)(1.5 * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), attemptAuthorization);
+                return;
+            }
+            if (error) {
+                NSString *message = networkFailure
+                    ? @"网络请求失败，请检查网络后重试"
+                    : error.localizedDescription;
+                os_log(OS_LOG_DEFAULT, "[AMProjExport] cloud authorize "
+                       "%{public}@ failed domain=%{public}@ code=%ld",
+                       feature ?: @"", error.domain ?: @"", (long)error.code);
+                deny(AMCloudError(error.code, message));
+                return;
+            }
+            os_log(OS_LOG_DEFAULT, "[AMProjExport] cloud authorize %{public}@ allowed",
+                   feature ?: @"");
+            if (completion) completion(YES, nil);
+        }];
+    };
+    attemptAuthorization();
 }
 
 UIViewController *AMCloudSyncReplacementForNativeAccountPresentation(
