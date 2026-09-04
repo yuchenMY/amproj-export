@@ -2169,7 +2169,8 @@ static void AMHomeUIDrawerInstallDataSourceTrim(UITableView *table,
         Method sectionsMethod = class_getInstanceMethod(dataSourceClass,
             @selector(numberOfSectionsInTableView:));
         if (sectionsMethod) {
-            orig_AMHomeUIDrawerNumberOfSections = (__bridge void *)
+            orig_AMHomeUIDrawerNumberOfSections =
+                (NSInteger (*)(id, SEL, UITableView *))
                 method_getImplementation(sectionsMethod);
             method_setImplementation(sectionsMethod,
                 (IMP)hooked_AMHomeUIDrawerNumberOfSections);
@@ -2177,7 +2178,8 @@ static void AMHomeUIDrawerInstallDataSourceTrim(UITableView *table,
         Method rowsMethod = class_getInstanceMethod(dataSourceClass,
             @selector(tableView:numberOfRowsInSection:));
         if (rowsMethod) {
-            orig_AMHomeUIDrawerNumberOfRows = (__bridge void *)
+            orig_AMHomeUIDrawerNumberOfRows =
+                (NSInteger (*)(id, SEL, UITableView *, NSInteger))
                 method_getImplementation(rowsMethod);
             method_setImplementation(rowsMethod,
                 (IMP)hooked_AMHomeUIDrawerNumberOfRows);
@@ -2287,9 +2289,9 @@ static void AMHomeUITrimDrawerNowInner(UIViewController *controller,
                 BOOL alreadyMarked = [objc_getAssociatedObject(
                     table, AMHomeUIDrawerTableKey) boolValue];
                 NSIndexPath *known = [NSIndexPath
-                    indexPathWithRow:[objc_getAssociatedObject(table,
+                    indexPathForRow:[objc_getAssociatedObject(table,
                         AMHomeUIDrawerAboutRowKey) integerValue]
-                            inSection:[objc_getAssociatedObject(table,
+                          inSection:[objc_getAssociatedObject(table,
                         AMHomeUIDrawerAboutSectionKey) integerValue]];
                 AMHomeUIDrawerInstallDataSourceTrim(table, aboutIndexPath);
                 dataTrimFresh = !alreadyMarked;
