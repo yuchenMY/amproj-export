@@ -154,11 +154,29 @@ static NSURL *AMHomeUIAvatarCacheURL(void) {
 }
 
 static UIImage *AMHomeUILoadAvatar(void) {
+    // Tab switches call this constantly; PNG-decoding the file each time
+    // stutters the main thread. Cache by the file's fingerprint.
+    static NSDate *cachedModDate = nil;
+    static NSNumber *cachedSize = nil;
+    static UIImage *cachedImage = nil;
+    NSString *path = AMHomeUIAvatarCacheURL().path;
+    NSDictionary *attrs = [[NSFileManager defaultManager]
+        attributesOfItemAtPath:path error:nil];
+    NSDate *modDate = attrs[NSFileModificationDate];
+    NSNumber *size = attrs[NSFileSize];
+    if (cachedImage && [modDate isEqual:cachedModDate] &&
+        [size isEqual:cachedSize]) {
+        return cachedImage;
+    }
     NSData *data = [NSData dataWithContentsOfURL:AMHomeUIAvatarCacheURL()];
     UIImage *image = data.length
         ? [UIImage imageWithData:data scale:UIScreen.mainScreen.scale]
         : nil;
-    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    cachedModDate = modDate;
+    cachedSize = size;
+    cachedImage = image;
+    return image;
 }
 
 static UIWindow *AMHomeUIKeyWindow(void) {
@@ -538,6 +556,21 @@ static BOOL AMHomeUISelectProjectsTab(void) {
 }
 
 - (void)updateAvatar {
+    // PNG-encoding the avatar and rebuilding the injection script on every
+    // tab switch stalls the main thread; the script only changes when the
+    // avatar file does.
+    static NSString *cachedScript = nil;
+    static NSString *cachedFingerprint = nil;
+    NSString *avatarPath = AMHomeUIAvatarCacheURL().path;
+    NSDictionary *avatarAttrs = [[NSFileManager defaultManager]
+        attributesOfItemAtPath:avatarPath error:nil];
+    NSString *fingerprint = [NSString stringWithFormat:@"%@|%@",
+        avatarAttrs[NSFileModificationDate] ?: @"",
+        avatarAttrs[NSFileSize] ?: @""];
+    NSString *script = nil;
+    if (cachedScript && [fingerprint isEqualToString:cachedFingerprint]) {
+        script = cachedScript;
+    } else {
     UIImage *avatar = AMHomeUILoadAvatar();
     NSString *avatarDataURL = @"";
     if (avatar) {
@@ -552,7 +585,7 @@ static BOOL AMHomeUISelectProjectsTab(void) {
     NSString *JSON = JSONData.length
         ? [[NSString alloc] initWithData:JSONData encoding:NSUTF8StringEncoding]
         : @"[\"\"]";
-    NSString *script = [NSString stringWithFormat:
+    script = [NSString stringWithFormat:
         @"(function(avatar){"
          "var state=window.__amHomeAccountButtonState;"
          "if(!state||typeof state!=='object'){state={avatar:'',observer:null,scheduled:false,force:false};"
@@ -602,6 +635,9 @@ static BOOL AMHomeUISelectProjectsTab(void) {
          "if(changed){break;}}if(changed){state.schedule(force);}});}"
          "state.observe();return state.apply(false);})(%@[0]||'');",
         JSON];
+    cachedFingerprint = fingerprint;
+    cachedScript = script;
+    }
     [self.webView evaluateJavaScript:script completionHandler:nil];
 }
 
@@ -1981,10 +2017,11 @@ static void AMHomeUIApplyBrandLogoEverywhere(void) {
 
 // MARK: - Settings drawer: hide every group below 关于
 
-// The drawer is a container (dimmView + containerView) whose content groups
-// are built at viewDidLoad. After layout, the row showing the localized
-// About title is located, and every sibling view positioned below it inside
-// containerView is hidden — the drawer then naturally ends at 关于.
+// r29 只匹配 UILabel.text 且日志被系统 redact 成 <private>，trim 落空后无从
+// 判断。这一版：文本源覆盖 text/attributedText/按钮标题/accessibilityLabel，
+// 目标串运行时取自 help_center/follow_us/open_source_libraries 键；日志一律
+// %{public}@；三个下方卡片额外直接隐藏顶层祖先，找不到任何目标时对
+// containerView 和 key window 做一次性全树 dump，下一轮日志必有真相。
 static void *AMHomeUIDrawerTrimmedKey = &AMHomeUIDrawerTrimmedKey;
 
 static UIView *AMHomeUIDrawerContainerView(UIViewController *controller) {
@@ -1993,49 +2030,190 @@ static UIView *AMHomeUIDrawerContainerView(UIViewController *controller) {
     return [value isKindOfClass:UIView.class] ? value : nil;
 }
 
-static UILabel *AMHomeUIFindAboutLabel(UIView *view, NSUInteger depth) {
-    if (!view || depth > 12) return nil;
+static NSString *AMHomeUIDrawerTextOfView(UIView *view) {
+    NSString *text = nil;
     if ([view isKindOfClass:UILabel.class]) {
         UILabel *label = (UILabel *)view;
-        NSString *text = [label.text stringByTrimmingCharactersInSet:
-            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        NSString *localized = [NSLocalizedString(@"about", @"")
-            stringByTrimmingCharactersInSet:
-            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if ([text isEqualToString:localized] ||
-            [text isEqualToString:@"关于"]) {
-            return label;
+        text = label.text;
+        if (!text.length && label.attributedText.length) {
+            text = label.attributedText.string;
+        }
+    } else if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)view;
+        text = [button titleForState:UIControlStateNormal];
+        if (!text.length && button.currentAttributedTitle.length) {
+            text = button.currentAttributedTitle.string;
+        }
+    }
+    if (!text.length) text = view.accessibilityLabel;
+    return [text stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+}
+
+static NSString *AMHomeUILocalizedOrLiteral(NSString *key, NSString *literal) {
+    NSString *value = NSLocalizedString(key, @"");
+    if (!value.length || [value isEqualToString:key]) return literal;
+    return [value stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static void AMHomeUIFindTextNodes(UIView *view, NSUInteger depth,
+    NSArray<NSString *> *targets,
+    NSMutableDictionary<NSString *, NSMutableArray<UIView *> *> *found) {
+    if (!view || depth > 16) return;
+    NSString *text = AMHomeUIDrawerTextOfView(view);
+    if (text.length) {
+        for (NSString *target in targets) {
+            if ([text isEqualToString:target]) {
+                [found[target] addObject:view];
+                break;
+            }
         }
     }
     for (UIView *subview in view.subviews) {
-        UILabel *found = AMHomeUIFindAboutLabel(subview, depth + 1);
-        if (found) return found;
+        AMHomeUIFindTextNodes(subview, depth + 1, targets, found);
     }
-    return nil;
 }
 
-static void AMHomeUITrimDrawerBelowAbout(UIView *containerView,
-                                         NSMutableArray<NSString *> *log) {
-    UILabel *aboutLabel = AMHomeUIFindAboutLabel(containerView, 0);
-    if (!aboutLabel) return;
-    UIView *aboutCard = aboutLabel;
-    while (aboutCard.superview && aboutCard.superview != containerView) {
-        aboutCard = aboutCard.superview;
-    }
-    CGFloat cutY = CGRectGetMinY(aboutCard.frame) + 1.0;
-    for (UIView *child in [containerView.subviews copy]) {
-        if (child == aboutCard || child.hidden) continue;
-        if (CGRectGetMinY(child.frame) >= cutY) {
-            child.hidden = YES;
-            [log addObject:[NSString stringWithFormat:@"%@ y=%.0f",
-                NSStringFromClass(child.class), CGRectGetMinY(child.frame)]];
+// 沿节点的祖先链逐层向下裁剪：每一层都隐藏位于该节点之后的兄弟视图。
+// 抽屉的行嵌在表格/堆栈等深层容器里，仅裁剪顶层容器的直接子视图会漏掉
+// 全部行；逐层处理对任意嵌套结构都生效。
+static void AMHomeUIDrawerTrimBelowNode(UIView *node, UIView *root,
+                                        NSMutableArray<NSString *> *log) {
+    UIView *current = node;
+    while (current && current.superview && current != root) {
+        UIView *parent = current.superview;
+        CGFloat cutY = CGRectGetMinY(current.frame) + 2.0;
+        for (UIView *sibling in [parent.subviews copy]) {
+            if (sibling == current || sibling.hidden) continue;
+            if (CGRectGetMinY(sibling.frame) >= cutY) {
+                sibling.hidden = YES;
+                [log addObject:[NSString stringWithFormat:@"below:%@ y=%.0f",
+                    NSStringFromClass(sibling.class),
+                    CGRectGetMinY(sibling.frame)]];
+            }
         }
+        if (parent == root) break;
+        current = parent;
+    }
+}
+
+// 直接隐藏包含该节点的顶层卡片（containerView 的直接子视图）。逐层裁剪
+// 依赖 frame 顺序，这里不依赖——只要节点存在，整张卡片必然消失。
+static void AMHomeUIHideTopLevelAncestor(UIView *node, UIView *root,
+                                         NSMutableArray<NSString *> *log) {
+    UIView *current = node;
+    while (current && current.superview && current.superview != root) {
+        current = current.superview;
+    }
+    if (current && current.superview == root && !current.hidden) {
+        current.hidden = YES;
+        [log addObject:[NSString stringWithFormat:@"topcard:%@ y=%.0f",
+            NSStringFromClass(current.class),
+            CGRectGetMinY(current.frame)]];
+    }
+}
+
+static void AMHomeUIDumpViewTree(UIView *root, NSString *tag) {
+    if (!root) return;
+    NSMutableString *dump = [NSMutableString stringWithFormat:
+        @"%@ root=%@ frame=%@\n", tag, NSStringFromClass(root.class),
+        NSStringFromCGRect(root.frame)];
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWith:@[ @0, root ]];
+    NSUInteger visited = 0;
+    while (stack.count && visited < 220) {
+        NSUInteger depth = [stack[0] unsignedIntegerValue];
+        UIView *view = stack[1];
+        [stack removeObjectsInRange:NSMakeRange(0, 2)];
+        visited++;
+        [dump appendFormat:@"%@%@ %@ %@ text=%@\n",
+            [@"" stringByPaddingToLength:MIN(depth, 14) * 2
+                             withString:@" " startingAtIndex:0],
+            NSStringFromClass(view.class),
+            NSStringFromCGRect(view.frame),
+            view.hidden ? @"HIDDEN" : @"shown",
+            AMHomeUIDrawerTextOfView(view)];
+        for (UIView *subview in view.subviews) {
+            [stack addObjectsFromArray:@[ @(depth + 1), subview ]];
+        }
+    }
+    if (stack.count) [dump appendString:@"…(truncated)\n"];
+    NSLog(@"[AMHomeUI] drawer dump %{public}@", dump);
+}
+
+static void AMHomeUITrimDrawerNow(UIViewController *controller, NSString *source) {
+    UIView *containerView = AMHomeUIDrawerContainerView(controller);
+    if (!containerView) {
+        NSLog(@"[AMHomeUI] drawer trim skipped (%{public}@): containerView "
+              @"not ready on %{public}@", source ?: @"",
+              NSStringFromClass(controller.class) ?: @"");
+        return;
+    }
+    NSString *aboutVal = AMHomeUILocalizedOrLiteral(@"about", @"关于");
+    NSString *helpVal = AMHomeUILocalizedOrLiteral(@"help_center", @"获取支持");
+    NSString *followVal = AMHomeUILocalizedOrLiteral(@"follow_us", @"关注我们");
+    NSString *ossVal = AMHomeUILocalizedOrLiteral(@"open_source_libraries", @"开源库");
+    NSArray<NSString *> *targets = @[aboutVal, helpVal, followVal, ossVal];
+    NSMutableDictionary<NSString *, NSMutableArray<UIView *> *> *found =
+        [NSMutableDictionary dictionary];
+    for (NSString *target in targets) found[target] = [NSMutableArray array];
+    AMHomeUIFindTextNodes(containerView, 0, targets, found);
+
+    NSMutableArray<NSString *> *log = [NSMutableArray array];
+    UIView *aboutNode = found[aboutVal].firstObject;
+    if (aboutNode) AMHomeUIDrawerTrimBelowNode(aboutNode, containerView, log);
+    for (NSString *key in @[helpVal, followVal, ossVal]) {
+        for (UIView *node in found[key]) {
+            AMHomeUIHideTopLevelAncestor(node, containerView, log);
+            AMHomeUIDrawerTrimBelowNode(node, containerView, log);
+        }
+    }
+    NSLog(@"[AMHomeUI] drawer trim pass (%{public}@): about=%d help=%lu "
+          @"follow=%lu oss=%lu hidden %{public}@", source ?: @"",
+          aboutNode != nil, (unsigned long)found[helpVal].count,
+          (unsigned long)found[followVal].count,
+          (unsigned long)found[ossVal].count, log);
+    if (!aboutNode && !found[helpVal].count && !found[followVal].count &&
+        !found[ossVal].count) {
+        static dispatch_once_t dumpToken;
+        dispatch_once(&dumpToken, ^{
+            AMHomeUIDumpViewTree(containerView, @"containerView");
+            AMHomeUIDumpViewTree(AMHomeUIKeyWindow(), @"keyWindow");
+        });
     }
 }
 
 static void AMHomeUIScheduleDrawerTrim(UIViewController *controller) {
     UIView *containerView = AMHomeUIDrawerContainerView(controller);
-    if (!containerView) return;
+    if (!containerView) {
+        // viewDidLoad can run long before the drawer is first opened, and
+        // the container is built lazily. Retry on a ladder so the first
+        // actual open is covered; each attempt reports why it bailed.
+        for (NSNumber *delay in @[@0.45, @1.0, @2.0, @4.0, @6.0]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if ([objc_getAssociatedObject(controller,
+                        AMHomeUIDrawerTrimmedKey) boolValue]) return;
+                UIView *liveContainer =
+                    AMHomeUIDrawerContainerView(controller);
+                if (!liveContainer) return;
+                objc_setAssociatedObject(controller,
+                    AMHomeUIDrawerTrimmedKey, @YES,
+                    OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                for (NSNumber *pass in @[@0.1, @0.5, @1.2]) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                        (int64_t)(pass.doubleValue * NSEC_PER_SEC)),
+                        dispatch_get_main_queue(), ^{
+                        AMHomeUITrimDrawerNow(controller,
+                            [NSString stringWithFormat:@"retry+%.1fs",
+                                pass.doubleValue]);
+                    });
+                }
+            });
+        }
+        return;
+    }
     if ([objc_getAssociatedObject(controller, AMHomeUIDrawerTrimmedKey) boolValue]) {
         return;
     }
@@ -2047,10 +2225,35 @@ static void AMHomeUIScheduleDrawerTrim(UIViewController *controller) {
                        dispatch_get_main_queue(), ^{
             UIView *liveContainer = AMHomeUIDrawerContainerView(controller);
             if (!liveContainer || !liveContainer.window) return;
-            NSMutableArray<NSString *> *log = [NSMutableArray array];
-            AMHomeUITrimDrawerBelowAbout(liveContainer, log);
-            NSLog(@"[AMHomeUI] drawer trim pass (%.1fs): hidden %@",
-                  delay.doubleValue, log);
+            AMHomeUITrimDrawerNow(controller,
+                [NSString stringWithFormat:@"load+%.1fs", delay.doubleValue]);
+        });
+    }
+}
+
+static void (*orig_SettingsContainerViewDidAppear)(id, SEL, BOOL) = NULL;
+
+static void hooked_SettingsContainerViewDidAppear(id self, SEL _cmd,
+                                                  BOOL animated) {
+    if (orig_SettingsContainerViewDidAppear) {
+        orig_SettingsContainerViewDidAppear(self, _cmd, animated);
+    }
+    // The drawer is on screen and laid out here: trim immediately, then a
+    // short ladder catches late-arriving rows.
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMHomeUITrimDrawerNow((UIViewController *)self, @"appear");
+        });
+        return;
+    }
+    AMHomeUITrimDrawerNow((UIViewController *)self, @"appear");
+    for (NSNumber *delay in @[@0.25, @0.7, @1.5]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            AMHomeUITrimDrawerNow((UIViewController *)self,
+                [NSString stringWithFormat:@"appear+%.1fs",
+                    delay.doubleValue]);
         });
     }
 }
@@ -2085,6 +2288,13 @@ static void AMHomeUIInstallSettingsDrawerTrim(void) {
         if (!method) return;
         orig_SettingsContainerViewDidLoad = (void (*)(id, SEL))method_setImplementation(
             method, (IMP)hooked_SettingsContainerViewDidLoad);
+        Method appearMethod = class_getInstanceMethod(containerClass,
+            NSSelectorFromString(@"viewDidAppear:"));
+        if (appearMethod) {
+            orig_SettingsContainerViewDidAppear =
+                (void (*)(id, SEL, BOOL))method_setImplementation(
+                    appearMethod, (IMP)hooked_SettingsContainerViewDidAppear);
+        }
         NSLog(@"[AMHomeUI] settings drawer trim installed");
     });
 }

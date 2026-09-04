@@ -10665,6 +10665,34 @@ static NSString *amproj_v865StoreSHA1ForFile(NSURL *fileURL) {
                                   encoding:NSASCIIStringEncoding];
 }
 
+// 旧版包的根级 manifest.txt 每行一条 "SHA1:文件名"，是引用键到实际资源
+// 文件名的权威映射——引用键不带扩展名时必须靠它定位文件。
+static NSDictionary<NSString *, NSString *> *AMProjLegacyManifestResourceMap(
+    NSURL *extractionDirectory) {
+    if (!extractionDirectory) return @{};
+    NSData *data = [NSData dataWithContentsOfURL:
+        [extractionDirectory URLByAppendingPathComponent:@"manifest.txt"]];
+    if (!data.length) return @{};
+    NSString *text = [[NSString alloc] initWithData:data
+                                           encoding:NSUTF8StringEncoding]
+        ?: [[NSString alloc] initWithData:data
+                                 encoding:NSUTF16LittleEndianStringEncoding];
+    if (!text.length) return @{};
+    NSMutableDictionary<NSString *, NSString *> *map = [NSMutableDictionary dictionary];
+    for (NSString *line in [text componentsSeparatedByCharactersInSet:
+        [NSCharacterSet newlineCharacterSet]]) {
+        NSRange split = [line rangeOfString:@":"];
+        if (split.location == NSNotFound || split.location == 0) continue;
+        NSString *key = [line substringToIndex:split.location];
+        NSString *name = [line substringFromIndex:NSMaxRange(split)];
+        NSCharacterSet *trim = [NSCharacterSet whitespaceCharacterSet];
+        key = [key stringByTrimmingCharactersInSet:trim];
+        name = [name stringByTrimmingCharactersInSet:trim];
+        if (key.length && name.length && !map[key]) map[key] = name;
+    }
+    return map;
+}
+
 // Rewrites one scene document into the on-device project store format and
 // copies every packaged resource into project-dependencies under its SHA-1.
 // Returns the store XML bytes; referenced dependency names are appended to
@@ -10693,6 +10721,8 @@ static NSData *amproj_v865StoreRewriteSceneXML(
     NSMutableArray<NSTextCheckingResult *> *uriMatches = [[uriRegex
         matchesInString:xml options:0 range:NSMakeRange(0, xml.length)] mutableCopy];
     NSMutableDictionary<NSString *, NSString *> *storeNamesByResource = [NSMutableDictionary dictionary];
+    NSDictionary<NSString *, NSString *> *manifestResources =
+        AMProjLegacyManifestResourceMap(extractionDirectory);
     for (NSUInteger index = uriMatches.count; index-- > 0;) {
         NSTextCheckingResult *match = uriMatches[index];
         NSString *reference = [xml substringWithRange:[match rangeAtIndex:1]];
@@ -10756,16 +10786,38 @@ static NSData *amproj_v865StoreRewriteSceneXML(
             NSURL *packaged = nil;
             NSURL *extraction = extractionDirectory;
             if (extraction) {
-                NSArray<NSURL *> *candidates = [NSFileManager.defaultManager
-                    contentsOfDirectoryAtURL:extraction
-                    includingPropertiesForKeys:@[NSURLIsRegularFileKey]
-                                       options:NSDirectoryEnumerationSkipsSubdirectoryDescendants
-                                         error:nil];
-                for (NSURL *candidate in candidates) {
-                    if ([candidate.lastPathComponent
-                            caseInsensitiveCompare:reference] == NSOrderedSame) {
+                // 旧版导出器用不带扩展名的 SHA-1 键引用媒体，而解包资源保留
+                // 原始文件名（SHA1.png）。先查 manifest.txt 的键到文件名映射，
+                // 再退回"去扩展名同基名"比较，最后才是完整文件名精确匹配。
+                NSString *manifestName = manifestResources[reference];
+                if (manifestName.length) {
+                    NSURL *candidate = [extraction
+                        URLByAppendingPathComponent:manifestName];
+                    if ([NSFileManager.defaultManager
+                            fileExistsAtPath:candidate.path]) {
                         packaged = candidate;
-                        break;
+                    }
+                }
+                if (!packaged) {
+                    NSString *referenceBase = reference.pathExtension.length
+                        ? [reference stringByDeletingPathExtension] : reference;
+                    NSArray<NSURL *> *candidates = [NSFileManager.defaultManager
+                        contentsOfDirectoryAtURL:extraction
+                        includingPropertiesForKeys:@[NSURLIsRegularFileKey]
+                                           options:NSDirectoryEnumerationSkipsSubdirectoryDescendants
+                                             error:nil];
+                    for (NSURL *candidate in candidates) {
+                        NSString *name = candidate.lastPathComponent;
+                        if ([name caseInsensitiveCompare:reference] == NSOrderedSame) {
+                            packaged = candidate;
+                            break;
+                        }
+                        NSString *base = name.pathExtension.length
+                            ? [name stringByDeletingPathExtension] : name;
+                        if ([base caseInsensitiveCompare:referenceBase] == NSOrderedSame) {
+                            packaged = candidate;
+                            break;
+                        }
                     }
                 }
             }
