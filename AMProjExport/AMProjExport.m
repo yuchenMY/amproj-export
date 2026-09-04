@@ -11011,7 +11011,74 @@ static NSData *amproj_v865StoreRewriteSceneXML(
         [xml replaceCharactersInRange:[match rangeAtIndex:1] withString:storeURI];
     }
 
-    // 全局扫尾：老包的图层不经 uri= 引用媒体——形状图层是
+    // 全局扫尾①：图层属性（fillImage 等）在准备阶段已被改写成解包临时
+    // 目录的 file:// 绝对路径，临时目录导入完成即删——把这些 URL 全部换成
+    // am-internal 存储引用，文件名未登记的现场登记补拷。
+    if (extractionDirectory && extractionDirectory.path.length) {
+        NSString *rawPath = extractionDirectory.path;
+        if ([rawPath hasPrefix:@"/private/"]) {
+            rawPath = [rawPath substringFromIndex:8];
+        }
+        NSString *escapedPath = [NSRegularExpression
+            escapedPatternForString:rawPath];
+        NSRegularExpression *tempFileRegex = [NSRegularExpression
+            regularExpressionWithPattern:
+                [NSString stringWithFormat:
+                    @"file://(?:private)?%@/([^\"<&\\s]+)", escapedPath]
+                             options:0 error:nil];
+        NSMutableArray<NSTextCheckingResult *> *tempMatches = [[tempFileRegex
+            matchesInString:xml options:0 range:NSMakeRange(0, xml.length)]
+            mutableCopy];
+        NSUInteger tempReplaced = 0, tempUnresolved = 0;
+        NSString *tempFirstMiss = nil;
+        for (NSUInteger index = tempMatches.count; index-- > 0;) {
+            NSTextCheckingResult *match = tempMatches[index];
+            NSString *fileName = [xml substringWithRange:[match rangeAtIndex:1]];
+            NSString *storeName = storeNamesByResource[fileName];
+            if (!storeName) {
+                // fillImage 等属性引用的文件可能没有对应的 media 条目——
+                // 现场按依赖登记（拷贝由统一的 dependenciesOut 流程完成）。
+                NSURL *fileURL = [extractionDirectory
+                    URLByAppendingPathComponent:fileName];
+                if (![NSFileManager.defaultManager
+                        fileExistsAtPath:fileURL.path]) {
+                    tempUnresolved++;
+                    if (!tempFirstMiss) tempFirstMiss = [fileName copy];
+                    continue;
+                }
+                NSString *sha1 = amproj_v865StoreSHA1ForFile(fileURL);
+                if (sha1.length != CC_SHA1_DIGEST_LENGTH * 2) {
+                    tempUnresolved++;
+                    if (!tempFirstMiss) tempFirstMiss = [fileName copy];
+                    continue;
+                }
+                NSString *extension = fileURL.pathExtension.uppercaseString;
+                storeName = extension.length
+                    ? [NSString stringWithFormat:@"%@.%@", sha1, extension]
+                    : sha1;
+                storeNamesByResource[fileName] = storeName;
+                NSNumber *fileSize = nil;
+                [fileURL getResourceValue:&fileSize forKey:NSURLFileSizeKey
+                                    error:nil];
+                [dependenciesOut addObject:@{
+                    @"source": [fileURL copy] ?: [NSNull null],
+                    @"name": storeName,
+                    @"sha1": sha1,
+                    @"size": fileSize ?: @0
+                }];
+            }
+            [xml replaceCharactersInRange:[match range]
+              withString:[NSString stringWithFormat:
+                  @"am-internal:///%@", storeName]];
+            tempReplaced++;
+        }
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] temp path sweep replaced=%lu "
+               "unresolved=%lu first=%{public}@",
+               (unsigned long)tempReplaced, (unsigned long)tempUnresolved,
+               tempFirstMiss ?: @"-");
+    }
+
+    // 全局扫尾②：老包的图层不经 uri= 引用媒体——形状图层是
     // fillImage="amproj:SHA1.ext"，别的属性也可能携带。上面只覆盖了
     // uri="…"，这里把全文档残留的 amproj:<sha1> token（大小写不敏感）
     // 统一替换成 am-internal:///<storeName>。
