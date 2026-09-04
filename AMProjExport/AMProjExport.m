@@ -11011,6 +11011,48 @@ static NSData *amproj_v865StoreRewriteSceneXML(
         [xml replaceCharactersInRange:[match rangeAtIndex:1] withString:storeURI];
     }
 
+    // 全局扫尾：老包的图层不经 uri= 引用媒体——形状图层是
+    // fillImage="amproj:SHA1.ext"，别的属性也可能携带。上面只覆盖了
+    // uri="…"，这里把全文档残留的 amproj:<sha1> token（大小写不敏感）
+    // 统一替换成 am-internal:///<storeName>。
+    if (storeNamesByResource.count) {
+        NSMutableDictionary<NSString *, NSString *> *resolvedByFoldedReference =
+            [NSMutableDictionary dictionary];
+        for (NSString *reference in storeNamesByResource) {
+            resolvedByFoldedReference[reference.lowercaseString] =
+                storeNamesByResource[reference];
+        }
+        NSRegularExpression *sweepRegex = [NSRegularExpression
+            regularExpressionWithPattern:
+                @"amproj:([A-Fa-f0-9]{40}(?:\\.[A-Za-z0-9]+)?)"
+                                 options:0 error:nil];
+        NSMutableArray<NSTextCheckingResult *> *sweepMatches = [[sweepRegex
+            matchesInString:xml options:0 range:NSMakeRange(0, xml.length)]
+            mutableCopy];
+        NSUInteger sweepReplaced = 0, sweepUnresolved = 0;
+        NSString *sweepFirstMiss = nil;
+        for (NSUInteger index = sweepMatches.count; index-- > 0;) {
+            NSTextCheckingResult *match = sweepMatches[index];
+            NSString *reference =
+                [xml substringWithRange:[match rangeAtIndex:1]];
+            NSString *storeName =
+                resolvedByFoldedReference[reference.lowercaseString];
+            if (!storeName) {
+                sweepUnresolved++;
+                if (!sweepFirstMiss) sweepFirstMiss = [reference copy];
+                continue;
+            }
+            [xml replaceCharactersInRange:[match range]
+              withString:[NSString stringWithFormat:
+                  @"am-internal:///%@", storeName]];
+            sweepReplaced++;
+        }
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] attribute sweep replaced=%lu "
+               "unresolved=%lu first=%{public}@",
+               (unsigned long)sweepReplaced, (unsigned long)sweepUnresolved,
+               sweepFirstMiss ?: @"-");
+    }
+
     // 标量在 os_log 里默认公开，不会被 syslog redact——导入诊断的关键通道。
     os_log(OS_LOG_DEFAULT, "[AMProjExport] import refs total=%lu amproj=%lu "
            "manifest_hit=%lu basename_hit=%lu exact_hit=%lu miss=%lu "
