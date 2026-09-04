@@ -10639,6 +10639,107 @@ static NSURL *amproj_v865StoreLibraryURL(void) {
                                                 inDomains:NSUserDomainMask].firstObject;
 }
 
+// app 会把"它不认识的项目"引用的依赖文件当孤儿清掉（r36 实测：导入时
+// verified=1 全部在位，打开项目时只剩原生文件）。依赖文件一律双写：
+// project-dependencies 给加载器用，amproj-deps-backup 留底；每次激活对账
+// 补回被清掉的文件。
+static NSURL *amproj_v865DependencyBackupURL(void) {
+    return [amproj_v865StoreLibraryURL()
+        URLByAppendingPathComponent:@"amproj-deps-backup" isDirectory:YES];
+}
+
+static void amproj_restoreDependencies(void) {
+    static BOOL running = NO;
+    if (running) return;
+    running = YES;
+    @try {
+        NSFileManager *manager = NSFileManager.defaultManager;
+        NSURL *library = amproj_v865StoreLibraryURL();
+        NSURL *dependencies = [library
+            URLByAppendingPathComponent:@"project-dependencies"
+                          isDirectory:YES];
+        NSURL *backup = amproj_v865DependencyBackupURL();
+        NSArray<NSURL *> *xmls = [manager contentsOfDirectoryAtURL:library
+            includingPropertiesForKeys:nil options:0 error:nil];
+        NSMutableSet<NSString *> *needed = [NSMutableSet set];
+        NSRegularExpression *regex = [NSRegularExpression
+            regularExpressionWithPattern:
+                @"am-internal:///([A-Fa-f0-9]{40}\\.[A-Za-z0-9]+)\""
+                                 options:0 error:nil];
+        for (NSURL *url in xmls) {
+            if (![url.pathExtension.lowercaseString isEqualToString:@"xml"]) continue;
+            NSString *text = [NSString stringWithContentsOfURL:url
+                                                      encoding:NSUTF8StringEncoding
+                                                         error:nil];
+            if (!text.length) continue;
+            for (NSTextCheckingResult *match in [regex matchesInString:text
+                options:0 range:NSMakeRange(0, text.length)]) {
+                [needed addObject:[text substringWithRange:[match rangeAtIndex:1]]
+                    .uppercaseString];
+            }
+        }
+        if (!needed.count) return;
+        [manager createDirectoryAtURL:dependencies
+          withIntermediateDirectories:YES attributes:nil error:nil];
+        [manager createDirectoryAtURL:backup
+          withIntermediateDirectories:YES attributes:nil error:nil];
+        NSUInteger restored = 0, missingBackup = 0;
+        NSMutableSet<NSString *> *backupNames = [NSMutableSet set];
+        for (NSURL *url in [manager contentsOfDirectoryAtURL:backup
+            includingPropertiesForKeys:nil options:0 error:nil]) {
+            [backupNames addObject:url.lastPathComponent.uppercaseString];
+        }
+        for (NSString *name in needed) {
+            if ([manager fileExistsAtPath:[dependencies
+                    URLByAppendingPathComponent:name].path]) continue;
+            NSURL *source = [backup URLByAppendingPathComponent:name];
+            if (![manager fileExistsAtPath:source.path]) {
+                missingBackup++;
+                continue;
+            }
+            NSURL *temporary = [dependencies URLByAppendingPathComponent:
+                [NSString stringWithFormat:@".%@.%@.restore", name,
+                 NSUUID.UUID.UUIDString]];
+            [manager removeItemAtURL:temporary error:nil];
+            if ([manager copyItemAtURL:source toURL:temporary error:nil] &&
+                [manager moveItemAtURL:temporary
+                    toURL:[dependencies URLByAppendingPathComponent:name]
+                    error:nil]) {
+                restored++;
+            } else {
+                [manager removeItemAtURL:temporary error:nil];
+            }
+        }
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency restore needed=%lu "
+               "restored=%lu missing_backup=%lu",
+               (unsigned long)needed.count, (unsigned long)restored,
+               (unsigned long)missingBackup);
+    } @catch (NSException *exception) {
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency restore exception: "
+               "%{public}@", exception.reason ?: @"");
+    } @finally {
+        running = NO;
+    }
+}
+
+// NSTimer 的 target 会被强持有，用单例代理避免把大上下文挂在定时器上。
+@interface AMProjRestoreTimerProxy : NSObject
++ (instancetype)sharedProxy;
+- (void)restore;
+@end
+
+@implementation AMProjRestoreTimerProxy
++ (instancetype)sharedProxy {
+    static AMProjRestoreTimerProxy *proxy = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ proxy = [AMProjRestoreTimerProxy new]; });
+    return proxy;
+}
+- (void)restore {
+    amproj_restoreDependencies();
+}
+@end
+
 static NSString *amproj_v865StoreSHA1ForFile(NSURL *fileURL) {
     int fd = open(fileURL.fileSystemRepresentation, O_RDONLY);
     if (fd < 0) return nil;
@@ -11349,6 +11450,29 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
             [manager removeItemAtURL:temporary error:nil];
         }
     }
+
+    // 双写留底：app 的孤儿清理会删掉它不认识的项目引用的依赖文件（r36 实
+    // 测），备份一份供每次激活时对账恢复。
+    NSURL *backupDirectory = amproj_v865DependencyBackupURL();
+    [manager createDirectoryAtURL:backupDirectory
+          withIntermediateDirectories:YES attributes:nil error:nil];
+    NSUInteger backedUp = 0;
+    for (NSDictionary<NSString *, id> *dependency in dependencies) {
+        NSString *storeName = [dependency[@"name"] isKindOfClass:NSString.class]
+            ? dependency[@"name"] : nil;
+        if (!storeName.length) continue;
+        NSURL *live = [dependenciesDirectory
+            URLByAppendingPathComponent:storeName];
+        NSURL *backupCopy = [backupDirectory
+            URLByAppendingPathComponent:storeName];
+        if (![manager fileExistsAtPath:live.path]) continue;
+        if ([manager fileExistsAtPath:backupCopy.path]) continue;
+        if ([manager copyItemAtURL:live toURL:backupCopy error:nil]) {
+            backedUp++;
+        }
+    }
+    os_log(OS_LOG_DEFAULT, "[AMProjExport] import deps backup written=%lu",
+           (unsigned long)backedUp);
 
     NSString *storeUUID = NSUUID.UUID.UUIDString.uppercaseString;
     NSURL *storeURL = [amproj_v865StoreLibraryURL()
@@ -20114,15 +20238,6 @@ static void AMProjExportInit(void) {
             amproj_schedulePaywallScan(nil, @"did_become_active");
             amproj_syncMemberFlags(@"did_become_active");
             amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active");
-            static dispatch_once_t depLocateToken;
-            dispatch_once(&depLocateToken, ^{
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                    (int64_t)(12.0 * NSEC_PER_SEC)),
-                    dispatch_get_main_queue(), ^{
-                        amproj_locateDependencySamples();
-                        amproj_logMediaTagSamples();
-                    });
-            });
             if (amproj_runtimeUsesLocalImportEngine()) {
                 // The launch URL is the current user action. Consume its deferred
                 // candidate first; only then inspect stale app-owned Inbox files.
@@ -20139,6 +20254,36 @@ static void AMProjExportInit(void) {
             } else {
                 amproj_log865LegacyPathDisabled(@"did_become_active_import_replay");
             }
+            static NSDate *lastDependencyRestore = nil;
+            if (!lastDependencyRestore ||
+                [NSDate.date timeIntervalSinceDate:lastDependencyRestore] > 10.0) {
+                lastDependencyRestore = NSDate.date;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)(2.0 * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+                        amproj_restoreDependencies();
+                    });
+            }
+            static dispatch_once_t restoreTimerToken;
+            dispatch_once(&restoreTimerToken, ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)(45.0 * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+                        [NSTimer scheduledTimerWithTimeInterval:45.0
+                            target:[AMProjRestoreTimerProxy sharedProxy]
+                            selector:@selector(restore)
+                            userInfo:nil repeats:YES];
+                    });
+            });
+            static dispatch_once_t depLocateToken;
+            dispatch_once(&depLocateToken, ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)(12.0 * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+                        amproj_locateDependencySamples();
+                        amproj_logMediaTagSamples();
+                    });
+            });
         }];
         amproj_willResignActiveObserver = [center
             addObserverForName:UIApplicationWillResignActiveNotification
