@@ -2106,20 +2106,92 @@ static void AMHomeUIDrawerTrimBelowNode(UIView *node, UIView *root,
     }
 }
 
-// 直接隐藏包含该节点的顶层卡片（containerView 的直接子视图）。逐层裁剪
-// 依赖 frame 顺序，这里不依赖——只要节点存在，整张卡片必然消失。
-static void AMHomeUIHideTopLevelAncestor(UIView *node, UIView *root,
-                                         NSMutableArray<NSString *> *log) {
-    UIView *current = node;
-    while (current && current.superview && current.superview != root) {
-        current = current.superview;
+// 直接隐藏包含该节点的顶层卡片已被证明是灾难性的（r31：顶层祖先解析到了
+// 应用根容器，隐藏后整屏卡死）——此策略永久移除。数据级裁剪见
+// AMHomeUIDrawerInstallDataSourceTrim：抽屉是 UITableView，直接截断
+// 关于以下的 section/row，行不再生成，也就没有空白占位。
+
+static void *AMHomeUIDrawerAboutSectionKey = &AMHomeUIDrawerAboutSectionKey;
+static void *AMHomeUIDrawerAboutRowKey = &AMHomeUIDrawerAboutRowKey;
+static void *AMHomeUIDrawerTableKey = &AMHomeUIDrawerTableKey;
+
+static UIView *AMHomeUIFindSuperviewOfClass(UIView *view, Class klass) {
+    while (view && ![view isKindOfClass:klass]) view = view.superview;
+    return view;
+}
+
+static NSInteger (*orig_AMHomeUIDrawerNumberOfSections)(
+    id, SEL, UITableView *) = NULL;
+static NSInteger (*orig_AMHomeUIDrawerNumberOfRows)(
+    id, SEL, UITableView *, NSInteger) = NULL;
+
+static NSInteger hooked_AMHomeUIDrawerNumberOfSections(id self, SEL _cmd,
+                                                       UITableView *table) {
+    NSInteger original = orig_AMHomeUIDrawerNumberOfSections
+        ? orig_AMHomeUIDrawerNumberOfSections(self, _cmd, table) : 0;
+    if (!table || ![objc_getAssociatedObject(table, AMHomeUIDrawerTableKey)
+            boolValue]) {
+        return original;
     }
-    if (current && current.superview == root && !current.hidden) {
-        current.hidden = YES;
-        [log addObject:[NSString stringWithFormat:@"topcard:%@ y=%.0f",
-            NSStringFromClass(current.class),
-            CGRectGetMinY(current.frame)]];
+    NSInteger aboutSection = [objc_getAssociatedObject(
+        table, AMHomeUIDrawerAboutSectionKey) integerValue];
+    if (aboutSection <= 0 || aboutSection == NSNotFound) return original;
+    return MIN(original, aboutSection + 1);
+}
+
+static NSInteger hooked_AMHomeUIDrawerNumberOfRows(id self, SEL _cmd,
+                                                   UITableView *table,
+                                                   NSInteger section) {
+    NSInteger original = orig_AMHomeUIDrawerNumberOfRows
+        ? orig_AMHomeUIDrawerNumberOfRows(self, _cmd, table, section) : 0;
+    if (!table || ![objc_getAssociatedObject(table, AMHomeUIDrawerTableKey)
+            boolValue]) {
+        return original;
     }
+    NSInteger aboutSection = [objc_getAssociatedObject(
+        table, AMHomeUIDrawerAboutSectionKey) integerValue];
+    NSInteger aboutRow = [objc_getAssociatedObject(
+        table, AMHomeUIDrawerAboutRowKey) integerValue];
+    if (aboutRow == NSNotFound) return original;
+    if (section < aboutSection) return original;
+    if (section > aboutSection) return 0;
+    return MIN(original, aboutRow + 1);
+}
+
+// 关于以下的行只在数据源层截断：行不生成、高度归零、无空白占位。
+static void AMHomeUIDrawerInstallDataSourceTrim(UITableView *table,
+                                                NSIndexPath *aboutIndexPath) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        id dataSource = table.dataSource;
+        if (!dataSource) return;
+        Class dataSourceClass = [dataSource class];
+        Method sectionsMethod = class_getInstanceMethod(dataSourceClass,
+            @selector(numberOfSectionsInTableView:));
+        if (sectionsMethod) {
+            orig_AMHomeUIDrawerNumberOfSections = (__bridge void *)
+                method_getImplementation(sectionsMethod);
+            method_setImplementation(sectionsMethod,
+                (IMP)hooked_AMHomeUIDrawerNumberOfSections);
+        }
+        Method rowsMethod = class_getInstanceMethod(dataSourceClass,
+            @selector(tableView:numberOfRowsInSection:));
+        if (rowsMethod) {
+            orig_AMHomeUIDrawerNumberOfRows = (__bridge void *)
+                method_getImplementation(rowsMethod);
+            method_setImplementation(rowsMethod,
+                (IMP)hooked_AMHomeUIDrawerNumberOfRows);
+        }
+        os_log(OS_LOG_DEFAULT, "[AMHomeUI] drawer data source trim installed "
+               "on %{public}@", NSStringFromClass(dataSourceClass));
+    });
+    if (!aboutIndexPath) return;
+    objc_setAssociatedObject(table, AMHomeUIDrawerTableKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(table, AMHomeUIDrawerAboutSectionKey,
+        @(aboutIndexPath.section), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(table, AMHomeUIDrawerAboutRowKey,
+        @(aboutIndexPath.row), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 static void AMHomeUIDumpViewTreeInto(UIView *view, NSUInteger depth,
@@ -2202,18 +2274,40 @@ static void AMHomeUITrimDrawerNowInner(UIViewController *controller,
     NSMutableArray<NSString *> *log = [NSMutableArray array];
     UIView *aboutNode = found[aboutVal].firstObject;
     if (aboutNode) AMHomeUIDrawerTrimBelowNode(aboutNode, containerView, log);
-    for (NSString *key in @[helpVal, followVal, ossVal]) {
-        for (UIView *node in found[key]) {
-            AMHomeUIHideTopLevelAncestor(node, containerView, log);
-            AMHomeUIDrawerTrimBelowNode(node, containerView, log);
+    BOOL dataTrimFresh = NO;
+    if (aboutNode) {
+        UITableViewCell *aboutCell = (UITableViewCell *)
+            AMHomeUIFindSuperviewOfClass(aboutNode, UITableViewCell.class);
+        UITableView *table = (UITableView *)
+            AMHomeUIFindSuperviewOfClass(aboutNode, UITableView.class);
+        if ([aboutCell isKindOfClass:UITableViewCell.class] &&
+            [table isKindOfClass:UITableView.class]) {
+            NSIndexPath *aboutIndexPath = [table indexPathForCell:aboutCell];
+            if (aboutIndexPath) {
+                BOOL alreadyMarked = [objc_getAssociatedObject(
+                    table, AMHomeUIDrawerTableKey) boolValue];
+                NSIndexPath *known = [NSIndexPath
+                    indexPathWithRow:[objc_getAssociatedObject(table,
+                        AMHomeUIDrawerAboutRowKey) integerValue]
+                            inSection:[objc_getAssociatedObject(table,
+                        AMHomeUIDrawerAboutSectionKey) integerValue]];
+                AMHomeUIDrawerInstallDataSourceTrim(table, aboutIndexPath);
+                dataTrimFresh = !alreadyMarked;
+                if (!alreadyMarked || ![known isEqual:aboutIndexPath]) {
+                    [table reloadData];
+                    os_log(OS_LOG_DEFAULT, "[AMHomeUI] drawer table trim at "
+                           "section=%ld row=%ld", (long)aboutIndexPath.section,
+                           (long)aboutIndexPath.row);
+                }
+            }
         }
     }
     os_log(OS_LOG_DEFAULT, "[AMHomeUI] drawer trim pass (%{public}@): "
-           "about=%d help=%lu follow=%lu oss=%lu hidden %{public}@",
+           "about=%d help=%lu follow=%lu oss=%lu dataTrimFresh=%d hidden %{public}@",
            source ?: @"", aboutNode != nil,
            (unsigned long)found[helpVal].count,
            (unsigned long)found[followVal].count,
-           (unsigned long)found[ossVal].count, log);
+           (unsigned long)found[ossVal].count, dataTrimFresh, log);
     if (!aboutNode && !found[helpVal].count && !found[followVal].count &&
         !found[ossVal].count) {
         static dispatch_once_t dumpToken;

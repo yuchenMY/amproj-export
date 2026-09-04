@@ -28,6 +28,7 @@
 #import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <os/log.h>
 #import <zlib.h>
 #import <stdatomic.h>
 #import <string.h>
@@ -10723,6 +10724,9 @@ static NSData *amproj_v865StoreRewriteSceneXML(
     NSMutableDictionary<NSString *, NSString *> *storeNamesByResource = [NSMutableDictionary dictionary];
     NSDictionary<NSString *, NSString *> *manifestResources =
         AMProjLegacyManifestResourceMap(extractionDirectory);
+    NSUInteger amprojRefCount = 0, amprojManifestHits = 0, amprojBaseHits = 0,
+        amprojExactHits = 0, amprojMisses = 0;
+    NSString *amprojFirstMiss = nil;
     for (NSUInteger index = uriMatches.count; index-- > 0;) {
         NSTextCheckingResult *match = uriMatches[index];
         NSString *reference = [xml substringWithRange:[match rangeAtIndex:1]];
@@ -10778,6 +10782,7 @@ static NSData *amproj_v865StoreRewriteSceneXML(
         // Legacy packages reference media as amproj:SHA1.ext (the file is
         // one of the package's root-level resources, already extracted).
         if ([value hasPrefix:@"amproj:"]) {
+            amprojRefCount++;
             NSString *reference = [value substringFromIndex:7];
             if (!reference.length || [reference containsString:@"/"] ||
                 [reference containsString:@".."]) {
@@ -10796,6 +10801,7 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                     if ([NSFileManager.defaultManager
                             fileExistsAtPath:candidate.path]) {
                         packaged = candidate;
+                        amprojManifestHits++;
                     }
                 }
                 if (!packaged) {
@@ -10810,12 +10816,14 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                         NSString *name = candidate.lastPathComponent;
                         if ([name caseInsensitiveCompare:reference] == NSOrderedSame) {
                             packaged = candidate;
+                            amprojExactHits++;
                             break;
                         }
                         NSString *base = name.pathExtension.length
                             ? [name stringByDeletingPathExtension] : name;
                         if ([base caseInsensitiveCompare:referenceBase] == NSOrderedSame) {
                             packaged = candidate;
+                            amprojBaseHits++;
                             break;
                         }
                     }
@@ -10835,6 +10843,8 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                 }
             }
             if (!packaged) {
+                amprojMisses++;
+                if (!amprojFirstMiss) amprojFirstMiss = [reference copy];
                 // The package did not provide this resource; keep the
                 // reference untouched rather than pointing at nothing.
                 continue;
@@ -10893,6 +10903,16 @@ static NSData *amproj_v865StoreRewriteSceneXML(
         NSString *storeURI = [NSString stringWithFormat:@"am-internal:///%@", storeName];
         [xml replaceCharactersInRange:[match rangeAtIndex:1] withString:storeURI];
     }
+
+    // 标量在 os_log 里默认公开，不会被 syslog redact——导入诊断的关键通道。
+    os_log(OS_LOG_DEFAULT, "[AMProjExport] import refs total=%lu amproj=%lu "
+           "manifest_hit=%lu basename_hit=%lu exact_hit=%lu miss=%lu "
+           "first_miss=%{public}@ manifest_lines=%lu",
+           (unsigned long)uriMatches.count, (unsigned long)amprojRefCount,
+           (unsigned long)amprojManifestHits, (unsigned long)amprojBaseHits,
+           (unsigned long)amprojExactHits, (unsigned long)amprojMisses,
+           amprojFirstMiss ?: @"-",
+           (unsigned long)manifestResources.count);
 
     // The project store does not use PackageImporter media signatures.
     NSRegularExpression *sigRegex = [NSRegularExpression
@@ -11126,8 +11146,7 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
     [manager createDirectoryAtURL:dependenciesDirectory
           withIntermediateDirectories:YES attributes:nil error:nil];
     NSUInteger copiedMedia = 0;
-    for (NSDictionary<NSString *, id> *dependency in dependencies) {
-        NSURL *source = [dependency[@"source"] isKindOfClass:NSURL.class]
+    for (NSDictionary<NSString *, id> *dependency in dependencies) {        NSURL *source = [dependency[@"source"] isKindOfClass:NSURL.class]
             ? dependency[@"source"] : nil;
         NSString *storeName = [dependency[@"name"] isKindOfClass:NSString.class]
             ? dependency[@"name"] : nil;
@@ -11209,6 +11228,11 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
         if (titleOut) *titleOut = title.length ? [title copy] : nil;
     }
     [manager removeItemAtURL:workDirectory error:nil];
+    os_log(OS_LOG_DEFAULT, "[AMProjExport] import store done deps=%lu "
+           "copied=%lu refs=%lu missing=%lu verified=%d",
+           (unsigned long)dependencies.count, (unsigned long)copiedMedia,
+           (unsigned long)referenceCount,
+           (unsigned long)missingWrittenDependencies, verified);
     amproj_logCriticalEvent(@"import.865_store_write_completed", @{
         @"filename": originalName ?: @"",
         @"transaction_id": transactionID ?: @"",
