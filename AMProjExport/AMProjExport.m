@@ -10928,6 +10928,27 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                                range:NSMakeRange(0, xml.length)
                           withTemplate:@""];
 
+    // r35 实锤：app 原生项目的 media 标签没有 sig 属性（<media uri=… type=…
+    // size=… infoUpdated=… width=… height=/>）。解包阶段从 manifest 注入的
+    // sig="…" 会让加载器拒绝渲染（图层在、图空白）。这里把 media 标签上的
+    // sig 一并剥掉，并把 infoUpdated 刷成当前时间对齐原生格式。
+    NSRegularExpression *mediaSigRegex = [NSRegularExpression
+        regularExpressionWithPattern:@"(<media\\b[^>]*?)\\s+sig=\"[^\"]*\""
+                             options:NSRegularExpressionCaseInsensitive
+                               error:nil];
+    [mediaSigRegex replaceMatchesInString:xml options:0
+                                   range:NSMakeRange(0, xml.length)
+                              withTemplate:@"$1"];
+    NSRegularExpression *infoUpdatedRegex = [NSRegularExpression
+        regularExpressionWithPattern:@"infoUpdated=\"\\d+\""
+                             options:0 error:nil];
+    NSString *nowTimestamp = [NSString stringWithFormat:@"%lld",
+        (long long)(NSDate.date.timeIntervalSince1970 * 1000.0)];
+    [infoUpdatedRegex replaceMatchesInString:xml options:0
+                                      range:NSMakeRange(0, xml.length)
+                                 withTemplate:
+        [NSString stringWithFormat:@"infoUpdated=\"%@\"", nowTimestamp]];
+
     // Classification markers mirror the files Alight Motion itself keeps on
     // device: projects carry neither `type` nor `templateLink`; imported
     // templates carry a (possibly stale) templateLink and no `type`.
