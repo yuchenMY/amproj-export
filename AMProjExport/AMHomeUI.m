@@ -2027,8 +2027,15 @@ static void *AMHomeUIDrawerTrimmedKey = &AMHomeUIDrawerTrimmedKey;
 
 static UIView *AMHomeUIDrawerContainerView(UIViewController *controller) {
     if (!controller) return nil;
-    id value = [controller valueForKey:@"containerView"];
-    return [value isKindOfClass:UIView.class] ? value : nil;
+    // 启动期会弹出没有 containerView 属性的 SettingsContainerVC 实例，
+    // 直接 valueForKey 会抛 NSUnknownKeyException 把整个启动带崩
+    // （r30 闪退根因），必须兜住。
+    @try {
+        id value = [controller valueForKey:@"containerView"];
+        return [value isKindOfClass:UIView.class] ? value : nil;
+    } @catch (NSException *exception) {
+        return nil;
+    }
 }
 
 static NSString *AMHomeUIDrawerTextOfView(UIView *view) {
@@ -2159,7 +2166,22 @@ static void AMHomeUIDumpViewTree(UIView *root, NSString *tag) {
     }
 }
 
+static void AMHomeUITrimDrawerNowInner(UIViewController *controller,
+                                       NSString *source);
+
 static void AMHomeUITrimDrawerNow(UIViewController *controller, NSString *source) {
+    // 钩子挂在 viewDidAppear 上，启动期非抽屉实例也可能进来；
+    // 裁剪逻辑里任何意外都不允许杀死宿主（r30 闪退教训）。
+    @try {
+        AMHomeUITrimDrawerNowInner(controller, source);
+    } @catch (NSException *exception) {
+        os_log(OS_LOG_DEFAULT, "[AMHomeUI] drawer trim exception (%{public}@): "
+               "%{public}@", source ?: @"", exception.reason ?: @"");
+    }
+}
+
+static void AMHomeUITrimDrawerNowInner(UIViewController *controller,
+                                       NSString *source) {
     UIView *containerView = AMHomeUIDrawerContainerView(controller);
     if (!containerView) {
         os_log(OS_LOG_DEFAULT, "[AMHomeUI] drawer trim skipped (%{public}@): "
