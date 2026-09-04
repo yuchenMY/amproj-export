@@ -544,6 +544,28 @@ static BOOL AMCloudIsValidDeviceIdentifier(NSString *identifier) {
     return UUID != nil;
 }
 
+// 设备 ID 与登录 token 一样受重签换访问组影响：Keychain 读不到时从
+// Library 镜像恢复，新生成时同步写镜像，保证服务器端"绑定设备"不漂移。
+static NSURL *AMCloudDeviceMirrorURL(void) {
+    NSURL *library = [NSFileManager.defaultManager
+        URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
+    return [library URLByAppendingPathComponent:@"amproj-device-id"];
+}
+
+static NSString *AMCloudReadDeviceMirror(void) {
+    return [NSString stringWithContentsOfURL:AMCloudDeviceMirrorURL()
+                                    encoding:NSUTF8StringEncoding error:nil];
+}
+
+static void AMCloudWriteDeviceMirror(NSString *identifier) {
+    if (!identifier.length) return;
+    NSURL *url = AMCloudDeviceMirrorURL();
+    [identifier writeToFile:url.path atomically:YES
+                   encoding:NSUTF8StringEncoding error:nil];
+    [NSFileManager.defaultManager setAttributes:
+        @{NSFilePosixPermissions: @0600} ofItemAtPath:url.path error:nil];
+}
+
 static NSString *AMCloudDeviceIdentifier(void) {
     static NSString *cachedIdentifier = nil;
     static dispatch_once_t onceToken;
@@ -567,6 +589,7 @@ static NSString *AMCloudDeviceIdentifier(void) {
             if (AMCloudIsValidDeviceIdentifier(stored)) {
                 NSUUID *storedUUID = [[NSUUID alloc] initWithUUIDString:stored];
                 cachedIdentifier = storedUUID.UUIDString.lowercaseString;
+                AMCloudWriteDeviceMirror(cachedIdentifier);
                 return;
             }
         } else if (status != errSecItemNotFound) {
@@ -574,7 +597,27 @@ static NSString *AMCloudDeviceIdentifier(void) {
             AMCloudDiagnostic(@"cloud.device_id.read_failed", @{
                 @"status": @(status)
             });
-            return;
+        }
+        // Keychain 失联（重签换访问组）时从镜像恢复，避免设备绑定漂移。
+        NSString *mirrored = AMCloudReadDeviceMirror();
+        if (AMCloudIsValidDeviceIdentifier(mirrored)) {
+            NSData *data = [mirrored dataUsingEncoding:NSUTF8StringEncoding];
+            NSDictionary *values = @{
+                (__bridge id)kSecValueData: data,
+                (__bridge id)kSecAttrAccessible:
+                    (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            };
+            NSMutableDictionary *insert = [identity mutableCopy];
+            [insert addEntriesFromDictionary:values];
+            OSStatus restoreStatus = SecItemAdd((__bridge CFDictionaryRef)insert, NULL);
+            if (restoreStatus == errSecDuplicateItem) {
+                restoreStatus = SecItemUpdate((__bridge CFDictionaryRef)identity,
+                                              (__bridge CFDictionaryRef)values);
+            }
+            if (restoreStatus == errSecSuccess) {
+                cachedIdentifier = mirrored.lowercaseString;
+                return;
+            }
         }
 
         NSString *candidate = NSUUID.UUID.UUIDString.lowercaseString;
@@ -603,6 +646,9 @@ static NSString *AMCloudDeviceIdentifier(void) {
             AMCloudDiagnostic(@"cloud.device_id.write_failed", @{
                 @"status": @(writeStatus)
             });
+        }
+        if (cachedIdentifier.length) {
+            AMCloudWriteDeviceMirror(cachedIdentifier);
         }
     });
     return cachedIdentifier;
