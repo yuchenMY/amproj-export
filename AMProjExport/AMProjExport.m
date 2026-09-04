@@ -17904,7 +17904,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                        NSStringFromClass(controller.class) ?: @"",
                        gateAlert.title ?: @"",
                        gateAlert.message ?: @"",
-                       NSStringFromClass(self.class) ?: @"");
+                       NSStringFromClass([self class]) ?: @"");
             }
         }
         // The one exception is the document picker delegate proxy: with the
