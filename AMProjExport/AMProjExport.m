@@ -11041,12 +11041,16 @@ static NSData *amproj_v865StoreRewriteSceneXML(
         for (NSUInteger index = tempMatches.count; index-- > 0;) {
             NSTextCheckingResult *match = tempMatches[index];
             NSString *fileName = [xml substringWithRange:[match rangeAtIndex:1]];
-            NSString *storeName = storeNamesByResource[fileName];
+            // URL 里的文件名是百分号编码（中文字体名），登记表用的是解码名。
+            NSString *decodedName =
+                [fileName stringByRemovingPercentEncoding] ?: fileName;
+            NSString *storeName = storeNamesByResource[decodedName]
+                ?: storeNamesByResource[fileName];
             if (!storeName) {
                 // fillImage 等属性引用的文件可能没有对应的 media 条目——
                 // 现场按依赖登记（拷贝由统一的 dependenciesOut 流程完成）。
                 NSURL *fileURL = [extractionDirectory
-                    URLByAppendingPathComponent:fileName];
+                    URLByAppendingPathComponent:decodedName];
                 if (![NSFileManager.defaultManager
                         fileExistsAtPath:fileURL.path]) {
                     tempUnresolved++;
@@ -11063,6 +11067,7 @@ static NSData *amproj_v865StoreRewriteSceneXML(
                 storeName = extension.length
                     ? [NSString stringWithFormat:@"%@.%@", sha1, extension]
                     : sha1;
+                storeNamesByResource[decodedName] = storeName;
                 storeNamesByResource[fileName] = storeName;
                 NSNumber *fileSize = nil;
                 [fileURL getResourceValue:&fileSize forKey:NSURLFileSizeKey
