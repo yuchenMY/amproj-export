@@ -1879,6 +1879,13 @@ static NSDictionary<NSString *, NSURL *>* amproj_resolveInternalResources(
     amproj_purgeInternalResourceCache();
     NSFileManager *manager = NSFileManager.defaultManager;
     NSMutableOrderedSet<NSURL *> *roots = [NSMutableOrderedSet orderedSet];
+    // 导入包的字体装在 Library/dlfonts。放首位：dlfonts 只有几个文件，
+    // 秒级命中；Library 根的大目录（依赖、备份、缓存）会把 5 秒扫描预算
+    // 吃光，排在后面时字体扫描永远轮不到（r37 起实测复现）。
+    NSURL *dlfontsDirectory = [[manager URLsForDirectory:NSLibraryDirectory
+                                               inDomains:NSUserDomainMask].firstObject
+        URLByAppendingPathComponent:@"dlfonts" isDirectory:YES];
+    if (dlfontsDirectory) [roots addObject:dlfontsDirectory];
     NSURL *XMLDirectory = XMLURL.URLByDeletingLastPathComponent;
     if (XMLDirectory) {
         [roots addObject:XMLDirectory];
