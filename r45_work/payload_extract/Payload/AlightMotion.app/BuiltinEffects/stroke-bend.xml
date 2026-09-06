@@ -1,8 +1,0 @@
-<?xml version='1.0' encoding='UTF-8' ?>
-<effect id="com.alightcreative.effects.drawing.strokebend" compat="acScreenNorm-y" name="Bend Stroke" desc="Curves the ends of freehand drawing strokes" type="drawing" category="drawing" experimental="true" thumb="thumb/stroketaper5.webp">
-
-    <params>
-        <spinner id="amount" default="0.0" min="-1500.0" max="1500.0" step="0.1" label="@am:string/effect_param_amount" ticks="0,-100,100" />
-    </params>
-
-</effect>

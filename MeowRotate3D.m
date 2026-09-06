@@ -159,7 +159,7 @@ static void AMDumpView(UIView *v, int depth, NSMutableString *out) {
                 id tgt = [(AMGRTargetStub *)inv target];
                 SEL act = [(AMGRTargetStub *)inv action];
                 [out appendFormat:@"%@   ~ %@ -> %@ action=%@\n", ind,
-                    AMClsName(g), AMClsName(tgt), act ? @(NSStringFromSelector(act)) : @"?"];
+                    AMClsName(g), AMClsName(tgt), act ? (NSString *)NSStringFromSelector(act) : @"?"];
             } @catch (NSException *e) {}
         }
     }
