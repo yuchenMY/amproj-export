@@ -17863,22 +17863,20 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         // the verified 862 ABI; touching them has caused XML picker/export
         // crashes even though the original presentation itself is valid.
         //
-        // The package-share login gate: Alight Motion raises this alert from
-        // ShareNC's export tap when the selected option is the project package
-        // and no AM account is signed in. The message is matched with all
-        // whitespace stripped (the runtime string's spacing has drifted from
-        // the shipped .strings), only while the tap is still fresh, and the
-        // presenter no longer has to be on screen yet — SwiftUI hosts fire
-        // this before their view lands in a window. Bypassing it hands the
-        // package export to the plugin's own .amproj flow.
+        // The package-share login gate: Alight Motion raises this alert when
+        // the selected option is the project package and no AM account is
+        // signed in. The message is matched whitespace-insensitively and is
+        // specific to this gate, so no tap-timing heuristics are needed —
+        // timing depended on ShareNC's onTapExport:, which not every device
+        // or UI path fires (distributed devices saw the wall regardless).
+        // Bypassing it hands the package export to the plugin's own .amproj
+        // flow; no AM account is required for a local package export.
         if (amproj_runtimeIsBuild865() &&
             [controller isKindOfClass:UIAlertController.class] &&
             !amproj_directRequest) {
             UIAlertController *gateAlert = (UIAlertController *)controller;
             NSString *expectedGateMessage = NSLocalizedString(
                 @"sign_in_for_package_share_msg", @"");
-            BOOL tapIsRecent = amproj_865ShareExportTapAt > 0 &&
-                CFAbsoluteTimeGetCurrent() - amproj_865ShareExportTapAt < 5.0;
             NSString *normalizedMessage = [[gateAlert.message
                 componentsSeparatedByCharactersInSet:
                     NSCharacterSet.whitespaceAndNewlineCharacterSet]
@@ -17889,7 +17887,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                 componentsJoinedByString:@""];
             BOOL messageMatches = normalizedExpected.length &&
                 [normalizedMessage isEqualToString:normalizedExpected];
-            if (tapIsRecent && messageMatches &&
+            if (messageMatches &&
                 [self isKindOfClass:UIViewController.class]) {
                 UIViewController *exportPresenter = (UIViewController *)self;
                 amproj_865ShareExportTapAt = 0;
@@ -17905,11 +17903,11 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                 });
                 return;
             }
-            if (tapIsRecent) {
-                // Near-miss forensics: an alert inside the tap window that did
-                // not match tells us exactly how the gate drifted this build.
-                // os_log with %{public}@ — amproj_logCriticalEvent values are
-                // redacted by syslog.
+            if (normalizedMessage.length &&
+                ([normalizedMessage containsString:@"共享项目包"] ||
+                 [normalizedMessage containsString:@"sign_in_for_package"])) {
+                // Gate forensics for any drift: os_log with %{public}@ —
+                // amproj_logCriticalEvent values are redacted by syslog.
                 os_log(OS_LOG_DEFAULT,
                        "[AMProjExport] gate near-miss class=%{public}@ "
                        "title=%{public}@ message=%{public}@ presenter=%{public}@",
