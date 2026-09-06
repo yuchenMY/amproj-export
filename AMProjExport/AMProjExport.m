@@ -19552,10 +19552,57 @@ static void amproj_installNavigationExportHook(void) {
 // （空白不敏感），就不再添加"登入"按钮——墙变成一个无害的取消提示。
 static void (*orig_alertAddAction)(id, SEL, UIAlertAction *) = NULL;
 
+static void *AMProjGateHandledKey = &AMProjGateHandledKey;
+
 static NSString *AMProjNormalizedGateText(NSString *text) {
     return [[text componentsSeparatedByCharactersInSet:
         [NSCharacterSet whitespaceAndNewlineCharacterSet]]
         componentsJoinedByString:@""];
+}
+
+// 分发设备上登录墙的呈现路径可能绕过 presentViewController: 钩子（addAction
+// 生效但墙照弹）。250ms 后全屏检查：墙还在屏上就关掉它并启动本地 .amproj
+// 导出；若 presentVC 钩子已绕过（屏上无墙）则此操作为空。
+static UIViewController *AMProjTopPresentedController(void) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    UIViewController *top = UIApplication.sharedApplication.keyWindow
+        .rootViewController;
+#pragma clang diagnostic pop
+    NSUInteger hops = 0;
+    while (top.presentedViewController && hops < 10) {
+        top = top.presentedViewController;
+        hops++;
+    }
+    return top;
+}
+
+static void AMProjScheduleGateTakeover(UIAlertController *alert) {
+    if (objc_getAssociatedObject(alert, AMProjGateHandledKey)) return;
+    objc_setAssociatedObject(alert, AMProjGateHandledKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    void (^takeover)(void) = ^{
+        if (amproj_directRequest) return;
+        UIViewController *top = AMProjTopPresentedController();
+        if (![top isKindOfClass:UIAlertController.class]) return;
+        UIAlertController *onScreen = (UIAlertController *)top;
+        NSString *normalizedOnScreen = AMProjNormalizedGateText(
+            onScreen.message ?: @"");
+        NSString *normalizedExpected = AMProjNormalizedGateText(
+            NSLocalizedString(@"sign_in_for_package_share_msg", @""));
+        if (!normalizedExpected.length ||
+            ![normalizedOnScreen isEqualToString:normalizedExpected]) return;
+        amproj_logCriticalEvent(@"direct.865_login_wall_takeover", @{});
+        UIViewController *presenter = top.presentingViewController ?: top;
+        [presenter dismissViewControllerAnimated:YES completion:^{
+            NSString *exportTitle =
+                amproj_currentProjectTitle(presenter) ?: @"";
+            amproj_startDirectExport(presenter, nil, YES, nil, exportTitle);
+        }];
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), takeover);
 }
 
 static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
@@ -19567,6 +19614,7 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
             [(UIAlertController *)self message] ?: @"");
         if (normalizedExpected.length &&
             [normalizedMessage isEqualToString:normalizedExpected]) {
+            AMProjScheduleGateTakeover((UIAlertController *)self);
             NSString *title = [action title] ?: @"";
             NSString *folded = title.lowercaseString;
             if ([folded containsString:@"登入"] ||
