@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<effect id="com.alightcreative.effect.parent" compat="acScreenNorm-y" name="Parent to Layer" desc="Parents the layer's locaiton and transform to another layer" tags="transform" thumb="thumb/movealongpath.webp" experimental="true">
+
+    <params>
+        <selector id="parent" style="layer" label="Parent" />
+<!--        <switch id="position" default="true" label="@am:string/effect_param_position" />-->
+<!--        <switch id="scale" default="true" label="@am:string/effect_param_scale" />-->
+<!--        <switch id="angle" default="true" label="@am:string/effect_param_angle" />-->
+    </params>
+
+    <script external="com.alightcreative.script.parent" />
+
+</effect>

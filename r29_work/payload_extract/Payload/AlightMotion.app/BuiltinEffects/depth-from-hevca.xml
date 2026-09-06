@@ -1,0 +1,53 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<effect id="com.alightcreative.effects.depth_from_hevca"
+    name="Depth From HEVCA"
+    desc="Depth From HEVCA"
+    category="color"
+    tags="color,raster"
+    thumb="thumb/saturation.jpg"
+    experimental="true"
+    >
+
+    <params>
+        <texture id="inputImg" srcType="content" />
+        <spinner id="clipLow" default="0.0" min="0.0" max="5.0" label="Clip Low"  step="0.01" />
+        <spinner id="clipHigh" default="5.0" min="0.0" max="5.0" label="Clip High"  step="0.01" />
+        <selector id="mode" default="0" style="dropdown" label="Processing" >
+            <choice label="Coarse + Fine" value="0" />
+            <choice label="Coarse" value="1" />
+            <choice label="Amplified Fine" value="2" />
+            <choice label="Coarse + Amplified Fine" value="3" />
+        </selector>
+    </params>
+
+    <shader type="fragment"><![CDATA[
+        
+        void main() {
+            vec4 texColor = texture2DCv(inputImg.texture,acScreenNorm);
+            float distance = 1 - texColor.a;
+            switch(mode) {
+            case 0://Coarse+Fine
+                distance = (1 - texColor.a) + ((texColor.r + texColor.g + texColor.b)/3/255);
+                break;
+            case 1://Coarse Only
+                distance = 1 - texColor.a;
+                break;
+            case 2://Amplified Fine
+                distance = 1 - ((texColor.r + texColor.g + texColor.b)/3);
+                break;
+            case 3://Coarse+AmplifiedFine
+                distance = (1 - texColor.a) + ((texColor.r + texColor.g + texColor.b)/3/10);
+                break;
+            default:
+                break;
+            }
+            
+            distance *= 5.0;
+            
+            float lum = clamp((distance - clipLow) / (clipHigh - clipLow), 0.0,1.0);
+            gl_FragColor = vec4(lum, lum, lum, 1.0);
+        }
+
+    ]]></shader>
+
+</effect>

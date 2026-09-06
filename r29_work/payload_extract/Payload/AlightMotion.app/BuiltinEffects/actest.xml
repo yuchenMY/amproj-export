@@ -1,0 +1,55 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<effect id="com.alightcreative.effects.actest" compat="acScreenNorm-y" name="AC Test" desc="INTERNAL TESTING ONLY" category="procedural" thumb="thumb/star.webp" experimental="true" >
+
+    <params>
+        <texture id="inputImg" srcType="content" />
+        <selector id="testtype" style="radio" default="0" label="TEST">
+            <choice label="acScreenNorm" value="0" />
+            <choice label="acLayerNorm" value="1" />
+            <choice label="l2s" value="2" />
+        </selector>
+        <switch id="aspectadj" default="false" label="Adjust Aspect" />
+        <switch id="invy" default="false" label="Invert Y" />
+    </params>
+
+    <shader type="fragment" precision="high"><![CDATA[
+
+        void main() {
+            vec4 texColor = texture2DCv(inputImg.texture,acScreenNorm);
+            vec2 st;
+            vec2 pixelSize;
+            if( testtype==0 ) {
+                st = acScreenNorm.xy;
+                pixelSize = vec2(1.0,1.0) / acScreenSize.xy;
+            } else if( testtype==1 ) {
+                st = acLayerNorm.xy;
+                pixelSize = vec2(1.0,1.0) / acLayerSize.xy;
+            } else if( testtype==2 ) {
+                st = acLayerNorm.xy;
+                st = (vec4(st,0.0,1.0) * acLayerToScreen).xy;
+                pixelSize = vec2(1.0,1.0) / acScreenSize.xy;
+            }
+            
+            if(invy) {
+                st.y = 1. - st.y;
+            }
+
+            if(aspectadj) {
+                st -= 0.5;
+                st.x *= acLayerSize.x/acLayerSize.y;
+                st += 0.5;
+            }
+            
+            float alpha = max(0.5,texColor.a);
+            
+            float gx = smoothstep(pixelSize.x*2.0, pixelSize.x, mod(st.x,pixelSize.y*40));
+            float gy = smoothstep(pixelSize.y*2.0, pixelSize.x, mod(st.y,pixelSize.y*40));
+
+            vec4 result = vec4( st.x, max(gx,gy), st.y, 1.0 );
+
+            gl_FragColor = mix(texColor,result,alpha);
+        }
+
+    ]]></shader>
+
+</effect>

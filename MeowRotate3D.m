@@ -1,39 +1,37 @@
-// MeowRotate3D.m — 猫鹤AM 三轴3D旋转 mod · Phase A 侦察版
+// MeowRotate3D.m — 猫鹤AM 三轴3D旋转 mod · Phase A3 侦察版(全Pad页强制挂钩)
 //
-// 背景: Bending Spoons 865 的静态类名/方法名被 BBAES 类混淆, 静态读不到明文,
-//       但运行时全部解密。本 dylib 不改任何行为, 只做一件事:
-//       当 "Move & Transform" 面板出现时, 采集运行时状态供后续实现用:
-//         1. 面板 VC 及相关类的 runtime 方法表 (真名!) + ivar 表
-//         2. 面板视图树 (类名/frame/UIControl target-action/手势/辅助功能)
-//         3. 响应链/父链上方的编辑器 VC
-//         4. KVC 探针: 模型对象上的 transform/rotation/orientation/... 键
-//       结果: NSLog + 沙盒文件 + UIPasteboard + POST 后端(失败忽略)。
-//
-// 后续 Phase B (功能版) 将用这些真名实现 X/Y/Z 三轴旋转注入。
+// v1 战果: 运行时类名 = "AlightMotion.XXX" 新格式; 核心控件 AlightMotion.ValueSpinner;
+//          面板页 = AlightMotion.*PadVC 家族 (ScalePadVC 已完整解剖)。
+// v3 改进:
+//   1. 不只 hook 面板容器: 扫描所有 AlightMotion.*PadVC/*PanelVC, 每个 Pad 页
+//      都挂钩 (没有自己的 viewDidAppear/viewWillAppear/viewDidLoad 就用
+//      class_addMethod 补一个调用 super 的), 保证旋转页一定能采到
+//   2. dump 去重: 类的方法表/ivar 本会话只采一次
+//   3. 树内/子VC/响应链上的 AlightMotion.* 类全部顺带采集
+//   4. holder 等 ivar 对象递归 KVC 探查 (找 transform/orientation 模型)
+//   5. ValueSpinner 实例带值采集 (value/delegate/target 绑定关系)
+//   输出: NSLog + 沙盒文件 + UIPasteboard + POST 后端(失败忽略)
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-// 私有 _UIGestureRecognizerTarget 的桩声明 (编译期合法调用运行时私有方法)
+// 私有 _UIGestureRecognizerTarget 的桩声明
 @interface AMGRTargetStub : NSObject
 - (id)target;
 - (SEL)action;
 @end
 
-// ============ 配置 ============
 static NSString *const kUploadURL = @"https://am.ayakameow.cn/api/modlog";
-static const int      kMaxDumpsPerSession = 8;   // 防刷屏
-static const int      kMaxLogChars        = 1500000;
+static const int      kMaxDumpsPerSession = 24;
 
-// ============ 全局 ============
 static int      gDumpCount = 0;
 static BOOL     gInstalled = NO;
-static IMP      orig_viewDidAppear = NULL;
-static IMP      orig_viewWillAppear = NULL;
+static NSMutableString *gLog = nil;
+static NSMutableDictionary *gDumpedClasses;   // 类名 -> YES
+static NSTimeInterval   gLastDumpAt = 0;
 
 #define AMLOG(fmt, ...) [gLog appendFormat:@"%@ " fmt "\n", [NSDate date], ##__VA_ARGS__]
-static NSMutableString *gLog = nil;
 
 // ============ 工具 ============
 
@@ -57,31 +55,20 @@ static NSString *AMClsName(id obj) {
     return NSStringFromClass([obj class]);
 }
 
-// 运行时按"包含子串"找类 (绕过静态混淆)
-static Class AMFindClassBySubstring(NSString *needle) {
-    unsigned int n = 0;
-    Class *classes = objc_copyClassList(&n);
-    Class found = nil;
-    for (unsigned int i = 0; i < n; i++) {
-        NSString *nm = NSStringFromClass(classes[i]);
-        if ([nm containsString:needle]) { found = classes[i]; break; }
-    }
-    free(classes);
-    return found;
+static BOOL AMIsModuleClass(NSString *nm) {
+    return [nm hasPrefix:@"AlightMotion."] || [nm hasPrefix:@"_TtC12AlightMotion"] || [nm hasPrefix:@"_TtCV12AlightMotion"];
 }
 
-// ============ 方法表 dump (运行时真名!) ============
+// ============ 方法表 / ivar ============
 
 static void AMDumpMethods(Class c, NSMutableString *out) {
     unsigned int cnt = 0;
     Method *ms = class_copyMethodList(c, &cnt);
     [out appendFormat:@"  -- instance methods (%u) --\n", cnt];
-    for (unsigned int i = 0; i < cnt && i < 400; i++) {
-        SEL s = method_getName(ms[i]);
+    for (unsigned int i = 0; i < cnt && i < 500; i++) {
         char *ret = method_copyReturnType(ms[i]);
-        unsigned int nargs = method_getNumberOfArguments(ms[i]);
-        [out appendFormat:@"    [%d] %@  (ret=%s, args=%u)\n", i,
-            NSStringFromSelector(s), ret ? ret : "?", nargs];
+        [out appendFormat:@"    [%d] %@ (ret=%s)\n", i,
+            NSStringFromSelector(method_getName(ms[i])), ret ? ret : "?"];
         if (ret) free(ret);
     }
     if (ms) free(ms);
@@ -96,13 +83,11 @@ static void AMDumpMethods(Class c, NSMutableString *out) {
     if (cms) free(cms);
 }
 
-// ============ ivar dump (只取对象型, 防崩溃) ============
-
 static void AMDumpIvars(id obj, NSMutableString *out, BOOL fetchValues) {
     Class c = [obj class];
     unsigned int cnt = 0;
     Ivar *ivs = class_copyIvarList(c, &cnt);
-    [out appendFormat:@"  -- ivars of %@ (%u) --\n", AMClsName(obj) ?: @"?", cnt];
+    [out appendFormat:@"  -- ivars of %@ (%u) --\n", AMClsName(obj), cnt];
     for (unsigned int i = 0; i < cnt; i++) {
         const char *nm = ivar_getName(ivs[i]);
         const char *ty = ivar_getTypeEncoding(ivs[i]);
@@ -110,7 +95,7 @@ static void AMDumpIvars(id obj, NSMutableString *out, BOOL fetchValues) {
         if (fetchValues && ty && ty[0] == '@') {
             @try {
                 id v = object_getIvar(obj, ivs[i]);
-                if (v) [out appendFormat:@"  = <%@> %@", AMClsName(v), AMDesc(v, 160)];
+                if (v) [out appendFormat:@"  = <%@> %@", AMClsName(v), AMDesc(v, 220)];
             } @catch (NSException *e) {}
         }
         [out appendString:@"\n"];
@@ -118,12 +103,31 @@ static void AMDumpIvars(id obj, NSMutableString *out, BOOL fetchValues) {
     if (ivs) free(ivs);
 }
 
-// ============ 视图树 dump ============
+// 类级采集(去重)
+static void AMDumpClassIfNew(Class c, NSMutableString *out) {
+    if (!c) return;
+    NSString *nm = NSStringFromClass(c);
+    if (!AMIsModuleClass(nm)) return;
+    if (gDumpedClasses[nm]) return;
+    [gDumpedClasses setObject:@YES forKey:nm];
+    [out appendFormat:@"\n#### CLASS %@ (super=%@) ####\n", nm, AMClsName([c superclass])];
+    AMDumpMethods(c, out);
+    unsigned int cnt = 0;
+    Ivar *ivs = class_copyIvarList(c, &cnt);
+    [out appendFormat:@"  -- ivars (%u) --\n", cnt];
+    for (unsigned int i = 0; i < cnt; i++) {
+        [out appendFormat:@"    %@ : %s\n", ivar_getName(ivs[i]) ? @(ivar_getName(ivs[i])) : @"?",
+                          ivar_getTypeEncoding(ivs[i]) ?: "?"];
+    }
+    if (ivs) free(ivs);
+}
+
+// ============ 视图树 ============
 
 static int gViewNodes = 0;
 
 static void AMDumpView(UIView *v, int depth, NSMutableString *out) {
-    if (!v || depth > 14 || gViewNodes > 1500) return;
+    if (!v || depth > 14 || gViewNodes > 2000) return;
     gViewNodes++;
     NSString *ind = [@"                                                   " substringToIndex:MIN(depth * 2, 50)];
     [out appendFormat:@"%@%@ %@ hidden=%d alpha=%.2f", ind, AMClsName(v), AMFrame(v.frame),
@@ -134,39 +138,32 @@ static void AMDumpView(UIView *v, int depth, NSMutableString *out) {
         NSString *t = ((UILabel *)v).text;
         if (t.length) [out appendFormat:@" text=\"%@\"", [t substringToIndex:MIN(t.length, 60)]];
     }
-    if ([v isKindOfClass:[UIButton class]]) {
-        NSString *t = [(UIButton *)v titleForState:UIControlStateNormal] ?: @"";
-        if (t.length) [out appendFormat:@" btn=\"%@\"", t];
-    }
     [out appendString:@"\n"];
 
     if ([v isKindOfClass:[UIControl class]]) {
         UIControl *ctl = (UIControl *)v;
         for (id tgt in ctl.allTargets) {
             for (NSString *act in [ctl actionsForTarget:tgt forControlEvent:UIControlEventTouchUpInside]) {
-                [out appendFormat:@"%@   ^ target=%@ action=%@ (UpInside)\n", ind, AMClsName(tgt), act];
+                [out appendFormat:@"%@   ^ %@ action=%@ (UpInside)\n", ind, AMClsName(tgt), act];
             }
             for (NSString *act in [ctl actionsForTarget:tgt forControlEvent:UIControlEventValueChanged]) {
-                [out appendFormat:@"%@   ^ target=%@ action=%@ (ValueChanged)\n", ind, AMClsName(tgt), act];
-            }
-            for (NSString *act in [ctl actionsForTarget:tgt forControlEvent:UIControlEventTouchDown]) {
-                [out appendFormat:@"%@   ^ target=%@ action=%@ (TouchDown)\n", ind, AMClsName(tgt), act];
+                [out appendFormat:@"%@   ^ %@ action=%@ (ValueChanged)\n", ind, AMClsName(tgt), act];
             }
         }
     }
     for (UIGestureRecognizer *g in v.gestureRecognizers ?: @[]) {
-        // _UIGestureRecognizerTarget 私有类, 用桩接口声明拿 target/action
-        id grTargets = nil; @try { grTargets = [g valueForKey:@"targets"]; } @catch (NSException *e) {}
+        id grTargets = nil;
+        @try { grTargets = [g valueForKey:@"targets"]; } @catch (NSException *e) {}
         for (id inv in grTargets ?: @[]) {
             @try {
-                AMGRTargetStub *stub = (AMGRTargetStub *)inv;
-                id tgt = [stub target];
-                SEL act = [stub action];
-                [out appendFormat:@"%@   ~ gesture %@ target=%@ action=%@\n", ind,
-                    AMClsName(g), AMClsName(tgt), act ? NSStringFromSelector(act) : @"?"];
+                id tgt = [(AMGRTargetStub *)inv target];
+                SEL act = [(AMGRTargetStub *)inv action];
+                [out appendFormat:@"%@   ~ %@ -> %@ action=%@\n", ind,
+                    AMClsName(g), AMClsName(tgt), act ? @(NSStringFromSelector(act)) : @"?"];
             } @catch (NSException *e) {}
         }
     }
+    AMDumpClassIfNew([v class], out);
     for (UIView *sub in v.subviews) AMDumpView(sub, depth + 1, out);
 }
 
@@ -179,7 +176,9 @@ static NSArray<NSString *> *AMModelKeys(void) {
         k = @[@"transform", @"rotation", @"orientation", @"location", @"pivot", @"scale",
               @"skew", @"opacity", @"angle", @"selectedLayer", @"selection", @"layer",
               @"layers", @"scene", @"document", @"editor", @"keyframes", @"value",
-              @"model", @"item", @"panel", @"dataSource", @"viewModel"];
+              @"model", @"item", @"panel", @"holder", @"dataSource", @"viewModel",
+              @"transformHolder", @"padModel", @"currentValue", @"animatedValue",
+              @"rotationX", @"rotationY", @"rotationZ", @"angleX", @"angleY", @"angleZ"];
     });
     return k;
 }
@@ -187,7 +186,7 @@ static NSArray<NSString *> *AMModelKeys(void) {
 static int gProbeDepth = 0;
 
 static void AMProbeKVC(id obj, NSMutableString *out, int depth) {
-    if (!obj || depth > 2 || gProbeDepth > 400) return;
+    if (!obj || depth > 3 || gProbeDepth > 500) return;
     gProbeDepth++;
     for (NSString *key in AMModelKeys()) {
         @try {
@@ -196,56 +195,39 @@ static void AMProbeKVC(id obj, NSMutableString *out, int depth) {
             if (!v || v == obj || v == [NSNull null]) continue;
             if ([v isKindOfClass:[NSNumber class]] || [v isKindOfClass:[NSString class]] ||
                 [v isKindOfClass:[NSValue class]]) {
-                [out appendFormat:@"  KVC %@.%@ = %@\n", AMClsName(obj), key, v];
+                [out appendFormat:@"  KVC [%@ d%d] .%@ = %@\n", AMClsName(obj), depth, key, v];
             } else if ([v isKindOfClass:[NSArray class]] || [v isKindOfClass:[NSDictionary class]]) {
-                [out appendFormat:@"  KVC %@.%@ = <%@ count=%lu> %@\n", AMClsName(obj), key,
-                    AMClsName(v), (unsigned long)[(NSArray *)v count], AMDesc(v, 120)];
+                [out appendFormat:@"  KVC [%@ d%d] .%@ = <%@ n=%lu> %@\n", AMClsName(obj), depth, key,
+                    AMClsName(v), (unsigned long)[(NSArray *)v count], AMDesc(v, 150)];
             } else if (![v isKindOfClass:[UIView class]] && ![v isKindOfClass:[UIColor class]]) {
-                [out appendFormat:@"  KVC %@.%@ -> <%@>\n", AMClsName(obj), key, AMClsName(v)];
-                if (depth < 1) AMProbeKVC(v, out, depth + 1);
+                [out appendFormat:@"  KVC [%@ d%d] .%@ -> <%@>\n", AMClsName(obj), depth, key, AMClsName(v)];
+                AMDumpClassIfNew([v class], out);
+                if (depth < 2) AMProbeKVC(v, out, depth + 1);
             }
-        } @catch (NSException *e) {
-            // valueForKey 不认识该键 -> 正常, 忽略
-        }
+        } @catch (NSException *e) {}
     }
     gProbeDepth--;
 }
 
-// ============ 响应链 / 父链 ============
-
-static void AMDumpChain(UIViewController *vc, NSMutableString *out) {
-    [out appendString:@"=== responder/parent chain ===\n"];
-    int i = 0;
-    for (UIResponder *r = vc; r && i < 12; r = [r nextResponder], i++) {
-        [out appendFormat:@"  [%d] %@\n", i, AMClsName(r)];
-        if ([r isKindOfClass:[UIViewController class]]) {
-            AMDumpIvars(r, out, NO);
-        }
+static void AMProbeIvarObjects(id obj, NSMutableString *out, int depth) {
+    if (!obj || depth > 1) return;
+    unsigned int cnt = 0;
+    Ivar *ivs = class_copyIvarList([obj class], &cnt);
+    for (unsigned int i = 0; i < cnt; i++) {
+        const char *ty = ivar_getTypeEncoding(ivs[i]);
+        const char *nm = ivar_getName(ivs[i]);
+        if (!ty || ty[0] != '@') continue;
+        @try {
+            id v = object_getIvar(obj, ivs[i]);
+            if (!v || [v isKindOfClass:[UIView class]] || [v isKindOfClass:[UIColor class]]) continue;
+            NSString *nms = nm ? @(nm) : @"?";
+            [out appendFormat:@"  IVAROBJ [%@] %@ -> <%@>\n", AMClsName(obj), nms, AMClsName(v)];
+            gProbeDepth = 0;
+            AMProbeKVC(v, out, 0);
+            AMProbeIvarObjects(v, out, depth + 1);
+        } @catch (NSException *e) {}
     }
-}
-
-// ============ 相关类全量扫描 ============
-
-static void AMDumpRelatedClasses(NSMutableString *out) {
-    NSArray *needles = @[@"TransformPanel", @"TransformInspector", @"Rotation", @"Orientation",
-                         @"TransformRow", @"TransformCell", @"AngleRow", @"TransformView",
-                         @"LayerTransform", @"Transform3D", @"Rotate3D"];
-    unsigned int n = 0;
-    Class *classes = objc_copyClassList(&n);
-    [out appendFormat:@"\n=== related classes (of %u) ===\n", n];
-    int listed = 0;
-    for (unsigned int i = 0; i < n && listed < 40; i++) {
-        NSString *nm = NSStringFromClass(classes[i]);
-        BOOL hit = NO;
-        for (NSString *nd in needles) if ([nm containsString:nd]) { hit = YES; break; }
-        if (!hit) continue;
-        // 只对猫鹤主模块 + UI 相关的展开方法表, 避免日志爆炸
-        BOOL expand = [nm hasPrefix:@"_TtC12AlightMotion"] || [nm hasPrefix:@"AlightMotion"];
-        [out appendFormat:@"\n-- CLASS %@ --\n", nm];
-        if (expand) AMDumpMethods(classes[i], out);
-        listed++;
-    }
-    free(classes);
+    if (ivs) free(ivs);
 }
 
 // ============ HUD ============
@@ -260,25 +242,22 @@ static void AMShowHUD(NSString *msg) {
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectMake(20, 60, win.bounds.size.width - 40, 34)];
         lb.text = msg; lb.textColor = UIColor.whiteColor; lb.backgroundColor = [UIColor colorWithWhite:0 alpha:0.75];
         lb.font = [UIFont systemFontOfSize:13]; lb.textAlignment = NSTextAlignmentCenter;
-        lb.layer.cornerRadius = 8; lb.clipsToBounds = YES; lb.tag = 0x4D4533; // 'ME3'
+        lb.layer.cornerRadius = 8; lb.clipsToBounds = YES;
         [win addSubview:lb];
-        [UIView animateWithDuration:0.3 delay:2.0 options:0 animations:^{ lb.alpha = 0; }
+        [UIView animateWithDuration:0.3 delay:1.6 options:0 animations:^{ lb.alpha = 0; }
                           completion:^(BOOL f){ [lb removeFromSuperview]; }];
     });
 }
 
-// ============ 采集与输出 ============
+// ============ 输出 ============
 
 static void AMTransmit(NSString *text) {
-    // 1) 剪贴板 (用户直接粘贴回来)
     UIPasteboard *pb = [UIPasteboard generalPasteboard];
     @try { [pb setString:[text substringToIndex:MIN(text.length, 900000)]]; } @catch (NSException *e) {}
-    // 2) 沙盒文件
     @try {
         NSString *path = [NSTemporaryDirectory() stringByAppendingFormat:@"meow3d_dump_%d.txt", gDumpCount];
         [text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
     } @catch (NSException *e) {}
-    // 3) 后端 (失败忽略)
     @try {
         NSURL *u = [NSURL URLWithString:kUploadURL];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:u];
@@ -290,57 +269,51 @@ static void AMTransmit(NSString *text) {
     } @catch (NSException *e) {}
 }
 
-static void AMDumpPanel(id panelVC) {
+// ============ 采集 ============
+
+static void AMDumpPadVC(id vc, NSString *reason) {
     if (gDumpCount >= kMaxDumpsPerSession) return;
     NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-    static NSTimeInterval last = 0;
-    if (now - last < 2.0) return;
-    last = now;
+    if (now - gLastDumpAt < 1.2) return;
+    gLastDumpAt = now;
     gDumpCount++;
     gLog = [NSMutableString string];
-    gViewNodes = 0; gProbeDepth = 0;
+    gViewNodes = 0;
 
     @try {
-        AMLOG("=== MeowRotate3D recon dump #%d ===", gDumpCount);
-        AMLOG("panel=%@ base=%@", AMClsName(panelVC), AMClsName([(UIViewController *)panelVC superclass]));
+        AMLOG("=== MeowRotate3D v3 dump #%d (%@) ===", gDumpCount, reason);
+        AMLOG("vc=%@ base=%@", AMClsName(vc), AMClsName([(UIViewController *)vc superclass]));
 
-        // 1. 面板 VC 方法表 + ivar (带值)
-        [gLog appendFormat:@"\n=== panel class methods ===\n"];
-        AMDumpMethods([panelVC class], gLog);
-        [gLog appendString:@"\n=== panel ivars ===\n"];
-        AMDumpIvars(panelVC, gLog, YES);
+        AMDumpClassIfNew([vc class], gLog);
+        [gLog appendString:@"\n=== vc ivars (带值) ===\n"];
+        AMDumpIvars(vc, gLog, YES);
 
-        // 2. 视图树
+        [gLog appendString:@"\n=== child VCs ===\n"];
+        for (UIViewController *ch in [(UIViewController *)vc childViewControllers]) {
+            [gLog appendFormat:@"  child: %@ view=%@\n", AMClsName(ch), AMFrame(ch.view.frame)];
+            AMDumpClassIfNew([ch class], gLog);
+            AMDumpIvars(ch, gLog, YES);
+            AMProbeIvarObjects(ch, gLog, 0);
+        }
+
         gViewNodes = 0;
         [gLog appendString:@"\n=== view tree ===\n"];
-        AMDumpView([(UIViewController *)panelVC view], 0, gLog);
+        AMDumpView([(UIViewController *)vc view], 0, gLog);
 
-        // 3. 响应链
-        AMDumpChain(panelVC, gLog);
+        [gLog appendString:@"\n=== responder chain ===\n"];
+        int i = 0;
+        for (UIResponder *r = vc; r && i < 12; r = [r nextResponder], i++) {
+            [gLog appendFormat:@"  [%d] %@\n", i, AMClsName(r)];
+            if ([r isKindOfClass:[UIViewController class]]) AMDumpClassIfNew([r class], gLog);
+        }
 
-        // 4. KVC 探针 (面板自身 + 其 ivar 里的对象)
         [gLog appendString:@"\n=== KVC probes ===\n"];
         gProbeDepth = 0;
-        AMProbeKVC(panelVC, gLog, 0);
-        unsigned int cnt = 0;
-        Ivar *ivs = class_copyIvarList([panelVC class], &cnt);
-        for (unsigned int i = 0; i < cnt; i++) {
-            const char *ty = ivar_getTypeEncoding(ivs[i]);
-            if (!ty || ty[0] != '@') continue;
-            @try {
-                id v = object_getIvar(panelVC, ivs[i]);
-                if (v && ![v isKindOfClass:[UIView class]] && ![v isKindOfClass:[NSString class]]) {
-                    gProbeDepth = 0;
-                    AMProbeKVC(v, gLog, 0);
-                }
-            } @catch (NSException *e) {}
-        }
-        if (ivs) free(ivs);
+        AMProbeKVC(vc, gLog, 0);
+        AMProbeIvarObjects(vc, gLog, 0);
 
-        // 5. 相关类方法表扫描
-        AMDumpRelatedClasses(gLog);
-
-        [gLog appendFormat:@"\n=== end dump #%d (%lu chars) ===\n", gDumpCount, (unsigned long)gLog.length];
+        [gLog appendFormat:@"\n=== end dump #%d (%lu chars, unique %lu) ===\n",
+            gDumpCount, (unsigned long)gLog.length, (unsigned long)gDumpedClasses.count];
     } @catch (NSException *e) {
         AMLOG("!!! dump exception: %@ %@", e.name, e.reason);
     }
@@ -349,46 +322,103 @@ static void AMDumpPanel(id panelVC) {
     gLog = nil;
     NSLog(@"[Meow3D]\n%@", text);
     AMTransmit(text);
-    AMShowHUD([NSString stringWithFormat:@"猫鹤3D: 已采集 #%d (%lu 字符, 已进剪贴板)", gDumpCount, (unsigned long)text.length]);
+    AMShowHUD([NSString stringWithFormat:@"猫鹤3D: #%d %@ (%lu字符, 已进剪贴板)",
+        gDumpCount, AMClsName(vc), (unsigned long)text.length]);
 }
 
-// ============ hooks ============
-
-static void hook_viewDidAppear(id self, SEL _cmd, BOOL animated) {
-    if (orig_viewDidAppear) ((void(*)(id,SEL,BOOL))orig_viewDidAppear)(self, _cmd, animated);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        AMDumpPanel(self);
+static void AMHookPadVCNow(id vc) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        AMDumpPadVC(vc, @"页面出现");
     });
 }
 
-static void hook_viewWillAppear(id self, SEL _cmd, BOOL animated) {
-    if (orig_viewWillAppear) ((void(*)(id,SEL,BOOL))orig_viewWillAppear)(self, _cmd, animated);
-    // 出现前先记一笔 (有些面板每次进入会重建)
-    NSLog(@"[Meow3D] panel willAppear: %@", AMClsName(self));
+// 为没有自己实现的类补一个调用 super 的方法
+static void added_viewDidAppear(id self, SEL _cmd, BOOL anim) {
+    struct objc_super sup = { self, class_getSuperclass([self class]) };
+    ((void(*)(struct objc_super *, SEL, BOOL))objc_msgSendSuper)(&sup, @selector(viewDidAppear:), anim);
+    AMHookPadVCNow(self);
+}
+static void added_viewWillAppear(id self, SEL _cmd, BOOL anim) {
+    struct objc_super sup = { self, class_getSuperclass([self class]) };
+    ((void(*)(struct objc_super *, SEL, BOOL))objc_msgSendSuper)(&sup, @selector(viewWillAppear:), anim);
+    AMHookPadVCNow(self);
+}
+static void added_viewDidLoad(id self, SEL _cmd) {
+    struct objc_super sup = { self, class_getSuperclass([self class]) };
+    ((void(*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, @selector(viewDidLoad));
+    AMHookPadVCNow(self);
 }
 
-// ============ 安装 ============
+static void AMHookOnePadClass(Class c) {
+    if (!c) return;
+    NSString *nm = NSStringFromClass(c);
+    NSString *hkey = [@"HOOKED:" stringByAppendingString:nm];
+    if (gDumpedClasses[hkey]) return;
+    [gDumpedClasses setObject:@YES forKey:hkey];
+
+    // 替换式: 类有自己的实现就替换(用 imp_implementationWithBlock 保住原实现)
+    SEL sel1 = @selector(viewDidAppear:);
+    Method m = class_getInstanceMethod(c, sel1);
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        IMP hook = imp_implementationWithBlock(^(id self, BOOL anim) {
+            ((void(*)(id, SEL, BOOL))orig)(self, sel1, anim);
+            AMHookPadVCNow(self);
+        });
+        method_setImplementation(m, hook);
+        NSLog(@"[Meow3D] hooked(替换) %@ viewDidAppear:", nm);
+        return;
+    }
+    SEL sel2 = @selector(viewWillAppear:);
+    m = class_getInstanceMethod(c, sel2);
+    if (m) {
+        IMP orig = method_getImplementation(m);
+        IMP hook = imp_implementationWithBlock(^(id self, BOOL anim) {
+            ((void(*)(id, SEL, BOOL))orig)(self, sel2, anim);
+            AMHookPadVCNow(self);
+        });
+        method_setImplementation(m, hook);
+        NSLog(@"[Meow3D] hooked(替换) %@ viewWillAppear:", nm);
+        return;
+    }
+    // 补充式: 没有自己的实现 -> class_addMethod 调 super
+    if (class_addMethod(c, @selector(viewDidAppear:), (IMP)added_viewDidAppear, "v@:@c")) {
+        NSLog(@"[Meow3D] hooked(补) %@ viewDidAppear:", nm);
+        return;
+    }
+    if (class_addMethod(c, @selector(viewWillAppear:), (IMP)added_viewWillAppear, "v@:@c")) {
+        NSLog(@"[Meow3D] hooked(补) %@ viewWillAppear:", nm);
+        return;
+    }
+    if (class_addMethod(c, @selector(viewDidLoad), (IMP)added_viewDidLoad, "v@:")) {
+        NSLog(@"[Meow3D] hooked(补) %@ viewDidLoad", nm);
+    }
+}
 
 static void AMInstall(void) {
     if (gInstalled) return;
     gInstalled = YES;
+    gDumpedClasses = [NSMutableDictionary new];
 
-    Class panel = NSClassFromString(@"_TtC12AlightMotion23MoveAndTransformPanelVC");
-    if (!panel) panel = AMFindClassBySubstring(@"MoveAndTransformPanelVC");
-    NSLog(@"[Meow3D] panel class = %@", panel);
-
-    if (panel) {
-        Method m1 = class_getInstanceMethod(panel, @selector(viewDidAppear:));
-        if (m1) { orig_viewDidAppear = method_getImplementation(m1); method_setImplementation(m1, (IMP)hook_viewDidAppear); }
-        Method m2 = class_getInstanceMethod(panel, @selector(viewWillAppear:));
-        if (m2) { orig_viewWillAppear = method_getImplementation(m2); method_setImplementation(m2, (IMP)hook_viewWillAppear); }
+    unsigned int n = 0;
+    Class *classes = objc_copyClassList(&n);
+    int hooked = 0;
+    for (unsigned int i = 0; i < n; i++) {
+        NSString *nm = NSStringFromClass(classes[i]);
+        if (!AMIsModuleClass(nm)) continue;
+        BOOL isPad = [nm hasSuffix:@"PadVC"] || [nm hasSuffix:@"PanelVC"] ||
+                     [nm containsString:@"RotationPad"] || [nm containsString:@"TransformPanel"];
+        if (!isPad) continue;
+        AMHookOnePadClass(classes[i]);
+        hooked++;
     }
-    NSLog(@"[Meow3D] installed. dumps capped at %d", kMaxDumpsPerSession);
+    free(classes);
+    NSLog(@"[Meow3D] installed v3: hooked %d pad/panel classes", hooked);
 }
 
 __attribute__((constructor))
 static void MeowRotate3DInit(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try { AMInstall(); } @catch (NSException *e) { NSLog(@"[Meow3D] install exception %@", e); }
     });
 }
