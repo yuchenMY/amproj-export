@@ -20580,20 +20580,22 @@ static void AMProjExportInit(void) {
             }
             static NSDate *lastDependencyRestore = nil;
             if (!lastDependencyRestore ||
-                [NSDate.date timeIntervalSinceDate:lastDependencyRestore] > 10.0) {
+                [NSDate.date timeIntervalSinceDate:lastDependencyRestore] > 5.0) {
                 lastDependencyRestore = NSDate.date;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                    (int64_t)(2.0 * NSEC_PER_SEC)),
+                    (int64_t)(1.0 * NSEC_PER_SEC)),
                     dispatch_get_main_queue(), ^{
                         amproj_restoreDependencies();
                     });
             }
+            // 10 秒一轮：孤儿清理可能在会话中途吃掉依赖文件（音频层引用的
+            // 文件缺席 = 播放没声），恢复窗口要小于用户可感知的间隔。
             static dispatch_once_t restoreTimerToken;
             dispatch_once(&restoreTimerToken, ^{
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                    (int64_t)(45.0 * NSEC_PER_SEC)),
+                    (int64_t)(10.0 * NSEC_PER_SEC)),
                     dispatch_get_main_queue(), ^{
-                        [NSTimer scheduledTimerWithTimeInterval:45.0
+                        [NSTimer scheduledTimerWithTimeInterval:10.0
                             target:[AMProjRestoreTimerProxy sharedProxy]
                             selector:@selector(restore)
                             userInfo:nil repeats:YES];
