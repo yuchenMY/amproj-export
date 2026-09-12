@@ -1461,6 +1461,10 @@ static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionar
     NSUInteger validCount = 0;
     NSUInteger eligibleCount = 0;
     NSArray<NSURL *> *candidates = amproj_expandXMLCandidates(roots);
+    NSString *normalizedExpectedTitle = amproj_normalizedProjectTitle(
+        expected[@"title"]);
+    // 宽松兜底层用的探测缓存：{url, data, probe, modified, titleMatches}。
+    NSMutableArray<NSDictionary *> *probed = [NSMutableArray array];
     for (NSURL *URL in candidates) {
         NSNumber *size = nil;
         NSDate *modified = nil;
@@ -1481,7 +1485,6 @@ static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionar
         if (layersKnown && probe.layerCount != expectedLayers) continue;
 
         NSString *expectedTitle = expected[@"title"];
-        NSString *normalizedExpectedTitle = amproj_normalizedProjectTitle(expectedTitle);
         NSString *normalizedProbeTitle = amproj_normalizedProjectTitle(probe.title);
         BOOL titleMatches = normalizedExpectedTitle.length &&
             [normalizedProbeTitle isEqualToString:normalizedExpectedTitle];
@@ -1507,6 +1510,37 @@ static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionar
                       @"modified": modified ?: NSDate.distantPast, @"score": @(score)};
         } else if (score == bestScore && fabs(modifiedTime - bestModified) <= 1.0) {
             ambiguous = YES;
+        }
+        [probed addObject:@{ @"data": data, @"url": URL, @"probe": probe,
+            @"modified": modified ?: NSDate.distantPast,
+            @"titleMatches": @(titleMatches) }];
+    }
+    if (!best && probed.count) {
+        // 分发设备实测：分享页标题未必捕获得到、工程也未必在导出前重存，
+        // 严格匹配会全军覆没。兜底：标题匹配的最新工程；无标题时取最新
+        // 的有效工程 XML（同标题多副本时选最近使用的）。
+        NSArray<NSDictionary *> *pool = normalizedExpectedTitle.length
+            ? [probed filteredArrayUsingPredicate:
+                  [NSPredicate predicateWithFormat:@"titleMatches == YES"]]
+            : probed;
+        if (!pool.count) pool = probed;
+        NSDictionary *fallback = nil;
+        NSTimeInterval fallbackModified = -DBL_MAX;
+        for (NSDictionary *entry in pool) {
+            NSDate *modified = entry[@"modified"];
+            if (modified.timeIntervalSince1970 > fallbackModified) {
+                fallbackModified = modified.timeIntervalSince1970;
+                fallback = entry;
+            }
+        }
+        if (fallback) {
+            amproj_debugEvent(@"direct.native_xml_fallback", @{
+                @"tier": normalizedExpectedTitle.length ? @"title_newest" : @"newest",
+                @"pool": @(pool.count)
+            });
+            best = @{ @"data": fallback[@"data"], @"url": fallback[@"url"],
+                      @"probe": fallback[@"probe"],
+                      @"modified": fallback[@"modified"], @"score": @0 };
         }
     }
     amproj_debugEvent(@"direct.native_xml_candidates", @{
