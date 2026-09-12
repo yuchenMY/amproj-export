@@ -19632,10 +19632,39 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
     if (orig_alertAddAction) orig_alertAddAction(self, _cmd, action);
 }
 
+// 不透明度滑条锁回 0-100%：865 的自定义 OpacitySlider 会被工程数据撑开
+// 范围（出现 100.3%、-0.5% 这类越界值）。最大值一律夹回 1.0（=100%），
+// UISlider 在 max 收紧时会自动把当前值夹回界内。
+static void (*orig_opacitySliderSetMaximum)(id, SEL, CGFloat) = NULL;
+
+static void hooked_opacitySliderSetMaximum(id self, SEL _cmd,
+                                           CGFloat maximumValue) {
+    if (orig_opacitySliderSetMaximum) {
+        orig_opacitySliderSetMaximum(self, _cmd, MIN(maximumValue, 1.0));
+    }
+}
+
+static void amproj_installOpacitySliderClamp(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class sliderClass = objc_getClass("_TtC12AlightMotion13OpacitySlider");
+        if (!sliderClass) sliderClass = objc_getClass("AlightMotion.OpacitySlider");
+        if (!sliderClass) return;
+        Method method = class_getInstanceMethod(sliderClass,
+            NSSelectorFromString(@"setMaximumValue:"));
+        if (!method) return;
+        orig_opacitySliderSetMaximum =
+            (void (*)(id, SEL, CGFloat))method_setImplementation(
+                method, (IMP)hooked_opacitySliderSetMaximum);
+        NSLog(@"[AMProjExport] opacity slider clamped to 0-100%");
+    });
+}
+
 static void amproj_installPresentationHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing presentation filter");
+        amproj_installOpacitySliderClamp();
         @try {
             Method method = class_getInstanceMethod(
                 [UIViewController class],
