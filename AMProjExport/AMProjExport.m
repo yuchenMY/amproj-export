@@ -19633,14 +19633,27 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
 }
 
 // 不透明度滑条锁回 0-100%：865 的自定义 OpacitySlider 会被工程数据撑开
-// 范围（出现 100.3%、-0.5% 这类越界值）。最大值一律夹回 1.0（=100%），
-// UISlider 在 max 收紧时会自动把当前值夹回界内。
+// 范围（出现 100.3%、-0.5% 这类越界值）。只夹"小幅越界"（max 顶到
+// 1.0-1.1、min 落在 -0.1-0），不碰音量滑条的 0-200% 量程（max≈2.0）——
+// 音量与不透明度共用 OpacitySlider 类，r48 的一刀切钳制把音量卡死在 100。
 static void (*orig_opacitySliderSetMaximum)(id, SEL, CGFloat) = NULL;
+static void (*orig_opacitySliderSetMinimum)(id, SEL, CGFloat) = NULL;
 
 static void hooked_opacitySliderSetMaximum(id self, SEL _cmd,
                                            CGFloat maximumValue) {
+    CGFloat clamped = maximumValue;
+    if (clamped > 1.0 && clamped <= 1.1) clamped = 1.0;
     if (orig_opacitySliderSetMaximum) {
-        orig_opacitySliderSetMaximum(self, _cmd, MIN(maximumValue, 1.0));
+        orig_opacitySliderSetMaximum(self, _cmd, clamped);
+    }
+}
+
+static void hooked_opacitySliderSetMinimum(id self, SEL _cmd,
+                                           CGFloat minimumValue) {
+    CGFloat clamped = minimumValue;
+    if (clamped < 0.0 && clamped >= -0.1) clamped = 0.0;
+    if (orig_opacitySliderSetMinimum) {
+        orig_opacitySliderSetMinimum(self, _cmd, clamped);
     }
 }
 
@@ -19650,13 +19663,21 @@ static void amproj_installOpacitySliderClamp(void) {
         Class sliderClass = objc_getClass("_TtC12AlightMotion13OpacitySlider");
         if (!sliderClass) sliderClass = objc_getClass("AlightMotion.OpacitySlider");
         if (!sliderClass) return;
-        Method method = class_getInstanceMethod(sliderClass,
+        Method maxMethod = class_getInstanceMethod(sliderClass,
             NSSelectorFromString(@"setMaximumValue:"));
-        if (!method) return;
-        orig_opacitySliderSetMaximum =
-            (void (*)(id, SEL, CGFloat))method_setImplementation(
-                method, (IMP)hooked_opacitySliderSetMaximum);
-        NSLog(@"[AMProjExport] opacity slider clamped to 0-100%");
+        if (maxMethod) {
+            orig_opacitySliderSetMaximum =
+                (void (*)(id, SEL, CGFloat))method_setImplementation(
+                    maxMethod, (IMP)hooked_opacitySliderSetMaximum);
+        }
+        Method minMethod = class_getInstanceMethod(sliderClass,
+            NSSelectorFromString(@"setMinimumValue:"));
+        if (minMethod) {
+            orig_opacitySliderSetMinimum =
+                (void (*)(id, SEL, CGFloat))method_setImplementation(
+                    minMethod, (IMP)hooked_opacitySliderSetMinimum);
+        }
+        NSLog(@"[AMProjExport] opacity slider drift clamp installed");
     });
 }
 
