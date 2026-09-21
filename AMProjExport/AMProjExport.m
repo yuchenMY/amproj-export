@@ -2641,6 +2641,18 @@ static NSURL* amproj_createOutputURL(NSString *title, NSError **error) {
 
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error);
 
+// 外围导出拦截时 request.presenter 可能仍在呈现原生导出面板（ShareVC 的
+// present 还没收尾），或早已被用户关闭；对它直接 present 会抛 "Attempt to
+// present ... while a presentation is in progress" 之类的 UIKit 异常，进程
+// 直接闪退。呈现失败弹窗/分享面板前一律换到 keyWindow 最顶层可见控制器。
+static UIViewController *amproj_safeDirectPresenter(UIViewController *preferred) {
+    UIViewController *top = amproj_topViewController(preferred);
+    if (top && top.viewIfLoaded.window) return top;
+    top = amproj_topViewController(amproj_keyWindow().rootViewController);
+    if (top && top.viewIfLoaded.window) return top;
+    return preferred;
+}
+
 #if AMPROJ_CLOUD_SYNC
 static UIViewController *amproj_visibleCloudUploadPresenter(
     UIViewController *preferred) {
@@ -2694,7 +2706,7 @@ static void amproj_presentDirectShare(AMProjDirectRequest *request, NSURL *fileU
         if (amproj_directRequest != request) return;
         amproj_setPersistentStage(@"activity_init");
         request.outputURL = fileURL;
-        UIViewController *presenter = request.presenter;
+        UIViewController *presenter = amproj_safeDirectPresenter(request.presenter);
         void (^presentShare)(void) = ^{
             if (!presenter) {
                 amproj_finishDirectFailure(request, amproj_directError(40, @"Export presenter is no longer available"));
@@ -3060,7 +3072,8 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
         void (^showFailure)(void) = ^{
             amproj_directRequest = nil;
             amproj_finishDirectFlow(@"failed");
-            if (!presenter) return;
+            UIViewController *safePresenter = amproj_safeDirectPresenter(presenter);
+            if (!safePresenter) return;
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"无法生成 .amproj"
                 message:error.localizedDescription ?: @"项目数据验证失败。"
                 preferredStyle:UIAlertControllerStyleAlert];
@@ -3068,16 +3081,24 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
                 handler:^(__unused UIAlertAction *action) {
                     if (uploadToCloud) {
 #if AMPROJ_CLOUD_SYNC
-                        amproj_startCloudUpload(presenter, projectTitle);
+                        amproj_startCloudUpload(safePresenter, projectTitle);
 #endif
                     } else {
                         amproj_startDirectExport(
-                            presenter, originalController, animated,
+                            safePresenter, originalController, animated,
                             originalCompletion, projectTitle);
                     }
                 }]];
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-            orig_presentVC(presenter, @selector(presentViewController:animated:completion:), alert, YES, nil);
+            @try {
+                orig_presentVC(safePresenter, @selector(presentViewController:animated:completion:), alert, YES, nil);
+            } @catch (NSException *exception) {
+                // 弹窗只是失败的可视化，呈现不了也不能带走进程。
+                amproj_logCriticalEvent(@"direct.failure_alert_exception", @{
+                    @"name": exception.name ?: @"NSException",
+                    @"reason": exception.reason ?: @""
+                });
+            }
         };
         if (request.progressAlert.presentingViewController) {
             [request.progressAlert dismissViewControllerAnimated:NO completion:showFailure];
@@ -10682,30 +10703,69 @@ static NSURL *amproj_v865StoreLibraryURL(void) {
 
 // app 会把"它不认识的项目"引用的依赖文件当孤儿清掉（r36 实测：导入时
 // verified=1 全部在位，打开项目时只剩原生文件）。依赖文件一律双写：
-// project-dependencies 给加载器用，amproj-deps-backup 留底；每次激活对账
-// 补回被清掉的文件。
+// project-dependencies 给加载器用，amproj-deps-backup 留底；后台对账周期
+// 补回被清掉的文件，并把 app 自写的依赖（录音、后配音频）补进留底。
+static NSURL *amproj_v865DependencyStoreURL(void) {
+    return [amproj_v865StoreLibraryURL()
+        URLByAppendingPathComponent:@"project-dependencies" isDirectory:YES];
+}
+
 static NSURL *amproj_v865DependencyBackupURL(void) {
     return [amproj_v865StoreLibraryURL()
         URLByAppendingPathComponent:@"amproj-deps-backup" isDirectory:YES];
 }
 
-static void amproj_restoreDependencies(void) {
-    static BOOL running = NO;
-    if (running) return;
-    running = YES;
+// 工程体量可达数十 MB 文本，全量扫描绝不能上主线程：r50 曾把对账排在主
+// 队列（激活后 1s + 每 10s 一轮），启动即同步读全部工程 XML，主线程冻结
+// 十余秒——启动白屏、界面卡死直至被系统或用户杀掉（外围导出"闪退"）。
+static dispatch_queue_t amproj_dependencyQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.amproj.dependency-reconcile",
+                                      DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+// 被任一工程 XML 引用的依赖文件名名单，供 NSFileManager 删除 veto 查询。
+static NSLock *amproj_dependencyProtectionLock(void) {
+    static NSLock *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSLock new]; });
+    return lock;
+}
+
+static NSMutableSet<NSString *> *amproj_protectedDependencyNames(void) {
+    static NSMutableSet<NSString *> *names;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ names = [NSMutableSet set]; });
+    return names;
+}
+
+static BOOL amproj_dependencyNameIsProtected(NSString *name) {
+    if (!name.length) return NO;
+    NSLock *lock = amproj_dependencyProtectionLock();
+    [lock lock];
+    BOOL hit = [amproj_protectedDependencyNames() containsObject:name];
+    [lock unlock];
+    return hit;
+}
+
+static void amproj_reconcileDependencies(void) {
     @try {
         NSFileManager *manager = NSFileManager.defaultManager;
         NSURL *library = amproj_v865StoreLibraryURL();
-        NSURL *dependencies = [library
-            URLByAppendingPathComponent:@"project-dependencies"
-                          isDirectory:YES];
+        NSURL *dependencies = amproj_v865DependencyStoreURL();
         NSURL *backup = amproj_v865DependencyBackupURL();
         NSArray<NSURL *> *xmls = [manager contentsOfDirectoryAtURL:library
             includingPropertiesForKeys:nil options:0 error:nil];
         NSMutableSet<NSString *> *needed = [NSMutableSet set];
+        NSMutableSet<NSString *> *referenced = [NSMutableSet set];
+        // 与导入校验一致的宽松引用模式：凡 am-internal:/// 引用都纳入对账，
+        // 命名格式漂移（哈希长度、扩展名字符集）不致漏保。
         NSRegularExpression *regex = [NSRegularExpression
-            regularExpressionWithPattern:
-                @"am-internal:///([A-Fa-f0-9]{40}\\.[A-Za-z0-9]+)\""
+            regularExpressionWithPattern:@"am-internal:///([^\"]+)\""
                                  options:0 error:nil];
         for (NSURL *url in xmls) {
             if (![url.pathExtension.lowercaseString isEqualToString:@"xml"]) continue;
@@ -10715,16 +10775,22 @@ static void amproj_restoreDependencies(void) {
             if (!text.length) continue;
             for (NSTextCheckingResult *match in [regex matchesInString:text
                 options:0 range:NSMakeRange(0, text.length)]) {
-                [needed addObject:[text substringWithRange:[match rangeAtIndex:1]]
-                    .uppercaseString];
+                NSString *name = [text substringWithRange:[match rangeAtIndex:1]];
+                [referenced addObject:name];
+                [needed addObject:name.uppercaseString];
             }
         }
+        // 先发布保护名单再动手恢复，删除 veto 尽早生效。
+        NSLock *lock = amproj_dependencyProtectionLock();
+        [lock lock];
+        [amproj_protectedDependencyNames() setSet:referenced];
+        [lock unlock];
         if (!needed.count) return;
         [manager createDirectoryAtURL:dependencies
           withIntermediateDirectories:YES attributes:nil error:nil];
         [manager createDirectoryAtURL:backup
           withIntermediateDirectories:YES attributes:nil error:nil];
-        NSUInteger restored = 0, missingBackup = 0;
+        NSUInteger restored = 0, missingBackup = 0, reBackedUp = 0;
         NSMutableSet<NSString *> *backupNames = [NSMutableSet set];
         for (NSURL *url in [manager contentsOfDirectoryAtURL:backup
             includingPropertiesForKeys:nil options:0 error:nil]) {
@@ -10751,16 +10817,48 @@ static void amproj_restoreDependencies(void) {
                 [manager removeItemAtURL:temporary error:nil];
             }
         }
-        os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency restore needed=%lu "
-               "restored=%lu missing_backup=%lu",
+        // 反向对账：app 自写的依赖（项目内录音、后配音频）不在导入留底里，
+        // 孤儿清理一吃就永久消失（恢复周期再快也无处可恢复）。趁文件还在时
+        // 补进备份，之后清理再动手也能对账还原。
+        for (NSString *name in needed) {
+            if ([backupNames containsObject:name]) continue;
+            NSURL *live = [dependencies URLByAppendingPathComponent:name];
+            if (![manager fileExistsAtPath:live.path]) continue;
+            NSURL *temporary = [backup URLByAppendingPathComponent:
+                [NSString stringWithFormat:@".%@.%@.backup", name,
+                 NSUUID.UUID.UUIDString]];
+            [manager removeItemAtURL:temporary error:nil];
+            if ([manager copyItemAtURL:live toURL:temporary error:nil] &&
+                [manager moveItemAtURL:temporary
+                    toURL:[backup URLByAppendingPathComponent:name]
+                    error:nil]) {
+                reBackedUp++;
+            } else {
+                [manager removeItemAtURL:temporary error:nil];
+            }
+        }
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency reconcile "
+               "needed=%lu restored=%lu missing_backup=%lu rebacked=%lu "
+               "protected=%lu",
                (unsigned long)needed.count, (unsigned long)restored,
-               (unsigned long)missingBackup);
+               (unsigned long)missingBackup, (unsigned long)reBackedUp,
+               (unsigned long)referenced.count);
     } @catch (NSException *exception) {
-        os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency restore exception: "
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency reconcile exception: "
                "%{public}@", exception.reason ?: @"");
-    } @finally {
-        running = NO;
     }
+}
+
+static void amproj_scheduleDependencyReconcile(void) {
+    static BOOL reconcileQueued = NO;  // 调用方都在主线程（激活通知 + 定时器）
+    if (reconcileQueued) return;
+    reconcileQueued = YES;
+    dispatch_async(amproj_dependencyQueue(), ^{
+        amproj_reconcileDependencies();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            reconcileQueued = NO;
+        });
+    });
 }
 
 // NSTimer 的 target 会被强持有，用单例代理避免把大上下文挂在定时器上。
@@ -10777,7 +10875,7 @@ static void amproj_restoreDependencies(void) {
     return proxy;
 }
 - (void)restore {
-    amproj_restoreDependencies();
+    amproj_scheduleDependencyReconcile();
 }
 @end
 
@@ -19691,6 +19789,100 @@ static void hooked_opacitySliderSetMinimum(id self, SEL _cmd,
     }
 }
 
+// ── 依赖文件删除保护 ─────────────────────────────────────────
+// 孤儿清理（打开项目时触发，r36 实测）会把导入工程引用的依赖文件当孤儿
+// 删掉，音频/媒体随之失效。对 NSFileManager 的删除入口做源头拦截：凡
+// project-dependencies 下被任一工程 XML 引用的文件一律拒绝删除；名单由
+// 后台对账（amproj_reconcileDependencies）周期刷新，未引用的孤儿照常放行，
+// 磁盘不堆积。
+static BOOL (*orig_removeItemAtPath)(id, SEL, NSString *, NSError **) = NULL;
+static BOOL (*orig_removeItemAtURL)(id, SEL, NSURL *, NSError **) = NULL;
+
+static BOOL amproj_shouldVetoDependencyRemoval(NSString *path) {
+    if (!path.length) return NO;
+    static NSString *dependenciesPath = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dependenciesPath = [amproj_v865DependencyStoreURL() path];
+    });
+    if (!dependenciesPath.length) return NO;
+    if (![path isEqualToString:dependenciesPath] &&
+        ![path hasPrefix:[dependenciesPath stringByAppendingString:@"/"]]) {
+        return NO;
+    }
+    NSString *name = path.lastPathComponent;
+    // 隐藏文件是对账用的 .restore/.partial 临时件，放行。
+    if (!name.length || [name hasPrefix:@"."]) return NO;
+    if (!amproj_dependencyNameIsProtected(name) &&
+        !amproj_dependencyNameIsProtected(name.uppercaseString)) {
+        return NO;
+    }
+    os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency removal vetoed: %{public}@",
+           name);
+    return YES;
+}
+
+static void amproj_vetoDependencyRemovalError(NSString *path, NSError **error) {
+    if (!error) return;
+    *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                 code:NSFileWriteNoPermissionError
+                             userInfo:@{NSFilePathErrorKey: path ?: @"",
+                                        NSLocalizedDescriptionKey:
+                                        @"Dependency file is referenced by a stored project"}];
+}
+
+static BOOL hooked_removeItemAtPath(id self, SEL _cmd, NSString *path,
+                                    NSError **error) {
+    if (amproj_shouldVetoDependencyRemoval(path)) {
+        amproj_vetoDependencyRemovalError(path, error);
+        return NO;
+    }
+    return orig_removeItemAtPath(self, _cmd, path, error);
+}
+
+static BOOL hooked_removeItemAtURL(id self, SEL _cmd, NSURL *URL,
+                                   NSError **error) {
+    if (amproj_shouldVetoDependencyRemoval(URL.path)) {
+        amproj_vetoDependencyRemovalError(URL.path, error);
+        return NO;
+    }
+    return orig_removeItemAtURL(self, _cmd, URL, error);
+}
+
+static void amproj_installDependencyProtection(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        @try {
+            Method removePath = class_getInstanceMethod(
+                [NSFileManager class], @selector(removeItemAtPath:error:));
+            if (removePath) {
+                IMP previous = amproj_installMethodHook(
+                    removePath, (IMP)hooked_removeItemAtPath, 4,
+                    @"NSFileManager.removeItemAtPath");
+                if (previous) {
+                    orig_removeItemAtPath = (BOOL (*)(id, SEL, NSString *,
+                                                      NSError **))previous;
+                }
+            }
+            Method removeURL = class_getInstanceMethod(
+                [NSFileManager class], @selector(removeItemAtURL:error:));
+            if (removeURL) {
+                IMP previous = amproj_installMethodHook(
+                    removeURL, (IMP)hooked_removeItemAtURL, 4,
+                    @"NSFileManager.removeItemAtURL");
+                if (previous) {
+                    orig_removeItemAtURL = (BOOL (*)(id, SEL, NSURL *,
+                                                     NSError **))previous;
+                }
+            }
+            NSLog(@"[AMProjExport] dependency removal protection installed");
+        } @catch (NSException *exception) {
+            NSLog(@"[AMProjExport] dependency protection hook failed: %@",
+                  exception);
+        }
+    });
+}
+
 static void amproj_installOpacitySliderClamp(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -19751,6 +19943,7 @@ static void amproj_installExportHooks(void) {
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing export hooks after app launch");
         amproj_installPresentationHook();
+        amproj_installDependencyProtection();
         if (amproj_runtimeIsBuild865()) {
             // Keep only the public presentation hook and the navigation
             // semantic boundary above. The latter handles the exact 865
@@ -20578,18 +20771,19 @@ static void AMProjExportInit(void) {
             } else {
                 amproj_log865LegacyPathDisabled(@"did_become_active_import_replay");
             }
-            static NSDate *lastDependencyRestore = nil;
-            if (!lastDependencyRestore ||
-                [NSDate.date timeIntervalSinceDate:lastDependencyRestore] > 5.0) {
-                lastDependencyRestore = NSDate.date;
+            static NSDate *lastDependencyReconcile = nil;
+            if (!lastDependencyReconcile ||
+                [NSDate.date timeIntervalSinceDate:lastDependencyReconcile] > 5.0) {
+                lastDependencyReconcile = NSDate.date;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                     (int64_t)(1.0 * NSEC_PER_SEC)),
                     dispatch_get_main_queue(), ^{
-                        amproj_restoreDependencies();
+                        amproj_scheduleDependencyReconcile();
                     });
             }
             // 10 秒一轮：孤儿清理可能在会话中途吃掉依赖文件（音频层引用的
-            // 文件缺席 = 播放没声），恢复窗口要小于用户可感知的间隔。
+            // 文件缺席 = 播放没声），恢复窗口要小于用户可感知的间隔。对账在
+            // 专用串行后台队列执行，主线程只做入队。
             static dispatch_once_t restoreTimerToken;
             dispatch_once(&restoreTimerToken, ^{
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
