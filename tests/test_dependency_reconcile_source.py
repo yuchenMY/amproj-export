@@ -86,6 +86,34 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         share = share[:share.index("static void amproj_writeDirectArchive(")]
         self.assertIn("amproj_safeDirectPresenter(request.presenter)", share)
 
+    def test_opacity_clamp_is_gated_by_positive_ownership(self):
+        # 音量（EditVolumePanelVC 的 volumeSlider，0-200%）与不透明度共用
+        # OpacitySlider，且 BlendOpacityPanelCell 会被复用给音量行：按类名
+        # 子串识别必误伤。钳制必须由属性标识/标签正向确认不透明度归属后才
+        # 生效；音量与识别不了的一律放行（音量 0-200% 不能再被卡在 100）。
+        region = EXPORT[EXPORT.index("typedef NS_ENUM(NSUInteger, AMProjSharedSliderRole) {"):]
+        region = region[:region.index("static void hooked_opacitySliderSetMaximum(")]
+        self.assertIn('valueForKey:@"volumeSlider"', region)
+        self.assertIn('valueForKey:@"opacitySlider"', region)
+        self.assertIn("AMProjSharedSliderRoleUnknown", region)
+        self.assertIn("音量", region)
+        self.assertNotIn("containsString:@\"BlendOpacityPanel\"", region)
+        hooks = EXPORT[EXPORT.index("static void hooked_opacitySliderSetMaximum("):]
+        hooks = hooks[:hooks.index("static void amproj_installOpacitySliderClamp(void) {")]
+        self.assertEqual(
+            hooks.count(
+                "amproj_sharedSliderRole(self) == AMProjSharedSliderRoleBlendOpacity"),
+            2, "max/min 两个钩子都必须按正向归属钳制")
+
+    def test_gate_takeover_dismiss_is_exception_guarded(self):
+        # 分发设备的登录墙接管是独有路径：dismiss 撞上进行中的过渡会同步抛
+        # 异常，接管后的导出呈现也必须走安全 presenter。
+        takeover = EXPORT[EXPORT.index("static void AMProjScheduleGateTakeover("):]
+        takeover = takeover[:takeover.index("static void hooked_alertAddAction(")]
+        self.assertIn("@try", takeover)
+        self.assertIn("direct.865_takeover_dismiss_exception", takeover)
+        self.assertIn("amproj_safeDirectPresenter(presenter)", takeover)
+
 
 if __name__ == "__main__":
     unittest.main()

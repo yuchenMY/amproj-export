@@ -19726,11 +19726,27 @@ static void AMProjScheduleGateTakeover(UIAlertController *alert) {
             ![normalizedOnScreen isEqualToString:normalizedExpected]) return;
         amproj_logCriticalEvent(@"direct.865_login_wall_takeover", @{});
         UIViewController *presenter = top.presentingViewController ?: top;
-        [presenter dismissViewControllerAnimated:YES completion:^{
+        void (^startExport)(void) = ^{
             NSString *exportTitle =
                 amproj_currentProjectTitle(presenter) ?: @"";
-            amproj_startDirectExport(presenter, nil, YES, nil, exportTitle);
-        }];
+            // 弹出侧的呈现走安全 presenter：接管完成时原 presenter 可能正
+            // 处在 dismiss 过渡里，直接 present 会抛 UIKit 异常闪退。
+            UIViewController *exportPresenter =
+                amproj_safeDirectPresenter(presenter);
+            amproj_startDirectExport(exportPresenter, nil, YES, nil,
+                                    exportTitle);
+        };
+        @try {
+            [presenter dismissViewControllerAnimated:YES
+                                          completion:startExport];
+        } @catch (NSException *exception) {
+            // dismiss 撞上进行中的过渡会同步抛异常；墙反正要关，直接走导出。
+            amproj_logCriticalEvent(@"direct.865_takeover_dismiss_exception", @{
+                @"name": exception.name ?: @"NSException",
+                @"reason": exception.reason ?: @""
+            });
+            startExport();
+        }
     };
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                  (int64_t)(0.25 * NSEC_PER_SEC)),
@@ -19764,17 +19780,73 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
     if (orig_alertAddAction) orig_alertAddAction(self, _cmd, action);
 }
 
-// 不透明度滑条锁回 0-100%：865 的自定义 OpacitySlider 会被工程数据撑开
-// 范围（出现 100.3%、-0.5% 这类越界值）。只夹"小幅越界"（max 顶到
-// 1.0-1.1、min 落在 -0.1-0），不碰音量滑条的 0-200% 量程（max≈2.0）——
-// 音量与不透明度共用 OpacitySlider 类，r48 的一刀切钳制把音量卡死在 100。
-static void (*orig_opacitySliderSetMaximum)(id, SEL, CGFloat) = NULL;
-static void (*orig_opacitySliderSetMinimum)(id, SEL, CGFloat) = NULL;
+// OpacitySlider 是共享控件：混合不透明度（BlendOpacityPanelVC/InspectorVC/
+// BlendOpacityPanelCell）与音量（EditVolumePanelVC 的 volumeSlider，0-200%）
+// 都用它，且 app 会按当前值动态下发小幅量程上限（1.0x 级，复用面板时音量
+// 滑条同样收到）。r48 按 max≤1.0 一刀切把音量卡死在 100，r49 按 (1.0,1.1]
+// 值窗钳制照样误伤。归属判定改为属性标识 + 标签正向识别（基座二进制符号
+// 实锤的面板类与属性名）：确认是混合不透明度滑条才钳显示漂移；音量和识别
+// 不了的一律放行——宁可让 100.3% 的显示漂移回来，也不能再把音量卡在 100。
+// 不可按类名子串识别：BlendOpacityPanelCell 会被复用给音量行。
+typedef NS_ENUM(NSUInteger, AMProjSharedSliderRole) {
+    AMProjSharedSliderRoleUnknown = 0,
+    AMProjSharedSliderRoleBlendOpacity,
+    AMProjSharedSliderRoleVolume,
+};
+
+static AMProjSharedSliderRole amproj_sharedSliderRole(id slider) {
+    if (![slider isKindOfClass:UIView.class]) return AMProjSharedSliderRoleUnknown;
+    UIResponder *responder = [(UIView *)slider nextResponder];
+    NSUInteger hops = 0;
+    while (responder && hops < 12) {
+        if ([responder isKindOfClass:UIViewController.class]) {
+            // 归属面板的属性绑定是最强标识：volumeSlider 属音量，
+            // opacitySlider 属混合不透明度，标识对比不受复用影响。
+            @try {
+                if ([(UIViewController *)responder
+                        valueForKey:@"volumeSlider"] == slider) {
+                    return AMProjSharedSliderRoleVolume;
+                }
+                if ([(UIViewController *)responder
+                        valueForKey:@"opacitySlider"] == slider) {
+                    return AMProjSharedSliderRoleBlendOpacity;
+                }
+            } @catch (NSException *exception) {
+                // 属性不存在（NSUnknownKeyException）：落回标签识别。
+            }
+            break;
+        }
+        responder = responder.nextResponder;
+        hops++;
+    }
+    UIView *node = [(UIView *)slider superview];
+    hops = 0;
+    while (node && hops < 4) {
+        for (UIView *sibling in node.subviews) {
+            if (![sibling isKindOfClass:UILabel.class]) continue;
+            NSString *text = ((UILabel *)sibling).text ?: @"";
+            if ([text containsString:@"音量"] ||
+                [text.lowercaseString containsString:@"volume"]) {
+                return AMProjSharedSliderRoleVolume;
+            }
+            if ([text containsString:@"透明度"] ||
+                [text.lowercaseString containsString:@"opacity"]) {
+                return AMProjSharedSliderRoleBlendOpacity;
+            }
+        }
+        node = node.superview;
+        hops++;
+    }
+    return AMProjSharedSliderRoleUnknown;
+}
 
 static void hooked_opacitySliderSetMaximum(id self, SEL _cmd,
                                            CGFloat maximumValue) {
     CGFloat clamped = maximumValue;
-    if (clamped > 1.0 && clamped <= 1.1) clamped = 1.0;
+    if (clamped > 1.0 && clamped <= 1.1 &&
+        amproj_sharedSliderRole(self) == AMProjSharedSliderRoleBlendOpacity) {
+        clamped = 1.0;
+    }
     if (orig_opacitySliderSetMaximum) {
         orig_opacitySliderSetMaximum(self, _cmd, clamped);
     }
@@ -19783,7 +19855,10 @@ static void hooked_opacitySliderSetMaximum(id self, SEL _cmd,
 static void hooked_opacitySliderSetMinimum(id self, SEL _cmd,
                                            CGFloat minimumValue) {
     CGFloat clamped = minimumValue;
-    if (clamped < 0.0 && clamped >= -0.1) clamped = 0.0;
+    if (clamped < 0.0 && clamped >= -0.1 &&
+        amproj_sharedSliderRole(self) == AMProjSharedSliderRoleBlendOpacity) {
+        clamped = 0.0;
+    }
     if (orig_opacitySliderSetMinimum) {
         orig_opacitySliderSetMinimum(self, _cmd, clamped);
     }
