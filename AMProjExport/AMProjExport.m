@@ -19788,6 +19788,9 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
 // 实锤的面板类与属性名）：确认是混合不透明度滑条才钳显示漂移；音量和识别
 // 不了的一律放行——宁可让 100.3% 的显示漂移回来，也不能再把音量卡在 100。
 // 不可按类名子串识别：BlendOpacityPanelCell 会被复用给音量行。
+static void (*orig_opacitySliderSetMaximum)(id, SEL, CGFloat) = NULL;
+static void (*orig_opacitySliderSetMinimum)(id, SEL, CGFloat) = NULL;
+
 typedef NS_ENUM(NSUInteger, AMProjSharedSliderRole) {
     AMProjSharedSliderRoleUnknown = 0,
     AMProjSharedSliderRoleBlendOpacity,
