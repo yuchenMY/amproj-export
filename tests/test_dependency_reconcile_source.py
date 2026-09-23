@@ -50,11 +50,20 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         self.assertIn("reBackedUp++", region)
         self.assertIn("rebacked=%lu", region)
 
-    def test_removal_veto_is_installed_and_scoped(self):
-        self.assertIn("static BOOL hooked_removeItemAtPath(id self, SEL _cmd,",
-                      EXPORT)
-        self.assertIn("static BOOL hooked_removeItemAtURL(id self, SEL _cmd,",
-                      EXPORT)
+    def test_removal_heals_instead_of_refusing(self):
+        # 拒绝删除会打断 app 自身的保存/替换/清理流程（实测连音量写回都被
+        # 回滚），改为删除放行后从留底立刻还原；只对被引用的依赖文件自愈。
+        region = EXPORT[
+            EXPORT.index("static NSString *amproj_protectedDependencyNameForPath("):
+            EXPORT.index("static void amproj_installDependencyProtection(void) {")
+        ]
+        self.assertIn("amproj_restoreDependencyFromBackup", region)
+        self.assertIn("healed:", region)
+        self.assertIn("orig_removeItemAtPath(self, _cmd, path, error)", region)
+        self.assertIn("orig_removeItemAtURL(self, _cmd, URL, error)", region)
+        self.assertNotIn("NSFileWriteNoPermissionError", region)
+        self.assertIn("hasPrefix:@\".\"", region)
+        self.assertIn("amproj_dependencyNameIsProtected(name)", region)
         install = EXPORT[
             EXPORT.index("static void amproj_installDependencyProtection(void) {"):
             EXPORT.index("static void amproj_installPresentationHook(void) {")
@@ -64,17 +73,26 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         self.assertIn('amproj_installDependencyProtection();',
                       EXPORT[EXPORT.index("amproj_installPresentationHook();"):]
                       [:400])
-        veto = EXPORT[
-            EXPORT.index("static BOOL amproj_shouldVetoDependencyRemoval("):
-            EXPORT.index("static void amproj_vetoDependencyRemovalError(")
-        ]
-        self.assertIn("project-dependencies", EXPORT[
-            EXPORT.index("static NSURL *amproj_v865DependencyStoreURL(void) {"):
-            EXPORT.index("static NSURL *amproj_v865DependencyBackupURL(void) {")
-        ])
-        self.assertIn("hasPrefix", veto)
-        self.assertIn("hasPrefix:@\".\"", veto)
-        self.assertIn("amproj_dependencyNameIsProtected(name)", veto)
+
+    def test_volume_writeback_rescue_uses_native_channel(self):
+        # 音量 widget 的写回（onVolumeValueChange:forEvent: ->
+        # setVolume:userInitiated:）接线丢失时数值钉死 100、播放后跳回默认。
+        # 救援只走 app 自己的通道与单位：接线补齐 + 写后校验补写。
+        region = EXPORT[EXPORT.index("// ── 音量写回救援"):]
+        region = region[:region.index("// ── 依赖文件删除自愈")]
+        self.assertIn("onVolumeValueChange:forEvent:", region)
+        self.assertIn("setVolume:userInitiated:", region)
+        self.assertIn("amproj_forceVolumeWrite", region)
+        self.assertIn("amproj_volumeSliderHasWriteback", region)
+        self.assertIn("UIAction", region)
+        self.assertIn("NSInvocation", region)
+        self.assertIn("amproj_installVolumeWritebackRescue();", EXPORT)
+
+    def test_reconcile_scan_is_memoized_by_stat(self):
+        region = _reconcile_region()
+        self.assertIn("scanCache", region)
+        self.assertIn("NSFileModificationDate", region)
+        self.assertIn("cachedNames", region)
 
     def test_failure_and_share_presentations_use_safe_presenter(self):
         failure = EXPORT[EXPORT.index("void (^showFailure)(void) = ^{"):]

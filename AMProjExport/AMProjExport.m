@@ -10767,17 +10767,56 @@ static void amproj_reconcileDependencies(void) {
         NSRegularExpression *regex = [NSRegularExpression
             regularExpressionWithPattern:@"am-internal:///([^\"]+)\""
                                  options:0 error:nil];
+        // 工程 XML 动辄几十 MB 文本，10s 周期重读全部会把设备 IO 烧满——
+        // 重装后资源库缩略图生成被饿死（泛白十几分钟）就是这么来的。按
+        // (size, mtime) 记账：文件没变直接用上次的引用名单，只读有变化的。
+        // 只在对账串行队列上访问，无需加锁。
+        static NSMutableDictionary<NSString *, NSDictionary *> *scanCache = nil;
+        if (!scanCache) scanCache = [NSMutableDictionary dictionary];
+        NSMutableSet<NSString *> *seenPaths = [NSMutableSet set];
         for (NSURL *url in xmls) {
             if (![url.pathExtension.lowercaseString isEqualToString:@"xml"]) continue;
+            [seenPaths addObject:url.path];
+            NSDictionary *attrs = [manager attributesOfItemAtPath:url.path
+                                                            error:nil];
+            NSNumber *size = attrs[NSFileSize] ?: @0;
+            NSDate *mtime = attrs[NSFileModificationDate] ?: NSDate.distantPast;
+            NSDictionary *cached = scanCache[url.path];
+            NSSet<NSString *> *cachedNames = nil;
+            if (cached &&
+                [cached[@"size"] isEqualToNumber:size] &&
+                [cached[@"mtime"] isEqualToDate:mtime]) {
+                cachedNames = cached[@"names"];
+            }
+            if (cachedNames) {
+                for (NSString *name in cachedNames) {
+                    [referenced addObject:name];
+                    [needed addObject:name.uppercaseString];
+                }
+                continue;
+            }
             NSString *text = [NSString stringWithContentsOfURL:url
                                                       encoding:NSUTF8StringEncoding
                                                          error:nil];
-            if (!text.length) continue;
-            for (NSTextCheckingResult *match in [regex matchesInString:text
-                options:0 range:NSMakeRange(0, text.length)]) {
-                NSString *name = [text substringWithRange:[match rangeAtIndex:1]];
-                [referenced addObject:name];
-                [needed addObject:name.uppercaseString];
+            NSMutableSet<NSString *> *fileNames = [NSMutableSet set];
+            if (text.length) {
+                for (NSTextCheckingResult *match in [regex matchesInString:text
+                    options:0 range:NSMakeRange(0, text.length)]) {
+                    NSString *name = [text substringWithRange:[match rangeAtIndex:1]];
+                    [fileNames addObject:name];
+                    [referenced addObject:name];
+                    [needed addObject:name.uppercaseString];
+                }
+            }
+            scanCache[url.path] = @{
+                @"size": size,
+                @"mtime": mtime,
+                @"names": fileNames,
+            };
+        }
+        for (NSString *path in scanCache.allKeys) {
+            if (![seenPaths containsObject:path]) {
+                [scanCache removeObjectForKey:path];
             }
         }
         // 先发布保护名单再动手恢复，删除 veto 尽早生效。
@@ -19787,64 +19826,278 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
 // 是完全不碰 setMaximumValue:/setMinimumValue:——不透明度的 100.3%
 // 显示漂移只是外观问题，音量被卡是功能问题。不要重新加回钳制。
 
-// ── 依赖文件删除保护 ─────────────────────────────────────────
+// ── 音量写回救援 ─────────────────────────────────────────────
+// 音量 widget（volumeSlider/volumeLable/volumeIcon/volumeCueView 一组
+// outlet）靠控件事件 onVolumeValueChange:forEvent: 把滑条值写进模型
+// （setVolume:userInitiated:）。实测该接线在属性行上丢失：滑条拖得动
+// 但数值钉在 100（模型从未更新），一播放 UI 就从模型重读、滑条跳回默认
+// （0-200% 量程的中点 = 100）。救援两步，全部走 app 自己的通道与单位
+// （滑条 0-2 = 0-200%，无换算）：滑条完全没有 valueChanged 接线时补一个
+// UIAction 直写模型；原处理器跑完后校验模型值，没跟上就补写。
+typedef void (*AMProjVolumeSetterIMP)(id, SEL, id);
+
+static Class amproj_volumeWidgetClassWith(BOOL needHandler, BOOL needOutlet) {
+    SEL handler = NSSelectorFromString(@"onVolumeValueChange:forEvent:");
+    SEL outletSetter = NSSelectorFromString(@"setVolumeSlider:");
+    SEL setter = NSSelectorFromString(@"setVolume:userInitiated:");
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return Nil;
+    Class *classes = (__unsafe_unretained Class *)malloc(sizeof(Class) * count);
+    count = objc_getClassList(classes, count);
+    Class found = Nil;
+    for (int i = 0; i < count; i++) {
+        Class cls = classes[i];
+        if (!class_getInstanceMethod(cls, setter)) continue;
+        if (needHandler && !class_getInstanceMethod(cls, handler)) continue;
+        if (needOutlet && !class_getInstanceMethod(cls, outletSetter)) continue;
+        found = cls;
+        break;
+    }
+    free(classes);
+    return found;
+}
+
+static void amproj_forceVolumeWrite(id owner, float value) {
+    @try {
+        SEL force = NSSelectorFromString(@"setVolume:userInitiated:");
+        if (![owner respondsToSelector:force]) return;
+        NSMethodSignature *sig = [owner methodSignatureForSelector:force];
+        if (!sig || sig.numberOfArguments < 3) return;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        inv.target = owner;
+        inv.selector = force;
+        const char *valueType = [sig getArgumentTypeAtIndex:2];
+        if (valueType[0] == 'd') {
+            double v = value;
+            [inv setArgument:&v atIndex:2];
+        } else if (valueType[0] == 'f') {
+            float v = value;
+            [inv setArgument:&v atIndex:2];
+        } else {
+            return;  // 整型/未知单位不猜测换算
+        }
+        if (sig.numberOfArguments >= 4) {
+            const char *flagType = [sig getArgumentTypeAtIndex:3];
+            int64_t one = 1;
+            if (flagType[0] == 'B' || flagType[0] == 'c') {
+                BOOL yes = YES;
+                [inv setArgument:&yes atIndex:3];
+            } else if (strchr("qQilILsS", flagType[0])) {
+                [inv setArgument:&one atIndex:3];
+            } else {
+                return;
+            }
+        }
+        [inv invoke];
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write enforced: %.3f",
+               value);
+    } @catch (NSException *exception) {
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write exception: "
+               "%{public}@", exception.reason ?: @"");
+    }
+}
+
+static BOOL amproj_volumeSliderHasWriteback(id slider) {
+    if (![slider isKindOfClass:UIControl.class]) return YES;
+    // 自定义 OpacitySlider 可能走 delegate 写回；有代理就不插手。
+    if ([slider respondsToSelector:NSSelectorFromString(@"delegate")]) {
+        @try {
+            if ([slider valueForKey:@"delegate"]) return YES;
+        } @catch (NSException *exception) {
+        }
+    }
+    UIControl *control = (UIControl *)slider;
+    for (id target in control.allTargets) {
+        NSArray *actions = [control actionsForTarget:target
+                                      forControlEvent:UIControlEventValueChanged];
+        if (actions.count) return YES;
+    }
+    return NO;
+}
+
+static void (*orig_volumeWidgetSetVolumeSlider)(id, SEL, id) = NULL;
+static void (*orig_onVolumeValueChange)(id, SEL, id, id) = NULL;
+
+static void hooked_volumeWidgetSetVolumeSlider(id self, SEL _cmd, id slider) {
+    if (orig_volumeWidgetSetVolumeSlider) {
+        orig_volumeWidgetSetVolumeSlider(self, _cmd, slider);
+    }
+    @try {
+        if (!slider || amproj_volumeSliderHasWriteback(slider)) return;
+        __weak id weakOwner = self;
+        UIAction *action = [UIAction actionWithHandler:^(__kindof UIAction *a) {
+            id owner = weakOwner;
+            id live = [owner respondsToSelector:NSSelectorFromString(@"volumeSlider")]
+                ? [owner valueForKey:@"volumeSlider"] : nil;
+            if (![live isKindOfClass:UISlider.class]) return;
+            amproj_forceVolumeWrite(owner, ((UISlider *)live).value);
+        }];
+        [(UIControl *)slider addAction:action
+                     forControlEvents:UIControlEventValueChanged];
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] volume slider writeback "
+               "re-wired on %{public}@",
+               NSStringFromClass([self class]) ?: @"");
+    } @catch (NSException *exception) {
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] volume re-wire exception: "
+               "%{public}@", exception.reason ?: @"");
+    }
+}
+
+static void hooked_onVolumeValueChange(id self, SEL _cmd, id sender, id event) {
+    @try {
+        if (orig_onVolumeValueChange) {
+            orig_onVolumeValueChange(self, _cmd, sender, event);
+        }
+    } @catch (NSException *exception) {
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] volume handler exception: "
+               "%{public}@", exception.reason ?: @"");
+    }
+    @try {
+        id slider = [self respondsToSelector:NSSelectorFromString(@"volumeSlider")]
+            ? [self valueForKey:@"volumeSlider"] : nil;
+        if (![slider isKindOfClass:UISlider.class]) return;
+        float value = ((UISlider *)slider).value;
+        NSNumber *current = nil;
+        if ([self respondsToSelector:NSSelectorFromString(@"volume")]) {
+            current = [self valueForKey:@"volume"];
+        }
+        if (current && fabsf(current.floatValue - value) <= 0.001f) return;
+        amproj_forceVolumeWrite(self, value);
+    } @catch (NSException *exception) {
+        os_log(OS_LOG_DEFAULT, "[AMProjExport] volume verify exception: "
+               "%{public}@", exception.reason ?: @"");
+    }
+}
+
+static void amproj_installVolumeWritebackRescue(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        @try {
+            SEL handlerSel = NSSelectorFromString(@"onVolumeValueChange:forEvent:");
+            SEL outletSel = NSSelectorFromString(@"setVolumeSlider:");
+            Class handlerClass = amproj_volumeWidgetClassWith(YES, NO);
+            Class outletClass = amproj_volumeWidgetClassWith(NO, YES);
+            if (!handlerClass && !outletClass) {
+                NSLog(@"[AMProjExport] volume widget not found; rescue skipped");
+                return;
+            }
+            if (outletClass) {
+                Method method = class_getInstanceMethod(outletClass, outletSel);
+                if (method) {
+                    IMP previous = amproj_installMethodHook(
+                        method, (IMP)hooked_volumeWidgetSetVolumeSlider, 3,
+                        @"volumeWidget.setVolumeSlider");
+                    if (previous) {
+                        orig_volumeWidgetSetVolumeSlider =
+                            (AMProjVolumeSetterIMP)previous;
+                    }
+                }
+            }
+            if (handlerClass) {
+                Method method = class_getInstanceMethod(handlerClass, handlerSel);
+                if (method) {
+                    IMP previous = amproj_installMethodHook(
+                        method, (IMP)hooked_onVolumeValueChange, 4,
+                        @"volumeWidget.onVolumeValueChange");
+                    if (previous) {
+                        orig_onVolumeValueChange =
+                            (void (*)(id, SEL, id, id))previous;
+                    }
+                }
+            }
+            NSLog(@"[AMProjExport] volume writeback rescue installed "
+                  "(outlet=%@ handler=%@)",
+                  outletClass ? NSStringFromClass(outletClass) : @"-",
+                  handlerClass ? NSStringFromClass(handlerClass) : @"-");
+        } @catch (NSException *exception) {
+            NSLog(@"[AMProjExport] volume rescue install failed: %@", exception);
+        }
+    });
+}
+
+// ── 依赖文件删除自愈 ─────────────────────────────────────────
 // 孤儿清理（打开项目时触发，r36 实测）会把导入工程引用的依赖文件当孤儿
-// 删掉，音频/媒体随之失效。对 NSFileManager 的删除入口做源头拦截：凡
-// project-dependencies 下被任一工程 XML 引用的文件一律拒绝删除；名单由
-// 后台对账（amproj_reconcileDependencies）周期刷新，未引用的孤儿照常放行，
-// 磁盘不堆积。
+// 删掉，音频/媒体随之失效。早期方案直接拒绝删除（veto），但拒绝会打断
+// app 自身的保存/替换/清理流程——实测连音量数值写回都被回滚。改为：
+// 删除一律放行，删完立刻从 amproj-deps-backup 留底还原。app 流程不被
+// 打断，文件毫秒级回位，播放器照样找得到。留底由对账的反向补备份保证
+// 齐全；还原只对被工程 XML 引用的文件生效，未引用的孤儿照常放行。
 static BOOL (*orig_removeItemAtPath)(id, SEL, NSString *, NSError **) = NULL;
 static BOOL (*orig_removeItemAtURL)(id, SEL, NSURL *, NSError **) = NULL;
 
-static BOOL amproj_shouldVetoDependencyRemoval(NSString *path) {
-    if (!path.length) return NO;
+static NSString *amproj_protectedDependencyNameForPath(NSString *path) {
+    if (!path.length) return nil;
     static NSString *dependenciesPath = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         dependenciesPath = [amproj_v865DependencyStoreURL() path];
     });
-    if (!dependenciesPath.length) return NO;
+    if (!dependenciesPath.length) return nil;
     if (![path isEqualToString:dependenciesPath] &&
         ![path hasPrefix:[dependenciesPath stringByAppendingString:@"/"]]) {
-        return NO;
+        return nil;
     }
     NSString *name = path.lastPathComponent;
-    // 隐藏文件是对账用的 .restore/.partial 临时件，放行。
-    if (!name.length || [name hasPrefix:@"."]) return NO;
+    // 隐藏文件是对账用的 .restore/.partial 临时件，不还原。
+    if (!name.length || [name hasPrefix:@"."]) return nil;
     if (!amproj_dependencyNameIsProtected(name) &&
         !amproj_dependencyNameIsProtected(name.uppercaseString)) {
-        return NO;
+        return nil;
     }
-    os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency removal vetoed: %{public}@",
-           name);
-    return YES;
+    return name;
 }
 
-static void amproj_vetoDependencyRemovalError(NSString *path, NSError **error) {
-    if (!error) return;
-    *error = [NSError errorWithDomain:NSCocoaErrorDomain
-                                 code:NSFileWriteNoPermissionError
-                             userInfo:@{NSFilePathErrorKey: path ?: @"",
-                                        NSLocalizedDescriptionKey:
-                                        @"Dependency file is referenced by a stored project"}];
+static void amproj_restoreDependencyFromBackup(NSString *name) {
+    if (!name.length) return;
+    dispatch_async(amproj_dependencyQueue(), ^{
+        @try {
+            NSFileManager *manager = NSFileManager.defaultManager;
+            NSURL *dependencies = amproj_v865DependencyStoreURL();
+            NSURL *live = [dependencies URLByAppendingPathComponent:name];
+            if ([manager fileExistsAtPath:live.path]) return;
+            NSURL *backupRoot = amproj_v865DependencyBackupURL();
+            NSURL *backup = [backupRoot URLByAppendingPathComponent:name];
+            if (![manager fileExistsAtPath:backup.path]) {
+                NSURL *upper = [backupRoot
+                    URLByAppendingPathComponent:name.uppercaseString];
+                if ([manager fileExistsAtPath:upper.path]) {
+                    backup = upper;
+                } else {
+                    return;
+                }
+            }
+            NSURL *temporary = [dependencies URLByAppendingPathComponent:
+                [NSString stringWithFormat:@".%@.%@.heal", name,
+                 NSUUID.UUID.UUIDString]];
+            [manager removeItemAtURL:temporary error:nil];
+            if ([manager copyItemAtURL:backup toURL:temporary error:nil] &&
+                [manager moveItemAtURL:temporary toURL:live error:nil]) {
+                os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency removal "
+                       "healed: %{public}@", name);
+            } else {
+                [manager removeItemAtURL:temporary error:nil];
+            }
+        } @catch (NSException *exception) {
+            os_log(OS_LOG_DEFAULT, "[AMProjExport] dependency heal exception: "
+                   "%{public}@", exception.reason ?: @"");
+        }
+    });
 }
 
 static BOOL hooked_removeItemAtPath(id self, SEL _cmd, NSString *path,
                                     NSError **error) {
-    if (amproj_shouldVetoDependencyRemoval(path)) {
-        amproj_vetoDependencyRemovalError(path, error);
-        return NO;
-    }
-    return orig_removeItemAtPath(self, _cmd, path, error);
+    NSString *healName = amproj_protectedDependencyNameForPath(path);
+    BOOL ok = orig_removeItemAtPath(self, _cmd, path, error);
+    if (ok && healName) amproj_restoreDependencyFromBackup(healName);
+    return ok;
 }
 
 static BOOL hooked_removeItemAtURL(id self, SEL _cmd, NSURL *URL,
                                    NSError **error) {
-    if (amproj_shouldVetoDependencyRemoval(URL.path)) {
-        amproj_vetoDependencyRemovalError(URL.path, error);
-        return NO;
-    }
-    return orig_removeItemAtURL(self, _cmd, URL, error);
+    NSString *healName = amproj_protectedDependencyNameForPath(URL.path);
+    BOOL ok = orig_removeItemAtURL(self, _cmd, URL, error);
+    if (ok && healName) amproj_restoreDependencyFromBackup(healName);
+    return ok;
 }
 
 static void amproj_installDependencyProtection(void) {
@@ -19885,6 +20138,7 @@ static void amproj_installPresentationHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing presentation filter");
+        amproj_installVolumeWritebackRescue();
         @try {
             Method method = class_getInstanceMethod(
                 [UIViewController class],
