@@ -19828,12 +19828,13 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
 
 // ── 音量写回救援 ─────────────────────────────────────────────
 // 音量 widget（volumeSlider/volumeLable/volumeIcon/volumeCueView 一组
-// outlet）靠控件事件 onVolumeValueChange:forEvent: 把滑条值写进模型
-// （setVolume:userInitiated:）。实测该接线在属性行上丢失：滑条拖得动
-// 但数值钉在 100（模型从未更新），一播放 UI 就从模型重读、滑条跳回默认
-// （0-200% 量程的中点 = 100）。救援两步，全部走 app 自己的通道与单位
-// （滑条 0-2 = 0-200%，无换算）：滑条完全没有 valueChanged 接线时补一个
-// UIAction 直写模型；原处理器跑完后校验模型值，没跟上就补写。
+// outlet）的写回链路：滑条事件 -> onVolumeValueChange:forEvent: ->
+// setVolume:userInitiated:。实测这条链在真实 UI 上整个失效：拖得动但
+// 数值钉在 100，一播放 UI 从模型重读就弹回 0-200% 中点（=默认 100）。
+// 救援不信任任何一环：给滑条补一个幂等的 UIAction（只在模型值与滑条
+// 不一致时写），写的时候先走 app 自己的 setVolume:userInitiated:，
+// 读回发现被夹住就直接写模型的存储 ivar，绕过 setter 的钳制。单位与
+// 滑条一致（0-2 = 0-200%），不做换算。
 typedef void (*AMProjVolumeSetterIMP)(id, SEL, id);
 
 static Class amproj_volumeWidgetClassWith(BOOL needHandler, BOOL needOutlet) {
@@ -19857,50 +19858,106 @@ static Class amproj_volumeWidgetClassWith(BOOL needHandler, BOOL needOutlet) {
     return found;
 }
 
+static NSNumber *amproj_readVolume(id owner) {
+    if (![owner respondsToSelector:NSSelectorFromString(@"volume")]) return nil;
+    @try {
+        return [owner valueForKey:@"volume"];
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+// 绕过 setter 直接写存储字段：Swift/ObjC 的 volume 标量 ivar。
+static BOOL amproj_writeVolumeIvarDirect(id owner, float value) {
+    Class cls = [owner class];
+    Ivar ivar = class_getInstanceVariable(cls, "_volume");
+    if (!ivar) ivar = class_getInstanceVariable(cls, "volume");
+    if (!ivar) {
+        unsigned int count = 0;
+        Ivar *list = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count && !ivar; i++) {
+            NSString *name = @(ivar_getName(list[i]) ?: "");
+            if (![name.lowercaseString containsString:@"volume"]) continue;
+            const char *type = ivar_getTypeEncoding(list[i]);
+            if (type && (type[0] == 'f' || type[0] == 'd')) ivar = list[i];
+        }
+        free(list);
+    }
+    if (!ivar) return NO;
+    const char *type = ivar_getTypeEncoding(ivar);
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    void *base = (__bridge void *)owner;
+    if (type[0] == 'd') {
+        *(double *)((char *)base + offset) = value;
+    } else if (type[0] == 'f') {
+        *(float *)((char *)base + offset) = value;
+    } else {
+        return NO;
+    }
+    os_log(OS_LOG_DEFAULT, "[AMProjExport] volume ivar write (%{public}s): "
+           "%.3f", ivar_getName(ivar) ?: "?", value);
+    return YES;
+}
+
 static void amproj_forceVolumeWrite(id owner, float value) {
     @try {
+        NSNumber *current = amproj_readVolume(owner);
+        if (current && fabsf(current.floatValue - value) <= 0.001f) return;
         SEL force = NSSelectorFromString(@"setVolume:userInitiated:");
-        if (![owner respondsToSelector:force]) return;
-        NSMethodSignature *sig = [owner methodSignatureForSelector:force];
-        if (!sig || sig.numberOfArguments < 3) return;
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        inv.target = owner;
-        inv.selector = force;
-        const char *valueType = [sig getArgumentTypeAtIndex:2];
-        if (valueType[0] == 'd') {
-            double v = value;
-            [inv setArgument:&v atIndex:2];
-        } else if (valueType[0] == 'f') {
-            float v = value;
-            [inv setArgument:&v atIndex:2];
-        } else {
-            return;  // 整型/未知单位不猜测换算
-        }
-        if (sig.numberOfArguments >= 4) {
-            const char *flagType = [sig getArgumentTypeAtIndex:3];
-            int64_t one = 1;
-            if (flagType[0] == 'B' || flagType[0] == 'c') {
-                BOOL yes = YES;
-                [inv setArgument:&yes atIndex:3];
-            } else if (strchr("qQilILsS", flagType[0])) {
-                [inv setArgument:&one atIndex:3];
-            } else {
-                return;
+        BOOL setterTried = NO;
+        if ([owner respondsToSelector:force]) {
+            NSMethodSignature *sig = [owner methodSignatureForSelector:force];
+            if (sig && sig.numberOfArguments >= 3) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                inv.target = owner;
+                inv.selector = force;
+                const char *valueType = [sig getArgumentTypeAtIndex:2];
+                if (valueType[0] == 'd') {
+                    double v = value;
+                    [inv setArgument:&v atIndex:2];
+                } else if (valueType[0] == 'f') {
+                    float v = value;
+                    [inv setArgument:&v atIndex:2];
+                } else {
+                    return;  // 非标量单位不猜测
+                }
+                if (sig.numberOfArguments >= 4) {
+                    const char *flagType = [sig getArgumentTypeAtIndex:3];
+                    int64_t one = 1;
+                    if (flagType[0] == 'B' || flagType[0] == 'c') {
+                        BOOL yes = YES;
+                        [inv setArgument:&yes atIndex:3];
+                    } else if (strchr("qQilILsS", flagType[0])) {
+                        [inv setArgument:&one atIndex:3];
+                    } else {
+                        return;
+                    }
+                }
+                [inv invoke];
+                setterTried = YES;
             }
         }
-        [inv invoke];
-        // 写后读回：值落进去了是接线问题（救援已覆盖）；被 setter 夹回
-        // 原值说明模型侧另有钳制，日志直接给出结论。
-        NSNumber *after = nil;
-        if ([owner respondsToSelector:NSSelectorFromString(@"volume")]) {
-            after = [owner valueForKey:@"volume"];
-        }
-        if (after && fabsf(after.floatValue - value) > 0.001f) {
-            os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write CLAMPED: "
-                   "wanted %.3f got %.3f", value, after.floatValue);
-        } else {
+        NSNumber *after = amproj_readVolume(owner);
+        if (after && fabsf(after.floatValue - value) <= 0.001f) {
             os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write enforced: %.3f",
                    value);
+            return;
+        }
+        // setter 没落值（缺 setter 或被钳回）：直接写存储 ivar。
+        if (amproj_writeVolumeIvarDirect(owner, value)) {
+            NSNumber *final = amproj_readVolume(owner);
+            if (final && fabsf(final.floatValue - value) <= 0.001f) {
+                os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write enforced "
+                       "via ivar bypass: %.3f", value);
+            } else {
+                os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write CLAMPED "
+                       "even after ivar bypass: wanted %.3f got %@",
+                       value, final ?: @"nil");
+            }
+        } else {
+            os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write CLAMPED: "
+                   "wanted %.3f got %@ (setter tried: %d)",
+                   value, after ?: @"nil", setterTried);
         }
     } @catch (NSException *exception) {
         os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write exception: "
@@ -19908,22 +19965,30 @@ static void amproj_forceVolumeWrite(id owner, float value) {
     }
 }
 
-static BOOL amproj_volumeSliderHasWriteback(id slider) {
-    if (![slider isKindOfClass:UIControl.class]) return YES;
-    // 自定义 OpacitySlider 可能走 delegate 写回；有代理就不插手。
-    if ([slider respondsToSelector:NSSelectorFromString(@"delegate")]) {
-        @try {
-            if ([slider valueForKey:@"delegate"]) return YES;
-        } @catch (NSException *exception) {
-        }
-    }
-    UIControl *control = (UIControl *)slider;
-    for (id target in control.allTargets) {
-        NSArray *actions = [control actionsForTarget:target
-                                      forControlEvent:UIControlEventValueChanged];
-        if (actions.count) return YES;
-    }
-    return NO;
+// 幂等兜底：只在模型值与滑条不一致时写，不打扰正常链路（不产生重复撤销
+// 记录），也不在乎原接线是否存在。
+static const void *AMProjVolumeRescueAttachedKey = &AMProjVolumeRescueAttachedKey;
+
+static void amproj_attachVolumeRescueAction(id owner, id slider) {
+    if (![slider isKindOfClass:UIControl.class]) return;
+    if (objc_getAssociatedObject(slider, AMProjVolumeRescueAttachedKey)) return;
+    objc_setAssociatedObject(slider, AMProjVolumeRescueAttachedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak id weakOwner = owner;
+    UIAction *action = [UIAction actionWithHandler:^(__kindof UIAction *a) {
+        id liveOwner = weakOwner;
+        id live = [liveOwner
+            respondsToSelector:NSSelectorFromString(@"volumeSlider")]
+            ? [liveOwner valueForKey:@"volumeSlider"] : a.sender;
+        if (![live isKindOfClass:UISlider.class]) return;
+        amproj_forceVolumeWrite(liveOwner, ((UISlider *)live).value);
+    }];
+    [(UIControl *)slider addAction:action
+                 forControlEvents:UIControlEventValueChanged];
+    os_log(OS_LOG_DEFAULT, "[AMProjExport] volume rescue action attached on "
+           "%{public}@ / %{public}@",
+           NSStringFromClass([owner class]) ?: @"?",
+           NSStringFromClass([slider class]) ?: @"?");
 }
 
 static void (*orig_volumeWidgetSetVolumeSlider)(id, SEL, id) = NULL;
@@ -19934,20 +19999,7 @@ static void hooked_volumeWidgetSetVolumeSlider(id self, SEL _cmd, id slider) {
         orig_volumeWidgetSetVolumeSlider(self, _cmd, slider);
     }
     @try {
-        if (!slider || amproj_volumeSliderHasWriteback(slider)) return;
-        __weak id weakOwner = self;
-        UIAction *action = [UIAction actionWithHandler:^(__kindof UIAction *a) {
-            id owner = weakOwner;
-            id live = [owner respondsToSelector:NSSelectorFromString(@"volumeSlider")]
-                ? [owner valueForKey:@"volumeSlider"] : nil;
-            if (![live isKindOfClass:UISlider.class]) return;
-            amproj_forceVolumeWrite(owner, ((UISlider *)live).value);
-        }];
-        [(UIControl *)slider addAction:action
-                     forControlEvents:UIControlEventValueChanged];
-        os_log(OS_LOG_DEFAULT, "[AMProjExport] volume slider writeback "
-               "re-wired on %{public}@",
-               NSStringFromClass([self class]) ?: @"");
+        if (slider) amproj_attachVolumeRescueAction(self, slider);
     } @catch (NSException *exception) {
         os_log(OS_LOG_DEFAULT, "[AMProjExport] volume re-wire exception: "
                "%{public}@", exception.reason ?: @"");
@@ -19967,13 +20019,7 @@ static void hooked_onVolumeValueChange(id self, SEL _cmd, id sender, id event) {
         id slider = [self respondsToSelector:NSSelectorFromString(@"volumeSlider")]
             ? [self valueForKey:@"volumeSlider"] : nil;
         if (![slider isKindOfClass:UISlider.class]) return;
-        float value = ((UISlider *)slider).value;
-        NSNumber *current = nil;
-        if ([self respondsToSelector:NSSelectorFromString(@"volume")]) {
-            current = [self valueForKey:@"volume"];
-        }
-        if (current && fabsf(current.floatValue - value) <= 0.001f) return;
-        amproj_forceVolumeWrite(self, value);
+        amproj_forceVolumeWrite(self, ((UISlider *)slider).value);
     } @catch (NSException *exception) {
         os_log(OS_LOG_DEFAULT, "[AMProjExport] volume verify exception: "
                "%{public}@", exception.reason ?: @"");
