@@ -19889,8 +19889,19 @@ static void amproj_forceVolumeWrite(id owner, float value) {
             }
         }
         [inv invoke];
-        os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write enforced: %.3f",
-               value);
+        // 写后读回：值落进去了是接线问题（救援已覆盖）；被 setter 夹回
+        // 原值说明模型侧另有钳制，日志直接给出结论。
+        NSNumber *after = nil;
+        if ([owner respondsToSelector:NSSelectorFromString(@"volume")]) {
+            after = [owner valueForKey:@"volume"];
+        }
+        if (after && fabsf(after.floatValue - value) > 0.001f) {
+            os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write CLAMPED: "
+                   "wanted %.3f got %.3f", value, after.floatValue);
+        } else {
+            os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write enforced: %.3f",
+                   value);
+        }
     } @catch (NSException *exception) {
         os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write exception: "
                "%{public}@", exception.reason ?: @"");
