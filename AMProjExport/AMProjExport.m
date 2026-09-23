@@ -19780,92 +19780,12 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
     if (orig_alertAddAction) orig_alertAddAction(self, _cmd, action);
 }
 
-// OpacitySlider 是共享控件：混合不透明度（BlendOpacityPanelVC/InspectorVC/
-// BlendOpacityPanelCell）与音量（EditVolumePanelVC 的 volumeSlider，0-200%）
-// 都用它，且 app 会按当前值动态下发小幅量程上限（1.0x 级，复用面板时音量
-// 滑条同样收到）。r48 按 max≤1.0 一刀切把音量卡死在 100，r49 按 (1.0,1.1]
-// 值窗钳制照样误伤。归属判定改为属性标识 + 标签正向识别（基座二进制符号
-// 实锤的面板类与属性名）：确认是混合不透明度滑条才钳显示漂移；音量和识别
-// 不了的一律放行——宁可让 100.3% 的显示漂移回来，也不能再把音量卡在 100。
-// 不可按类名子串识别：BlendOpacityPanelCell 会被复用给音量行。
-static void (*orig_opacitySliderSetMaximum)(id, SEL, CGFloat) = NULL;
-static void (*orig_opacitySliderSetMinimum)(id, SEL, CGFloat) = NULL;
-
-typedef NS_ENUM(NSUInteger, AMProjSharedSliderRole) {
-    AMProjSharedSliderRoleUnknown = 0,
-    AMProjSharedSliderRoleBlendOpacity,
-    AMProjSharedSliderRoleVolume,
-};
-
-static AMProjSharedSliderRole amproj_sharedSliderRole(id slider) {
-    if (![slider isKindOfClass:UIView.class]) return AMProjSharedSliderRoleUnknown;
-    UIResponder *responder = [(UIView *)slider nextResponder];
-    NSUInteger hops = 0;
-    while (responder && hops < 12) {
-        if ([responder isKindOfClass:UIViewController.class]) {
-            // 归属面板的属性绑定是最强标识：volumeSlider 属音量，
-            // opacitySlider 属混合不透明度，标识对比不受复用影响。
-            @try {
-                if ([(UIViewController *)responder
-                        valueForKey:@"volumeSlider"] == slider) {
-                    return AMProjSharedSliderRoleVolume;
-                }
-                if ([(UIViewController *)responder
-                        valueForKey:@"opacitySlider"] == slider) {
-                    return AMProjSharedSliderRoleBlendOpacity;
-                }
-            } @catch (NSException *exception) {
-                // 属性不存在（NSUnknownKeyException）：落回标签识别。
-            }
-            break;
-        }
-        responder = responder.nextResponder;
-        hops++;
-    }
-    UIView *node = [(UIView *)slider superview];
-    hops = 0;
-    while (node && hops < 4) {
-        for (UIView *sibling in node.subviews) {
-            if (![sibling isKindOfClass:UILabel.class]) continue;
-            NSString *text = ((UILabel *)sibling).text ?: @"";
-            if ([text containsString:@"音量"] ||
-                [text.lowercaseString containsString:@"volume"]) {
-                return AMProjSharedSliderRoleVolume;
-            }
-            if ([text containsString:@"透明度"] ||
-                [text.lowercaseString containsString:@"opacity"]) {
-                return AMProjSharedSliderRoleBlendOpacity;
-            }
-        }
-        node = node.superview;
-        hops++;
-    }
-    return AMProjSharedSliderRoleUnknown;
-}
-
-static void hooked_opacitySliderSetMaximum(id self, SEL _cmd,
-                                           CGFloat maximumValue) {
-    CGFloat clamped = maximumValue;
-    if (clamped > 1.0 && clamped <= 1.1 &&
-        amproj_sharedSliderRole(self) == AMProjSharedSliderRoleBlendOpacity) {
-        clamped = 1.0;
-    }
-    if (orig_opacitySliderSetMaximum) {
-        orig_opacitySliderSetMaximum(self, _cmd, clamped);
-    }
-}
-
-static void hooked_opacitySliderSetMinimum(id self, SEL _cmd,
-                                           CGFloat minimumValue) {
-    CGFloat clamped = minimumValue;
-    if (clamped < 0.0 && clamped >= -0.1 &&
-        amproj_sharedSliderRole(self) == AMProjSharedSliderRoleBlendOpacity) {
-        clamped = 0.0;
-    }
-    if (orig_opacitySliderSetMinimum) {
-        orig_opacitySliderSetMinimum(self, _cmd, clamped);
-    }
-}
+// OpacitySlider 是共享控件（不透明度、音量 0-200%、其它参数行都用它），
+// 且通用属性行会把任意参数的滑条挂在 opacitySlider 命名的 outlet 上，
+// 面板/标签/属性标识都不可靠：任何量程钳制（r48 一刀切、r49 值窗、
+// r52 归属识别）都会在某些 UI 上把音量钉死在 100%。唯一安全的做法
+// 是完全不碰 setMaximumValue:/setMinimumValue:——不透明度的 100.3%
+// 显示漂移只是外观问题，音量被卡是功能问题。不要重新加回钳制。
 
 // ── 依赖文件删除保护 ─────────────────────────────────────────
 // 孤儿清理（打开项目时触发，r36 实测）会把导入工程引用的依赖文件当孤儿
@@ -19961,35 +19881,10 @@ static void amproj_installDependencyProtection(void) {
     });
 }
 
-static void amproj_installOpacitySliderClamp(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class sliderClass = objc_getClass("_TtC12AlightMotion13OpacitySlider");
-        if (!sliderClass) sliderClass = objc_getClass("AlightMotion.OpacitySlider");
-        if (!sliderClass) return;
-        Method maxMethod = class_getInstanceMethod(sliderClass,
-            NSSelectorFromString(@"setMaximumValue:"));
-        if (maxMethod) {
-            orig_opacitySliderSetMaximum =
-                (void (*)(id, SEL, CGFloat))method_setImplementation(
-                    maxMethod, (IMP)hooked_opacitySliderSetMaximum);
-        }
-        Method minMethod = class_getInstanceMethod(sliderClass,
-            NSSelectorFromString(@"setMinimumValue:"));
-        if (minMethod) {
-            orig_opacitySliderSetMinimum =
-                (void (*)(id, SEL, CGFloat))method_setImplementation(
-                    minMethod, (IMP)hooked_opacitySliderSetMinimum);
-        }
-        NSLog(@"[AMProjExport] opacity slider drift clamp installed");
-    });
-}
-
 static void amproj_installPresentationHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing presentation filter");
-        amproj_installOpacitySliderClamp();
         @try {
             Method method = class_getInstanceMethod(
                 [UIViewController class],

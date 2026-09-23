@@ -57,7 +57,7 @@ class DependencyReconcileSourceTests(unittest.TestCase):
                       EXPORT)
         install = EXPORT[
             EXPORT.index("static void amproj_installDependencyProtection(void) {"):
-            EXPORT.index("static void amproj_installOpacitySliderClamp(void) {")
+            EXPORT.index("static void amproj_installPresentationHook(void) {")
         ]
         self.assertIn("removeItemAtPath:error:", install)
         self.assertIn("removeItemAtURL:error:", install)
@@ -86,24 +86,16 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         share = share[:share.index("static void amproj_writeDirectArchive(")]
         self.assertIn("amproj_safeDirectPresenter(request.presenter)", share)
 
-    def test_opacity_clamp_is_gated_by_positive_ownership(self):
-        # 音量（EditVolumePanelVC 的 volumeSlider，0-200%）与不透明度共用
-        # OpacitySlider，且 BlendOpacityPanelCell 会被复用给音量行：按类名
-        # 子串识别必误伤。钳制必须由属性标识/标签正向确认不透明度归属后才
-        # 生效；音量与识别不了的一律放行（音量 0-200% 不能再被卡在 100）。
-        region = EXPORT[EXPORT.index("typedef NS_ENUM(NSUInteger, AMProjSharedSliderRole) {"):]
-        region = region[:region.index("static void hooked_opacitySliderSetMaximum(")]
-        self.assertIn('valueForKey:@"volumeSlider"', region)
-        self.assertIn('valueForKey:@"opacitySlider"', region)
-        self.assertIn("AMProjSharedSliderRoleUnknown", region)
-        self.assertIn("音量", region)
-        self.assertNotIn("containsString:@\"BlendOpacityPanel\"", region)
-        hooks = EXPORT[EXPORT.index("static void hooked_opacitySliderSetMaximum("):]
-        hooks = hooks[:hooks.index("static void amproj_installOpacitySliderClamp(void) {")]
-        self.assertEqual(
-            hooks.count(
-                "amproj_sharedSliderRole(self) == AMProjSharedSliderRoleBlendOpacity"),
-            2, "max/min 两个钩子都必须按正向归属钳制")
+    def test_shared_slider_range_is_never_clamped(self):
+        # OpacitySlider 被不透明度、音量（0-200%）等参数行共用，且通用属性行
+        # 会把任意参数的滑条挂在 opacitySlider 命名的 outlet 上——面板/标签/
+        # 属性标识都不可靠。历史上 r48 一刀切、r49 值窗、r52 归属识别三版钳制
+        # 都在真实 UI 上把音量钉死在 100%。禁止再对这个共享类挂钩
+        # setMaximumValue:/setMinimumValue:；100.3% 的显示漂移是可接受代价。
+        self.assertNotIn("hooked_opacitySliderSetMaximum", EXPORT)
+        self.assertNotIn("hooked_opacitySliderSetMinimum", EXPORT)
+        self.assertNotIn("amproj_installOpacitySliderClamp", EXPORT)
+        self.assertNotIn("AMProjSharedSliderRole", EXPORT)
 
     def test_gate_takeover_dismiss_is_exception_guarded(self):
         # 分发设备的登录墙接管是独有路径：dismiss 撞上进行中的过渡会同步抛
