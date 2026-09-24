@@ -19890,7 +19890,7 @@ static BOOL amproj_writeVolumeIvarDirect(id owner, float value) {
     }
     os_log(OS_LOG_DEFAULT, "[AMProjExport] volume ivar write (%{public}s on "
            "%{public}@): %.3f", ivar_getName(ivar) ?: "?",
-           NSStringFromClass([owner class]) ?: "?", value);
+           NSStringFromClass([owner class]) ?: @"?", value);
     return YES;
 }
 
@@ -19972,7 +19972,7 @@ static void amproj_enforceVolumeOnTarget(id target, float value) {
     if (after && fabsf(after.floatValue - value) <= 0.001f) {
         os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write enforced on "
                "%{public}@: %.3f",
-               NSStringFromClass([target class]) ?: "?", value);
+               NSStringFromClass([target class]) ?: @"?", value);
         return;
     }
     if (amproj_writeVolumeIvarDirect(target, value)) {
@@ -19980,17 +19980,17 @@ static void amproj_enforceVolumeOnTarget(id target, float value) {
         if (final && fabsf(final.floatValue - value) <= 0.001f) {
             os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write enforced via "
                    "ivar bypass on %{public}@: %.3f",
-                   NSStringFromClass([target class]) ?: "?", value);
+                   NSStringFromClass([target class]) ?: @"?", value);
         } else {
             os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write CLAMPED even "
                    "after ivar bypass on %{public}@: wanted %.3f got %@",
-                   NSStringFromClass([target class]) ?: "?", value,
+                   NSStringFromClass([target class]) ?: @"?", value,
                    final ?: @"nil");
         }
     } else {
         os_log(OS_LOG_DEFAULT, "[AMProjExport] volume write CLAMPED on "
                "%{public}@: wanted %.3f got %@",
-               NSStringFromClass([target class]) ?: "?", value, after ?: @"nil");
+               NSStringFromClass([target class]) ?: @"?", value, after ?: @"nil");
     }
 }
 
