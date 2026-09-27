@@ -93,6 +93,27 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         self.assertIn("NSInvocation", region)
         self.assertIn("amproj_installVolumeWritebackRescue();", EXPORT)
 
+    def test_dark_appearance_enforced_on_all_windows(self):
+        # 资源面板（形状/媒体/对象元素）用系统语义色渲染：手机浅色模式下
+        # 面板背景=白、图标=白，白上白即"泛白"；重装后观设置重置为跟随
+        # 系统所以必现。全局压深色 trait，新窗口出现时同样套用。
+        region = EXPORT[EXPORT.index("// ── 资源库泛白修复"):]
+        region = region[:region.index("// ── 资源库权限救援")]
+        self.assertIn("UIUserInterfaceStyleDark", region)
+        self.assertIn("overrideUserInterfaceStyle", region)
+        self.assertIn("UIWindowDidBecomeVisibleNotification", region)
+        self.assertIn("amproj_installDarkAppearanceEnforcement();", EXPORT)
+
+    def test_media_permission_probe_and_nudge(self):
+        # 权限被拒/未决定也会让媒体/音频页空白：主动申请 + 被拒时提示跳设置。
+        region = EXPORT[EXPORT.index("// ── 资源库权限救援"):]
+        region = region[:region.index("// ── 音量写回救援")]
+        self.assertIn("PHPhotoLibrary", region)
+        self.assertIn("MPMediaLibrary", region)
+        self.assertIn("requestAuthorization", region)
+        self.assertIn("UIApplicationOpenSettingsURLString", region)
+        self.assertIn("amproj_probeMediaLibraryAccess();", EXPORT)
+
     def test_reconcile_scan_is_memoized_by_stat(self):
         region = _reconcile_region()
         self.assertIn("scanCache", region)

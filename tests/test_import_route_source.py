@@ -2316,8 +2316,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertEqual(inbox.count("amproj_normalizedFilePath"), 2)
 
     def test_activation_prioritizes_launch_retry_before_inbox_scan(self):
-        marker = SOURCE.index("UIApplicationDidBecomeActiveNotification")
-        body = SOURCE[marker : marker + 2400]
+        init_start = SOURCE.index("static void AMProjExportInit")
+        marker = SOURCE.index("UIApplicationDidBecomeActiveNotification", init_start)
+        body = SOURCE[marker : marker + 2800]
         scan = body.index('amproj_scanLocalImportInboxes(@"did_become_active", nil)')
         retry = body.index("amproj_retryDeferredLaunchImportCandidates()")
         self.assertLess(retry, scan)

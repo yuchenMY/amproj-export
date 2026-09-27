@@ -10722,8 +10722,10 @@ static dispatch_queue_t amproj_dependencyQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        queue = dispatch_queue_create("com.amproj.dependency-reconcile",
-                                      DISPATCH_QUEUE_SERIAL);
+        // utility QOS：对账是长期后台活，不能跟资源库缩略图生成抢 IO。
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
+            DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
+        queue = dispatch_queue_create("com.amproj.dependency-reconcile", attr);
     });
     return queue;
 }
@@ -19826,6 +19828,188 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
 // 是完全不碰 setMaximumValue:/setMinimumValue:——不透明度的 100.3%
 // 显示漂移只是外观问题，音量被卡是功能问题。不要重新加回钳制。
 
+
+
+// ── 资源库泛白修复 ───────────────────────────────────────────
+// 资源面板（形状/媒体/音频/对象元素/模板）用系统语义色渲染：手机浅色模式
+// 时面板背景=白、内容图标=白，白上白整个面板"泛白"（截图里淡淡的点/线
+// 就是白图标本身）。编辑器是硬编码深色所以只有这些面板露馅。重装后 app
+// 内观设置重置为"跟随系统"，于是重装必现、手动调深色后"自愈"。修复：
+// 无视系统外观，把所有窗口的 overrideUserInterfaceStyle 压成深色——
+// 系统语义色在深色 trait 下解析成暗色，面板内容立刻显形。新窗口出现时
+// 同样套用（监听 UIWindowDidBecomeVisible）。
+static void amproj_applyDarkAppearanceToWindows(void) {
+    if (!NSThread.isMainThread) return;
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                if (window && ![windows containsObject:window]) {
+                    [windows addObject:window];
+                }
+            }
+        }
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (window && ![windows containsObject:window]) [windows addObject:window];
+    }
+#pragma clang diagnostic pop
+    UIWindow *keyWindow = amproj_keyWindow();
+    if (keyWindow && ![windows containsObject:keyWindow]) [windows addObject:keyWindow];
+    for (UIWindow *window in windows) {
+        if (window.overrideUserInterfaceStyle != UIUserInterfaceStyleDark) {
+            window.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        }
+    }
+}
+
+static void amproj_installDarkAppearanceEnforcement(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            amproj_applyDarkAppearanceToWindows();
+        });
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:UIWindowDidBecomeVisibleNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(__unused NSNotification *note) {
+            amproj_applyDarkAppearanceToWindows();
+        }];
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:UIApplicationDidBecomeActiveNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(__unused NSNotification *note) {
+            amproj_applyDarkAppearanceToWindows();
+        }];
+        NSLog(@"[AMProjExport] dark appearance enforcement installed");
+    });
+}
+
+// ── 资源库权限救援 ───────────────────────────────────────────
+// 重装后 iOS 重置相册/音乐库权限：没授予时媒体/音频页就是空白格（"泛白"），
+// 用户后来去设置开了权限才恢复——看起来像"十几分钟自愈"。启动后主动
+// 探测：未决定就发起系统申请（让弹窗尽早出现），被拒就弹一次性提示并可
+// 直接跳系统设置。Photos/MediaPlayer 只经 NSClassFromString 取用，不引
+// 链接期依赖。
+static void amproj_presentMediaPermissionNotice(NSString *photoDesc,
+                                                NSString *musicDesc) {
+    void (^show)(void) = ^{
+        UIViewController *presenter = amproj_safeDirectPresenter(nil);
+        if (!presenter) return;
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"资源库显示不全？"
+            message:[NSString stringWithFormat:
+                @"相册权限：%@；音乐库权限：%@。
+系统权限未开启时媒体/音频页会显示空白，去设置开启即可恢复。",
+                photoDesc, musicDesc]
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"去设置"
+            style:UIAlertActionStyleDefault
+            handler:^(__unused UIAlertAction *action) {
+                NSURL *url = [NSURL URLWithString:UIApplicationOpenSettingsURLString];
+                if (url) {
+                    [UIApplication.sharedApplication openURL:url options:@{}
+                        completionHandler:nil];
+                }
+            }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"知道了"
+            style:UIAlertActionStyleCancel handler:nil]];
+        @try {
+            [presenter presentViewController:alert animated:YES completion:nil];
+        } @catch (NSException *exception) {
+            amproj_logCriticalEvent(@"media.permission_alert_exception", @{
+                @"reason": exception.reason ?: @""
+            });
+        }
+    };
+    dispatch_async(dispatch_get_main_queue(), show);
+}
+
+static NSString *amproj_photoAuthDescription(NSInteger status) {
+    switch (status) {
+        case 0: return @"未决定";
+        case 1: return @"受限";
+        case 2: return @"已拒绝";
+        case 3: return @"已授权";
+        case 4: return @"有限访问";
+        default: return [NSString stringWithFormat:@"未知(%ld)", (long)status];
+    }
+}
+
+static NSString *amproj_musicAuthDescription(NSInteger status) {
+    switch (status) {
+        case 0: return @"未决定";
+        case 1: return @"已拒绝";
+        case 2: return @"受限";
+        case 3: return @"已授权";
+        default: return [NSString stringWithFormat:@"未知(%ld)", (long)status];
+    }
+}
+
+static void amproj_probeMediaLibraryAccess(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(6.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            NSInteger photoStatus = -1;
+            Class phClass = NSClassFromString(@"PHPhotoLibrary");
+            SEL levelSel = NSSelectorFromString(@"authorizationStatusForAccessLevel:");
+            SEL plainSel = NSSelectorFromString(@"authorizationStatus");
+            if (phClass && [phClass respondsToSelector:levelSel]) {
+                photoStatus = ((NSInteger (*)(id, SEL, NSInteger))objc_msgSend)(
+                    phClass, levelSel, 2);
+            } else if (phClass && [phClass respondsToSelector:plainSel]) {
+                photoStatus = ((NSInteger (*)(id, SEL))objc_msgSend)(
+                    phClass, plainSel);
+            }
+            NSInteger musicStatus = -1;
+            Class mpClass = NSClassFromString(@"MPMediaLibrary");
+            if (mpClass && [mpClass respondsToSelector:plainSel]) {
+                musicStatus = ((NSInteger (*)(id, SEL))objc_msgSend)(
+                    mpClass, plainSel);
+            }
+            os_log(OS_LOG_DEFAULT, "[AMProjExport] media probe: photo=%ld "
+                   "music=%ld", (long)photoStatus, (long)musicStatus);
+            if (photoStatus == 0 && phClass) {
+                SEL requestSel = NSSelectorFromString(
+                    @"requestAuthorizationForAccessLevel:handler:");
+                if ([phClass respondsToSelector:requestSel]) {
+                    ((void (*)(id, SEL, NSInteger, void (^)(NSInteger)))objc_msgSend)(
+                        phClass, requestSel, 2, ^(NSInteger result) {
+                        os_log(OS_LOG_DEFAULT, "[AMProjExport] media probe: "
+                               "photo requested, now=%ld", (long)result);
+                    });
+                }
+            }
+            if (musicStatus == 0 && mpClass) {
+                SEL requestSel = NSSelectorFromString(@"requestAuthorization:");
+                if ([mpClass respondsToSelector:requestSel]) {
+                    ((void (*)(id, SEL, void (^)(NSInteger)))objc_msgSend)(
+                        mpClass, requestSel, ^(NSInteger result) {
+                        os_log(OS_LOG_DEFAULT, "[AMProjExport] media probe: "
+                               "music requested, now=%ld", (long)result);
+                    });
+                }
+            }
+            if ((photoStatus == 1 || photoStatus == 2) ||
+                (musicStatus == 1 || musicStatus == 2)) {
+                amproj_presentMediaPermissionNotice(
+                    amproj_photoAuthDescription(photoStatus),
+                    amproj_musicAuthDescription(musicStatus));
+            }
+        } @catch (NSException *exception) {
+            os_log(OS_LOG_DEFAULT, "[AMProjExport] media probe exception: "
+                   "%{public}@", exception.reason ?: @"");
+        }
+        });
+    });
+}
+
 // ── 音量写回救援 ─────────────────────────────────────────────
 // 音量 widget 的写回链路：滑条事件 -> onVolumeValueChange:forEvent: ->
 // setVolume:userInitiated:。实测这条链在真实 UI 上失效：拖得动但数值
@@ -20256,6 +20440,7 @@ static void amproj_installPresentationHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing presentation filter");
+        amproj_installDarkAppearanceEnforcement();
         amproj_installVolumeWritebackRescue();
         @try {
             Method method = class_getInstanceMethod(
@@ -21092,6 +21277,7 @@ static void AMProjExportInit(void) {
             amproj_armPaywallStartupFallback();
             amproj_startStartupPaywallRescue();
             amproj_schedulePaywallScan(nil, @"did_become_active");
+            amproj_probeMediaLibraryAccess();
             amproj_syncMemberFlags(@"did_become_active");
             amproj_scheduleIPAFireWelcomeSuppression(@"did_become_active");
             // 导出页的"喜欢 Alight Motion 吗"评分弹窗由
