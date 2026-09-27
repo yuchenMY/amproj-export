@@ -19904,8 +19904,7 @@ static void amproj_presentMediaPermissionNotice(NSString *photoDesc,
         UIAlertController *alert = [UIAlertController
             alertControllerWithTitle:@"资源库显示不全？"
             message:[NSString stringWithFormat:
-                @"相册权限：%@；音乐库权限：%@。
-系统权限未开启时媒体/音频页会显示空白，去设置开启即可恢复。",
+                @"相册权限：%@；音乐库权限：%@。系统权限未开启时媒体/音频页会显示空白，去设置开启即可恢复。",
                 photoDesc, musicDesc]
             preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"去设置"
