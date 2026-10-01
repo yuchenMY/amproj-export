@@ -114,6 +114,21 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         self.assertIn("UIApplicationOpenSettingsURLString", region)
         self.assertIn("amproj_probeMediaLibraryAccess();", EXPORT)
 
+    def test_interrupt_notice_fires_once_per_transaction(self):
+        # 导入中断提示不能每次启动都弹：提示后写回 interrupt_notice_shown，
+        # 同一事务不再重弹；新事务重建记录后自动重新武装。
+        self.assertIn("interrupt_notice_shown", EXPORT)
+        self.assertIn("amproj_markImportBreadcrumbInterruptNoticed();", EXPORT)
+        mark = EXPORT[
+            EXPORT.index("static void amproj_markImportBreadcrumbInterruptNoticed(void) {"):
+            EXPORT.index("static NSString *amproj_nativeBreadcrumbDisplayStage(")
+        ]
+        self.assertIn('record[@"interrupt_notice_shown"] = @YES;', mark)
+        bootstrap = EXPORT[EXPORT.index('if (phase.length && ![phase isEqualToString:@"completed"]'):]
+        bootstrap = bootstrap[:bootstrap.index("amproj_purgeOldDirectExports")]
+        self.assertIn("interrupt_notice_shown", bootstrap)
+        self.assertIn("amproj_markImportBreadcrumbInterruptNoticed();", bootstrap)
+
     def test_reconcile_scan_is_memoized_by_stat(self):
         region = _reconcile_region()
         self.assertIn("scanCache", region)

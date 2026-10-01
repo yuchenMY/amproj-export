@@ -376,6 +376,22 @@ static NSDictionary *amproj_readImportBreadcrumb(void) {
     }
 }
 
+// 中断提示只弹一次：标记后同一事务不再在启动时重弹；新导入事务会重建
+// 记录（transaction_id 变化），提示自动重新武装。
+static void amproj_markImportBreadcrumbInterruptNoticed(void) {
+    NSURL *URL = amproj_importBreadcrumbURL();
+    if (!URL) return;
+    @synchronized (amproj_importBreadcrumbLock()) {
+        NSDictionary *previous = amproj_readImportBreadcrumbAtURL(URL);
+        if (!previous.count) return;
+        NSMutableDictionary *record = [previous mutableCopy];
+        record[@"interrupt_notice_shown"] = @YES;
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:record
+            format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+        if (data.length) [data writeToURL:URL options:NSDataWritingAtomic error:nil];
+    }
+}
+
 static NSString *amproj_nativeBreadcrumbDisplayStage(NSDictionary *breadcrumb) {
     NSString *phase = [breadcrumb[@"phase"] isKindOfClass:NSString.class]
         ? breadcrumb[@"phase"] : @"";
@@ -20742,10 +20758,12 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                 NSString *interruptedStage =
                     amproj_nativeBreadcrumbDisplayStage(previousBreadcrumb);
                 if (phase.length && ![phase isEqualToString:@"completed"] &&
-                    ![phase isEqualToString:@"failed"]) {
+                    ![phase isEqualToString:@"failed"] &&
+                    ![previousBreadcrumb[@"interrupt_notice_shown"] boolValue]) {
                     amproj_showImportStatus([NSString stringWithFormat:
                         @"AMProj · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
                         interruptedStage], YES);
+                    amproj_markImportBreadcrumbInterruptNoticed();
                 }
             }
             if (amproj_runtimeUsesLocalImportEngine()) {
