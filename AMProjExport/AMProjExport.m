@@ -20757,8 +20757,16 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                     isKindOfClass:NSString.class] ? previousBreadcrumb[@"phase"] : @"";
                 NSString *interruptedStage =
                     amproj_nativeBreadcrumbDisplayStage(previousBreadcrumb);
+                NSNumber *updatedAt =
+                    [previousBreadcrumb[@"updated_at"] isKindOfClass:NSNumber.class]
+                        ? previousBreadcrumb[@"updated_at"] : nil;
+                // 陈旧记录（>24h）不再提示：分发包/备份还原可能带着旧的中断
+                // 记录，新装用户不该看到一条无从操作的红字。
+                BOOL stale = updatedAt && (NSDate.date.timeIntervalSince1970 -
+                    updatedAt.doubleValue) > 24.0 * 60.0 * 60.0;
                 if (phase.length && ![phase isEqualToString:@"completed"] &&
                     ![phase isEqualToString:@"failed"] &&
+                    !stale &&
                     ![previousBreadcrumb[@"interrupt_notice_shown"] boolValue]) {
                     amproj_showImportStatus([NSString stringWithFormat:
                         @"AMProj · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",

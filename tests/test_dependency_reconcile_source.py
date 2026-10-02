@@ -128,6 +128,9 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         bootstrap = bootstrap[:bootstrap.index("amproj_purgeOldDirectExports")]
         self.assertIn("interrupt_notice_shown", bootstrap)
         self.assertIn("amproj_markImportBreadcrumbInterruptNoticed();", bootstrap)
+        # 陈旧中断记录（>24h，分发包/备份还原携带）直接不提示。
+        self.assertIn("!stale", bootstrap)
+        self.assertIn("24.0 * 60.0 * 60.0", bootstrap)
 
     def test_reconcile_scan_is_memoized_by_stat(self):
         region = _reconcile_region()
