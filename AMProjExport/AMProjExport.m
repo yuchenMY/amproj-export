@@ -64,7 +64,15 @@ static NSString *const kAMProjGateDefenseRound = @"r24-storekit-empty-response";
 // defend against, and every interception here is pure false-positive risk
 // (the r22 black screen was this defense hiding the app's own window).
 // Keep the machinery compiled but switched off.
-static BOOL amproj_gateDefenseActive = NO;
+// 2026-10 分发基座换回带真实 Blatant 破解模块的包（welcome 带 3.2s 倒计时
+// 自关），a5c027e 的"空壳包无 funnel 可防"前提不再成立。视觉防御重新
+// 装备：welcome 零帧渲染；合成点击保持关闭（其倒计时自己走完授权状态机，
+// 权益不受影响）。
+static BOOL amproj_gateDefenseActive = YES;
+// 合成点击（fireGateSkipControl 的 continue/close 激活）会与破解模块的
+// 授权状态机赛跑并丢失会员权益（r14/r21 实测）。永远不发：Blatant 欢迎页
+// 自带倒计时自动关闭，无需代按。
+static BOOL amproj_gateSkipControlEnabled = NO;
 // The accessibility-based activations (funnel sweep continue taps, intro
 // close activation) raced the crack module's license state machine and were
 // observed dropping the member entitlement. They stay disarmed even while
@@ -12310,7 +12318,18 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                 amproj_resumeQueuedImports(@"865_store_denied");
             };
 #if AMPROJ_CLOUD_SYNC
+            // 授权请求必须有死线：新设备未开通/网络不通时回调可能永不返回，
+            // 事务会永远停在 creating_project（"上次导入中断"红字的真凶）。
+            // 20 秒未落定按未开通收尾，写终态、给明确文案、可重试。
+            __block BOOL authSettled = NO;
+            void (^settleStoreDenied)(NSError *) = ^(NSError *error) {
+                if (authSettled) return;
+                authSettled = YES;
+                storeDenied(error);
+            };
             AMCloudAuthorizeFeature(@"import", nil, ^(BOOL allowed, NSError *error) {
+                if (authSettled) return;
+                authSettled = YES;
                 if (!allowed) {
                     storeDenied(error);
                     return;
@@ -12323,6 +12342,14 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                         presentStoreResult(written, projectTitle);
                     });
                 });
+            });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                (int64_t)(20.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                settleStoreDenied([NSError errorWithDomain:
+                    @"com.amproj.import" code:408 userInfo:@{
+                    NSLocalizedDescriptionKey:
+                        @"授权请求超时，请检查网络后重试（设备权限未开通时也会超时）"
+                }]);
             });
 #else
             dispatch_async(amproj_importInboxQueue(), ^{
@@ -15296,6 +15323,9 @@ static BOOL amproj_windowCarriesCrackGate(UIWindow *window) {
 // wired, so its own state machine performs the completion and dismissal
 // while the window stays invisible.
 static BOOL amproj_fireGateSkipControl(UIWindow *window) {
+    // 合成点击永久禁用：代按 continue/close 会丢会员权益。窗口只做视觉
+    // 隐藏，Blatant 欢迎页的倒计时会自行完成授权流程。
+    if (!amproj_gateSkipControlEnabled) return NO;
     if (!window || !NSThread.isMainThread) return NO;
     UIViewController *root = window.rootViewController;
     if (root && !root.viewIfLoaded) {
@@ -20757,22 +20787,10 @@ static void amproj_bootstrapAfterLaunch(NSString *trigger) {
                     isKindOfClass:NSString.class] ? previousBreadcrumb[@"phase"] : @"";
                 NSString *interruptedStage =
                     amproj_nativeBreadcrumbDisplayStage(previousBreadcrumb);
-                NSNumber *updatedAt =
-                    [previousBreadcrumb[@"updated_at"] isKindOfClass:NSNumber.class]
-                        ? previousBreadcrumb[@"updated_at"] : nil;
-                // 陈旧记录（>24h）不再提示：分发包/备份还原可能带着旧的中断
-                // 记录，新装用户不该看到一条无从操作的红字。
-                BOOL stale = updatedAt && (NSDate.date.timeIntervalSince1970 -
-                    updatedAt.doubleValue) > 24.0 * 60.0 * 60.0;
-                if (phase.length && ![phase isEqualToString:@"completed"] &&
-                    ![phase isEqualToString:@"failed"] &&
-                    !stale &&
-                    ![previousBreadcrumb[@"interrupt_notice_shown"] boolValue]) {
-                    amproj_showImportStatus([NSString stringWithFormat:
-                        @"AMProj · 上次导入在 %@ 阶段中断，原项目包已保留，可重新打开重试",
-                        interruptedStage], YES);
-                    amproj_markImportBreadcrumbInterruptNoticed();
-                }
+                // 启动不再弹"上次导入中断"红字（r40 时代行为，用户反馈这是
+                // 吓人的报错弹窗）。中断的包仍在缓存里，重新打开文件即可重试；
+                // 日志保留 interruptedStage 供诊断。
+                (void)interruptedStage;
             }
             if (amproj_runtimeUsesLocalImportEngine()) {
                 amproj_purgeOldDirectExports();

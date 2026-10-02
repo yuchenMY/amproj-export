@@ -114,23 +114,28 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         self.assertIn("UIApplicationOpenSettingsURLString", region)
         self.assertIn("amproj_probeMediaLibraryAccess();", EXPORT)
 
-    def test_interrupt_notice_fires_once_per_transaction(self):
-        # 导入中断提示不能每次启动都弹：提示后写回 interrupt_notice_shown，
-        # 同一事务不再重弹；新事务重建记录后自动重新武装。
-        self.assertIn("interrupt_notice_shown", EXPORT)
-        self.assertIn("amproj_markImportBreadcrumbInterruptNoticed();", EXPORT)
-        mark = EXPORT[
-            EXPORT.index("static void amproj_markImportBreadcrumbInterruptNoticed(void) {"):
-            EXPORT.index("static NSString *amproj_nativeBreadcrumbDisplayStage(")
-        ]
-        self.assertIn('record[@"interrupt_notice_shown"] = @YES;', mark)
-        bootstrap = EXPORT[EXPORT.index('if (phase.length && ![phase isEqualToString:@"completed"]'):]
-        bootstrap = bootstrap[:bootstrap.index("amproj_purgeOldDirectExports")]
-        self.assertIn("interrupt_notice_shown", bootstrap)
-        self.assertIn("amproj_markImportBreadcrumbInterruptNoticed();", bootstrap)
-        # 陈旧中断记录（>24h，分发包/备份还原携带）直接不提示。
-        self.assertIn("!stale", bootstrap)
-        self.assertIn("24.0 * 60.0 * 60.0", bootstrap)
+    def test_bootstrap_banner_removed_and_auth_deadlined(self):
+        # 启动红字已按用户要求移除；导入授权必须有死线（挂死曾把事务永远
+        # 留在 creating_project）。
+        bootstrap = EXPORT[EXPORT.index('(void)interruptedStage;'):]
+        self.assertNotIn("上次导入在", bootstrap)
+        store = EXPORT[EXPORT.index('__block BOOL authSettled = NO;'):]
+        store = store[:store.index("#else")]
+        self.assertIn("20.0 * NSEC_PER_SEC", store)
+        self.assertIn("settleStoreDenied", store)
+
+    def test_welcome_defense_visual_only(self):
+        # welcome 每次启动冒出 = 防御被 a5c027e 关死。重开视觉压制，但合成
+        # 点击（fireGateSkipControl）永久禁用：代按 continue/close 会丢会员
+        # 权益；Blatant 欢迎页自带倒计时自关，无需代按。
+        flags = EXPORT[EXPORT.index("static BOOL amproj_gateDefenseActive"):]
+        flags = flags[:flags.index("static BOOL amproj_introAutocloseEnabled")]
+        self.assertIn("amproj_gateDefenseActive = YES;", flags)
+        self.assertIn("amproj_gateSkipControlEnabled = NO;", flags)
+        self.assertIn("amproj_funnelSweepEnabled = NO;", flags)
+        skip = EXPORT[EXPORT.index("static BOOL amproj_fireGateSkipControl("):]
+        skip = skip[:skip.index("static void amproj_gateCycleEnd")]
+        self.assertIn("if (!amproj_gateSkipControlEnabled) return NO;", skip)
 
     def test_reconcile_scan_is_memoized_by_stat(self):
         region = _reconcile_region()

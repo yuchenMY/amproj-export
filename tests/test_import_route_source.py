@@ -3324,9 +3324,11 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         # defense is visual-only: the funnel pages are hidden, the gate's
         # own continue button is activated once exactly like a user tap,
         # and every accessibility-based activation stays disarmed.
-        self.assertIn('static BOOL amproj_gateDefenseActive = NO;', SOURCE)
-        self.assertIn(
-            'Keep the machinery compiled but switched off.', SOURCE)
+        # 2026-10 起分发基座带真实 Blatant 破解（welcome 自带倒计时自关），
+        # 视觉防御重新装备；合成点击（fireGateSkipControl）永久禁用——代按
+        # continue/close 会丢会员权益。
+        self.assertIn('static BOOL amproj_gateDefenseActive = YES;', SOURCE)
+        self.assertIn('static BOOL amproj_gateSkipControlEnabled = NO;', SOURCE)
         self.assertIn('static BOOL amproj_funnelSweepEnabled = NO;', SOURCE)
         self.assertIn('static BOOL amproj_introAutocloseEnabled = YES;', SOURCE)
         self.assertIn(
