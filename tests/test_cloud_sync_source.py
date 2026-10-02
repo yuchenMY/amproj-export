@@ -1351,3 +1351,26 @@ class CloudSyncSourceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TokenCacheSourceTests(unittest.TestCase):
+    """真机 309 看门狗崩溃栈顶是 SecItemAdd：重签后每次读 token 都做
+    自愈回写，场景切换 10s 预算被 securityd 同步调用烧光。读路径必须
+    缓存命中、自愈回写进程内最多一次且异步、Keychain 写失败即降级。"""
+
+    def test_token_reads_are_cached_and_heal_is_throttled(self):
+        cloud = (ROOT / "AMProjExport" / "AMCloudSync.m").read_text(encoding="utf-8")
+        region = cloud[cloud.index("static NSString *AMCloudCachedToken = nil;"):]
+        region = region[:region.index("static OSStatus AMCloudDeleteTokenUnlocked")]
+        self.assertIn("if (AMCloudTokenCacheLoaded) return AMCloudCachedToken;", region)
+        self.assertIn("AMCloudMirrorHealScheduled", region)
+        self.assertIn("dispatch_async(dispatch_get_global_queue", region)
+        self.assertIn("AMCloudKeychainWriteAvailable = NO;", region)
+        self.assertIn("cloud.token.restored_from_mirror", region)
+
+    def test_write_degrades_to_mirror_only(self):
+        cloud = (ROOT / "AMProjExport" / "AMCloudSync.m").read_text(encoding="utf-8")
+        write = cloud[cloud.index("static BOOL AMCloudWriteTokenUnlocked(NSString *token) {"):]
+        write = write[:write.index("static OSStatus AMCloudDeleteTokenUnlocked")]
+        self.assertIn("if (AMCloudKeychainWriteAvailable) {", write)
+        self.assertIn("AMCloudWriteTokenMirror(token);", write)
+        self.assertIn("AMCloudCachedToken = token;", write)

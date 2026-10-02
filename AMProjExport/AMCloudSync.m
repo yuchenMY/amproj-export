@@ -338,7 +338,20 @@ static NSString *AMCloudReadTokenMirror(void) {
 
 static BOOL AMCloudWriteTokenUnlocked(NSString *token);
 
+// token 读写都走 securityd 同步调用，且 blatantsPatch 会拦 SecItem*：LCSign
+// 重签后 Keychain 访问组失联，旧逻辑每次读都做一次 SecItemAdd 自愈回写，
+// 场景切换（截图切 app 等）的 10 秒看门狗预算被它烧光——真机 309 崩溃栈
+// 顶就是 SecItemAdd。修法：进程内缓存 token（读不再进 Keychain）；自愈回写
+// 整个进程最多调度一次且放在后台执行；Keychain 写失败一次即永久降级为纯
+// 镜像存储。全部状态只在 auth queue 上访问。
+static NSString *AMCloudCachedToken = nil;
+static BOOL AMCloudTokenCacheLoaded = NO;
+static BOOL AMCloudMirrorHealScheduled = NO;
+static BOOL AMCloudKeychainWriteAvailable = YES;
+
 static NSString *AMCloudReadTokenUnlocked(void) {
+    if (AMCloudTokenCacheLoaded) return AMCloudCachedToken;
+    AMCloudTokenCacheLoaded = YES;
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: AMCloudKeychainService,
@@ -351,13 +364,30 @@ static NSString *AMCloudReadTokenUnlocked(void) {
     if (status == errSecSuccess && result) {
         NSData *data = CFBridgingRelease(result);
         NSString *token = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (token.length) return token;
+        if (token.length) {
+            AMCloudCachedToken = token;
+            return token;
+        }
     }
-    // Keychain 因重签换团队失联时的兜底：从 Library 镜像恢复并回写。
+    // Keychain 因重签换团队失联时的兜底：从 Library 镜像恢复。回写 Keychain
+    // 只做一次、且不在读路径上同步执行——SecItemAdd 可能被破解层拖住数秒。
     NSString *mirrored = AMCloudReadTokenMirror();
     if (mirrored.length) {
-        AMCloudWriteTokenUnlocked(mirrored);
-        AMCloudDiagnostic(@"cloud.token.restored_from_mirror", @{});
+        AMCloudCachedToken = mirrored;
+        if (!AMCloudMirrorHealScheduled) {
+            AMCloudMirrorHealScheduled = YES;
+            NSString *healToken = [mirrored copy];
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                AMCloudAuthPerformSync(^{
+                    if (!AMCloudKeychainWriteAvailable) return;
+                    BOOL healed = AMCloudWriteTokenUnlocked(healToken);
+                    if (!healed) AMCloudKeychainWriteAvailable = NO;
+                    AMCloudDiagnostic(@"cloud.token.restored_from_mirror", @{
+                        @"keychain_written": @(healed)
+                    });
+                });
+            });
+        }
     }
     return mirrored;
 }
@@ -374,23 +404,36 @@ static BOOL AMCloudWriteTokenUnlocked(NSString *token) {
         (__bridge id)kSecAttrAccessible:
             (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     };
-    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)identity,
-                                    (__bridge CFDictionaryRef)values);
-    if (status == errSecItemNotFound) {
-        NSMutableDictionary *insert = [identity mutableCopy];
-        [insert addEntriesFromDictionary:values];
-        status = SecItemAdd((__bridge CFDictionaryRef)insert, NULL);
+    OSStatus status = errSecSuccess;
+    if (AMCloudKeychainWriteAvailable) {
+        status = SecItemUpdate((__bridge CFDictionaryRef)identity,
+                               (__bridge CFDictionaryRef)values);
+        if (status == errSecItemNotFound) {
+            NSMutableDictionary *insert = [identity mutableCopy];
+            [insert addEntriesFromDictionary:values];
+            status = SecItemAdd((__bridge CFDictionaryRef)insert, NULL);
+        }
+        if (status != errSecSuccess) {
+            // Keychain 写在本签名环境下不可用（访问组失联/被破解层拖死），
+            // 降级为纯镜像存储，后续写不再碰 securityd。
+            AMCloudKeychainWriteAvailable = NO;
+        }
     }
     AMCloudWriteTokenMirror(token);
-    return status == errSecSuccess;
+    AMCloudCachedToken = token;
+    AMCloudTokenCacheLoaded = YES;
+    return status == errSecSuccess || !AMCloudKeychainWriteAvailable;
 }
 
 static OSStatus AMCloudDeleteTokenUnlocked(void) {
+    AMCloudCachedToken = nil;
+    AMCloudTokenCacheLoaded = YES;
     NSDictionary *query = @{
         (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: AMCloudKeychainService,
         (__bridge id)kSecAttrAccount: AMCloudKeychainAccount
     };
+    if (!AMCloudKeychainWriteAvailable) return errSecSuccess;
     return SecItemDelete((__bridge CFDictionaryRef)query);
 }
 
