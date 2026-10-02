@@ -3727,6 +3727,7 @@ static void amproj_releaseImportTransaction(NSString *transactionID, BOOL succes
                                     : AMProjImportTransactionFailed;
         transaction.updatedAt = now;
         if (success) {
+            amproj_recordIncomingImportSuccess(transaction.name);
             amproj_clearIncomingGrantLoss(transaction.name);
         }
         if (success) {
@@ -4205,8 +4206,41 @@ static NSString *amproj_pendingRedeliveryKey(NSString *name) {
     return (name.length ? name : @"project").lowercaseString ?: @"";
 }
 
+static NSMutableDictionary<NSString *, NSNumber *> *amproj_recentImportSuccessMap(void) {
+    static NSMutableDictionary<NSString *, NSNumber *> *map;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ map = [NSMutableDictionary dictionary]; });
+    return map;
+}
+
+static void amproj_recordIncomingImportSuccess(NSString *name) {
+    if (!name.length) return;
+    @synchronized (amproj_pendingRedeliveryLock()) {
+        amproj_recentImportSuccessMap()[amproj_pendingRedeliveryKey(name)] =
+            @(CFAbsoluteTimeGetCurrent());
+    }
+}
+
+static BOOL amproj_recentlyImportedSuccessfully(NSString *name) {
+    if (!name.length) return NO;
+    @synchronized (amproj_pendingRedeliveryLock()) {
+        NSNumber *at =
+            amproj_recentImportSuccessMap()[amproj_pendingRedeliveryKey(name)];
+        return at != nil &&
+            (CFAbsoluteTimeGetCurrent() - at.doubleValue) < 90.0;
+    }
+}
+
 static void amproj_noteIncomingGrantLoss(NSString *name, BOOL isXML) {
     if (!name.length) return;
+    // 同名文件已经导入成功（QQ 双投递：一条成功一条读取竞态失败）——
+    // 不再记账，否则 10 秒后会在成功之后弹"无法导入"。
+    if (amproj_recentlyImportedSuccessfully(name)) {
+        amproj_logCriticalEvent(@"import.grant_loss_suppressed_by_success", @{
+            @"filename": name ?: @""
+        });
+        return;
+    }
     NSString *key = amproj_pendingRedeliveryKey(name);
     CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 10.0;
     BOOL scheduleCheck = NO;
@@ -4230,6 +4264,7 @@ static void amproj_noteIncomingGrantLoss(NSString *name, BOOL isXML) {
             if (stillPending) [amproj_pendingRedeliveryDeadlines() removeObjectForKey:key];
         }
         if (!stillPending) return;
+        if (amproj_recentlyImportedSuccessfully(name)) return;
         amproj_showImportStatus([NSString stringWithFormat:
             @"AMProj · 未能读取《%@》，请回到 QQ 重新用其他应用打开一次",
             name], YES);
@@ -12765,9 +12800,24 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
                 ([copyError.domain isEqualToString:NSCocoaErrorDomain] &&
                  (copyError.code == 257 || copyError.code == 513 ||
                   copyError.code == 260 || copyError.code == 256));
-            if (providerGrantLost) {
-                // QQ re-delivers the same document through openURL with a
-                // fresh grant; stay silent here and let that delivery import.
+            // 源读取侧失败一律静默等重投递：QQ 会带新授权重投递同一文件并
+            // 导入成功。此前只有"授权检查后不可读"的窄组合走静默，其余竞态
+            // （可读检查通过后文件才被清掉、POSIX ENOENT 等）落进立即报错
+            // 分支——成功之后还弹"无法导入 XML"就是这么来的。10 秒内无重
+            // 投递、也无同名成功导入，才由 noteIncomingGrantLoss 弹一次。
+            BOOL cocoaSourceReadFailure =
+                [copyError.domain isEqualToString:NSCocoaErrorDomain] &&
+                (copyError.code == 257 || copyError.code == 513 ||
+                 copyError.code == 260 || copyError.code == 256 ||
+                 copyError.code == 4);
+            BOOL ourSourceReadFailure =
+                [copyError.domain isEqualToString:@"com.amproj.import.file"] &&
+                (copyError.code == AMProjImportFileErrorOpenSource ||
+                 copyError.code == AMProjImportFileErrorReadSource);
+            BOOL sourceReadFailure = providerGrantLost ||
+                cocoaSourceReadFailure || ourSourceReadFailure ||
+                [copyError.domain isEqualToString:NSPOSIXErrorDomain];
+            if (sourceReadFailure) {
                 amproj_noteIncomingGrantLoss(originalName,
                     importKind == AMProjImportKindXMLTemplate);
                 return AMProjIncomingURLFailed;

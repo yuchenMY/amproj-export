@@ -137,6 +137,23 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         skip = skip[:skip.index("static void amproj_gateCycleEnd")]
         self.assertIn("if (!amproj_gateSkipControlEnabled) return NO;", skip)
 
+    def test_false_import_failure_suppressed_after_success(self):
+        # QQ 双投递：一条读取成功导入，另一条读取竞态失败——曾成功之后还弹
+        # "无法导入 XML"。源读取失败统一静默等重投递；成功记忆（90s）拦住
+        # 误报，10 秒无重投递且无成功才弹一次过期提示。
+        region = EXPORT[EXPORT.index("static NSMutableDictionary<NSString *, NSNumber *> *amproj_recentImportSuccessMap("):]
+        region = region[:region.index("static void amproj_clearIncomingGrantLoss(")]
+        self.assertIn("amproj_recentlyImportedSuccessfully(name)", region)
+        self.assertIn("import.grant_loss_suppressed_by_success", region)
+        copy_fail = EXPORT[EXPORT.index("BOOL cocoaSourceReadFailure ="):]
+        copy_fail = copy_fail[:copy_fail.index("return AMProjIncomingURLFailed;")]
+        self.assertIn("NSPOSIXErrorDomain", copy_fail)
+        self.assertIn("AMProjImportFileErrorOpenSource", copy_fail)
+        self.assertIn("amproj_noteIncomingGrantLoss(originalName", copy_fail)
+        success = EXPORT[EXPORT.index("if (success) {"):]
+        success = success[:success.index("amproj_clearIncomingGrantLoss(transaction.name);")]
+        self.assertIn("amproj_recordIncomingImportSuccess(transaction.name);", success)
+
     def test_reconcile_scan_is_memoized_by_stat(self):
         region = _reconcile_region()
         self.assertIn("scanCache", region)
