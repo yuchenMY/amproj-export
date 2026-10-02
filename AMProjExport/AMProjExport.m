@@ -116,6 +116,7 @@ static UIViewController* amproj_shareVCRecursive(
 static UIViewController* amproj_topViewController(UIViewController *controller);
 static void amproj_noteIncomingGrantLoss(NSString *name, BOOL isXML);
 static void amproj_clearIncomingGrantLoss(NSString *name);
+static void amproj_recordIncomingImportSuccess(NSString *name);
 static BOOL AMProjClassIsFromCrackDylib(Class cls);
 static BOOL AMProjPresentationChainHasCrackController(UIViewController *controller);
 static BOOL AMProjViewHierarchyHasCrackClass(UIView *view, NSUInteger depth);
