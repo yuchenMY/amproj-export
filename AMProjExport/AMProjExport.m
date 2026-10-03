@@ -20304,7 +20304,7 @@ static void amproj_attachVolumeRescueAction(id owner, id slider) {
                  forControlEvents:UIControlEventValueChanged];
     os_log(OS_LOG_DEFAULT, "[AMProjExport] volume rescue action attached on "
            "%{public}@ / %{public}@",
-           NSStringFromClass([owner class]) ?: @"?",
+           owner ? NSStringFromClass([owner class]) : @"(class-level)",
            NSStringFromClass([slider class]) ?: @"?");
 }
 
@@ -20321,6 +20321,30 @@ static void hooked_volumeWidgetSetVolumeSlider(id self, SEL _cmd, id slider) {
         os_log(OS_LOG_DEFAULT, "[AMProjExport] volume re-wire exception: "
                "%{public}@", exception.reason ?: @"");
     }
+}
+
+// 类级挂载：通用属性行的滑条不走任何 widget 出口（r56 只盯了专用音量弹窗，
+// 属性行的拖动埋点全程静默——真机日志实证）。改为在 OpacitySlider 构造时
+// 直接给每个实例挂救援行动，无论它属于哪个面板。
+static id (*orig_opacitySliderInitFrame)(id, SEL, CGRect) = NULL;
+static id (*orig_opacitySliderInitCoder)(id, SEL, id) = NULL;
+
+static id hooked_opacitySliderInitFrame(id self, SEL _cmd, CGRect frame) {
+    id created = orig_opacitySliderInitFrame(self, _cmd, frame);
+    @try {
+        if (created) amproj_attachVolumeRescueAction(nil, created);
+    } @catch (NSException *exception) {
+    }
+    return created;
+}
+
+static id hooked_opacitySliderInitCoder(id self, SEL _cmd, id coder) {
+    id created = orig_opacitySliderInitCoder(self, _cmd, coder);
+    @try {
+        if (created) amproj_attachVolumeRescueAction(nil, created);
+    } @catch (NSException *exception) {
+    }
+    return created;
 }
 
 static void hooked_onVolumeValueChange(id self, SEL _cmd, id sender, id event) {
@@ -20384,6 +20408,34 @@ static void amproj_installVolumeWritebackRescue(void) {
                             (void (*)(id, SEL, id, id))previous;
                     }
                 }
+            }
+            // 类级挂载：OpacitySlider 每个实例构造即带救援。
+            Class sliderClass = objc_getClass("_TtC12AlightMotion13OpacitySlider");
+            if (!sliderClass) sliderClass = objc_getClass("AlightMotion.OpacitySlider");
+            if (sliderClass) {
+                Method frameInit = class_getInstanceMethod(sliderClass,
+                    NSSelectorFromString(@"initWithFrame:"));
+                if (frameInit) {
+                    IMP previous = amproj_installMethodHook(
+                        frameInit, (IMP)hooked_opacitySliderInitFrame, 3,
+                        @"OpacitySlider.initWithFrame");
+                    if (previous) {
+                        orig_opacitySliderInitFrame = (__typeof__(
+                            orig_opacitySliderInitFrame))previous;
+                    }
+                }
+                Method coderInit = class_getInstanceMethod(sliderClass,
+                    NSSelectorFromString(@"initWithCoder:"));
+                if (coderInit) {
+                    IMP previous = amproj_installMethodHook(
+                        coderInit, (IMP)hooked_opacitySliderInitCoder, 3,
+                        @"OpacitySlider.initWithCoder");
+                    if (previous) {
+                        orig_opacitySliderInitCoder = (__typeof__(
+                            orig_opacitySliderInitCoder))previous;
+                    }
+                }
+                NSLog(@"[AMProjExport] volume rescue class-attached to OpacitySlider");
             }
             NSLog(@"[AMProjExport] volume writeback rescue installed "
                   "(outlet=%@ handler=%@)",
