@@ -19981,7 +19981,7 @@ static NSURL *amproj_offlineCacheDirectory(void) {
 }
 
 static NSString *amproj_offlineCacheKey(NSURL *URL) {
-    NSData *data = [[URL.absoluteString ?: @""] dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *data = [(URL.absoluteString ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
     NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
