@@ -165,6 +165,25 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         self.assertIn("offline.config_replayed", region)
         self.assertIn("amproj_installOfflineTakeover();", EXPORT)
 
+    def test_import_history_dedupes_across_restarts(self):
+        # tombstone 只活 6 秒且不落盘：重启后同内容重导，模板页堆出 N 份
+        # 同名条目。指纹档案落盘 + 库内文件存在性校验：在库即跳过并清源，
+        # 用户删过库内条目则放行重导。
+        self.assertIn("amproj-import-history.plist", EXPORT)
+        helpers = EXPORT[EXPORT.index("static NSString *const AMProjImportHistoryFilename"):]
+        helpers = helpers[:helpers.index("static BOOL amproj_claimImportTransaction(")]
+        self.assertIn("amproj_importHistoryStoreLocked", helpers)
+        self.assertIn("amproj_importHistoryRememberLocked", helpers)
+        claim = EXPORT[EXPORT.index("static BOOL amproj_claimImportFingerprint("):]
+        claim = claim[:claim.index("static void amproj_releaseImportTransaction")]
+        self.assertIn("amproj_importHistoryStoreLocked()[fingerprint]", claim)
+        self.assertIn("store_uuid", claim)
+        self.assertIn("removeObjectForKey:fingerprint", claim)
+        success = EXPORT[EXPORT.index("amproj_importHistoryRememberLocked(transaction.fingerprint"):]
+        success = success[:success.index(");", success.index("transaction.storeUUID"))]
+        self.assertIn("transaction.storeUUID", success)
+        self.assertIn("storeOwner.storeUUID = storeUUID;", EXPORT)
+
     def test_reconcile_scan_is_memoized_by_stat(self):
         region = _reconcile_region()
         self.assertIn("scanCache", region)

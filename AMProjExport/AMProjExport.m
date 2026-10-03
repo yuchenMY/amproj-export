@@ -3257,6 +3257,7 @@ typedef NS_ENUM(NSInteger, AMProjTemplateProbeCapability) {
 @property(nonatomic, copy) NSString *transactionID;
 @property(nonatomic, copy) NSString *provisionalKey;
 @property(nonatomic, copy) NSString *fingerprint;
+@property(nonatomic, copy) NSString *storeUUID;
 @property(nonatomic, copy) NSString *duplicateOfFingerprint;
 @property(nonatomic, copy) NSString *name;
 @property(nonatomic, copy) NSString *source;
@@ -3590,6 +3591,76 @@ static BOOL amproj_hasDeferredLaunchImportCandidates(void) {
     }
 }
 
+static NSURL *amproj_v865StoreLibraryURL(void);
+
+// ── 已导入内容档案（落盘去重）─────────────────────────────────
+// tombstone 只活 6 秒且不落盘：重启后同内容放行、inbox 源文件又没消费，
+// 每次启动都会把同一模板再导一份（模板页堆出 N 份同名 angel 就是这么来
+// 的）。指纹档案落盘并配库内文件存在性校验：内容已在库 → 跳过本次导入
+// （调用方会顺手清掉重复源）；用户删过库内条目 → 放行重导。
+static NSString *const AMProjImportHistoryFilename = @"amproj-import-history.plist";
+
+static NSMutableDictionary<NSString *, NSDictionary *> *amproj_importHistoryStoreLocked(void) {
+    static NSMutableDictionary<NSString *, NSDictionary *> *history = nil;
+    static BOOL loaded = NO;
+    if (loaded) return history;
+    loaded = YES;
+    NSURL *library = [NSFileManager.defaultManager
+        URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *url = [library URLByAppendingPathComponent:AMProjImportHistoryFilename];
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    NSDictionary *raw = nil;
+    if (data.length) {
+        id object = [NSPropertyListSerialization propertyListWithData:data
+            options:NSPropertyListImmutable format:nil error:nil];
+        if ([object isKindOfClass:NSDictionary.class]) raw = object;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    history = [NSMutableDictionary dictionary];
+    for (NSString *key in raw) {
+        NSDictionary *entry = raw[key];
+        if (![entry isKindOfClass:NSDictionary.class]) continue;
+        NSNumber *time = [entry[@"time"] isKindOfClass:NSNumber.class] ? entry[@"time"] : nil;
+        if (time && now - time.doubleValue > 60.0 * 24.0 * 60.0 * 60.0) continue;
+        history[key] = entry;
+    }
+    return history;
+}
+
+static void amproj_importHistorySaveLocked(void) {
+    NSURL *library = [NSFileManager.defaultManager
+        URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
+    if (!library) return;
+    NSURL *url = [library URLByAppendingPathComponent:AMProjImportHistoryFilename];
+    NSMutableDictionary *history = amproj_importHistoryStoreLocked();
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:history
+        format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    if (data) [data writeToURL:url options:NSDataWritingAtomic error:nil];
+}
+
+static void amproj_importHistoryRememberLocked(NSString *fingerprint,
+                                               NSString *storeUUID,
+                                               NSString *title) {
+    if (!fingerprint.length) return;
+    NSMutableDictionary *history = amproj_importHistoryStoreLocked();
+    history[fingerprint] = @{
+        @"store_uuid": storeUUID ?: @"",
+        @"title": title ?: @"",
+        @"time": @(CFAbsoluteTimeGetCurrent()),
+    };
+    if (history.count > 1200) {
+        NSArray *sorted = [history keysSortedByValueUsingComparator:
+            ^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [a[@"time"] compare:b[@"time"]];
+        }];
+        for (NSString *key in [sorted subarrayWithRange:
+                NSMakeRange(0, sorted.count - 1000)]) {
+            [history removeObjectForKey:key];
+        }
+    }
+    amproj_importHistorySaveLocked();
+}
+
 static BOOL amproj_claimImportTransaction(NSURL *URL, NSString *name,
                                            NSString *source, NSString **transactionID,
                                            BOOL *duplicate) {
@@ -3680,6 +3751,27 @@ static BOOL amproj_claimImportFingerprint(NSString *transactionID, NSURL *archiv
         if (!ownerID && amproj_importTombstones[fingerprint]) {
             ownerID = @"tombstone";
         }
+        if (!ownerID) {
+            NSDictionary *historyEntry =
+                amproj_importHistoryStoreLocked()[fingerprint];
+            if (historyEntry) {
+                NSString *storeUUID = [historyEntry[@"store_uuid"]
+                    isKindOfClass:NSString.class] ? historyEntry[@"store_uuid"] : @"";
+                NSURL *storeFile = storeUUID.length
+                    ? [amproj_v865StoreLibraryURL() URLByAppendingPathComponent:
+                        [storeUUID stringByAppendingPathExtension:@"xml"]]
+                    : nil;
+                if (!storeFile ||
+                    [NSFileManager.defaultManager fileExistsAtPath:storeFile.path]) {
+                    // 同内容已在项目库：跳过本次导入，调用方会清掉重复源。
+                    if (duplicate) *duplicate = YES;
+                    return NO;
+                }
+                // 库内条目已被用户删除：放行重导。
+                [amproj_importHistoryStoreLocked() removeObjectForKey:fingerprint];
+                amproj_importHistorySaveLocked();
+            }
+        }
         if (ownerID && ![ownerID isEqualToString:@"tombstone"] &&
             !amproj_importTransactions[ownerID]) {
             [amproj_importKeyOwners removeObjectForKey:fingerprintKey];
@@ -3734,6 +3826,10 @@ static void amproj_releaseImportTransaction(NSString *transactionID, BOOL succes
         if (success) {
             if (transaction.fingerprint.length) {
                 amproj_importTombstones[transaction.fingerprint] = @(now);
+                amproj_importHistoryRememberLocked(transaction.fingerprint,
+                    transaction.storeUUID,
+                    transaction.projectTitle.length
+                        ? transaction.projectTitle : transaction.name);
             }
             if (transaction.provisionalKey.length) {
                 amproj_importTombstones[[@"provisional:" stringByAppendingString:
@@ -11829,6 +11925,11 @@ static BOOL amproj_write865ProjectStoreImport(NSURL *preparedArchiveURL,
            (unsigned long)backedUp);
 
     NSString *storeUUID = NSUUID.UUID.UUIDString.uppercaseString;
+    if (transactionID.length) {
+        AMProjImportTransaction *storeOwner =
+            amproj_importTransactionForID(transactionID);
+        storeOwner.storeUUID = storeUUID;
+    }
     NSURL *storeURL = [amproj_v865StoreLibraryURL()
         URLByAppendingPathComponent:[storeUUID stringByAppendingPathExtension:@"xml"]];
     NSError *writeError = nil;
