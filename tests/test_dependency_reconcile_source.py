@@ -154,6 +154,17 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         success = success[:success.index("amproj_clearIncomingGrantLoss(transaction.name);")]
         self.assertIn("amproj_recordIncomingImportSuccess(transaction.name);", success)
 
+    def test_offline_takeover_spares_meowcr_and_replays_config(self):
+        # 官方服务器全死不影响使用：配置缓存回放、授权压超时、广告快断；
+        # am.meowcr.cn 授权门是刻意保留的杀伤开关，一根毫毛都不能碰。
+        region = EXPORT[EXPORT.index("// ── 官方服务器接管"):]
+        region = region[:region.index("// ── 资源库泛白修复")]
+        self.assertIn('containsString:@"meowcr"', region)
+        self.assertIn("amproj_storeOfflineConfig", region)
+        self.assertIn("amproj_loadOfflineConfig", region)
+        self.assertIn("offline.config_replayed", region)
+        self.assertIn("amproj_installOfflineTakeover();", EXPORT)
+
     def test_reconcile_scan_is_memoized_by_stat(self):
         region = _reconcile_region()
         self.assertIn("scanCache", region)

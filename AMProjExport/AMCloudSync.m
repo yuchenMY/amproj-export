@@ -336,6 +336,79 @@ static NSString *AMCloudReadTokenMirror(void) {
     return token.length ? token : nil;
 }
 
+static void AMCloudReadAuthContext(NSString **token, uint64_t *generation,
+                                   NSString **authorizationKey);
+static void AMCloudQuietReauthAttempt(void);
+
+// ── 授权心跳（24h TTL）────────────────────────────────────────
+// 授权是导入导出与特效的唯一闸门（防二卖）。心跳语义：
+//  · 登录/任一授权成功 → 记一次心跳；
+//  · 心跳 24h 内 → 免网络放行（离线照常），并后台软续期；
+//  · 心跳过期 → 必须实时续期，续期失败（你的服务器关停、后台停权限）
+//    立即锁死导入导出与特效；未登录设备由插件系统天然锁死。
+//  · 在线设备被停权限：后台软续期拿到明确拒绝时立刻锁，不等 TTL。
+static const CFAbsoluteTime AMCloudAuthzHeartbeatTTL = 24.0 * 60.0 * 60.0;
+
+static NSURL *AMCloudAuthzHeartbeatURL(void) {
+    NSURL *library = [NSFileManager.defaultManager
+        URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
+    return [library URLByAppendingPathComponent:@"amproj-authz-heartbeat"];
+}
+
+static CFAbsoluteTime AMCloudAuthzHeartbeatRead(void) {
+    NSString *text = [NSString stringWithContentsOfURL:AMCloudAuthzHeartbeatURL()
+        encoding:NSUTF8StringEncoding error:nil];
+    return text.doubleValue;
+}
+
+static void AMCloudAuthzHeartbeatRefresh(void) {
+    NSString *value = [NSString stringWithFormat:@"%.3f",
+        CFAbsoluteTimeGetCurrent()];
+    NSURL *url = AMCloudAuthzHeartbeatURL();
+    [NSFileManager.defaultManager
+        createDirectoryAtURL:url.URLByDeletingLastPathComponent
+        withIntermediateDirectories:YES attributes:nil error:nil];
+    [value writeToFile:url.path atomically:YES
+        encoding:NSUTF8StringEncoding error:nil];
+}
+
+static BOOL AMCloudAuthzHeartbeatFresh(void) {
+    CFAbsoluteTime beat = AMCloudAuthzHeartbeatRead();
+    return beat > 0 &&
+        (CFAbsoluteTimeGetCurrent() - beat) < AMCloudAuthzHeartbeatTTL;
+}
+
+// 锁：授权代数归零 → 插件的代数校验全部失败，特效立即不可用。不销毁已装
+// 状态，续期成功后按原代数恢复。
+static void AMCloudLapsePluginAuthorization(void) {
+    AMCloudPluginsSetAuthorizationGeneration(0);
+}
+
+static void AMCloudRestorePluginAuthorization(void) {
+    NSString *token = nil;
+    NSString *key = nil;
+    uint64_t generation = 0;
+    AMCloudReadAuthContext(&token, &generation, &key);
+    if (!token.length) return;
+    AMCloudPluginsSetAuthorizationGeneration(generation);
+    AMCloudPluginsRestoreInstalledReleaseForAuthorization(key, generation);
+}
+
+// 心跳执法：启动/回前台调用。过期先锁再静默续期，成功自动恢复。
+static void AMCloudEnforceAuthzHeartbeat(BOOL allowRemoteRefresh) {
+    NSString *token = nil;
+    uint64_t generation = 0;
+    NSString *key = nil;
+    AMCloudReadAuthContext(&token, &generation, &key);
+    if (!token.length) return;
+    if (AMCloudAuthzHeartbeatFresh()) {
+        AMCloudPluginsRestoreInstalledReleaseForAuthorization(key, generation);
+        return;
+    }
+    AMCloudLapsePluginAuthorization();
+    if (allowRemoteRefresh) AMCloudQuietReauthAttempt();
+}
+
 static BOOL AMCloudWriteTokenUnlocked(NSString *token);
 
 // token 读写都走 securityd 同步调用，且 blatantsPatch 会拦 SecItem*：LCSign
@@ -1970,8 +2043,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             return AMCloudAuthMatches(nil, startupGeneration);
         });
     } else {
-        AMCloudPluginsRestoreInstalledReleaseForAuthorization(
-            startupAuthorizationKey, startupGeneration);
+        AMCloudEnforceAuthzHeartbeat(NO);
     }
     AMCloudPluginsInstallBundleHooks();
     AMEditorCustomizationInstall();
@@ -2025,6 +2097,12 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     [self showPluginDownloadNoticeIfPossible];
     [self syncPluginsNow:@"did_become_active"];
 	[self refreshAccountAvatar];
+    static CFAbsoluteTime lastHeartbeatEnforce = 0;
+    CFAbsoluteTime enforceNow = CFAbsoluteTimeGetCurrent();
+    if (enforceNow - lastHeartbeatEnforce > 300.0) {
+        lastHeartbeatEnforce = enforceNow;
+        AMCloudEnforceAuthzHeartbeat(YES);
+    }
 }
 
 - (void)pluginTokenChanged:(NSNotification *)notification {
@@ -4023,6 +4101,32 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 @end
 
 
+static void AMCloudQuietReauthAttempt(void) {
+    static CFAbsoluteTime lastAttempt = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastAttempt < 600.0) return;
+    lastAttempt = now;
+    AMCloudManager *manager = [AMCloudManager shared];
+    if (!manager) return;
+    [manager.client authorizeFeature:@"session"
+        completion:^(__unused id data, NSError *error) {
+        if (!error) {
+            AMCloudAuthzHeartbeatRefresh();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AMCloudRestorePluginAuthorization();
+            });
+            return;
+        }
+        BOOL networkFailure = [error.domain isEqualToString:NSURLErrorDomain];
+        if (!networkFailure) {
+            // 服务器明确拒绝（权限被停）：立刻锁，不等 TTL。
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AMCloudLapsePluginAuthorization();
+            });
+        }
+    }];
+}
+
 void AMCloudSyncInstallPluginHooksEarly(void) {
     NSString *token = nil;
     NSString *authorizationKey = nil;
@@ -4030,8 +4134,7 @@ void AMCloudSyncInstallPluginHooksEarly(void) {
     AMCloudReadAuthContext(&token, &authorizationGeneration, &authorizationKey);
     AMCloudPluginsInstallBundleHooks();
     if (token.length) {
-        AMCloudPluginsRestoreInstalledReleaseForAuthorization(
-            authorizationKey, authorizationGeneration);
+        AMCloudEnforceAuthzHeartbeat(NO);
     }
 }
 
@@ -4071,6 +4174,7 @@ void AMCloudAuthorizeFeature(NSString *feature, UIViewController *presenter,
     UIViewController *top = AMCloudTopController(presenter);
     void (^deny)(NSError *) = ^(NSError *error) {
         if (completion) completion(NO, error);
+        AMCloudLapsePluginAuthorization();
         if (!top || top.presentedViewController) return;
         UIAlertController *alert = [UIAlertController
             alertControllerWithTitle:@"iOS 权限未通过"
@@ -4086,6 +4190,13 @@ void AMCloudAuthorizeFeature(NSString *feature, UIViewController *presenter,
     };
     if (!AMCloudReadToken().length) {
         deny(AMCloudError(401, @"请先登录猫鹤账户；iOS 权限由管理员后台开通"));
+        return;
+    }
+    // 心跳有效期内免网络放行；顺手后台软续期（明确拒绝立刻锁，网络失败
+    // 不动——TTL 到期自然锁）。
+    if (AMCloudAuthzHeartbeatFresh()) {
+        AMCloudQuietReauthAttempt();
+        if (completion) completion(YES, nil);
         return;
     }
     // 网络瞬断（蜂窝/Wi-Fi 切换、DNS 抖动）会以 NSURLErrorDomain 报
@@ -4118,6 +4229,8 @@ void AMCloudAuthorizeFeature(NSString *feature, UIViewController *presenter,
             }
             os_log(OS_LOG_DEFAULT, "[AMProjExport] cloud authorize %{public}@ allowed",
                    feature ?: @"");
+            AMCloudAuthzHeartbeatRefresh();
+            AMCloudRestorePluginAuthorization();
             if (completion) completion(YES, nil);
         }];
     };

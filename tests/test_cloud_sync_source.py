@@ -873,7 +873,11 @@ class CloudSyncSourceTests(unittest.TestCase):
         early_restore = CLOUD.split("void AMCloudSyncInstallPluginHooksEarly", 1)[1]
         early_restore = early_restore.split("void AMCloudSyncInstall", 1)[0]
         self.assertIn("AMCloudReadAuthContext", early_restore)
-        self.assertIn("AMCloudPluginsRestoreInstalledReleaseForAuthorization", early_restore)
+        # 2026-10 起恢复由授权心跳执法门控（心跳过期即锁特效，续期成功才
+        # 恢复）：早启动路径不再允许无条件恢复插件。
+        self.assertIn("AMCloudEnforceAuthzHeartbeat(NO);", early_restore)
+        self.assertNotIn("AMCloudPluginsRestoreInstalledReleaseForAuthorization",
+                         early_restore)
         self.assertIn("不会从磁盘恢复插件", PLUGIN_HEADER)
 
         manifest = CLOUD.split("BOOL enabled =", 1)[1].split(
@@ -1374,3 +1378,34 @@ class TokenCacheSourceTests(unittest.TestCase):
         self.assertIn("if (AMCloudKeychainWriteAvailable) {", write)
         self.assertIn("AMCloudWriteTokenMirror(token);", write)
         self.assertIn("AMCloudCachedToken = token;", write)
+
+class AuthzHeartbeatSourceTests(unittest.TestCase):
+    """授权心跳 = 杀伤开关（防二卖）：24h 内离线照常，过期/被拒即锁特效与
+    导入导出；未登录天然锁死。任何"缓存永久放行"的改动都会破坏该契约。"""
+
+    def test_authorize_uses_heartbeat_window_and_lapses_on_deny(self):
+        cloud = (ROOT / "AMProjExport" / "AMCloudSync.m").read_text(encoding="utf-8")
+        feature = cloud[cloud.index("void AMCloudAuthorizeFeature("):]
+        feature = feature[:feature.index("UIViewController *AMCloudSyncReplacementForNativeAccountPresentation(")]
+        self.assertIn("AMCloudAuthzHeartbeatFresh()", feature)
+        self.assertIn("AMCloudAuthzHeartbeatRefresh();", feature)
+        self.assertIn("AMCloudLapsePluginAuthorization();", feature)
+        self.assertIn("AMCloudRestorePluginAuthorization();", feature)
+        self.assertIn("24.0 * 60.0 * 60.0", cloud)
+
+    def test_heartbeat_enforcement_gates_plugin_restore(self):
+        cloud = (ROOT / "AMProjExport" / "AMCloudSync.m").read_text(encoding="utf-8")
+        self.assertIn("AMCloudEnforceAuthzHeartbeat(NO);", cloud)
+        self.assertIn("AMCloudEnforceAuthzHeartbeat(YES);", cloud)
+        # 锁 = 授权代数归零（可恢复），不销毁已装特效状态
+        lapse = cloud[cloud.index("static void AMCloudLapsePluginAuthorization(void) {"):]
+        lapse = lapse[:lapse.index("static void AMCloudRestorePluginAuthorization")]
+        self.assertIn("AMCloudPluginsSetAuthorizationGeneration(0);", lapse)
+
+    def test_quiet_reauth_lapses_only_on_explicit_deny(self):
+        cloud = (ROOT / "AMProjExport" / "AMCloudSync.m").read_text(encoding="utf-8")
+        quiet = cloud[cloud.index("static void AMCloudQuietReauthAttempt(void) {"):]
+        quiet = quiet[:quiet.index("void AMCloudSyncInstallPluginHooksEarly(void) {")]
+        self.assertIn("NSURLErrorDomain", quiet)
+        self.assertIn("AMCloudLapsePluginAuthorization();", quiet)
+        self.assertIn("AMCloudAuthzHeartbeatRefresh();", quiet)

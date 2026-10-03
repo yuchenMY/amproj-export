@@ -19927,6 +19927,204 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
 
 
 
+// ── 官方服务器接管（offline takeover） ─────────────────────────
+// 目标：Alight Motion 官方（Bending Spoons/Alight/Firebase/广告）服务器
+// 全部关停也不影响使用。三类接管，全在网络入口做：
+//  1) 远程配置（pico/firebaseremoteconfig）：成功响应落盘缓存；请求失败
+//     用缓存回放，无缓存 2 秒快速失败——启动与功能开关不再依赖官方存活。
+//  2) 授权/网关（janus、bendingspoons、alight 系域名）：超时压到 8 秒，
+//     请求照发（活着时行为不变）；失败快速落进破解层的本地授权状态机。
+//  3) 广告/统计（admob/vungle/unity 等）：立即失败且异步回调，广告 SDK
+//     的同步 init 不再拖死启动。
+// 猫鹤授权门（am.meowcr.cn）与一切非官方域名完全不碰。
+static BOOL amproj_hostHasSuffix(NSString *host, NSString *suffix) {
+    if (!host.length || !suffix.length) return NO;
+    if ([host isEqualToString:suffix]) return YES;
+    return [host hasSuffix:[@"." stringByAppendingString:suffix]];
+}
+
+static BOOL amproj_isConfigHost(NSString *host) {
+    return amproj_hostHasSuffix(host, @"pico.bendingspoonsapps.com") ||
+        amproj_hostHasSuffix(host, @"picox.bendingspoons.com") ||
+        amproj_hostHasSuffix(host, @"pico.staging.bendingspoonsapps.com") ||
+        [host containsString:@"firebaseremoteconfig"];
+}
+
+static BOOL amproj_isLicenseHost(NSString *host) {
+    return amproj_hostHasSuffix(host, @"bendingspoons.com") ||
+        amproj_hostHasSuffix(host, @"bendingspoonsapps.com") ||
+        amproj_hostHasSuffix(host, @"alightmotion.com") ||
+        amproj_hostHasSuffix(host, @"alightcreative.com");
+}
+
+static BOOL amproj_isAdOrTelemetryHost(NSString *host) {
+    static NSArray<NSString *> *markers;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        markers = @[@"admob", @"googleads", @"doubleclick", @"googlesyndication",
+                    @"imasdk", @"vungle", @"unity3d", @"inner-active",
+                    @"supersonicads", @"crashlytics", @"spidersense",
+                    @"app-analytics-services", @"firebaselogging",
+                    @"applovin", @"skadnetwork"];
+    });
+    for (NSString *marker in markers) {
+        if ([host containsString:marker]) return YES;
+    }
+    return NO;
+}
+
+static NSURL *amproj_offlineCacheDirectory(void) {
+    NSURL *library = [NSFileManager.defaultManager
+        URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
+    return [library URLByAppendingPathComponent:@"amproj-offline-cache"
+                                    isDirectory:YES];
+}
+
+static NSString *amproj_offlineCacheKey(NSURL *URL) {
+    NSData *data = [[URL.absoluteString ?: @""] dataUsingEncoding:NSUTF8StringEncoding];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
+        [hex appendFormat:@"%02x", digest[i]];
+    }
+    return hex;
+}
+
+static void amproj_storeOfflineConfig(NSURL *URL, NSData *body, NSURLResponse *response) {
+    if (!URL || !body.length || body.length > 2 * 1024 * 1024) return;
+    @try {
+        NSURL *dir = amproj_offlineCacheDirectory();
+        [NSFileManager.defaultManager createDirectoryAtURL:dir
+            withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString *key = amproj_offlineCacheKey(URL);
+        [body writeToURL:[dir URLByAppendingPathComponent:[key stringByAppendingString:@".bin"]]
+                atomically:YES];
+        NSMutableDictionary *meta = [NSMutableDictionary dictionary];
+        if ([response isKindOfClass:NSHTTPURLResponse.class]) {
+            NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+            meta[@"status"] = @(http.statusCode);
+            meta[@"headers"] = http.allHeaderFields ?: @{};
+        }
+        meta[@"url"] = URL.absoluteString ?: @"";
+        meta[@"stored_at"] = @([NSDate.date timeIntervalSince1970]);
+        NSData *plist = [NSPropertyListSerialization dataWithPropertyList:meta
+            format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+        if (plist) {
+            [plist writeToURL:[dir URLByAppendingPathComponent:[key stringByAppendingString:@".plist"]]
+                      atomically:YES];
+        }
+    } @catch (NSException *exception) {
+    }
+}
+
+static BOOL amproj_loadOfflineConfig(NSURL *URL, NSData **bodyOut,
+                                     NSURLResponse **responseOut) {
+    @try {
+        NSURL *dir = amproj_offlineCacheDirectory();
+        NSString *key = amproj_offlineCacheKey(URL);
+        NSData *body = [NSData dataWithContentsOfURL:
+            [dir URLByAppendingPathComponent:[key stringByAppendingString:@".bin"]]];
+        NSData *plist = [NSData dataWithContentsOfURL:
+            [dir URLByAppendingPathComponent:[key stringByAppendingString:@".plist"]]];
+        if (!body.length || !plist.length) return NO;
+        NSDictionary *meta = [NSPropertyListSerialization propertyListWithData:plist
+            options:NSPropertyListImmutable format:nil error:nil];
+        if (![meta isKindOfClass:NSDictionary.class]) return NO;
+        NSNumber *status = [meta[@"status"] isKindOfClass:NSNumber.class]
+            ? meta[@"status"] : @200;
+        NSDictionary *headers = [meta[@"headers"] isKindOfClass:NSDictionary.class]
+            ? meta[@"headers"] : @{};
+        NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
+            initWithURL:URL statusCode:status.integerValue
+            HTTPVersion:@"HTTP/1.1" headerFields:headers];
+        if (bodyOut) *bodyOut = body;
+        if (responseOut) *responseOut = response;
+        return YES;
+    } @catch (NSException *exception) {
+        return NO;
+    }
+}
+
+static void (*orig_sessionDataTaskRequest)(id, SEL, NSURLRequest *,
+    void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
+
+static NSURLSessionDataTask *hooked_sessionDataTaskRequest(
+        id self, SEL _cmd, NSURLRequest *request,
+        void (^completion)(NSData *, NSURLResponse *, NSError *)) {
+    NSString *host = request.URL.host.lowercaseString;
+    if (!host.length || !completion) {
+        return orig_sessionDataTaskRequest(self, _cmd, request, completion);
+    }
+    // 猫鹤授权门与一切非官方域名完全不碰。
+    if ([host containsString:@"meowcr"]) {
+        return orig_sessionDataTaskRequest(self, _cmd, request, completion);
+    }
+    BOOL configHost = amproj_isConfigHost(host);
+    BOOL adHost = amproj_isAdOrTelemetryHost(host);
+    if (!configHost && !adHost && !amproj_isLicenseHost(host)) {
+        return orig_sessionDataTaskRequest(self, _cmd, request, completion);
+    }
+    if (adHost) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            completion(nil, nil, [NSError errorWithDomain:NSURLErrorDomain
+                code:NSURLErrorNotConnectedToInternet userInfo:nil]);
+        });
+        return nil;
+    }
+    NSMutableURLRequest *effective = [request mutableCopy] ?: [NSMutableURLRequest new];
+    if (configHost) {
+        effective.timeoutInterval = MIN(
+            effective.timeoutInterval > 0 ? effective.timeoutInterval : 15.0, 2.0);
+    } else {
+        effective.timeoutInterval = MIN(
+            effective.timeoutInterval > 0 ? effective.timeoutInterval : 60.0, 8.0);
+    }
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
+        ^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (!error && configHost && data.length) {
+            amproj_storeOfflineConfig(request.URL, data, response);
+        }
+        if (error && configHost) {
+            NSData *cachedBody = nil;
+            NSURLResponse *cachedResponse = nil;
+            if (amproj_loadOfflineConfig(request.URL, &cachedBody, &cachedResponse)) {
+                amproj_logCriticalEvent(@"offline.config_replayed", @{
+                    @"host": host ?: @""
+                });
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    completion(cachedBody, cachedResponse, nil);
+                });
+                return;
+            }
+        }
+        completion(data, response, error);
+    };
+    return orig_sessionDataTaskRequest(self, _cmd, effective, wrapped);
+}
+
+static void amproj_installOfflineTakeover(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        @try {
+            Method method = class_getInstanceMethod([NSURLSession class],
+                @selector(dataTaskWithRequest:completionHandler:));
+            if (method) {
+                IMP previous = amproj_installMethodHook(
+                    method, (IMP)hooked_sessionDataTaskRequest, 4,
+                    @"NSURLSession.dataTaskWithRequest");
+                if (previous) {
+                    orig_sessionDataTaskRequest = (__typeof__(
+                        orig_sessionDataTaskRequest))previous;
+                }
+            }
+            NSLog(@"[AMProjExport] offline takeover installed");
+        } @catch (NSException *exception) {
+            NSLog(@"[AMProjExport] offline takeover install failed: %@", exception);
+        }
+    });
+}
+
 // ── 资源库泛白修复 ───────────────────────────────────────────
 // 资源面板（形状/媒体/音频/对象元素/模板）用系统语义色渲染：手机浅色模式
 // 时面板背景=白、内容图标=白，白上白整个面板"泛白"（截图里淡淡的点/线
@@ -20536,6 +20734,7 @@ static void amproj_installPresentationHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSLog(@"[AMProjExport] Installing presentation filter");
+        amproj_installOfflineTakeover();
         amproj_installDarkAppearanceEnforcement();
         amproj_installVolumeWritebackRescue();
         @try {
