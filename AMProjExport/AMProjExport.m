@@ -128,6 +128,89 @@ typedef NS_ENUM(NSInteger, AMProjImportKind) {
     AMProjImportKindXMLTemplate,
 };
 
+static NSData* amproj_buildXML(id sceneInfo);
+static NSData* amproj_buildXMLInternal(id sceneInfo, NSMutableSet<NSValue*> *visited,
+                                       NSUInteger depth, BOOL includeDeclaration);
+static NSString* amproj_serializeLayer(id layer, NSMutableSet<NSValue*> *visited, NSUInteger depth);
+static NSString* amproj_tagForType(NSString *type);
+static UIWindow* amproj_keyWindow(void);
+static NSURL* amproj_directExportRoot(void);
+static void amproj_exportPresentedChainDiagnostics(
+    NSArray<NSString *> *classes);
+// Startup paywall fallback window; the initializing definition lives with
+// the startup paywall machinery, but the gate-bypass helpers above reference
+// it earlier.
+static CFAbsoluteTime amproj_paywallStartupFallbackUntil;
+static BOOL amproj_URLIsInDocumentsInbox(NSURL *URL);
+static NSString* amproj_normalizedFilePath(NSURL *URL);
+static AMProjIncomingURLResult amproj_handleIncomingProjectURL(
+    NSURL *URL, NSString *source, NSDictionary *options);
+static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
+    NSURL *URL, NSString *source, NSDictionary *options, BOOL *prepared);
+static void amproj_releaseImportTransactionForURL(NSURL *URL, NSString *name);
+static void amproj_clearImportSuppression(NSURL *URL, NSString *name);
+static AMProjIncomingURLResult amproj_handleIncomingProjectURLSafely(
+    NSURL *URL, NSString *source, NSDictionary *options, BOOL *prepared);
+#if AMPROJ_CLOUD_SYNC
+static void amproj_importCloudPackage(NSURL *URL, NSString *filename,
+                                      NSURL *cleanupURL,
+                                      AMCloudImportCompletion completion);
+#endif
+static void amproj_presentImportError(NSString *message);
+static void amproj_presentImportErrorOfferingPicker(NSString *message,
+                                                     BOOL offerPicker);
+static void amproj_presentImportErrorOfferingPickerWithTitle(
+    NSString *message, NSString *title, BOOL offerPicker);
+static void amproj_presentXMLImportError(NSString *message,
+                                         BOOL offerPicker);
+static void amproj_presentImportErrorForKind(NSString *message,
+                                              AMProjImportKind kind,
+                                              BOOL offerPicker);
+static void amproj_presentImportDocumentPicker(void);
+static dispatch_queue_t amproj_importInboxQueue(void);
+static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID);
+static void amproj_installImportHook(void);
+static void amproj_installPublic865ImportHooks(void);
+static void amproj_installPublic865SceneHooksForClass(Class cls);
+static void amproj_recordPublic865LaunchNativeRoute(
+    NSDictionary *launchOptions, NSString *source, BOOL forwarded);
+static void amproj_installNativeProjectPickerHook(void);
+static Class amproj_declaredAppDelegateClass(void);
+static void amproj_installApplicationDelegateHook(void);
+static void amproj_installShareExportHook(void);
+static void amproj_installNavigationExportHook(void);
+static void amproj_installPresentationHook(void);
+static id<UIDocumentPickerDelegate> amproj_restoreNativeXMLPickerDelegate(
+    AMProjNativeXMLPickerProxy *proxy,
+    UIDocumentPickerViewController *picker);
+static NSString* amproj_importedFontFilename(NSString *reference);
+static NSDictionary* amproj_captureImportPersistenceSnapshot(void);
+static void amproj_storeImportProjectTitle(NSString *transactionID,
+                                           NSString *projectTitle);
+static void amproj_captureActivatedPersistenceBaseline(
+    NSString *transactionID, NSUInteger generation, NSUInteger probeEpoch,
+    void (^completion)(BOOL captured));
+static void amproj_scheduleImportPersistenceProbe(
+    NSString *transactionID, NSString *reason, void (^completion)(BOOL verified));
+static void amproj_captureXMLPersistenceBaseline(
+    NSString *transactionID, NSUInteger generation,
+    void (^completion)(BOOL captured));
+static void amproj_probeXMLPersistence(
+    NSString *transactionID, NSUInteger generation,
+    void (^completion)(BOOL verified));
+static NSArray *amproj_accessibilityChildren(UIView *view);
+
+static AMProjImportKind amproj_importKindForURL(NSURL *URL,
+                                                NSDictionary *options);
+
+static void amproj_debugEvent(NSString *name, NSDictionary *fields) {
+#if AMPROJ_DEBUG || AMPROJ_TELEMETRY
+    [[AMDebugTransport shared] emitEvent:name fields:fields ?: @{}];
+#else
+    (void)name;
+    (void)fields;
+#endif
+}
 
 // Keep the two user-visible entry points diagnosable even when the telemetry
 // backend is not configured.  These messages are intentionally limited to
@@ -302,6 +385,21 @@ static NSDictionary *amproj_readImportBreadcrumb(void) {
     }
 }
 
+// 中断提示只弹一次：标记后同一事务不再在启动时重弹；新导入事务会重建
+// 记录（transaction_id 变化），提示自动重新武装。
+static void amproj_markImportBreadcrumbInterruptNoticed(void) {
+    NSURL *URL = amproj_importBreadcrumbURL();
+    if (!URL) return;
+    @synchronized (amproj_importBreadcrumbLock()) {
+        NSDictionary *previous = amproj_readImportBreadcrumbAtURL(URL);
+        if (!previous.count) return;
+        NSMutableDictionary *record = [previous mutableCopy];
+        record[@"interrupt_notice_shown"] = @YES;
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:record
+            format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+        if (data.length) [data writeToURL:URL options:NSDataWritingAtomic error:nil];
+    }
+}
 
 static NSString *amproj_nativeBreadcrumbDisplayStage(NSDictionary *breadcrumb) {
     NSString *phase = [breadcrumb[@"phase"] isKindOfClass:NSString.class]
@@ -458,6 +556,64 @@ static NSData* amproj_deflate(NSData *input) {
     return output;
 }
 
+static NSData* amproj_createZIP(NSData *xml, NSDictionary<NSString*,NSData*> *resources) {
+    NSMutableData *z = [NSMutableData data];
+    NSMutableArray *cd = [NSMutableArray array];
+
+    void (^w32)(uint32_t) = ^(uint32_t v){
+        uint8_t b[4]={v,v>>8,v>>16,v>>24}; [z appendBytes:b length:4];
+    };
+    void (^w16)(uint16_t) = ^(uint16_t v){
+        uint8_t b[2]={v,v>>8}; [z appendBytes:b length:2];
+    };
+
+    NSMutableArray *files = [NSMutableArray arrayWithObject:@{@"n":@"scene.xml",@"d":xml}];
+    for (NSString *k in resources)
+        [files addObject:@{@"n":k,@"d":resources[k]}];
+
+    for (NSDictionary *f in files) {
+        NSString *n = f[@"n"]; NSData *d = f[@"d"];
+        NSData *nameData = [n dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *compressed = amproj_deflate(d);
+        if (!compressed || nameData.length > UINT16_MAX || d.length > UINT32_MAX ||
+            compressed.length > UINT32_MAX || z.length > UINT32_MAX) return nil;
+
+        uLong crcValue = crc32(0L, Z_NULL, 0);
+        crcValue = crc32(crcValue, d.bytes, (uInt)d.length);
+        uint32_t crc = (uint32_t)crcValue;
+        uint32_t cs = (uint32_t)compressed.length;
+        uint32_t us = (uint32_t)d.length;
+        uint32_t lo = (uint32_t)z.length;
+        [z appendBytes:"PK\3\4" length:4];
+        w16(20);w16(0);w16(8);w16(0);w16(0);
+        w32(crc);w32(cs);w32(us);
+        w16((uint16_t)nameData.length);w16(0);
+        [z appendData:nameData];
+        [z appendData:compressed];
+        [cd addObject:@{@"n":n,@"nd":nameData,@"o":@(lo),@"crc":@(crc),@"cs":@(cs),@"us":@(us)}];
+    }
+
+    uint32_t cds = (uint32_t)z.length;
+    for (NSDictionary *e in cd) {
+        NSString *n = e[@"n"];
+        NSData *nameData = e[@"nd"];
+        uint32_t lo=[e[@"o"] unsignedIntValue], crc=[e[@"crc"] unsignedIntValue];
+        uint32_t cs=[e[@"cs"] unsignedIntValue], us=[e[@"us"] unsignedIntValue];
+        [z appendBytes:"PK\1\2" length:4];
+        w16(20);w16(20);w16(0);w16(8);w16(0);w16(0);
+        w32(crc);w32(cs);w32(us);
+        w16((uint16_t)nameData.length);w16(0);w16(0);
+        w16(0);w16(0);w32(0);w32(lo);
+        [z appendData:nameData];
+        (void)n;
+    }
+    uint32_t cdz = (uint32_t)z.length - cds;
+    [z appendBytes:"PK\5\6" length:4];
+    w16(0);w16(0);
+    w16((uint16_t)cd.count);w16((uint16_t)cd.count);
+    w32(cdz);w32(cds);w16(0);
+    return z;
+}
 
 // ═══════════════════════════════════════════
 // MARK: - Scene XML Serializer
@@ -637,6 +793,10 @@ static id am_findSceneRecursive(id obj, NSUInteger depth, NSMutableSet<NSValue*>
     return nil;
 }
 
+static id am_findScene(id obj) {
+    NSMutableSet<NSValue*> *visited = [NSMutableSet set];
+    return am_findSceneRecursive(obj, 0, visited);
+}
 
 static NSString* amproj_escapeXML(NSString *value, BOOL attribute) {
     if (!value) return @"";
@@ -651,12 +811,218 @@ static NSString* amproj_escapeXML(NSString *value, BOOL attribute) {
     return escaped;
 }
 
+// ─── XML 构建 ───
+
+static NSData* amproj_buildXMLInternal(id sceneInfo, NSMutableSet<NSValue*> *visited,
+                                       NSUInteger depth, BOOL includeDeclaration) {
+    if (!sceneInfo || depth > 12) return nil;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)sceneInfo];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
+
+    @try {
+        NSMutableString *x = [NSMutableString string];
+        if (includeDeclaration) {
+            [x appendString:@"<?xml version='1.0' encoding='UTF-8' ?>\n"];
+        }
+
+        NSString *title = amproj_escapeXML(am_str(sceneInfo, @"title") ?: @"Exported Project", YES);
+        NSInteger w = am_int(sceneInfo, @"width") ?: 1280;
+        NSInteger h = am_int(sceneInfo, @"height") ?: 720;
+        NSInteger fps = am_int(sceneInfo, @"fps") ?: 60;
+        NSInteger tt = am_int(sceneInfo, @"totalTime") ?: 5000;
+        NSString *bg = amproj_escapeXML(am_str(sceneInfo, @"bgcolor") ?: @"#ff000000", YES);
+
+        [x appendFormat:@"<scene title=\"%@\" width=\"%ld\" height=\"%ld\" "
+                          "exportWidth=\"%ld\" exportHeight=\"%ld\" "
+                          "fps=\"%ld\" totalTime=\"%ld\" bgcolor=\"%@\">\n",
+                          title, (long)w, (long)h, (long)w, (long)h, (long)fps, (long)tt, bg];
+
+        // 序列化 media
+        NSArray *media = am_arr(sceneInfo, @"media");
+        if (media) {
+            for (id m in media) {
+                [x appendFormat:@"<media uri=\"%@\" filename=\"%@\" type=\"%@\" />\n",
+                    amproj_escapeXML(am_str(m, @"uri") ?: @"", YES),
+                    amproj_escapeXML(am_str(m, @"filename") ?: @"", YES),
+                    amproj_escapeXML(am_str(m, @"mediaType") ?: @"", YES)];
+            }
+        }
+
+        // 序列化 layers
+        NSArray *layers = am_arr(sceneInfo, @"layers");
+        if (layers) {
+            NSUInteger index = 0;
+            for (id layer in layers) {
+#if AMPROJ_DEBUG
+                amproj_debugEvent(@"layer.begin", @{@"index": @(index), @"class": NSStringFromClass([layer class]) ?: @""});
+#endif
+                NSString *layerXML = amproj_serializeLayer(layer, visited, depth + 1);
+                if (layerXML) [x appendString:layerXML];
+#if AMPROJ_DEBUG
+                amproj_debugEvent(@"layer.end", @{@"index": @(index), @"bytes": @(layerXML.length)});
+#endif
+                index++;
+            }
+        }
+
+        [x appendString:@"</scene>\n"];
+        NSData *result = [x dataUsingEncoding:NSUTF8StringEncoding];
+        [visited removeObject:identity];
+        return result;
+    } @catch (NSException *e) {
+        [visited removeObject:identity];
+        NSLog(@"[AMProjExport] XML build error: %@", e);
+        return nil;
+    }
+}
 
 static NSData* amproj_buildXML(id sceneInfo) {
     return amproj_buildXMLInternal(sceneInfo, [NSMutableSet set], 0, YES);
 }
 
+static NSString* amproj_serializeLayer(id layer, NSMutableSet<NSValue*> *visited, NSUInteger depth) {
+    if (!layer || depth > 12) return nil;
+    NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)layer];
+    if ([visited containsObject:identity]) return nil;
+    [visited addObject:identity];
 
+    @try {
+        NSString *type = am_str(layer, @"layerType") ?:
+                          am_str(layer, @"type") ?: @"shape";
+        NSInteger lid = am_int(layer, @"id");
+        NSString *label = amproj_escapeXML(am_str(layer, @"label") ?: @"", YES);
+        NSInteger st = am_int(layer, @"startTime");
+        NSInteger et = am_int(layer, @"endTime");
+        NSInteger parent = am_int(layer, @"parent");
+        BOOL hidden = [am_get(layer, @"hidden") boolValue];
+
+        NSString *tag = amproj_tagForType(type);
+        NSMutableString *l = [NSMutableString string];
+        [l appendFormat:@"<%@ id=\"%ld\" label=\"%@\" startTime=\"%ld\" endTime=\"%ld\"",
+                         tag, (long)lid, label, (long)st, (long)et];
+        if (parent) [l appendFormat:@" parent=\"%ld\"", (long)parent];
+        if (hidden) [l appendString:@" hidden=\"true\""];
+
+        NSString *fillType = am_str(layer, @"fillType");
+        if (fillType) [l appendFormat:@" fillType=\"%@\"", amproj_escapeXML(fillType, YES)];
+        NSString *blending = am_str(layer, @"blending");
+        if (blending) [l appendFormat:@" blending=\"%@\"", amproj_escapeXML(blending, YES)];
+
+        // shape specific
+        NSString *shapeType = am_str(layer, @"shapeType") ?: am_str(layer, @"s");
+        if (shapeType) [l appendFormat:@" s=\"%@\"", amproj_escapeXML(shapeType, YES)];
+        CGFloat speed = am_flt(layer, @"speed");
+        if (speed > 0 && speed != 1.0) [l appendFormat:@" speed=\"%g\"", speed];
+
+        // text specific
+        NSString *font = am_str(layer, @"font");
+        if (font) [l appendFormat:@" font=\"%@\"", amproj_escapeXML(font, YES)];
+        CGFloat fontSize = am_flt(layer, @"size");
+        if (fontSize > 0) [l appendFormat:@" size=\"%g\"", fontSize];
+        NSString *align = am_str(layer, @"align");
+        if (align) [l appendFormat:@" align=\"%@\"", amproj_escapeXML(align, YES)];
+        CGFloat wrap = am_flt(layer, @"wrapWidth");
+        if (wrap > 0) [l appendFormat:@" wrapWidth=\"%g\"", wrap];
+
+        [l appendString:@">\n"];
+
+        // transform
+        id xf = am_get(layer, @"transform");
+        if (xf) {
+            [l appendString:@"<transform>\n"];
+            NSString *loc = am_str(xf, @"locationValue") ?: am_str(xf, @"location");
+            if (loc) [l appendFormat:@"<location value=\"%@\" />\n", amproj_escapeXML(loc, YES)];
+            NSString *piv = am_str(xf, @"pivotValue") ?: am_str(xf, @"pivot");
+            if (piv) [l appendFormat:@"<pivot value=\"%@\" />\n", amproj_escapeXML(piv, YES)];
+            CGFloat rot = am_flt(xf, @"rotation") ?: am_flt(xf, @"rotationValue");
+            [l appendFormat:@"<rotation value=\"%g\" />\n", rot];
+            NSString *scl = am_str(xf, @"scaleValue") ?: am_str(xf, @"scale");
+            [l appendFormat:@"<scale value=\"%@\" />\n", amproj_escapeXML(scl ?: @"1.0,1.0", YES)];
+            CGFloat op = am_flt(xf, @"opacity") ?: am_flt(xf, @"opacityValue") ?: 1.0;
+            [l appendFormat:@"<opacity value=\"%g\" />\n", op];
+            [l appendString:@"</transform>\n"];
+        }
+
+        // fillColor
+        NSString *fc = am_str(layer, @"fillColor");
+        if (fc) [l appendFormat:@"<fillColor value=\"%@\" />\n", amproj_escapeXML(fc, YES)];
+
+        // content (text)
+        NSString *content = am_str(layer, @"content");
+        if (content) [l appendFormat:@"<content>%@</content>\n", amproj_escapeXML(content, NO)];
+
+        // effects
+        NSArray *effects = am_arr(layer, @"effects");
+        if (effects) {
+            for (id eff in effects) {
+                NSString *eid = am_str(eff, @"id") ?: am_str(eff, @"effectId") ?: @"";
+                BOOL local = [am_get(eff, @"locallyApplied") boolValue];
+                [l appendFormat:@"<effect id=\"%@\"%@>\n", amproj_escapeXML(eid, YES), local ? @" locallyApplied=\"true\"" : @""];
+                NSArray *props = am_arr(eff, @"properties");
+                for (id p in props) {
+                    [l appendFormat:@"<property name=\"%@\" type=\"%@\" value=\"%@\" />\n",
+                        amproj_escapeXML(am_str(p, @"name") ?: @"", YES),
+                        amproj_escapeXML(am_str(p, @"type") ?: am_str(p,@"propType") ?: @"float", YES),
+                        amproj_escapeXML(am_str(p, @"value") ?: @"", YES)];
+                }
+                [l appendString:@"</effect>\n"];
+            }
+        }
+
+        // path
+        NSString *pathD = am_str(layer, @"pathData") ?: am_str(layer, @"d");
+        if (pathD) [l appendFormat:@"<path d=\"%@\" />\n", amproj_escapeXML(pathD, YES)];
+
+        // gradient
+        id grad = am_get(layer, @"gradient");
+        if (grad) {
+            [l appendFormat:@"<gradient type=\"%@\" startColor=\"%@\" endColor=\"%@\" />\n",
+                amproj_escapeXML(am_str(grad, @"gradientType") ?: @"linear", YES),
+                amproj_escapeXML(am_str(grad, @"startColor") ?: @"#ff000000", YES),
+                amproj_escapeXML(am_str(grad, @"endColor") ?: @"#ffffffff", YES)];
+        }
+
+        // stroke
+        id stroke = am_get(layer, @"stroke") ?: am_get(layer, @"pathStroke");
+        if (stroke) {
+            [l appendFormat:@"<path-stroke direction=\"%@\">",
+                amproj_escapeXML(am_str(stroke, @"direction") ?: @"center", YES)];
+            NSString *sc = am_str(stroke, @"colorValue") ?: am_str(stroke, @"color");
+            if (sc) [l appendFormat:@"<color value=\"%@\" />", amproj_escapeXML(sc, YES)];
+            [l appendString:@"</path-stroke>\n"];
+        }
+
+        // nested scene
+        if ([tag isEqualToString:@"embedScene"]) {
+            id nested = am_get(layer, @"scene");
+            if (nested) {
+                NSData *nx = amproj_buildXMLInternal(nested, visited, depth + 1, NO);
+                if (nx) [l appendString:[[NSString alloc] initWithData:nx encoding:NSUTF8StringEncoding]];
+            }
+        }
+
+        [l appendFormat:@"</%@>\n", tag];
+        [visited removeObject:identity];
+        return l;
+    } @catch (NSException *e) {
+        [visited removeObject:identity];
+        NSLog(@"[AMProjExport] Layer serialize error: %@", e);
+        return nil;
+    }
+}
+
+static NSString* amproj_tagForType(NSString *type) {
+    static NSDictionary *map;
+    if (!map) map = @{
+        @"shape":@"shape", @"text":@"text", @"image":@"image",
+        @"video":@"video", @"audio":@"audio", @"camera":@"camera",
+        @"nullobj":@"nullobj", @"null":@"nullobj",
+        @"embedScene":@"embedScene", @"group":@"embedScene",
+        @"bookmark":@"bookmark"
+    };
+    return map[type] ?: @"shape";
+}
 
 static NSData* amproj_placeholderXML(void) {
     return [@"<?xml version='1.0' encoding='UTF-8' ?>\n"
@@ -977,6 +1343,14 @@ static id amproj_findObjectByClassRecursive(id object, NSString *classFragment,
     return nil;
 }
 
+static id amproj_findObjectByClass(NSArray *roots, NSString *classFragment) {
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    for (id root in roots) {
+        id found = amproj_findObjectByClassRecursive(root, classFragment, 0, visited);
+        if (found) return found;
+    }
+    return nil;
+}
 
 static void amproj_addPathCandidate(id value, NSMutableOrderedSet<NSURL *> *candidates) {
     NSURL *URL = nil;
@@ -2244,6 +2618,17 @@ static void amproj_beginDirectFlow(void) {
 #endif
 }
 
+static NSDictionary* amproj_expectedSceneMetadata(id scene, NSDate *saveStarted) {
+    NSArray *layers = am_arr(scene, @"layers");
+    return @{
+        @"title": am_str(scene, @"title") ?: @"",
+        @"width": @(am_int(scene, @"width")),
+        @"height": @(am_int(scene, @"height")),
+        @"layers": @(layers.count),
+        @"layers_known": @(layers != nil),
+        @"save_started": saveStarted ?: NSDate.date
+    };
+}
 
 static BOOL amproj_validateXMLAgainstScene(NSData *xmlData, NSDictionary *expected,
                                            AMProjXMLProbe **probeOut, NSError **error) {
@@ -3680,6 +4065,16 @@ static IMP amproj_originalHookForReceiver(AMProjTrackedHook *hooks, NSUInteger c
     return NULL;
 }
 
+static IMP amproj_originalHookForClass(AMProjTrackedHook *hooks, NSUInteger count,
+                                      Class targetClass) {
+    if (!targetClass) return NULL;
+    for (NSUInteger index = 0; index < count; index++) {
+        if (hooks[index].cls == targetClass && hooks[index].original) {
+            return hooks[index].base ? hooks[index].base : hooks[index].original;
+        }
+    }
+    return NULL;
+}
 
 static IMP amproj_originalHookForReceiverSkippingExact(AMProjTrackedHook *hooks,
                                                        NSUInteger count, id receiver) {
