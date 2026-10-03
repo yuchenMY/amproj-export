@@ -3191,7 +3191,9 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn('amproj_IPAFireHideRootViewTemporarily', SOURCE)
         self.assertIn(
             'for (NSNumber *delay in @[@0.05, @0.3, @1.0, @2.0,', SOURCE)
-        self.assertIn('@4.0, @8.0, @15.0, @21.0])', SOURCE)
+        # 2026-10：压制从 8 轮减到 5 轮（窗口钩子在 show 路径已拦出生，
+        # 晚段扫描是冗余保险），启动关键路径更轻。
+        self.assertIn('@0.05, @0.3, @1.0, @2.0, @5.0])', SOURCE)
         # The expensive text walk never runs on the app's own window.
         scan = function_body(
             'static void amproj_suppressIPAFireWelcomeWindows',

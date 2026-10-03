@@ -15786,8 +15786,7 @@ static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source) {
         // With the intro flow seeded away and the gate handled by the class
         // hooks, these passes are a cheap safety net; the early ones stay
         // dense for overlays that appear during launch.
-        for (NSNumber *delay in @[@0.05, @0.3, @1.0, @2.0,
-                                  @4.0, @8.0, @15.0, @21.0]) {
+        for (NSNumber *delay in @[@0.05, @0.3, @1.0, @2.0, @5.0]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                           (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
@@ -20736,7 +20735,12 @@ static void amproj_installPresentationHook(void) {
         NSLog(@"[AMProjExport] Installing presentation filter");
         amproj_installOfflineTakeover();
         amproj_installDarkAppearanceEnforcement();
-        amproj_installVolumeWritebackRescue();
+        // 音量救援安装时要遍历全进程类表（两轮），挪出启动关键路径：首帧后
+        // 2 秒安装完，远早于用户打开音量面板。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            amproj_installVolumeWritebackRescue();
+        });
         @try {
             Method method = class_getInstanceMethod(
                 [UIViewController class],
