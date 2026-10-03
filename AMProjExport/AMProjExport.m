@@ -20046,7 +20046,7 @@ static BOOL amproj_loadOfflineConfig(NSURL *URL, NSData **bodyOut,
     }
 }
 
-static void (*orig_sessionDataTaskRequest)(id, SEL, NSURLRequest *,
+static NSURLSessionDataTask *(*orig_sessionDataTaskRequest)(id, SEL, NSURLRequest *,
     void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
 
 static NSURLSessionDataTask *hooked_sessionDataTaskRequest(
