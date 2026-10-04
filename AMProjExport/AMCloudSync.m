@@ -1540,8 +1540,6 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
-- (void)attachCloudBackupBannerToController:(UIViewController *)controller;
-- (void)presentCloudBackupManagerFrom:(UIViewController *)presenter;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
 - (void)refreshAccountAvatar;
@@ -3061,7 +3059,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         @"controller": AMCloudClassName(controller),
         @"previous_item_count": @(current.count)
     });
-    [self attachCloudBackupBannerToController:controller];
 }
 
 - (void)showAccountEntry:(id)sender {
@@ -3075,107 +3072,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         self.lastProjectsController = presenter;
     }
     [self showAccountFrom:presenter];
-}
-
-static char AMCloudBannerViewKey;
-static char AMCloudBannerLabelKey;
-static char AMCloudBannerFetchedKey;
-
-- (void)attachCloudBackupBannerToController:(UIViewController *)controller {
-    if (!AMCloudIsProjectsControllerClass(controller.class) || !controller.viewIfLoaded) return;
-    UIButton *banner = objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
-    if (!banner) {
-        banner = [UIButton buttonWithType:UIButtonTypeCustom];
-        banner.translatesAutoresizingMaskIntoConstraints = NO;
-        banner.layer.cornerRadius = 12;
-        if (@available(iOS 13.0, *)) {
-            banner.backgroundColor = [UIColor secondarySystemGroupedBackground];
-        } else {
-            banner.backgroundColor = [UIColor colorWithWhite:0.94 alpha:1.0];
-        }
-        [banner addTarget:self action:@selector(cloudBackupBannerTapped:)
-         forControlEvents:UIControlEventTouchUpInside];
-        [controller.view addSubview:banner];
-        [NSLayoutConstraint activateConstraints:@[
-            [banner.leadingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.leadingAnchor constant:12],
-            [banner.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-12],
-            [banner.bottomAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.bottomAnchor constant:-10],
-            [banner.heightAnchor constraintEqualToConstant:42],
-        ]];
-        UILabel *label = [UILabel new];
-        label.translatesAutoresizingMaskIntoConstraints = NO;
-        label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-        label.text = @"☁️ 云端备份：加载中…";
-        label.textAlignment = NSTextAlignmentCenter;
-        [banner addSubview:label];
-        [NSLayoutConstraint activateConstraints:@[
-            [label.centerXAnchor constraintEqualToAnchor:banner.centerXAnchor],
-            [label.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
-            [label.leadingAnchor constraintGreaterThanOrEqualToAnchor:banner.leadingAnchor constant:12],
-        ]];
-        objc_setAssociatedObject(controller, &AMCloudBannerViewKey, banner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(controller, &AMCloudBannerLabelKey, label, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        AMCloudDiagnostic(@"cloud.banner.attached", @{
-            @"controller": AMCloudClassName(controller)
-        });
-    }
-    UILabel *label = objc_getAssociatedObject(controller, &AMCloudBannerLabelKey);
-    if (!AMCloudReadToken().length) {
-        label.text = @"☁️ 登录猫鹤账户，查看云端备份与配额";
-        return;
-    }
-    NSDate *last = objc_getAssociatedObject(self, &AMCloudBannerFetchedKey);
-    if (last && [last timeIntervalSinceNow] > -30) return;
-    objc_setAssociatedObject(self, &AMCloudBannerFetchedKey, [NSDate date],
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    __weak typeof(self) weakSelf = self;
-    __weak UIViewController *weakController = controller;
-    [self.client loadProjects:^(NSDictionary *data, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            AMCloudManager *manager = weakSelf;
-            UIViewController *strongController = weakController;
-            if (!manager || !strongController) return;
-            UILabel *lbl = objc_getAssociatedObject(strongController, &AMCloudBannerLabelKey);
-            if (!lbl) return;
-            if (error) {
-                lbl.text = @"☁️ 云端备份：暂时读取失败，点此重试";
-                objc_setAssociatedObject(manager, &AMCloudBannerFetchedKey, nil,
-                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                return;
-            }
-            NSArray *projects = [data[@"projects"] isKindOfClass:NSArray.class]
-                ? data[@"projects"] : @[];
-            NSDictionary *usage = [data[@"usage"] isKindOfClass:NSDictionary.class]
-                ? data[@"usage"] : @{};
-            long long used = [usage[@"usedBytes"] longLongValue];
-            long long quota = [usage[@"quotaBytes"] longLongValue];
-            lbl.text = [NSString stringWithFormat:@"☁️ 云端备份 %lu 个工程 · 已用 %@ / %@ · 查看",
-                        (unsigned long)projects.count,
-                        AMCloudByteText(used), AMCloudByteText(quota)];
-        });
-    }];
-}
-
-- (void)cloudBackupBannerTapped:(id)sender {
-    UIViewController *presenter = AMCloudTopController(nil) ?: self.lastProjectsController;
-    if (!presenter) return;
-    if (!AMCloudReadToken().length) {
-        [self showAccountFrom:presenter];
-        return;
-    }
-    [self presentCloudBackupManagerFrom:presenter];
-}
-
-- (void)presentCloudBackupManagerFrom:(UIViewController *)presenter {
-    UIViewController *top = AMCloudTopController(presenter) ?: presenter;
-    if (!top) return;
-    AMCloudAccountViewController *managerController = [[AMCloudAccountViewController alloc]
-        initWithStyle:UITableViewStyleGrouped];
-    managerController.manager = self;
-    UINavigationController *navigation = [[UINavigationController alloc]
-        initWithRootViewController:managerController];
-    navigation.modalPresentationStyle = UIModalPresentationPageSheet;
-    [top presentViewController:navigation animated:YES completion:nil];
 }
 
 - (UIAlertController *)busyAlert:(NSString *)title presenter:(UIViewController *)presenter {
