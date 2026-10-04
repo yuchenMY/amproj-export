@@ -184,6 +184,22 @@ class DependencyReconcileSourceTests(unittest.TestCase):
         self.assertIn("transaction.storeUUID", success)
         self.assertIn("storeOwner.storeUUID = storeUUID;", EXPORT)
 
+    def test_export_success_screen_swapped_for_share_video_replica(self):
+        # 新版白底完成页（ExportSuccessVC）不受欢迎，呈现被拦截并替换为
+        # 老版深色"分享视频"复刻页（标题+预览+节省/分享+关闭）。
+        region = EXPORT[EXPORT.index("// ── 导出完成页替换"):]
+        region = region[:region.index("// ── 音量写回救援")]
+        self.assertIn("AMProjShareVideoReplicaVC", region)
+        self.assertIn("分享视频", region)
+        self.assertIn("节省", region)
+        self.assertIn("分享", region)
+        self.assertIn("关闭", region)
+        self.assertIn("AMProjReplicaShareVideo", region)
+        hook = EXPORT[EXPORT.index('containsString:@"ExportSuccessVC"'):]
+        hook = hook[:hook.index("The account presentation replacement")]
+        self.assertIn("AMProjReplicaShareVideo(controller)", hook)
+        self.assertIn("orig_presentVC(self, _cmd, replica, animated, completion);", hook)
+
     def test_reconcile_scan_is_memoized_by_stat(self):
         region = _reconcile_region()
         self.assertIn("scanCache", region)

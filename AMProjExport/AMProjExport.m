@@ -17909,6 +17909,19 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                 return;
             }
         }
+        // 新版导出完成页（ExportSuccessVC：白底"已保存到设备"）换成老版
+        // 深色"分享视频"复刻页；原生页面仅作取址来源，不再呈现。
+        if ([NSStringFromClass(controller.class)
+                containsString:@"ExportSuccessVC"]) {
+            UIViewController *replica = AMProjReplicaShareVideo(controller);
+            if (replica) {
+                amproj_logCriticalEvent(@"share.replica_presented", @{
+                    @"controller": NSStringFromClass(controller.class) ?: @""
+                });
+                orig_presentVC(self, _cmd, replica, animated, completion);
+                return;
+            }
+        }
         // The account presentation replacement remains active above. All
         // other controllers, including document pickers, XML import alerts,
         // and activity sheets, must use the native lifecycle exactly once.
@@ -20086,6 +20099,325 @@ static void amproj_probeMediaLibraryAccess(void) {
         }
         });
     });
+}
+
+// ── 导出完成页替换（老版深色"分享视频"页复刻） ────────────────
+// 865 新版完成页（ExportSuccessVC：白色"已保存到设备"+TikTok/Instagram）
+// 不合口味；老版深色"分享视频"页（ShareVideoVC）仍编译在二进制里但入口
+// 已被新版顶掉。按老版样式复刻并接管 ExportSuccessVC 的呈现：
+// 标题栏 + 视频预览/进度 + 节省/分享 + 绿色关闭。
+#import <AVFoundation/AVFoundation.h>
+
+@interface AMProjShareVideoReplicaVC : UIViewController
+@property(nonatomic, copy) NSURL *videoURL;
+@end
+
+@interface AMProjShareVideoReplicaVC ()
+@property(nonatomic, strong) AVPlayer *player;
+@property(nonatomic, strong) AVPlayerLayer *playerLayer;
+@property(nonatomic, strong) UISlider *scrubber;
+@property(nonatomic, strong) UIButton *playButton;
+@property(nonatomic, strong) UILabel *toastLabel;
+@property(nonatomic, strong) id timeObserver;
+@end
+
+@implementation AMProjShareVideoReplicaVC
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithRed:0.106 green:0.137
+                                                blue:0.184 alpha:1.0];
+    self.modalPresentationStyle = UIModalPresentationFullScreen;
+
+    // 标题栏
+    UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    bar.backgroundColor = [UIColor colorWithRed:0.137 green:0.173
+                                          blue:0.224 alpha:1.0];
+    [self.view addSubview:bar];
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    [close setTitle:@"✕" forState:UIControlStateNormal];
+    close.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightMedium];
+    [close setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    close.translatesAutoresizingMaskIntoConstraints = NO;
+    [close addTarget:self action:@selector(onClose)
+        forControlEvents:UIControlEventTouchUpInside];
+    [bar addSubview:close];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectZero];
+    title.text = @"分享视频";
+    title.textColor = UIColor.whiteColor;
+    title.font = [UIFont systemFontOfSize:18 weight:UIFontWeightMedium];
+    title.textAlignment = NSTextAlignmentCenter;
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    [bar addSubview:title];
+
+    // 视频预览
+    UIView *preview = [[UIView alloc] initWithFrame:CGRectZero];
+    preview.translatesAutoresizingMaskIntoConstraints = NO;
+    preview.backgroundColor = UIColor.blackColor;
+    preview.tag = 9001;
+    [self.view addSubview:preview];
+
+    self.playButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.playButton setTitle:@"⏸" forState:UIControlStateNormal];
+    self.playButton.titleLabel.font = [UIFont systemFontOfSize:24];
+    [self.playButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    self.playButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.playButton addTarget:self action:@selector(onTogglePlay)
+        forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.playButton];
+
+    self.scrubber = [[UISlider alloc] initWithFrame:CGRectZero];
+    self.scrubber.translatesAutoresizingMaskIntoConstraints = NO;
+    self.scrubber.minimumTrackTintColor = UIColor.whiteColor;
+    self.scrubber.maximumTrackTintColor = [UIColor colorWithWhite:1 alpha:0.25];
+    [self.scrubber addTarget:self action:@selector(onScrub)
+        forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:self.scrubber];
+
+    // 节省 / 分享
+    UIButton *save = [self actionButtonWithTitle:@"节省" systemImage:@"arrow.down.to.line"];
+    [save addTarget:self action:@selector(onSave) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *share = [self actionButtonWithTitle:@"分享" systemImage:@"square.and.arrow.up"];
+    [share addTarget:self action:@selector(onShare) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[save, share]];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 20;
+    row.distribution = UIStackViewDistributionFillEqually;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:row];
+
+    UIButton *bottomClose = [UIButton buttonWithType:UIButtonTypeSystem];
+    [bottomClose setTitle:@"关闭" forState:UIControlStateNormal];
+    [bottomClose setTitleColor:[UIColor colorWithRed:0.24 green:0.85
+                                               blue:0.51 alpha:1.0]
+                      forState:UIControlStateNormal];
+    bottomClose.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightMedium];
+    bottomClose.translatesAutoresizingMaskIntoConstraints = NO;
+    [bottomClose addTarget:self action:@selector(onClose)
+        forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:bottomClose];
+
+    self.toastLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.toastLabel.textColor = UIColor.whiteColor;
+    self.toastLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
+    self.toastLabel.layer.cornerRadius = 10;
+    self.toastLabel.clipsToBounds = YES;
+    self.toastLabel.textAlignment = NSTextAlignmentCenter;
+    self.toastLabel.font = [UIFont systemFontOfSize:15];
+    self.toastLabel.alpha = 0;
+    self.toastLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.toastLabel];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [bar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [bar.heightAnchor constraintEqualToConstant:52],
+        [close.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:12],
+        [close.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [title.centerXAnchor constraintEqualToAnchor:bar.centerXAnchor],
+        [title.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+
+        [preview.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
+        [preview.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [preview.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [preview.heightAnchor constraintEqualToConstant:330],
+
+        [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
+        [self.playButton.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:10],
+        [self.scrubber.leadingAnchor constraintEqualToAnchor:self.playButton.trailingAnchor constant:8],
+        [self.scrubber.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [self.scrubber.centerYAnchor constraintEqualToAnchor:self.playButton.centerYAnchor],
+
+        [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
+        [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
+        [row.bottomAnchor constraintEqualToAnchor:bottomClose.topAnchor constant:-28],
+        [row.heightAnchor constraintEqualToConstant:64],
+
+        [bottomClose.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [bottomClose.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-12],
+
+        [self.toastLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [self.toastLabel.bottomAnchor constraintEqualToAnchor:row.topAnchor constant:-24],
+        [self.toastLabel.widthAnchor constraintGreaterThanOrEqualToConstant:200],
+        [self.toastLabel.heightAnchor constraintEqualToConstant:40],
+    ]];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    UIView *preview = [self.view viewWithTag:9001];
+    if (self.playerLayer && preview) {
+        self.playerLayer.frame = preview.bounds;
+    }
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (!self.player && self.videoURL) {
+        self.player = [AVPlayer playerWithURL:self.videoURL];
+        self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
+        self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        UIView *preview = [self.view viewWithTag:9001];
+        self.playerLayer.frame = preview.bounds;
+        [preview.layer addSublayer:self.playerLayer];
+        [self.player play];
+        __weak AMProjShareVideoReplicaVC *weakSelf = self;
+        self.timeObserver = [self.player addPeriodicTimeObserverForInterval:
+            CMTimeMake(1, 4) queue:dispatch_get_main_queue()
+            usingBlock:^(CMTime time) {
+            AMProjShareVideoReplicaVC *strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.player) return;
+            AVPlayerItem *item = strongSelf.player.currentItem;
+            if (item && CMTIME_IS_NUMERIC(item.duration) &&
+                item.duration.value > 0) {
+                strongSelf.scrubber.value =
+                    (float)(CMTimeGetSeconds(time) /
+                            CMTimeGetSeconds(item.duration));
+            }
+        }];
+    }
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    if (self.timeObserver && self.player) {
+        [self.player removeTimeObserver:self.timeObserver];
+        self.timeObserver = nil;
+    }
+    [self.player pause];
+}
+
+- (UIButton *)actionButtonWithTitle:(NSString *)title systemImage:(NSString *)symbol {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.backgroundColor = [UIColor colorWithRed:0.231 green:0.278
+                                            blue:0.337 alpha:1.0];
+    button.layer.cornerRadius = 12;
+    UIImage *icon = [UIImage systemImageNamed:symbol];
+    [button setImage:icon forState:UIControlStateNormal];
+    [button setTitle:title forState:UIControlStateNormal];
+    button.tintColor = UIColor.whiteColor;
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+    button.imageEdgeInsets = UIEdgeInsetsMake(0, -6, 0, 6);
+    return button;
+}
+
+- (void)onTogglePlay {
+    if (!self.player) return;
+    if (self.player.rate > 0) {
+        [self.player pause];
+        [self.playButton setTitle:@"▶" forState:UIControlStateNormal];
+    } else {
+        [self.player play];
+        [self.playButton setTitle:@"⏸" forState:UIControlStateNormal];
+    }
+}
+
+- (void)onScrub {
+    if (!self.player || !self.player.currentItem) return;
+    NSTimeInterval total = CMTimeGetSeconds(self.player.currentItem.duration);
+    if (!isfinite(total) || total <= 0) return;
+    [self.player seekToTime:CMTimeMakeWithSeconds(total * self.scrubber.value, 600)
+        toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+}
+
+- (void)onSave {
+    if (!self.videoURL) {
+        [self showToast:@"已保存到设备"];
+        return;
+    }
+    __weak AMProjShareVideoReplicaVC *weakSelf = self;
+    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:
+            weakSelf.videoURL];
+    } completionHandler:^(BOOL success, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf showToast:success ? @"已保存到设备" : @"保存失败，请重试"];
+        });
+    }];
+}
+
+- (void)onShare {
+    if (!self.videoURL) return;
+    UIActivityViewController *activity =
+        [[UIActivityViewController alloc] initWithActivityItems:@[self.videoURL]
+                                          applicationActivities:nil];
+    activity.popoverPresentationController.sourceView = self.view;
+    activity.popoverPresentationController.sourceRect =
+        CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+    [self presentViewController:activity animated:YES completion:nil];
+}
+
+- (void)onClose {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)showToast:(NSString *)text {
+    self.toastLabel.text = text;
+    self.toastLabel.alpha = 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [UIView animateWithDuration:0.3 animations:^{
+            self.toastLabel.alpha = 0;
+        }];
+    });
+}
+
+@end
+
+// 从被替换的 ExportSuccessVC 上捞导出视频地址（属性名不确定，逐个试）；
+// 拿不到就取相册里最新的视频。
+static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) {
+    for (NSString *key in @[@"videoURL", @"outputURL", @"savedURL",
+                            @"fileURL", @"exportURL", @"url"]) {
+        @try {
+            id value = [controller valueForKey:key];
+            if ([value isKindOfClass:NSURL.class] &&
+                [(NSURL *)value isFileURL]) {
+                return value;
+            }
+        } @catch (NSException *exception) {
+        }
+    }
+    PHFetchOptions *options = [PHFetchOptions new];
+    options.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate"
+                                                              ascending:NO]];
+    options.fetchLimit = 1;
+    PHFetchResult<PHAsset *> *result =
+        [PHAsset fetchAssetsWithMediaType:PHAssetMediaTypeVideo options:options];
+    PHAsset *asset = result.firstObject;
+    if (!asset) return nil;
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    __block NSURL *resolved = nil;
+    [[PHImageManager defaultManager]
+        requestAVAssetForVideo:asset options:nil
+        resultHandler:^(AVAsset *avAsset, AVAudioMix *audioMix,
+                        NSDictionary *info) {
+        if ([avAsset isKindOfClass:AVURLAsset.class]) {
+            resolved = ((AVURLAsset *)avAsset).URL;
+        }
+        dispatch_semaphore_signal(sema);
+    }];
+    dispatch_semaphore_wait(sema,
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+    return resolved;
+}
+
+static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess) {
+    @try {
+        AMProjShareVideoReplicaVC *replica = [AMProjShareVideoReplicaVC new];
+        replica.videoURL = AMProjReplicaVideoURLFromController(exportSuccess);
+        return replica;
+    } @catch (NSException *exception) {
+        amproj_logCriticalEvent(@"share.replica_failed", @{
+            @"reason": exception.reason ?: @""
+        });
+        return nil;
+    }
 }
 
 // ── 音量写回救援 ─────────────────────────────────────────────
