@@ -3218,7 +3218,7 @@ static char AMCloudBannerFetchedKey;
         [NSLayoutConstraint activateConstraints:@[
             [banner.leadingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.leadingAnchor constant:12],
             [banner.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-12],
-            [banner.topAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.topAnchor constant:8],
+            [banner.topAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.topAnchor constant:174],
             [banner.heightAnchor constraintEqualToConstant:40],
 
             [blurView.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor],

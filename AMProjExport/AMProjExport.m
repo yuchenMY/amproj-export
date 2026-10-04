@@ -20417,13 +20417,13 @@ static void amproj_probeMediaLibraryAccess(void) {
         [self.scrubber.topAnchor constraintEqualToAnchor:self.stripContainer.topAnchor constant:-6],
         [self.scrubber.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:6],
 
+        [row.topAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:32],
         [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
         [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
-        [row.bottomAnchor constraintEqualToAnchor:bottomClose.topAnchor constant:-28],
         [row.heightAnchor constraintEqualToConstant:64],
 
         [bottomClose.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [bottomClose.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-12],
+        [bottomClose.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:28],
 
         [self.toastLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [self.toastLabel.bottomAnchor constraintEqualToAnchor:row.topAnchor constant:-24],
