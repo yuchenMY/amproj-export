@@ -1540,9 +1540,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
-extern void AMProjStartSelfCloudUpload(void);
-
-- (void)attachCloudBackupBannerToController:(UIViewController *)controller;
+extern BOOL AMProjStartSelfCloudUpload(void);
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
 - (void)refreshAccountAvatar;
@@ -1619,6 +1617,7 @@ extern void AMProjStartSelfCloudUpload(void);
     <WKNavigationDelegate, WKScriptMessageHandler>
 @property(nonatomic, weak) AMCloudManager *manager;
 @property(nonatomic, copy) NSString *route;
+@property(nonatomic, copy) NSString *page;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) UIActivityIndicatorView *spinner;
 - (void)loadAccountWebsiteWithToken:(NSString *)token activationError:(NSError *)error;
@@ -1771,7 +1770,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"猫鹤账户";
+    self.title = [self.page isEqualToString:@"backup"] ? @"云端备份" : @"猫鹤账户";
     self.view.backgroundColor = UIColor.systemBackgroundColor;
     if ([self.route isEqualToString:@"modal"] ||
         [self.route isEqualToString:@"native_present"]) {
@@ -1879,7 +1878,9 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         [webView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [webView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
     ]];
-    NSURL *URL = [NSURL URLWithString:@"https://am.meowcr.cn/me.html?embed=1&platform=ios"];
+    NSString *pageName = [self.page isEqualToString:@"backup"] ? @"backup.html" : @"me.html";
+    NSURL *URL = [NSURL URLWithString:
+        [NSString stringWithFormat:@"https://am.meowcr.cn/%@?embed=1&platform=ios", pageName]];
     [webView loadRequest:[NSURLRequest requestWithURL:URL
                                          cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                      timeoutInterval:60]];
@@ -1946,6 +1947,11 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
                     decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSURL *URL = navigationAction.request.URL;
+    if ([URL.scheme.lowercaseString isEqualToString:@"amproj-handoff"]) {
+        decisionHandler(WKNavigationActionPolicyCancel);
+        [self handleHandoffURL:URL];
+        return;
+    }
     if (AMCloudIsTrustedAccountURL(URL)) {
         decisionHandler(WKNavigationActionPolicyAllow);
         return;
@@ -1964,6 +1970,49 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                                completionHandler:nil];
     }
     decisionHandler(WKNavigationActionPolicyCancel);
+}
+
+// handleHandoffURL 处理备份页里的 amproj-handoff:// 动作：
+//   amproj-handoff://upload           发起备份新工程（打包->选择->上传自有云）
+//   amproj-handoff://import?id=<uuid> 下载云工程并交给系统导入
+- (void)handleHandoffURL:(NSURL *)URL {
+    NSString *host = URL.host.lowercaseString ?: @"";
+    if ([host isEqualToString:@"upload"]) {
+        if (!AMProjStartSelfCloudUpload()) {
+            [self.manager showError:AMCloudError(40, @"当前界面无法发起备份，请重试")
+                          presenter:self];
+        }
+        return;
+    }
+    if ([host isEqualToString:@"import"]) {
+        NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:NO];
+        NSString *projectID = nil;
+        for (NSURLQueryItem *item in components.queryItems) {
+            if ([item.name isEqualToString:@"id"]) projectID = item.value;
+        }
+        if (!projectID.length) return;
+        __weak typeof(self) weakSelf = self;
+        UIViewController *hostVC = self;
+        [self.manager.client loadProjects:^(NSDictionary *data, NSError *error) {
+            NSArray *projects = [data[@"projects"] isKindOfClass:NSArray.class]
+                ? data[@"projects"] : @[];
+            NSDictionary *match = nil;
+            for (NSDictionary *project in projects) {
+                if ([project[@"id"] isKindOfClass:NSString.class] &&
+                    [project[@"id"] isEqualToString:projectID]) {
+                    match = project;
+                    break;
+                }
+            }
+            if (!match) {
+                [weakSelf.manager showError:AMCloudError(8, @"云工程不存在或已删除")
+                                 presenter:hostVC];
+                return;
+            }
+            [weakSelf.manager downloadAndImportProject:match presenter:hostVC];
+        }];
+        return;
+    }
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
@@ -3074,7 +3123,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         @"controller": AMCloudClassName(controller),
         @"previous_item_count": @(current.count)
     });
-    [self attachCloudBackupBannerToController:controller];
 }
 
 - (void)showAccountEntry:(id)sender {
@@ -3090,105 +3138,34 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     [self showAccountFrom:presenter];
 }
 
-static char AMCloudBannerViewKey;
-static char AMCloudBannerLabelKey;
-static char AMCloudBannerFetchedKey;
-
-// 云端备份横幅：挂在工程列表（含"云端"标签页的 ProjectsListVC）底部，
-// 高对比深色底，实时显示自有云工程的个数与配额；点击打开自有备份管理器。
-- (void)attachCloudBackupBannerToController:(UIViewController *)controller {
-    if (!AMCloudIsProjectsControllerClass(controller.class) || !controller.viewIfLoaded) return;
-    UIButton *banner = objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
-    if (!banner) {
-        banner = [UIButton buttonWithType:UIButtonTypeCustom];
-        banner.translatesAutoresizingMaskIntoConstraints = NO;
-        banner.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.92];
-        banner.layer.cornerRadius = 12;
-        banner.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
-        banner.layer.borderWidth = 1;
-        banner.layer.zPosition = 999;  // 永远浮在 AM 自己的搜索栏/浮层之上
-        banner.layer.shadowColor = UIColor.blackColor.CGColor;
-        banner.layer.shadowOpacity = 0.45;
-        banner.layer.shadowRadius = 10;
-        banner.layer.shadowOffset = CGSizeMake(0, 3);
-        [banner addTarget:self action:@selector(cloudBackupBannerTapped:)
-         forControlEvents:UIControlEventTouchUpInside];
-        [controller.view addSubview:banner];
-        // 上移到 AM 底部搜索栏之上（-10 会被搜索栏完全盖住，实测隐形）
-        [NSLayoutConstraint activateConstraints:@[
-            [banner.leadingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.leadingAnchor constant:12],
-            [banner.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-80],
-            [banner.bottomAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.bottomAnchor constant:-78],
-            [banner.heightAnchor constraintEqualToConstant:44],
-        ]];
-        UILabel *label = [UILabel new];
-        label.translatesAutoresizingMaskIntoConstraints = NO;
-        label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-        label.textColor = UIColor.whiteColor;
-        label.text = @"☁️ 云端备份：加载中…";
-        label.textAlignment = NSTextAlignmentCenter;
-        [banner addSubview:label];
-        [NSLayoutConstraint activateConstraints:@[
-            [label.centerXAnchor constraintEqualToAnchor:banner.centerXAnchor],
-            [label.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
-            [label.leadingAnchor constraintGreaterThanOrEqualToAnchor:banner.leadingAnchor constant:12],
-        ]];
-        objc_setAssociatedObject(controller, &AMCloudBannerViewKey, banner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(controller, &AMCloudBannerLabelKey, label, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        NSLog(@"[AMProjExport] cloud banner attached to %@", NSStringFromClass(controller.class));
-    }
-    [controller.view bringSubviewToFront:
-        objc_getAssociatedObject(controller, &AMCloudBannerViewKey)];
-    UILabel *label = objc_getAssociatedObject(controller, &AMCloudBannerLabelKey);
-    if (!AMCloudReadToken().length) {
-        label.text = @"☁️ 登录猫鹤账户，查看云端备份与配额";
-        return;
-    }
-    NSDate *last = objc_getAssociatedObject(self, &AMCloudBannerFetchedKey);
-    if (last && [last timeIntervalSinceNow] > -30) return;
-    objc_setAssociatedObject(self, &AMCloudBannerFetchedKey, [NSDate date],
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    __weak typeof(self) weakSelf = self;
-    __weak UIViewController *weakController = controller;
-    [self.client loadProjects:^(NSDictionary *data, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            AMCloudManager *manager = weakSelf;
-            UIViewController *strongController = weakController;
-            if (!manager || !strongController) return;
-            UILabel *lbl = objc_getAssociatedObject(strongController, &AMCloudBannerLabelKey);
-            if (!lbl) return;
-            if (error) {
-                lbl.text = @"☁️ 云端备份：暂时读取失败，点此重试";
-                objc_setAssociatedObject(manager, &AMCloudBannerFetchedKey, nil,
-                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                return;
-            }
-            NSArray *projects = [data[@"projects"] isKindOfClass:NSArray.class]
-                ? data[@"projects"] : @[];
-            NSDictionary *usage = [data[@"usage"] isKindOfClass:NSDictionary.class]
-                ? data[@"usage"] : @{};
-            long long used = [usage[@"usedBytes"] longLongValue];
-            long long quota = [usage[@"quotaBytes"] longLongValue];
-            lbl.text = [NSString stringWithFormat:@"☁️ 云端备份 %lu 个工程 · 已用 %@ / %@",
-                        (unsigned long)projects.count,
-                        AMCloudByteText(used), AMCloudByteText(quota)];
-        });
-    }];
+// 云端上传接管 IMP：原方法被完全替换（不调用原实现），
+// 重定向到自有云备份流程（打包 -> 完整备份/仅工程选择 -> 上传自有云）。
+static void AMCloudUploadTakeoverIMP(id self, SEL _cmd, ...) {
+    NSLog(@"[AMProjExport] cloud upload takeover: %s on %s",
+          sel_getName(_cmd), class_getName(object_getClass(self)));
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!AMProjStartSelfCloudUpload()) {
+            [[AMCloudManager shared] showCloudBackupManager:nil];
+        }
+    });
 }
 
-- (void)cloudBackupBannerTapped:(id)sender {
-    UIViewController *presenter = AMCloudTopController(nil) ?: self.lastProjectsController;
-    if (!presenter) return;
-    if (!AMCloudReadToken().length) {
-        [self showAccountFrom:presenter];
-        return;
+// 只接管上传入口类方法；清理、取消、删除、结束类方法绝不碰。
+static BOOL AMCloudShouldTakeoverSelector(const char *selName) {
+    if (!selName) return NO;
+    if (strcasestr(selName, "dismiss") || strcasestr(selName, "cleanup") ||
+        strcasestr(selName, "cancel") || strcasestr(selName, "delete") ||
+        strcasestr(selName, "finish") || strcasestr(selName, "done") ||
+        strcasestr(selName, "fail")) {
+        return NO;
     }
-    [self presentCloudBackupManagerFrom:presenter];
+    return strcasestr(selName, "uploadtocloud") != NULL ||
+           strcasestr(selName, "cloudupload") != NULL;
 }
 
-// 安装云端上传点击接管：AM 原版"上传到云端"入口（ProjectsListVC 里的
-// didTapCloudProjectUpload / uploadProjectToCloudButtonTapped）原本会弹官方登录墙；
-// 接管后直接打开自有备份管理器，官方登录墙与官方云不再出现。
+// 安装云端上传点击接管（全覆盖）：任何类（不限模块名——UploadToCloudView 在
+// AlightCommons 模块，按类名过滤会漏）中选择器含 uploadtocloud / cloudupload 的
+// void 方法全部接管；变参 IMP 不挑参数签名，杜绝签名不匹配漏装。
 static void AMCloudInstallCloudUploadTapHooks(void) {
     int count = objc_getClassList(NULL, 0);
     if (count <= 0) return;
@@ -3196,44 +3173,24 @@ static void AMCloudInstallCloudUploadTapHooks(void) {
         (__unsafe_unretained Class *)calloc((size_t)count, sizeof(Class));
     if (!classes) return;
     count = objc_getClassList(classes, count);
-    // "保存到云端"的真实入口是 didTapUploadToCloudButton / handleCloudUploadPresent
-    // （从 AM 二进制提取）；老的两个选择器也保留，覆盖其他上传按钮。
-    SEL selectors[4] = {
-        @selector(didTapUploadToCloudButton),
-        @selector(handleCloudUploadPresent),
-        @selector(didTapCloudProjectUpload),
-        @selector(uploadProjectToCloudButtonTapped),
-    };
     int installed = 0;
     for (int index = 0; index < count; index++) {
         Class cls = classes[index];
-        const char *name = class_getName(cls);
-        if (!strstr(name, "AlightMotion")) continue;  // 只接管 AM 自己的类
-        for (int si = 0; si < 4; si++) {
-            Method method = class_getInstanceMethod(cls, selectors[si]);
-            if (!method) continue;
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(cls, &methodCount);
+        if (!methods) continue;
+        for (unsigned int mi = 0; mi < methodCount; mi++) {
+            Method method = methods[mi];
+            const char *selName = sel_getName(method_getName(method));
+            if (!AMCloudShouldTakeoverSelector(selName)) continue;
             const char *types = method_getTypeEncoding(method);
-            IMP imp = nil;
-            // 无参 void 方法
-            if (types && strcmp(types, "v16@0:8") == 0) {
-                imp = imp_implementationWithBlock(^(id self) {
-                    NSLog(@"[AMProjExport] cloud upload tap intercepted -> self-hosted");
-                    AMProjStartSelfCloudUpload();
-                });
-            // 带一个对象参数的 void 方法（如 sender）
-            } else if (types && strcmp(types, "v24@0:8@16") == 0) {
-                imp = imp_implementationWithBlock(^(id self, id arg) {
-                    (void)arg;
-                    NSLog(@"[AMProjExport] cloud upload tap intercepted(arg) -> self-hosted");
-                    AMProjStartSelfCloudUpload();
-                });
-            }
-            if (!imp) continue;
-            method_setImplementation(method, imp);
+            if (!types || types[0] != 'v') continue;  // 只接管 void 返回
+            method_setImplementation(method, (IMP)AMCloudUploadTakeoverIMP);
             installed++;
             NSLog(@"[AMProjExport] hooked %s %s (%s)",
-                  name, sel_getName(selectors[si]), types ? types : "?");
+                  class_getName(cls), selName, types);
         }
+        free(methods);
     }
     free(classes);
     if (installed > 0) {
@@ -3261,11 +3218,12 @@ static void AMCloudInstallCloudUploadTapHooks(void) {
 - (void)presentCloudBackupManagerFrom:(UIViewController *)presenter {
     UIViewController *top = AMCloudTopController(presenter) ?: presenter;
     if (!top) return;
-    AMCloudAccountViewController *managerController = [[AMCloudAccountViewController alloc]
-        initWithStyle:UITableViewStyleGrouped];
-    managerController.manager = self;
+    AMCloudAccountWebViewController *backup = [AMCloudAccountWebViewController new];
+    backup.manager = self;
+    backup.page = @"backup";
+    backup.route = @"modal";
     UINavigationController *navigation = [[UINavigationController alloc]
-        initWithRootViewController:managerController];
+        initWithRootViewController:backup];
     navigation.modalPresentationStyle = UIModalPresentationPageSheet;
     [top presentViewController:navigation animated:YES completion:nil];
 }

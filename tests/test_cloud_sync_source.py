@@ -1028,7 +1028,8 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("person.crop.circle", CLOUD)
         self.assertIn("AMCloudAccountWebViewController", CLOUD)
         self.assertIn("WKWebView", CLOUD)
-        self.assertIn("https://am.meowcr.cn/me.html?embed=1&platform=ios", CLOUD)
+        self.assertIn("https://am.meowcr.cn/%@?embed=1&platform=ios", CLOUD)
+        self.assertIn('isEqualToString:@"backup"] ? @"backup.html" : @"me.html"', CLOUD)
         self.assertIn('name:@"amAccount"', CLOUD)
 
     def test_native_my_account_route_is_replaced_before_presentation_or_push(self):

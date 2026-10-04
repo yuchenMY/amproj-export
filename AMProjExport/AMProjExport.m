@@ -2806,8 +2806,8 @@ static void amproj_startCloudUpload(UIViewController *presenter,
 
 // AMProjStartSelfCloudUpload 供 AMCloudSync 的云端上传点击接管调用：
 // 从当前界面发起"保存到猫鹤云"完整流程（打包 -> 弹完整备份/仅工程选择 -> 上传），
-// 不经过 AM 官方云，也绝不弹 AM 官方登录。
-void AMProjStartSelfCloudUpload(void) {
+// 不经过 AM 官方云，也绝不弹 AM 官方登录。找不到宿主界面时返回 NO。
+BOOL AMProjStartSelfCloudUpload(void) {
     UIWindow *window = amproj_keyWindow();
     UIViewController *presenter = window.rootViewController;
     while (presenter.presentedViewController) {
@@ -2818,8 +2818,9 @@ void AMProjStartSelfCloudUpload(void) {
             ((UINavigationController *)presenter).visibleViewController;
         if (visible) presenter = visible;
     }
-    if (!presenter) return;
+    if (!presenter) return NO;
     amproj_startCloudUpload(presenter, nil);
+    return YES;
 }
 #endif
 
