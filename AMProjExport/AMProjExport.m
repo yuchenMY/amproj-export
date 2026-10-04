@@ -17887,6 +17887,22 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     // completes and the app proceeds as if the page had been confirmed. Only
     // the class chain is checked here: a per-presentation view-tree walk on
     // large controllers stalled the main thread.
+#if AMPROJ_CLOUD_SYNC
+    // AM 官方云上传页呈现拦截：类名含 UploadToCloud 的宿主/视图控制器一律
+    // 不上屏，改走自有云备份流程。SwiftUI 宿主的 mangled 名同样包含该串。
+    {
+        NSString *presentedName = NSStringFromClass(controller.class) ?: @"";
+        if ([presentedName containsString:@"UploadToCloud"] ||
+            [presentedName containsString:@"CloudUploadVC"]) {
+            amproj_logCriticalEvent(@"direct.cloud_upload_screen_takeover", @{
+                @"controller": presentedName
+            });
+            if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+            AMProjStartSelfCloudUpload();
+            return;
+        }
+    }
+#endif
     if (amproj_gateDefenseActive &&
         AMProjPresentationChainHasCrackController(controller)) {
         amproj_logCriticalEvent(@"popup.suppressed", @{
@@ -19694,6 +19710,47 @@ static UIViewController *AMProjTopPresentedController(void) {
     return top;
 }
 
+#if AMPROJ_CLOUD_SYNC
+// 云端登录墙接管：AM 的"保存到云端"在未登录官方云时会弹 sign_in_cloud_alert
+// 登录墙；剥掉登录按钮并接管，改为走自有云备份流程（打包->完整备份/仅工程->上传）。
+static void AMProjScheduleCloudGateTakeover(UIAlertController *alert) {
+    if (objc_getAssociatedObject(alert, AMProjGateHandledKey)) return;
+    objc_setAssociatedObject(alert, AMProjGateHandledKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    void (^takeover)(void) = ^{
+        if (amproj_directRequest) return;
+        UIViewController *top = AMProjTopPresentedController();
+        if (![top isKindOfClass:UIAlertController.class]) return;
+        UIAlertController *onScreen = (UIAlertController *)top;
+        NSString *normalizedMessage = AMProjNormalizedGateText(onScreen.message ?: @"");
+        NSString *normalizedTitle = AMProjNormalizedGateText(onScreen.title ?: @"");
+        NSString *normalizedExpectedMessage = AMProjNormalizedGateText(
+            NSLocalizedString(@"sign_in_cloud_alert_body", @""));
+        NSString *normalizedExpectedTitle = AMProjNormalizedGateText(
+            NSLocalizedString(@"sign_in_cloud_alert_title", @""));
+        BOOL matches =
+            (normalizedExpectedMessage.length &&
+             [normalizedMessage isEqualToString:normalizedExpectedMessage]) ||
+            (normalizedExpectedTitle.length &&
+             [normalizedTitle isEqualToString:normalizedExpectedTitle]);
+        if (!matches) return;
+        amproj_logCriticalEvent(@"direct.cloud_login_wall_takeover", @{});
+        UIViewController *presenter = top.presentingViewController ?: top;
+        void (^startCloud)(void) = ^{
+            if (!AMProjStartSelfCloudUpload()) {
+                amproj_logCriticalEvent(@"direct.cloud_takeover_no_presenter", @{});
+            }
+        };
+        @try {
+            [presenter dismissViewControllerAnimated:YES completion:startCloud];
+        } @catch (NSException *exception) {
+            startCloud();
+        }
+    };
+    dispatch_async(dispatch_get_main_queue(), takeover);
+}
+#endif
+
 static void AMProjScheduleGateTakeover(UIAlertController *alert) {
     if (objc_getAssociatedObject(alert, AMProjGateHandledKey)) return;
     objc_setAssociatedObject(alert, AMProjGateHandledKey, @YES,
@@ -19759,6 +19816,31 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
                 return;
             }
         }
+#if AMPROJ_CLOUD_SYNC
+        // 云端登录墙（sign_in_cloud_alert_title / _body）：剥登录按钮 + 接管
+        NSString *cloudExpectedMessage = AMProjNormalizedGateText(
+            NSLocalizedString(@"sign_in_cloud_alert_body", @""));
+        NSString *cloudExpectedTitle = AMProjNormalizedGateText(
+            NSLocalizedString(@"sign_in_cloud_alert_title", @""));
+        NSString *normalizedTitle = AMProjNormalizedGateText(
+            [(UIAlertController *)self title] ?: @"");
+        if ((cloudExpectedMessage.length &&
+             [normalizedMessage isEqualToString:cloudExpectedMessage]) ||
+            (cloudExpectedTitle.length &&
+             [normalizedTitle isEqualToString:cloudExpectedTitle])) {
+            AMProjScheduleCloudGateTakeover((UIAlertController *)self);
+            NSString *title = [action title] ?: @"";
+            NSString *folded = title.lowercaseString;
+            if ([folded containsString:@"登入"] ||
+                [folded containsString:@"登录"] ||
+                [folded containsString:@"sign in"] ||
+                [folded containsString:@"log in"]) {
+                os_log(OS_LOG_DEFAULT, "[AMProjExport] cloud gate login action "
+                       "stripped: %{public}@", title);
+                return;
+            }
+        }
+#endif
     } @catch (NSException *exception) {
         // never break the host alert
     }

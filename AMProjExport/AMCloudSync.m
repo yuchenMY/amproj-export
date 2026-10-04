@@ -2100,7 +2100,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     AMCloudPluginsInstallBundleHooks();
     AMEditorCustomizationInstall();
     AMCloudInstallProjectsHooks();
-    AMCloudInstallCloudUploadTapHooks();
     AMCloudAttachVisibleProjectsControllers();
     [NSNotificationCenter.defaultCenter
         addObserver:self selector:@selector(applicationDidBecomeActive:)
@@ -2133,7 +2132,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                                      (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             AMCloudInstallProjectsHooks();
-            AMCloudInstallCloudUploadTapHooks();
             AMCloudAttachVisibleProjectsControllers();
         });
     }
@@ -2147,7 +2145,6 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
     (void)notification;
     AMCloudInstallProjectsHooks();
-    AMCloudInstallCloudUploadTapHooks();
     AMCloudAttachVisibleProjectsControllers();
     [self showPluginDownloadNoticeIfPossible];
     [self syncPluginsNow:@"did_become_active"];
@@ -3138,67 +3135,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     [self showAccountFrom:presenter];
 }
 
-// 云端上传接管 IMP：原方法被完全替换（不调用原实现），
-// 重定向到自有云备份流程（打包 -> 完整备份/仅工程选择 -> 上传自有云）。
-static void AMCloudUploadTakeoverIMP(id self, SEL _cmd, ...) {
-    NSLog(@"[AMProjExport] cloud upload takeover: %s on %s",
-          sel_getName(_cmd), class_getName(object_getClass(self)));
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!AMProjStartSelfCloudUpload()) {
-            [[AMCloudManager shared] showCloudBackupManager:nil];
-        }
-    });
-}
 
-// 只接管上传入口类方法；清理、取消、删除、结束类方法绝不碰。
-static BOOL AMCloudShouldTakeoverSelector(const char *selName) {
-    if (!selName) return NO;
-    if (strcasestr(selName, "dismiss") || strcasestr(selName, "cleanup") ||
-        strcasestr(selName, "cancel") || strcasestr(selName, "delete") ||
-        strcasestr(selName, "finish") || strcasestr(selName, "done") ||
-        strcasestr(selName, "fail")) {
-        return NO;
-    }
-    return strcasestr(selName, "uploadtocloud") != NULL ||
-           strcasestr(selName, "cloudupload") != NULL;
-}
-
-// 安装云端上传点击接管（全覆盖）：任何类（不限模块名——UploadToCloudView 在
-// AlightCommons 模块，按类名过滤会漏）中选择器含 uploadtocloud / cloudupload 的
-// void 方法全部接管；变参 IMP 不挑参数签名，杜绝签名不匹配漏装。
-static void AMCloudInstallCloudUploadTapHooks(void) {
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return;
-    Class __unsafe_unretained *classes =
-        (__unsafe_unretained Class *)calloc((size_t)count, sizeof(Class));
-    if (!classes) return;
-    count = objc_getClassList(classes, count);
-    int installed = 0;
-    for (int index = 0; index < count; index++) {
-        Class cls = classes[index];
-        unsigned int methodCount = 0;
-        Method *methods = class_copyMethodList(cls, &methodCount);
-        if (!methods) continue;
-        for (unsigned int mi = 0; mi < methodCount; mi++) {
-            Method method = methods[mi];
-            const char *selName = sel_getName(method_getName(method));
-            if (!AMCloudShouldTakeoverSelector(selName)) continue;
-            const char *types = method_getTypeEncoding(method);
-            if (!types || types[0] != 'v') continue;  // 只接管 void 返回
-            method_setImplementation(method, (IMP)AMCloudUploadTakeoverIMP);
-            installed++;
-            NSLog(@"[AMProjExport] hooked %s %s (%s)",
-                  class_getName(cls), selName, types);
-        }
-        free(methods);
-    }
-    free(classes);
-    if (installed > 0) {
-        AMCloudDiagnostic(@"cloud.upload_tap_hooks_installed", @{
-            @"count": @(installed)
-        });
-    }
-}
 
 // showCloudBackupManager: 打开完全自有的云端备份管理器（自有界面 + 自有服务器数据，
 // 不依赖 AM 官方的任何在线服务；AM 官方服务下线也不影响云工程功能）。
