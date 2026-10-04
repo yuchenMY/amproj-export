@@ -1541,6 +1541,8 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
 extern BOOL AMProjStartSelfCloudUpload(void);
+
+- (void)attachCloudBackupBannerToController:(UIViewController *)controller;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
 - (void)refreshAccountAvatar;
@@ -3120,6 +3122,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         @"controller": AMCloudClassName(controller),
         @"previous_item_count": @(current.count)
     });
+    [self attachCloudBackupBannerToController:controller];
 }
 
 - (void)showAccountEntry:(id)sender {
@@ -3139,6 +3142,176 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 
 // showCloudBackupManager: 打开完全自有的云端备份管理器（自有界面 + 自有服务器数据，
 // 不依赖 AM 官方的任何在线服务；AM 官方服务下线也不影响云工程功能）。
+static char AMCloudBannerViewKey;
+static char AMCloudBannerLabelKey;
+static char AMCloudBannerBarKey;
+static char AMCloudBannerFetchedKey;
+
+// 云空间水位条：内容区顶部的毛玻璃细条。设计原则——
+// 不做黑盒子（旧版被吐槽突兀），用系统毛玻璃融入界面；信息排布
+// 图标+名称+进度条+数字 一行搞定；进度条随配额加载平滑填充。
+- (void)attachCloudBackupBannerToController:(UIViewController *)controller {
+    if (!AMCloudIsProjectsControllerClass(controller.class) || !controller.viewIfLoaded) return;
+    UIView *banner = objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
+    if (!banner) {
+        banner = [UIView new];
+        banner.translatesAutoresizingMaskIntoConstraints = NO;
+        banner.layer.cornerRadius = 13;
+        banner.layer.masksToBounds = YES;
+        [controller.view addSubview:banner];
+
+        UIVisualEffectView *blurView;
+        if (@available(iOS 13.0, *)) {
+            blurView = [[UIVisualEffectView alloc]
+                initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
+        } else {
+            blurView = [[UIVisualEffectView alloc]
+                initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
+        }
+        blurView.translatesAutoresizingMaskIntoConstraints = NO;
+        [banner addSubview:blurView];
+
+        UIImageView *iconView;
+        if (@available(iOS 13.0, *)) {
+            iconView = [[UIImageView alloc] initWithImage:
+                [UIImage systemImageNamed:@"cloud.fill"]];
+            iconView.tintColor = [UIColor colorWithRed:0.22 green:0.77 blue:0.73 alpha:1.0];
+        } else {
+            iconView = [UIImageView new];
+        }
+        iconView.translatesAutoresizingMaskIntoConstraints = NO;
+        [banner addSubview:iconView];
+
+        UILabel *titleLabel = [UILabel new];
+        titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        titleLabel.text = @"云空间";
+        [banner addSubview:titleLabel];
+
+        UIProgressView *bar = [[UIProgressView alloc]
+            initWithProgressViewStyle:UIProgressViewStyleDefault];
+        bar.translatesAutoresizingMaskIntoConstraints = NO;
+        bar.progressTintColor = [UIColor colorWithRed:0.22 green:0.77 blue:0.73 alpha:1.0];
+        bar.trackTintColor = [UIColor colorWithWhite:0.55 alpha:0.28];
+        bar.layer.cornerRadius = 1.5;
+        bar.layer.masksToBounds = YES;
+        [banner addSubview:bar];
+
+        UILabel *valueLabel = [UILabel new];
+        valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        valueLabel.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightMedium];
+        valueLabel.text = @"-- / --";
+        valueLabel.textAlignment = NSTextAlignmentRight;
+        [banner addSubview:valueLabel];
+
+        UIImageView *chevron;
+        if (@available(iOS 13.0, *)) {
+            chevron = [[UIImageView alloc] initWithImage:
+                [UIImage systemImageNamed:@"chevron.right"]];
+            chevron.tintColor = [UIColor colorWithWhite:0.55 alpha:0.9];
+        } else {
+            chevron = [UIImageView new];
+        }
+        chevron.translatesAutoresizingMaskIntoConstraints = NO;
+        [banner addSubview:chevron];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [banner.leadingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.leadingAnchor constant:12],
+            [banner.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-12],
+            [banner.topAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.topAnchor constant:8],
+            [banner.heightAnchor constraintEqualToConstant:40],
+
+            [blurView.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor],
+            [blurView.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor],
+            [blurView.topAnchor constraintEqualToAnchor:banner.topAnchor],
+            [blurView.bottomAnchor constraintEqualToAnchor:banner.bottomAnchor],
+
+            [iconView.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor constant:12],
+            [iconView.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
+            [iconView.widthAnchor constraintEqualToConstant:17],
+            [iconView.heightAnchor constraintEqualToConstant:17],
+
+            [titleLabel.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:6],
+            [titleLabel.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
+
+            [bar.leadingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor constant:10],
+            [bar.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
+            [bar.heightAnchor constraintEqualToConstant:3],
+
+            [valueLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:bar.trailingAnchor constant:10],
+            [valueLabel.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-6],
+            [valueLabel.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
+
+            [chevron.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor constant:-12],
+            [chevron.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
+            [chevron.widthAnchor constraintEqualToConstant:8],
+            [chevron.heightAnchor constraintEqualToConstant:13],
+        ]];
+        // 进度条弹性宽度：右侧数字宽度不固定，让 bar 吸收差值
+        [bar setContentHuggingPriority:UILayoutPriorityDefaultLow
+                               forAxis:UILayoutConstraintAxisHorizontal];
+        [valueLabel setContentHuggingPriority:UILayoutPriorityRequired
+                                       forAxis:UILayoutConstraintAxisHorizontal];
+
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+            initWithTarget:self action:@selector(cloudBackupBannerTapped:)];
+        [banner addGestureRecognizer:tap];
+
+        objc_setAssociatedObject(controller, &AMCloudBannerViewKey, banner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(controller, &AMCloudBannerLabelKey, valueLabel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(controller, &AMCloudBannerBarKey, bar, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSLog(@"[AMProjExport] cloud banner v2 attached to %@",
+              NSStringFromClass(controller.class));
+    }
+    [controller.view bringSubviewToFront:
+        objc_getAssociatedObject(controller, &AMCloudBannerViewKey)];
+    UILabel *valueLabel = objc_getAssociatedObject(controller, &AMCloudBannerLabelKey);
+    if (!AMCloudReadToken().length) {
+        valueLabel.text = @"未登录";
+        return;
+    }
+    NSDate *last = objc_getAssociatedObject(self, &AMCloudBannerFetchedKey);
+    if (last && [last timeIntervalSinceNow] > -30) return;
+    objc_setAssociatedObject(self, &AMCloudBannerFetchedKey, [NSDate date],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak typeof(self) weakSelf = self;
+    __weak UIViewController *weakController = controller;
+    [self.client loadProjects:^(NSDictionary *data, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMCloudManager *manager = weakSelf;
+            UIViewController *strongController = weakController;
+            if (!manager || !strongController) return;
+            UILabel *lbl = objc_getAssociatedObject(strongController, &AMCloudBannerLabelKey);
+            UIProgressView *bar = objc_getAssociatedObject(strongController, &AMCloudBannerBarKey);
+            if (!lbl || !bar) return;
+            if (error) {
+                lbl.text = @"读取失败";
+                objc_setAssociatedObject(manager, &AMCloudBannerFetchedKey, nil,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                return;
+            }
+            NSDictionary *usage = [data[@"usage"] isKindOfClass:NSDictionary.class]
+                ? data[@"usage"] : @{};
+            long long used = [usage[@"usedBytes"] longLongValue];
+            long long quota = [usage[@"quotaBytes"] longLongValue];
+            lbl.text = [NSString stringWithFormat:@"%@ / %@",
+                        AMCloudByteText(used), AMCloudByteText(quota)];
+            float ratio = quota > 0 ? (float)((double)used / (double)quota) : 0;
+            [bar setProgress:ratio animated:YES];
+        });
+    }];
+}
+
+- (void)cloudBackupBannerTapped:(id)sender {
+    UIViewController *presenter = AMCloudTopController(nil) ?: self.lastProjectsController;
+    if (!presenter) return;
+    if (!AMCloudReadToken().length) {
+        [self showAccountFrom:presenter];
+        return;
+    }
+    [self presentCloudBackupManagerFrom:presenter];
+}
+
 - (void)showCloudBackupManager:(id)sender {
     UIViewController *presenter = AMCloudTopController(nil) ?: self.lastProjectsController;
     if (!presenter) return;
