@@ -1598,6 +1598,8 @@ extern BOOL AMProjStartSelfCloudUpload(void);
 - (void)showPluginDownloadNoticeIfPossible;
 - (void)hidePluginDownloadNotice;
 - (void)cancelPluginDownloadNotice;
+- (void)cloudSegmentSelectionDidChange;
+- (void)updateCloudBackupBannerVisibilityForController:(UIViewController *)controller;
 - (void)updateAccountEntryImage;
 - (void)clearAccountAvatar;
 - (void)loadCachedAccountAvatar;
@@ -1703,6 +1705,8 @@ static void AMCloudProjectsViewDidAppear(id self, SEL selector, BOOL animated) {
     }
 }
 
+static void AMCloudInstallSegmentObserverHooks(void);
+
 static void AMCloudInstallProjectsHooks(void) {
     int count = objc_getClassList(NULL, 0);
     if (count <= 0) return;
@@ -1728,6 +1732,68 @@ static void AMCloudInstallProjectsHooks(void) {
         }
     }
     free(classes);
+    AMCloudInstallSegmentObserverHooks();
+}
+
+// ── 子标签分段控件监听 ──────────────────────────────────────────
+// AM 的"项目/您的模板/元素/云端"分段是自有的 AMSegmentedControl（Swift），
+// setSelectedIndex: 是 @objc 方法。挂纯观察 hook：不改变 AM 行为，索引变化
+// 时通知管理器刷新横幅可见性（横幅只在云端页显示）。
+
+static void *AMCloudSegmentOriginalIMPKey = &AMCloudSegmentOriginalIMPKey;
+
+static IMP AMCloudOriginalSegmentSetSelectedIndex(Class cls) {
+    for (Class current = cls; current; current = class_getSuperclass(current)) {
+        NSValue *value = objc_getAssociatedObject((id)current, AMCloudSegmentOriginalIMPKey);
+        if (value) return value.pointerValue;
+    }
+    return NULL;
+}
+
+static void AMCloudSegmentSetSelectedIndexHook(id self, SEL _cmd, NSInteger index) {
+    IMP original = AMCloudOriginalSegmentSetSelectedIndex(object_getClass(self));
+    if (original) {
+        ((void (*)(id, SEL, NSInteger))original)(self, _cmd, index);
+    }
+    [[AMCloudManager shared] cloudSegmentSelectionDidChange];
+}
+
+static void AMCloudInstallSegmentObserverHooks(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        SEL selector = NSSelectorFromString(@"setSelectedIndex:");
+        int count = objc_getClassList(NULL, 0);
+        if (count <= 0) return;
+        Class __unsafe_unretained *classes =
+            (__unsafe_unretained Class *)calloc((size_t)count, sizeof(Class));
+        if (!classes) return;
+        count = objc_getClassList(classes, count);
+        for (int i = 0; i < count; i++) {
+            Class cls = classes[i];
+            NSString *name = NSStringFromClass(cls) ?: @"";
+            if (![name containsString:@"AMSegmentedControl"] &&
+                ![name containsString:@"AMSegmentControl"]) continue;
+            if (![cls isSubclassOfClass:NSObject.class]) continue;
+            Method method = class_getInstanceMethod(cls, selector);
+            if (!method) continue;
+            const char *types = method_getTypeEncoding(method);
+            // types 形如 "v@:q"，第 4 位是首参类型；仅整数类型才挂，防 ABI 变化。
+            if (!types || strlen(types) < 4) continue;
+            char argType = types[3];
+            if (argType != 'q' && argType != 'i' && argType != 'l' &&
+                argType != 'I' && argType != 'Q') continue;
+            if (objc_getAssociatedObject((id)cls, AMCloudSegmentOriginalIMPKey)) continue;
+            IMP original = method_getImplementation(method);
+            if (original == (IMP)AMCloudSegmentSetSelectedIndexHook) continue;
+            objc_setAssociatedObject((id)cls, AMCloudSegmentOriginalIMPKey,
+                [NSValue valueWithPointer:original], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (!class_addMethod(cls, selector, (IMP)AMCloudSegmentSetSelectedIndexHook, types)) {
+                class_replaceMethod(cls, selector, (IMP)AMCloudSegmentSetSelectedIndexHook, types);
+            }
+            NSLog(@"[AMProjExport] observing %@.setSelectedIndex:", name);
+        }
+        free(classes);
+    });
 }
 
 static void AMCloudAttachProjectsInControllerTree(UIViewController *controller,
@@ -3147,111 +3213,176 @@ static char AMCloudBannerLabelKey;
 static char AMCloudBannerBarKey;
 static char AMCloudBannerFetchedKey;
 
-// 云空间水位条：内容区顶部的毛玻璃细条。设计原则——
-// 不做黑盒子（旧版被吐槽突兀），用系统毛玻璃融入界面；信息排布
-// 图标+名称+进度条+数字 一行搞定；进度条随配额加载平滑填充。
+// "云端"子标签的本地化标题：与登录墙文案同在 AlightMotion_Homepage.bundle
+// 的 Localizable_cloud 表，读不到时用中文兜底。
+static NSString *AMCloudHomepageCloudTabTitle(void) {
+    static NSString *cached;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *title = nil;
+        NSString *homepagePath = [[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"AlightMotion_Homepage.bundle"];
+        NSBundle *homepage = homepagePath.length
+            ? [NSBundle bundleWithPath:homepagePath] : nil;
+        if (homepage) {
+            title = [homepage localizedStringForKey:@"cloud_subtab_title"
+                                              value:nil
+                                              table:@"Localizable_cloud"];
+            if ([title isEqualToString:@"cloud_subtab_title"]) title = nil;
+        }
+        if (!title.length) title = @"云端";
+        cached = title;
+    });
+    return cached;
+}
+
+// 在视图树里找 AM 的分段控件（AMSegmentedControl / AMSegmentControl）。
+static UIView *AMCloudFindSegmentControl(UIView *view, NSInteger depth) {
+    if (!view || depth > 10) return nil;
+    NSString *name = NSStringFromClass(view.class) ?: @"";
+    if ([name containsString:@"AMSegmentedControl"] ||
+        [name containsString:@"AMSegmentControl"]) return view;
+    for (UIView *child in view.subviews) {
+        UIView *hit = AMCloudFindSegmentControl(child, depth + 1);
+        if (hit) return hit;
+    }
+    return nil;
+}
+
+// 读取分段控件当前选中索引；读不到返回 -1。
+static NSInteger AMCloudSegmentSelectedIndex(UIView *control) {
+    if ([control respondsToSelector:@selector(selectedSegmentIndex)]) {
+        return [(UISegmentedControl *)control selectedSegmentIndex];
+    }
+    if ([control respondsToSelector:@selector(selectedIndex)]) {
+        @try {
+            NSMethodSignature *signature =
+                [control methodSignatureForSelector:@selector(selectedIndex)];
+            if (!signature || signature.numberOfArguments < 3) return -1;
+            const char *returnType = [signature getArgumentTypeAtIndex:2];
+            if (returnType[0] != 'q' && returnType[0] != 'i' &&
+                returnType[0] != 'l' && returnType[0] != 'I') return -1;
+            NSInvocation *invocation =
+                [NSInvocation invocationWithMethodSignature:signature];
+            [invocation setSelector:@selector(selectedIndex)];
+            [invocation invokeWithTarget:control];
+            NSInteger result = 0;
+            [invocation getReturnValue:&result];
+            return result;
+        } @catch (NSException *exception) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+// 找出"云端"档位索引：优先用控件自身标题与 cloud_subtab_title 对比；
+// 自定义控件读不到标题时按 AM 设计取最后一档；完全拿不到返回 -1。
+static NSInteger AMCloudCloudSegmentIndex(UIView *control) {
+    NSString *cloudTitle = AMCloudHomepageCloudTabTitle();
+    if ([control respondsToSelector:@selector(numberOfSegments)]) {
+        UISegmentedControl *segment = (UISegmentedControl *)control;
+        NSInteger count = segment.numberOfSegments;
+        if (count <= 0) return -1;
+        if ([control respondsToSelector:@selector(titleForSegmentAtIndex:)]) {
+            for (NSInteger i = 0; i < count; i++) {
+                NSString *title = [segment titleForSegmentAtIndex:i] ?: @"";
+                if ([title isEqualToString:cloudTitle]) return i;
+            }
+        }
+        return count - 1;
+    }
+    @try {
+        NSArray *titles = [control valueForKey:@"titles"];
+        if ([titles isKindOfClass:NSArray.class] && titles.count > 0) {
+            for (NSUInteger i = 0; i < titles.count; i++) {
+                if ([titles[i] isKindOfClass:NSString.class] &&
+                    [titles[i] isEqualToString:cloudTitle]) {
+                    return (NSInteger)i;
+                }
+            }
+            return (NSInteger)titles.count - 1;
+        }
+    } @catch (NSException *exception) {
+        // 自定义控件没有 titles 属性 → 走 -1 降级
+    }
+    return -1;
+}
+
+// 横幅所在工程页的弱引用表：分段索引变化时逐个刷新可见性。
+static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
+    static NSHashTable<UIViewController *> *table;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        table = [NSHashTable weakObjectsHashTable];
+    });
+    return table;
+}
+
+// 云储存水位卡（p4 样式）：白底圆角卡，标题"云储存"+右侧已用/总量灰字，
+// 下方细进度条随配额平滑填充。只在"云端"子标签页显示：分段控件索引变化
+// 由 setSelectedIndex: 观察 hook 通知，横幅挂载与每次切换都会重新评估。
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller {
     if (!AMCloudIsProjectsControllerClass(controller.class) || !controller.viewIfLoaded) return;
     UIView *banner = objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
     if (!banner) {
         banner = [UIView new];
         banner.translatesAutoresizingMaskIntoConstraints = NO;
-        banner.layer.cornerRadius = 13;
-        banner.layer.masksToBounds = YES;
+        banner.backgroundColor = [UIColor whiteColor];
+        banner.layer.cornerRadius = 14;
+        banner.layer.borderWidth = 1;
+        banner.layer.borderColor = [UIColor colorWithRed:0.912 green:0.912 blue:0.925 alpha:1.0].CGColor;
         [controller.view addSubview:banner];
-
-        UIVisualEffectView *blurView;
-        if (@available(iOS 13.0, *)) {
-            blurView = [[UIVisualEffectView alloc]
-                initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
-        } else {
-            blurView = [[UIVisualEffectView alloc]
-                initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
-        }
-        blurView.translatesAutoresizingMaskIntoConstraints = NO;
-        [banner addSubview:blurView];
-
-        UIImageView *iconView;
-        if (@available(iOS 13.0, *)) {
-            iconView = [[UIImageView alloc] initWithImage:
-                [UIImage systemImageNamed:@"cloud.fill"]];
-            iconView.tintColor = [UIColor colorWithRed:0.22 green:0.77 blue:0.73 alpha:1.0];
-        } else {
-            iconView = [UIImageView new];
-        }
-        iconView.translatesAutoresizingMaskIntoConstraints = NO;
-        [banner addSubview:iconView];
 
         UILabel *titleLabel = [UILabel new];
         titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-        titleLabel.text = @"云空间";
+        titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+        titleLabel.textColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.11 alpha:1.0];
+        titleLabel.text = @"云储存";
         [banner addSubview:titleLabel];
 
         UIProgressView *bar = [[UIProgressView alloc]
             initWithProgressViewStyle:UIProgressViewStyleDefault];
         bar.translatesAutoresizingMaskIntoConstraints = NO;
         bar.progressTintColor = [UIColor colorWithRed:0.22 green:0.77 blue:0.73 alpha:1.0];
-        bar.trackTintColor = [UIColor colorWithWhite:0.55 alpha:0.28];
-        bar.layer.cornerRadius = 1.5;
+        bar.trackTintColor = [UIColor colorWithRed:0.925 green:0.925 blue:0.933 alpha:1.0];
+        bar.layer.cornerRadius = 3;
         bar.layer.masksToBounds = YES;
         [banner addSubview:bar];
 
         UILabel *valueLabel = [UILabel new];
         valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        valueLabel.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightMedium];
+        valueLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightMedium];
+        valueLabel.textColor = [UIColor colorWithRed:0.60 green:0.62 blue:0.64 alpha:1.0];
         valueLabel.text = @"-- / --";
         valueLabel.textAlignment = NSTextAlignmentRight;
         [banner addSubview:valueLabel];
 
-        UIImageView *chevron;
-        if (@available(iOS 13.0, *)) {
-            chevron = [[UIImageView alloc] initWithImage:
-                [UIImage systemImageNamed:@"chevron.right"]];
-            chevron.tintColor = [UIColor colorWithWhite:0.55 alpha:0.9];
-        } else {
-            chevron = [UIImageView new];
-        }
-        chevron.translatesAutoresizingMaskIntoConstraints = NO;
-        [banner addSubview:chevron];
-
         [NSLayoutConstraint activateConstraints:@[
-            [banner.leadingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.leadingAnchor constant:12],
-            [banner.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-12],
+            [banner.leadingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.leadingAnchor constant:16],
+            [banner.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-16],
             [banner.topAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.topAnchor constant:174],
-            [banner.heightAnchor constraintEqualToConstant:40],
+            [banner.heightAnchor constraintEqualToConstant:78],
 
-            [blurView.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor],
-            [blurView.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor],
-            [blurView.topAnchor constraintEqualToAnchor:banner.topAnchor],
-            [blurView.bottomAnchor constraintEqualToAnchor:banner.bottomAnchor],
+            [titleLabel.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor constant:16],
+            [titleLabel.topAnchor constraintEqualToAnchor:banner.topAnchor constant:14],
 
-            [iconView.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor constant:12],
-            [iconView.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
-            [iconView.widthAnchor constraintEqualToConstant:17],
-            [iconView.heightAnchor constraintEqualToConstant:17],
+            [valueLabel.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor constant:-16],
+            [valueLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+            [valueLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:12],
 
-            [titleLabel.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:6],
-            [titleLabel.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
-
-            [bar.leadingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor constant:10],
-            [bar.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
-            [bar.heightAnchor constraintEqualToConstant:3],
-
-            [valueLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:bar.trailingAnchor constant:10],
-            [valueLabel.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-6],
-            [valueLabel.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
-
-            [chevron.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor constant:-12],
-            [chevron.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor],
-            [chevron.widthAnchor constraintEqualToConstant:8],
-            [chevron.heightAnchor constraintEqualToConstant:13],
+            [bar.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor constant:16],
+            [bar.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor constant:-16],
+            [bar.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:12],
+            [bar.heightAnchor constraintEqualToConstant:6],
         ]];
         // 进度条弹性宽度：右侧数字宽度不固定，让 bar 吸收差值
         [bar setContentHuggingPriority:UILayoutPriorityDefaultLow
                                forAxis:UILayoutConstraintAxisHorizontal];
         [valueLabel setContentHuggingPriority:UILayoutPriorityRequired
                                        forAxis:UILayoutConstraintAxisHorizontal];
+        [valueLabel setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                                     forAxis:UILayoutConstraintAxisHorizontal];
 
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
             initWithTarget:self action:@selector(cloudBackupBannerTapped:)];
@@ -3260,8 +3391,11 @@ static char AMCloudBannerFetchedKey;
         objc_setAssociatedObject(controller, &AMCloudBannerViewKey, banner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(controller, &AMCloudBannerLabelKey, valueLabel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(controller, &AMCloudBannerBarKey, bar, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        NSLog(@"[AMProjExport] cloud banner v2 attached to %@",
+        NSLog(@"[AMProjExport] cloud banner v3 (p4 card) attached to %@",
               NSStringFromClass(controller.class));
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[AMCloudManager shared] updateCloudBackupBannerVisibilityForController:controller];
+        });
     }
     [controller.view bringSubviewToFront:
         objc_getAssociatedObject(controller, &AMCloudBannerViewKey)];
@@ -3310,6 +3444,36 @@ static char AMCloudBannerFetchedKey;
         return;
     }
     [self presentCloudBackupManagerFrom:presenter];
+}
+
+// 分段索引变化（任一分段控件的 setSelectedIndex: 被调用）→ 刷新所有工程页横幅。
+- (void)cloudSegmentSelectionDidChange {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
+            if (!controller) continue;
+            [self updateCloudBackupBannerVisibilityForController:controller];
+        }
+    });
+}
+
+// 评估横幅可见性：只有选中"云端"档才显示。分段信息读不到时降级为常显。
+- (void)updateCloudBackupBannerVisibilityForController:(UIViewController *)controller {
+    UIView *banner = objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
+    if (!banner) return;
+    [AMCloudBannerControllersTable() addObject:controller];
+    UIView *control = AMCloudFindSegmentControl(controller.view, 0);
+    NSInteger selected = control ? AMCloudSegmentSelectedIndex(control) : -1;
+    NSInteger cloudIndex = control ? AMCloudCloudSegmentIndex(control) : -1;
+    BOOL visible = (selected < 0 || cloudIndex < 0) || selected == cloudIndex;
+    BOOL wasHidden = banner.hidden;
+    banner.hidden = !visible;
+    if (visible) {
+        [controller.view bringSubviewToFront:banner];
+        if (wasHidden) {
+            // 回到云端页时顺带刷新配额（内部有 30 秒缓存节流）。
+            [self attachCloudBackupBannerToController:controller];
+        }
+    }
 }
 
 - (void)showCloudBackupManager:(id)sender {

@@ -17872,6 +17872,90 @@ static BOOL amproj_hasPluginManagedImportAlertContext(void) {
         xmlTransaction.xmlTemplateDispatchStarted;
 }
 
+// 云端登录墙候选文本：从 AlightMotion_Homepage.bundle 的 Localizable_cloud
+// 表把所有语言的取值都读出来（r77 用 NSLocalizedString 只查主表，key 根本不
+// 在那里，导致匹配永远失败、登录墙照弹）。表读不到时退回硬编码的已知文案。
+static NSString *AMProjNormalizedGateText(NSString *text);
+
+static NSArray<NSString *> *AMProjCloudGateExpectedTexts(void) {
+    static NSArray<NSString *> *cached;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableOrderedSet<NSString *> *candidates = [NSMutableOrderedSet orderedSet];
+        NSArray<NSString *> *keys = @[@"sign_in_cloud_alert_title",
+                                      @"sign_in_cloud_alert_body"];
+        NSString *homepagePath = [[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"AlightMotion_Homepage.bundle"];
+        NSBundle *homepage = homepagePath.length
+            ? [NSBundle bundleWithPath:homepagePath] : nil;
+        if (homepage) {
+            for (NSString *key in keys) {
+                NSString *value = [homepage localizedStringForKey:key
+                                                            value:nil
+                                                            table:@"Localizable_cloud"];
+                if (value.length && ![value isEqualToString:key]) {
+                    [candidates addObject:value];
+                }
+            }
+            NSArray<NSString *> *entries = [[NSFileManager defaultManager]
+                contentsOfDirectoryAtPath:homepage.bundlePath error:nil] ?: @[];
+            for (NSString *entry in entries) {
+                if (![entry.pathExtension isEqualToString:@"lproj"]) continue;
+                NSString *stringsPath = [[homepage.bundlePath
+                    stringByAppendingPathComponent:entry]
+                    stringByAppendingPathComponent:@"Localizable_cloud.strings"];
+                NSDictionary *values = [NSDictionary
+                    dictionaryWithContentsOfFile:stringsPath] ?: @{};
+                for (NSString *key in keys) {
+                    NSString *value = values[key];
+                    if ([value isKindOfClass:NSString.class] && value.length) {
+                        [candidates addObject:value];
+                    }
+                }
+            }
+        }
+        for (NSString *key in keys) {
+            NSString *value = NSLocalizedString(key, @"");
+            if (value.length && ![value isEqualToString:key]) {
+                [candidates addObject:value];
+            }
+        }
+        // 硬编码兜底：表结构变化时至少认得这面墙的已知文案。
+        [candidates addObject:@"需要登录"];
+        [candidates addObject:@"需要登入"];
+        [candidates addObject:@"您必须登录到您的Alight Motion账户，才能将项目上传到云端。"];
+        [candidates addObject:@"您必須登入您的Alight Motion帳戶才能上傳專案到雲端。"];
+        NSMutableArray<NSString *> *normalized = [NSMutableArray array];
+        for (NSString *candidate in candidates) {
+            NSString *folded = AMProjNormalizedGateText(candidate);
+            if (folded.length) [normalized addObject:folded];
+        }
+        cached = normalized;
+    });
+    return cached;
+}
+
+// 判定一个 alert 是否是云端登录墙：正文精确匹配（各语言正文都是独一无二
+// 的长句）；标题命中时再要求正文里出现品牌名+账户词，避免误伤其他
+// "需要登录"弹窗。归一化会去掉空白，所以 "Alight Motion" 在归一化域里是
+// "AlightMotion"，各语言正文都含该品牌串。
+static BOOL AMProjIsCloudGateAlert(UIAlertController *alert) {
+    if (![alert isKindOfClass:UIAlertController.class]) return NO;
+    NSString *title = AMProjNormalizedGateText(alert.title ?: @"");
+    NSString *message = AMProjNormalizedGateText(alert.message ?: @"");
+    if (!title.length && !message.length) return NO;
+    BOOL titleMatches = NO;
+    for (NSString *expected in AMProjCloudGateExpectedTexts()) {
+        if (message.length && [message isEqualToString:expected]) return YES;
+        if (title.length && [title isEqualToString:expected]) titleMatches = YES;
+    }
+    if (!titleMatches || !message.length) return NO;
+    NSString *foldedLower = message.lowercaseString;
+    return [message containsString:@"AlightMotion"] &&
+        ([message containsString:@"账户"] || [message containsString:@"帳戶"] ||
+         [foldedLower containsString:@"account"]);
+}
+
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
     if (![NSThread isMainThread] || !controller || !orig_presentVC) {
@@ -17901,6 +17985,22 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             AMProjStartSelfCloudUpload();
             return;
         }
+    }
+#endif
+#if AMPROJ_CLOUD_SYNC
+    // 云端登录墙呈现拦截：未登录官方云时的 sign_in_cloud_alert 一律不上屏，
+    // 改走自有云备份流程。r77 只做了 addAction 侧接管且匹配串取错表，这里
+    // 在呈现层直接拦下（官方墙完全不出现）。
+    if ([controller isKindOfClass:UIAlertController.class] &&
+        !amproj_directRequest &&
+        AMProjIsCloudGateAlert((UIAlertController *)controller)) {
+        amproj_logCriticalEvent(@"direct.cloud_login_wall_takeover", @{
+            @"layer": @"presentation",
+            @"presenter": NSStringFromClass([self class]) ?: @""
+        });
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        AMProjStartSelfCloudUpload();
+        return;
     }
 #endif
     if (amproj_gateDefenseActive &&
@@ -19722,18 +19822,7 @@ static void AMProjScheduleCloudGateTakeover(UIAlertController *alert) {
         UIViewController *top = AMProjTopPresentedController();
         if (![top isKindOfClass:UIAlertController.class]) return;
         UIAlertController *onScreen = (UIAlertController *)top;
-        NSString *normalizedMessage = AMProjNormalizedGateText(onScreen.message ?: @"");
-        NSString *normalizedTitle = AMProjNormalizedGateText(onScreen.title ?: @"");
-        NSString *normalizedExpectedMessage = AMProjNormalizedGateText(
-            NSLocalizedString(@"sign_in_cloud_alert_body", @""));
-        NSString *normalizedExpectedTitle = AMProjNormalizedGateText(
-            NSLocalizedString(@"sign_in_cloud_alert_title", @""));
-        BOOL matches =
-            (normalizedExpectedMessage.length &&
-             [normalizedMessage isEqualToString:normalizedExpectedMessage]) ||
-            (normalizedExpectedTitle.length &&
-             [normalizedTitle isEqualToString:normalizedExpectedTitle]);
-        if (!matches) return;
+        if (!AMProjIsCloudGateAlert(onScreen)) return;
         amproj_logCriticalEvent(@"direct.cloud_login_wall_takeover", @{});
         UIViewController *presenter = top.presentingViewController ?: top;
         void (^startCloud)(void) = ^{
@@ -19818,16 +19907,7 @@ static void hooked_alertAddAction(id self, SEL _cmd, UIAlertAction *action) {
         }
 #if AMPROJ_CLOUD_SYNC
         // 云端登录墙（sign_in_cloud_alert_title / _body）：剥登录按钮 + 接管
-        NSString *cloudExpectedMessage = AMProjNormalizedGateText(
-            NSLocalizedString(@"sign_in_cloud_alert_body", @""));
-        NSString *cloudExpectedTitle = AMProjNormalizedGateText(
-            NSLocalizedString(@"sign_in_cloud_alert_title", @""));
-        NSString *normalizedTitle = AMProjNormalizedGateText(
-            [(UIAlertController *)self title] ?: @"");
-        if ((cloudExpectedMessage.length &&
-             [normalizedMessage isEqualToString:cloudExpectedMessage]) ||
-            (cloudExpectedTitle.length &&
-             [normalizedTitle isEqualToString:cloudExpectedTitle])) {
+        if (AMProjIsCloudGateAlert((UIAlertController *)self)) {
             AMProjScheduleCloudGateTakeover((UIAlertController *)self);
             NSString *title = [action title] ?: @"";
             NSString *folded = title.lowercaseString;

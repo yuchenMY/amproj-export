@@ -1412,3 +1412,51 @@ class AuthzHeartbeatSourceTests(unittest.TestCase):
         self.assertIn("NSURLErrorDomain", quiet)
         self.assertIn("AMCloudLapsePluginAuthorization();", quiet)
         self.assertIn("AMCloudAuthzHeartbeatRefresh();", quiet)
+
+
+class CloudGateAndBannerV3Tests(unittest.TestCase):
+    """r78：登录墙呈现层拦截（文案改从 AM bundle 表取）+ 云储存白卡只在云端页显示。"""
+
+    def test_cloud_gate_texts_come_from_homepage_bundle_table(self):
+        # r77 根因：NSLocalizedString 只查主表，而 key 在 Homepage bundle 的
+        # Localizable_cloud 表里 → 匹配永远失败、登录墙照弹。r78 直接读该 bundle。
+        self.assertIn("AlightMotion_Homepage.bundle", EXPORT)
+        self.assertIn('table:@"Localizable_cloud"', EXPORT)
+        self.assertIn("sign_in_cloud_alert_title", EXPORT)
+        self.assertIn("sign_in_cloud_alert_body", EXPORT)
+        # 硬编码兜底不能少（表结构变化时仍认得这面墙）
+        self.assertIn('@"您必须登录到您的Alight Motion账户，才能将项目上传到云端。"', EXPORT)
+
+    def test_cloud_login_wall_never_presents(self):
+        # 呈现层拦截先行：alert 压根不上屏，直接改走自有云备份。
+        self.assertIn("AMProjIsCloudGateAlert((UIAlertController *)controller)", EXPORT)
+        self.assertIn("AMProjStartSelfCloudUpload();", EXPORT)
+        # addAction 剥按钮与事后接管共用同一判定
+        self.assertIn("AMProjIsCloudGateAlert((UIAlertController *)self)", EXPORT)
+        self.assertIn("AMProjIsCloudGateAlert(onScreen)", EXPORT)
+
+    def test_banner_renders_p4_storage_card(self):
+        # p4 白卡：白底圆角 + "云储存"标题 + 右灰字 + 细进度条；无毛玻璃无图标无箭头。
+        self.assertIn('titleLabel.text = @"云储存";', CLOUD)
+        self.assertIn("cloud banner v3 (p4 card) attached", CLOUD)
+        self.assertNotIn("UIBlurEffectStyleSystemChromeMaterial", CLOUD)
+        self.assertNotIn('systemImageNamed:@"chevron.right"', CLOUD)
+        self.assertIn("banner.heightAnchor constraintEqualToConstant:78", CLOUD)
+
+    def test_banner_shows_only_on_cloud_subtab(self):
+        # 分段控件监听：AMSegmentedControl setSelectedIndex: 纯观察 hook。
+        self.assertIn("AMCloudInstallSegmentObserverHooks(void)", CLOUD)
+        self.assertIn('NSSelectorFromString(@"setSelectedIndex:")', CLOUD)
+        self.assertIn('containsString:@"AMSegmentedControl"', CLOUD)
+        self.assertIn("cloudSegmentSelectionDidChange", CLOUD)
+        # 云端档位识别用 AM 自家 cloud_subtab_title 文案；读不到分段信息则降级常显
+        self.assertIn('@"cloud_subtab_title"', CLOUD)
+        self.assertIn(
+            "BOOL visible = (selected < 0 || cloudIndex < 0) || selected == cloudIndex;",
+            CLOUD,
+        )
+
+    def test_segment_observer_keeps_original_implementation(self):
+        # 只观察不改行为：原 IMP 必须被保留并在 hook 里原样调用。
+        self.assertIn("AMCloudOriginalSegmentSetSelectedIndex(object_getClass(self))", CLOUD)
+        self.assertIn("((void (*)(id, SEL, NSInteger))original)(self, _cmd, index);", CLOUD)
