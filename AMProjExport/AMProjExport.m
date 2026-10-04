@@ -2092,6 +2092,7 @@ static void amproj_install865ShareTapHook(void) {
 @property(nonatomic, strong) NSURL *outputURL;
 @property(nonatomic, copy) NSString *projectTitle;
 @property(nonatomic) BOOL uploadToCloud;
+@property(nonatomic) BOOL includeMedia;
 @end
 
 @implementation AMProjDirectRequest
@@ -2518,6 +2519,10 @@ static void amproj_writeDirectArchive(AMProjDirectRequest *request, NSData *xmlD
             }
             NSData *rewrittenXML = prepared[@"xml"];
             NSDictionary<NSString *, NSURL *> *resources = prepared[@"resources"];
+            if (!request.includeMedia) {
+                // 仅工程备份：丢弃素材引用，包里只有场景 XML 和空 manifest。
+                resources = @{};
+            }
             if (!amproj_validateXMLAgainstScene(rewrittenXML, expected, NULL, &error)) {
                 amproj_finishDirectFailure(request, error ?: amproj_directError(31, @"Rewritten XML validation failed"));
                 return;
@@ -2657,7 +2662,8 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
                                                UIViewController *originalController,
                                                BOOL animated, void (^completion)(void),
                                                NSString *projectTitle,
-                                               BOOL uploadToCloud) {
+                                               BOOL uploadToCloud,
+                                               BOOL includeMedia) {
     if (amproj_directRequest) {
         if (completion) completion();
         return;
@@ -2669,6 +2675,7 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
     request.originalCompletion = completion;
     request.projectTitle = projectTitle;
     request.uploadToCloud = uploadToCloud;
+    request.includeMedia = includeMedia;
     request.mode = amproj_exportMode();
     // Do not present a second UIKit modal from ShareNC.onTapExport.  On 6.2.55
     // the action is still inside SwiftUI/UIKit's transition, and presenting a
@@ -2746,16 +2753,39 @@ static void amproj_startDirectExportWithDestination(
                         });
                         return;
                     }
+                    // 云端备份让用户自己挑：完整（含素材）还是仅工程（省空间）。
+                    // 此时授权回调已异步回到主线程，原始转场早已结束，弹窗安全。
+                    UIAlertController *mediaChoice = [UIAlertController
+                        alertControllerWithTitle:@"云端备份方式"
+                        message:@"完整备份包含全部素材，还原最完整；仅工程只保存工程结构，更省空间，导入后需要重新放置素材。"
+                        preferredStyle:UIAlertControllerStyleAlert];
+                    void (^startCloudExport)(BOOL) = ^(BOOL includeMedia) {
+                        amproj_startAuthorizedDirectExport(
+                            presenter, originalController, animated, completion,
+                            projectTitle, uploadToCloud, includeMedia);
+                    };
+                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"完整备份（含素材）"
+                        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                            startCloudExport(YES);
+                        }]];
+                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"仅工程（不含素材，更省空间）"
+                        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                            startCloudExport(NO);
+                        }]];
+                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"取消"
+                        style:UIAlertActionStyleCancel handler:nil]];
+                    [presenter presentViewController:mediaChoice animated:YES completion:nil];
+                    return;
                 }
                 amproj_startAuthorizedDirectExport(
                     presenter, originalController, animated, completion, projectTitle,
-                    uploadToCloud);
+                    uploadToCloud, YES);
             }
         });
 #else
     amproj_startAuthorizedDirectExport(
         presenter, originalController, animated, completion, projectTitle,
-        uploadToCloud);
+        uploadToCloud, YES);
 #endif
 }
 
