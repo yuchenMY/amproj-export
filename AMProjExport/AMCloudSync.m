@@ -1635,7 +1635,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @implementation AMCloudUploadActivity
 
 - (NSString *)activityType { return @"com.ayakameow.amproj.cloud-upload"; }
-- (NSString *)activityTitle { return @"上传到云项目"; }
+- (NSString *)activityTitle { return @"备份到云端"; }
 - (UIImage *)activityImage {
     if (@available(iOS 13.0, *)) return [UIImage systemImageNamed:@"cloud.and.arrow.up"];
     return nil;
@@ -3340,7 +3340,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 - (void)chooseUploadTarget:(NSArray *)projects fileURL:(NSURL *)fileURL
                       title:(NSString *)title presenter:(UIViewController *)presenter {
     UIViewController *top = AMCloudTopController(presenter);
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"上传到云项目"
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"备份到云端"
         message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf = self;
     [sheet addAction:[UIAlertAction actionWithTitle:@"新建云工程" style:UIAlertActionStyleDefault
@@ -3726,7 +3726,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 - (void)confirmDeleteProject:(NSDictionary *)project
                    presenter:(UIViewController *)presenter {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"删除云工程"
-        message:@"云端项目及其全部版本将被移入删除状态。"
+        message:@"云端工程及其全部版本将被移入删除状态，空间立即释放。"
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     __weak typeof(self) weakSelf = self;
@@ -3960,7 +3960,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     (void)tableView;
     if (section == 0) return @"猫鹤账户";
     if (section == 1) return @"云空间";
-    return @"云工程";
+    return @"云端备份";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView
@@ -3980,7 +3980,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
         } else if (!self.authenticated) {
             cell.textLabel.text = @"登录或注册";
-            cell.detailTextLabel.text = @"登录后管理云空间与云工程";
+            cell.detailTextLabel.text = @"登录后管理账户与云端备份";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
             NSString *nickname = [self.account[@"nickname"] isKindOfClass:NSString.class]
@@ -4025,16 +4025,19 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             long long quota = [self.usage[@"quotaBytes"] longLongValue];
             cell.textLabel.text = [NSString stringWithFormat:@"%@ / %@",
                 AMCloudByteText(used), AMCloudByteText(quota)];
-            cell.detailTextLabel.text = quota > 0 ? @"" : @"当前会员未开通云空间";
+            cell.detailTextLabel.text = quota > 0
+                ? [NSString stringWithFormat:@"云端备份空间 · 可用 %@",
+                    AMCloudByteText(quota > used ? quota - used : 0)]
+                : @"当前会员未开通云空间";
         }
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if (!self.authenticated) {
-        cell.textLabel.text = @"登录后查看云工程";
+        cell.textLabel.text = @"登录后查看云端备份";
         cell.detailTextLabel.text = @"";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if (!self.projects.count) {
-        cell.textLabel.text = @"暂无云工程";
-        cell.detailTextLabel.text = @"";
+        cell.textLabel.text = @"暂无云端备份";
+        cell.detailTextLabel.text = @"导出工程包时选择「备份到云端」即可上传";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else {
         NSDictionary *project = self.projects[indexPath.row];

@@ -17069,10 +17069,10 @@ static void amproj_customizeCloudUploadLabelsInView(UIView *view) {
             stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if ([text isEqualToString:@"上传到云端"] ||
             [text isEqualToString:@"Upload to Cloud"]) {
-            label.text = @"上传到云项目";
+            label.text = @"备份到云端";
         } else if ([text isEqualToString:@"确保您的项目安全！"] ||
                    [text isEqualToString:@"Keep your projects safe!"]) {
-            label.text = @"选择性保存为云工程";
+            label.text = @"备份到猫鹤云，随时找回";
         }
     }
     for (UIView *subview in view.subviews) {
