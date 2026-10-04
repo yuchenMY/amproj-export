@@ -20517,7 +20517,7 @@ static void amproj_probeMediaLibraryAccess(void) {
                             fabs(transformed.height) > 1
                                 ? fabs(transformed.width / transformed.height)
                                 : 16.0 / 9.0;
-                        CGFloat width = UIScreen.mainScreen.bounds.width;
+                        CGFloat width = UIScreen.mainScreen.bounds.size.width;
                         CGFloat height = width / aspect;
                         self.previewHeightConstraint.constant =
                             MIN(MAX(height, 160), 460);
