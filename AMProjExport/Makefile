@@ -10,7 +10,7 @@ CFLAGS = -arch arm64 -dynamiclib -isysroot $(SDK) \
 LOADER_CFLAGS = -arch arm64 -dynamiclib -isysroot $(SDK) \
                 -miphoneos-version-min=14.0 -O2
 LDLIBS = -framework Foundation -framework UIKit -framework QuartzCore \
-         -framework CoreGraphics -framework Photos \
+         -framework CoreGraphics -framework Photos -framework AVFoundation \
          -framework UniformTypeIdentifiers -lz
 
 .PHONY: all clean legacy-loader
