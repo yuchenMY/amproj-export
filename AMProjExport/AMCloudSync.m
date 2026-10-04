@@ -1540,6 +1540,8 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
+- (void)attachCloudBackupButtonToController:(UIViewController *)controller;
+- (void)presentCloudBackupManagerFrom:(UIViewController *)presenter;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
 - (void)refreshAccountAvatar;
@@ -3051,6 +3053,15 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     NSMutableArray<UIBarButtonItem *> *updated = [current mutableCopy];
     if (updated.count) updated[0] = accountItem;
     else [updated addObject:accountItem];
+    UIImage *cloudImage = nil;
+    if (@available(iOS 13.0, *)) cloudImage = [UIImage systemImageNamed:@"cloud"];
+    UIBarButtonItem *cloudItem = cloudImage
+        ? [[UIBarButtonItem alloc] initWithImage:cloudImage style:UIBarButtonItemStylePlain
+                                          target:self action:@selector(showCloudBackupManager:)]
+        : [[UIBarButtonItem alloc] initWithTitle:@"备份" style:UIBarButtonItemStylePlain
+                                           target:self action:@selector(showCloudBackupManager:)];
+    cloudItem.accessibilityLabel = @"云端备份";
+    [updated addObject:cloudItem];
     controller.navigationItem.rightBarButtonItems = updated;
 	if (AMCloudReadToken().length && !self.accountAvatarImage && !self.accountAvatarRequestID.length) {
 		[self refreshAccountAvatar];
@@ -3072,6 +3083,33 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         self.lastProjectsController = presenter;
     }
     [self showAccountFrom:presenter];
+}
+
+// showCloudBackupManager: 打开完全自有的云端备份管理器（自有界面 + 自有服务器数据，
+// 不依赖 AM 官方的任何在线服务；AM 官方服务下线也不影响云工程功能）。
+- (void)showCloudBackupManager:(id)sender {
+    UIViewController *presenter = AMCloudTopController(nil) ?: self.lastProjectsController;
+    if (!presenter) return;
+    if (AMCloudIsProjectsControllerClass(presenter.class)) {
+        self.lastProjectsController = presenter;
+    }
+    if (!AMCloudReadToken().length) {
+        [self showAccountFrom:presenter];
+        return;
+    }
+    [self presentCloudBackupManagerFrom:presenter];
+}
+
+- (void)presentCloudBackupManagerFrom:(UIViewController *)presenter {
+    UIViewController *top = AMCloudTopController(presenter) ?: presenter;
+    if (!top) return;
+    AMCloudAccountViewController *managerController = [[AMCloudAccountViewController alloc]
+        initWithStyle:UITableViewStyleGrouped];
+    managerController.manager = self;
+    UINavigationController *navigation = [[UINavigationController alloc]
+        initWithRootViewController:managerController];
+    navigation.modalPresentationStyle = UIModalPresentationPageSheet;
+    [top presentViewController:navigation animated:YES completion:nil];
 }
 
 - (UIAlertController *)busyAlert:(NSString *)title presenter:(UIViewController *)presenter {
