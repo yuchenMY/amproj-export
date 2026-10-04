@@ -1541,9 +1541,6 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller;
-- (void)presentCloudBackupManagerFrom:(UIViewController *)presenter;
-- (void)attachCloudBackupButtonToController:(UIViewController *)controller;
-- (void)presentCloudBackupManagerFrom:(UIViewController *)presenter;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
 - (void)refreshAccountAvatar;
@@ -3176,18 +3173,6 @@ static char AMCloudBannerFetchedKey;
         return;
     }
     [self presentCloudBackupManagerFrom:presenter];
-}
-
-- (void)presentCloudBackupManagerFrom:(UIViewController *)presenter {
-    UIViewController *top = AMCloudTopController(presenter) ?: presenter;
-    if (!top) return;
-    AMCloudAccountViewController *managerController = [[AMCloudAccountViewController alloc]
-        initWithStyle:UITableViewStyleGrouped];
-    managerController.manager = self;
-    UINavigationController *navigation = [[UINavigationController alloc]
-        initWithRootViewController:managerController];
-    navigation.modalPresentationStyle = UIModalPresentationPageSheet;
-    [top presentViewController:navigation animated:YES completion:nil];
 }
 
 // 安装云端上传点击接管：AM 原版"上传到云端"入口（ProjectsListVC 里的
