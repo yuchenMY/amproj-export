@@ -20251,6 +20251,11 @@ static void amproj_probeMediaLibraryAccess(void) {
 @property(nonatomic, strong) UIButton *playButton;
 @property(nonatomic, strong) UILabel *toastLabel;
 @property(nonatomic, strong) id timeObserver;
+@property(nonatomic, strong) UILabel *titleLabel;
+@property(nonatomic, strong) UIView *stripContainer;
+@property(nonatomic, strong) UIStackView *filmstripStack;
+@property(nonatomic, strong) NSLayoutConstraint *previewHeightConstraint;
+@property(nonatomic, assign) BOOL filmstripGenerated;
 @end
 
 @implementation AMProjShareVideoReplicaVC
@@ -20290,19 +20295,54 @@ static void amproj_probeMediaLibraryAccess(void) {
     preview.tag = 9001;
     [self.view addSubview:preview];
 
+    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.titleLabel.textColor = UIColor.whiteColor;
+    self.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
+    self.titleLabel.textAlignment = NSTextAlignmentCenter;
+    self.titleLabel.numberOfLines = 2;
+    self.titleLabel.hidden = self.videoTitle.length == 0;
+    self.titleLabel.text = self.videoTitle;
+    self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.titleLabel];
+
     self.playButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.playButton setTitle:@"⏸" forState:UIControlStateNormal];
-    self.playButton.titleLabel.font = [UIFont systemFontOfSize:24];
-    [self.playButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    if (@available(iOS 13.0, *)) {
+        [self.playButton setImage:[UIImage systemImageNamed:@"pause.fill"]
+                         forState:UIControlStateNormal];
+    } else {
+        [self.playButton setTitle:@"❚❚" forState:UIControlStateNormal];
+    }
+    self.playButton.tintColor = UIColor.whiteColor;
     self.playButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.playButton addTarget:self action:@selector(onTogglePlay)
         forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.playButton];
 
+    // 胶片帧预览条：黑底容器 + 帧缩略图横排；滑条叠在上面只露白色滑块
+    self.stripContainer = [UIView new];
+    self.stripContainer.backgroundColor = UIColor.blackColor;
+    self.stripContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    self.stripContainer.clipsToBounds = YES;
+    self.stripContainer.layer.cornerRadius = 2;
+    [self.view addSubview:self.stripContainer];
+
+    self.filmstripStack = [[UIStackView alloc] init];
+    self.filmstripStack.axis = UILayoutConstraintAxisHorizontal;
+    self.filmstripStack.distribution = UIStackViewDistributionFillEqually;
+    self.filmstripStack.spacing = 1;
+    self.filmstripStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.stripContainer addSubview:self.filmstripStack];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.filmstripStack.topAnchor constraintEqualToAnchor:self.stripContainer.topAnchor],
+        [self.filmstripStack.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor],
+        [self.filmstripStack.leadingAnchor constraintEqualToAnchor:self.stripContainer.leadingAnchor],
+        [self.filmstripStack.trailingAnchor constraintEqualToAnchor:self.stripContainer.trailingAnchor],
+    ]];
+
     self.scrubber = [[UISlider alloc] initWithFrame:CGRectZero];
     self.scrubber.translatesAutoresizingMaskIntoConstraints = NO;
-    self.scrubber.minimumTrackTintColor = UIColor.whiteColor;
-    self.scrubber.maximumTrackTintColor = [UIColor colorWithWhite:1 alpha:0.25];
+    self.scrubber.minimumTrackTintColor = UIColor.clearColor;
+    self.scrubber.maximumTrackTintColor = UIColor.clearColor;
     [self.scrubber addTarget:self action:@selector(onScrub)
         forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:self.scrubber];
@@ -20355,13 +20395,26 @@ static void amproj_probeMediaLibraryAccess(void) {
         [preview.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
         [preview.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [preview.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [preview.heightAnchor constraintEqualToConstant:330],
+        [self.previewHeightConstraint =
+            [preview.heightAnchor constraintEqualToConstant:330]],
 
-        [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
-        [self.playButton.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:10],
-        [self.scrubber.leadingAnchor constraintEqualToAnchor:self.playButton.trailingAnchor constant:8],
-        [self.scrubber.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-        [self.scrubber.centerYAnchor constraintEqualToAnchor:self.playButton.centerYAnchor],
+        [self.titleLabel.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:16],
+        [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
+        [self.titleLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+
+        [self.stripContainer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
+        [self.stripContainer.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+        [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:16],
+        [self.stripContainer.heightAnchor constraintEqualToConstant:38],
+
+        [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:14],
+        [self.playButton.centerYAnchor constraintEqualToAnchor:self.stripContainer.centerYAnchor],
+
+        [self.scrubber.leadingAnchor constraintEqualToAnchor:self.playButton.trailingAnchor constant:12],
+        [self.scrubber.trailingAnchor constraintEqualToAnchor:self.stripContainer.trailingAnchor constant:-8],
+        [self.scrubber.centerYAnchor constraintEqualToAnchor:self.stripContainer.centerYAnchor],
+        [self.scrubber.topAnchor constraintEqualToAnchor:self.stripContainer.topAnchor constant:-6],
+        [self.scrubber.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:6],
 
         [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
         [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
@@ -20396,6 +20449,7 @@ static void amproj_probeMediaLibraryAccess(void) {
         self.playerLayer.frame = preview.bounds;
         [preview.layer addSublayer:self.playerLayer];
         [self.player play];
+        [self loadVideoMetadata];
         __weak AMProjShareVideoReplicaVC *weakSelf = self;
         self.timeObserver = [self.player addPeriodicTimeObserverForInterval:
             CMTimeMake(1, 4) queue:dispatch_get_main_queue()
@@ -20438,14 +20492,93 @@ static void amproj_probeMediaLibraryAccess(void) {
     return button;
 }
 
+// loadVideoMetadata 读取视频真实比例与时长：预览高度按比例自适应
+//（宽度撑满、高度夹在 160-460），胶片帧按均匀间隔抽帧生成。
+- (void)loadVideoMetadata {
+    if (!self.videoURL) return;
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:self.videoURL options:nil];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        [asset loadValuesAsynchronouslyForKeys:@[@"duration", @"tracks"]
+            completionHandler:^{
+            NSError *trackError = nil;
+            BOOL loaded = [asset statusOfValueForKey:@"tracks"
+                                               error:&trackError] == AVKeyValueStatusLoaded;
+            double seconds = CMTimeGetSeconds(asset.duration);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (loaded) {
+                    AVAssetTrack *track =
+                        [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+                    if (track) {
+                        CGSize natural = track.naturalSize;
+                        CGSize transformed =
+                            CGSizeApplyAffineTransform(natural, track.preferredTransform);
+                        CGFloat aspect =
+                            fabs(transformed.height) > 1
+                                ? fabs(transformed.width / transformed.height)
+                                : 16.0 / 9.0;
+                        CGFloat width = UIScreen.mainScreen.bounds.width;
+                        CGFloat height = width / aspect;
+                        self.previewHeightConstraint.constant =
+                            MIN(MAX(height, 160), 460);
+                        [self.view layoutIfNeeded];
+                    }
+                }
+                if (seconds > 0 && !self.filmstripGenerated) {
+                    self.filmstripGenerated = YES;
+                    [self generateFilmstripForAsset:asset seconds:seconds];
+                }
+            });
+        }];
+    });
+}
+
+// generateFilmstripForAsset 均匀抽 14 帧，逐帧落到胶片条栈里；
+// 生成是异步的，帧到一张填一张，栈内均分宽度。
+- (void)generateFilmstripForAsset:(AVAsset *)asset seconds:(double)seconds {
+    if (self.filmstripStack.arrangedSubviews.count > 0) return;
+    AVAssetImageGenerator *generator =
+        [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
+    generator.appliesPreferredTrackTransform = YES;
+    generator.maximumSize = CGSizeMake(160, 160);
+    int frames = 14;
+    NSMutableArray<NSValue *> *times = [NSMutableArray array];
+    for (int i = 0; i < frames; i++) {
+        double t = seconds * (i + 0.5) / frames;
+        [times addObject:[NSValue valueWithCMTime:CMTimeMakeWithSeconds(t, 600)]];
+    }
+    __weak AMProjShareVideoReplicaVC *weakSelf = self;
+    [generator generateCGImagesAsynchronouslyForTimes:times
+        completionHandler:^(CMTime requestedTime, CGImageRef image,
+                            CMTime actualTime,
+                            AVAssetImageGeneratorResult result, NSError *error) {
+        if (result != AVAssetImageGeneratorSucceeded || !image) return;
+        UIImage *thumb = [UIImage imageWithCGImage:image];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMProjShareVideoReplicaVC *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            UIImageView *view = [UIImageView new];
+            view.image = thumb;
+            view.contentMode = UIViewContentModeScaleAspectFill;
+            view.clipsToBounds = YES;
+            [strongSelf.filmstripStack addArrangedSubview:view];
+        });
+    }];
+}
+
 - (void)onTogglePlay {
     if (!self.player) return;
     if (self.player.rate > 0) {
         [self.player pause];
-        [self.playButton setTitle:@"▶" forState:UIControlStateNormal];
+        if (@available(iOS 13.0, *)) {
+            [self.playButton setImage:[UIImage systemImageNamed:@"play.fill"]
+                             forState:UIControlStateNormal];
+        }
     } else {
         [self.player play];
-        [self.playButton setTitle:@"⏸" forState:UIControlStateNormal];
+        if (@available(iOS 13.0, *)) {
+            [self.playButton setImage:[UIImage systemImageNamed:@"pause.fill"]
+                             forState:UIControlStateNormal];
+        }
     }
 }
 
@@ -20543,6 +20676,7 @@ static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess
     @try {
         AMProjShareVideoReplicaVC *replica = [AMProjShareVideoReplicaVC new];
         replica.videoURL = AMProjReplicaVideoURLFromController(exportSuccess);
+        replica.videoTitle = amproj_currentProjectTitle(exportSuccess);
         return replica;
     } @catch (NSException *exception) {
         amproj_logCriticalEvent(@"share.replica_failed", @{
