@@ -196,6 +196,7 @@ static void amproj_probeXMLPersistence(
     NSString *transactionID, NSUInteger generation,
     void (^completion)(BOOL verified));
 static NSArray *amproj_accessibilityChildren(UIView *view);
+static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess);
 
 static AMProjImportKind amproj_importKindForURL(NSURL *URL,
                                                 NSDictionary *options);
