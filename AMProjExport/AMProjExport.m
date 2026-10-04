@@ -20396,8 +20396,8 @@ static void amproj_probeMediaLibraryAccess(void) {
         [preview.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
         [preview.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [preview.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.previewHeightConstraint =
-            [preview.heightAnchor constraintEqualToConstant:330]],
+        self.previewHeightConstraint =
+            [preview.heightAnchor constraintEqualToConstant:330],
 
         [self.titleLabel.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:16],
         [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
