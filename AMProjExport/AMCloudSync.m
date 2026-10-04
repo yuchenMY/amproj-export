@@ -1540,6 +1540,8 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
+extern void AMProjStartSelfCloudUpload(void);
+
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
@@ -3100,17 +3102,23 @@ static char AMCloudBannerFetchedKey;
     if (!banner) {
         banner = [UIButton buttonWithType:UIButtonTypeCustom];
         banner.translatesAutoresizingMaskIntoConstraints = NO;
-        banner.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.88];
+        banner.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.92];
         banner.layer.cornerRadius = 12;
         banner.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
         banner.layer.borderWidth = 1;
+        banner.layer.zPosition = 999;  // 永远浮在 AM 自己的搜索栏/浮层之上
+        banner.layer.shadowColor = UIColor.blackColor.CGColor;
+        banner.layer.shadowOpacity = 0.45;
+        banner.layer.shadowRadius = 10;
+        banner.layer.shadowOffset = CGSizeMake(0, 3);
         [banner addTarget:self action:@selector(cloudBackupBannerTapped:)
          forControlEvents:UIControlEventTouchUpInside];
         [controller.view addSubview:banner];
+        // 上移到 AM 底部搜索栏之上（-10 会被搜索栏完全盖住，实测隐形）
         [NSLayoutConstraint activateConstraints:@[
             [banner.leadingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.leadingAnchor constant:12],
-            [banner.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-12],
-            [banner.bottomAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.bottomAnchor constant:-10],
+            [banner.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-80],
+            [banner.bottomAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.bottomAnchor constant:-78],
             [banner.heightAnchor constraintEqualToConstant:44],
         ]];
         UILabel *label = [UILabel new];
@@ -3127,7 +3135,10 @@ static char AMCloudBannerFetchedKey;
         ]];
         objc_setAssociatedObject(controller, &AMCloudBannerViewKey, banner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(controller, &AMCloudBannerLabelKey, label, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSLog(@"[AMProjExport] cloud banner attached to %@", NSStringFromClass(controller.class));
     }
+    [controller.view bringSubviewToFront:
+        objc_getAssociatedObject(controller, &AMCloudBannerViewKey)];
     UILabel *label = objc_getAssociatedObject(controller, &AMCloudBannerLabelKey);
     if (!AMCloudReadToken().length) {
         label.text = @"☁️ 登录猫鹤账户，查看云端备份与配额";
@@ -3185,7 +3196,11 @@ static void AMCloudInstallCloudUploadTapHooks(void) {
         (__unsafe_unretained Class *)calloc((size_t)count, sizeof(Class));
     if (!classes) return;
     count = objc_getClassList(classes, count);
-    SEL selectors[2] = {
+    // "保存到云端"的真实入口是 didTapUploadToCloudButton / handleCloudUploadPresent
+    // （从 AM 二进制提取）；老的两个选择器也保留，覆盖其他上传按钮。
+    SEL selectors[4] = {
+        @selector(didTapUploadToCloudButton),
+        @selector(handleCloudUploadPresent),
         @selector(didTapCloudProjectUpload),
         @selector(uploadProjectToCloudButtonTapped),
     };
@@ -3194,17 +3209,30 @@ static void AMCloudInstallCloudUploadTapHooks(void) {
         Class cls = classes[index];
         const char *name = class_getName(cls);
         if (!strstr(name, "AlightMotion")) continue;  // 只接管 AM 自己的类
-        for (int si = 0; si < 2; si++) {
+        for (int si = 0; si < 4; si++) {
             Method method = class_getInstanceMethod(cls, selectors[si]);
             if (!method) continue;
             const char *types = method_getTypeEncoding(method);
-            // 只接管 void(self, _cmd) 签名，避免 block 签名不匹配
-            if (!types || strcmp(types, "v16@0:8") != 0) continue;
-            IMP imp = imp_implementationWithBlock(^(id self) {
-                [[AMCloudManager shared] showCloudBackupManager:nil];
-            });
+            IMP imp = nil;
+            // 无参 void 方法
+            if (types && strcmp(types, "v16@0:8") == 0) {
+                imp = imp_implementationWithBlock(^(id self) {
+                    NSLog(@"[AMProjExport] cloud upload tap intercepted -> self-hosted");
+                    AMProjStartSelfCloudUpload();
+                });
+            // 带一个对象参数的 void 方法（如 sender）
+            } else if (types && strcmp(types, "v24@0:8@16") == 0) {
+                imp = imp_implementationWithBlock(^(id self, id arg) {
+                    (void)arg;
+                    NSLog(@"[AMProjExport] cloud upload tap intercepted(arg) -> self-hosted");
+                    AMProjStartSelfCloudUpload();
+                });
+            }
+            if (!imp) continue;
             method_setImplementation(method, imp);
             installed++;
+            NSLog(@"[AMProjExport] hooked %s %s (%s)",
+                  name, sel_getName(selectors[si]), types ? types : "?");
         }
     }
     free(classes);

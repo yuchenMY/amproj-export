@@ -2803,6 +2803,24 @@ static void amproj_startCloudUpload(UIViewController *presenter,
     amproj_startDirectExportWithDestination(
         presenter, nil, YES, nil, projectTitle, YES);
 }
+
+// AMProjStartSelfCloudUpload 供 AMCloudSync 的云端上传点击接管调用：
+// 从当前界面发起"保存到猫鹤云"完整流程（打包 -> 弹完整备份/仅工程选择 -> 上传），
+// 不经过 AM 官方云，也绝不弹 AM 官方登录。
+void AMProjStartSelfCloudUpload(void) {
+    UIWindow *window = amproj_keyWindow();
+    UIViewController *presenter = window.rootViewController;
+    while (presenter.presentedViewController) {
+        presenter = presenter.presentedViewController;
+    }
+    if ([presenter isKindOfClass:UINavigationController.class]) {
+        UIViewController *visible =
+            ((UINavigationController *)presenter).visibleViewController;
+        if (visible) presenter = visible;
+    }
+    if (!presenter) return;
+    amproj_startCloudUpload(presenter, nil);
+}
 #endif
 
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error) {
