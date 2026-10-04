@@ -20245,6 +20245,7 @@ static void amproj_probeMediaLibraryAccess(void) {
 @end
 
 @interface AMProjShareVideoReplicaVC ()
+@property(nonatomic, copy) NSString *videoTitle;
 @property(nonatomic, strong) AVPlayer *player;
 @property(nonatomic, strong) AVPlayerLayer *playerLayer;
 @property(nonatomic, strong) UISlider *scrubber;
