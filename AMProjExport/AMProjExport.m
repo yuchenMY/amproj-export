@@ -2782,16 +2782,7 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
     });
 }
 
-                    // 云端上传=不含素材的工程备份（语义固化，不再弹二选一）；
-                    // 含素材完整版走"项目包"导出，再经分享面板的猫鹤云活动上云。
-                    amproj_logCriticalEvent(@"direct.cloud_backup_mode", @{
-                        @"include_media": @NO
-                    });
-                    amproj_startAuthorizedDirectExport(
-                        activePresenter, originalController, animated, completion,
-                        projectTitle, uploadToCloud, NO);
-                    return;
-                }static void amproj_startDirectExportWithDestination(
+static void amproj_startDirectExportWithDestination(
     UIViewController *presenter, UIViewController *originalController,
     BOOL animated, void (^completion)(void), NSString *projectTitle,
     BOOL uploadToCloud) {
