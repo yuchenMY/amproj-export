@@ -1460,3 +1460,52 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         # 只观察不改行为：原 IMP 必须被保留并在 hook 里原样调用。
         self.assertIn("AMCloudOriginalSegmentSetSelectedIndex(object_getClass(self))", CLOUD)
         self.assertIn("((void (*)(id, SEL, NSInteger))original)(self, _cmd, index);", CLOUD)
+
+
+class ExportFlowR79Tests(unittest.TestCase):
+    """r79：插件目录磁盘对账（状态失效不再整包重下）+ 导出卡死看门狗 +
+    云端选择弹窗稳妥呈现 + 登录墙宿主优先接管。"""
+
+    def test_plugin_sync_reuses_installed_items_from_disk(self):
+        # 状态失效（授权代数/协议版本/底包指纹变化）时 items/ 目录仍在：
+        # 同步对账必须回退到磁盘 item.json，全部命中就零下载重建目录。
+        self.assertIn("AMCloudPluginsInstalledItemMetadataFromDisk", CLOUD)
+        self.assertIn("AMCloudPluginsInstalledItemMetadataFromDisk", (
+            (ROOT / "AMProjExport" / "AMCloudPlugins.h").read_text(encoding="utf-8")))
+        plugins_m = (ROOT / "AMProjExport" / "AMCloudPlugins.m").read_text(encoding="utf-8")
+        self.assertIn("AMCloudPluginsInstalledItemMetadataFromDisk(", plugins_m)
+        # 回退只在状态缺失时发生，且以 versionID 定位
+        self.assertIn("if (!local && pluginID.length && versionID.length)", CLOUD)
+
+    def test_direct_export_has_stuck_flow_watchdog(self):
+        # r78 现象：一次流程卡住后 amproj_directRequest 常驻，之后所有导出
+        # 在入口静默 no-op。看门狗在 10 分钟无阶段推进时失败收尾复位。
+        self.assertIn("amproj_directRequestProgressAt", EXPORT)
+        self.assertIn(
+            "amproj_setPersistentStage(NSString *stage) {\n"
+            "    amproj_directRequestProgressAt", EXPORT)
+        self.assertIn("600 * NSEC_PER_SEC", EXPORT)
+        self.assertIn("导出流程超时卡住，已自动复位，请重试", EXPORT)
+
+    def test_cloud_choice_presentation_waits_for_settled_top(self):
+        # 插件下载提示(alert)盖在导出页上时不能直接 present：稍等重试 + @try。
+        self.assertIn("amproj_presentCloudChoiceWhenSettled", EXPORT)
+        self.assertIn("direct.cloud_choice_present_exception", EXPORT)
+        self.assertIn("direct.cloud_choice_unpresentable", EXPORT)
+        self.assertNotIn(
+            "[presenter presentViewController:mediaChoice animated:YES completion:nil]",
+            EXPORT)
+
+    def test_login_wall_takeover_prefers_gate_host(self):
+        # 呈现层接管改走墙的呈现者（导出面板宿主），保证 shareVC/选项识别
+        # 发生在正确上下文；宿主不可用回退全局 top。
+        self.assertIn("AMProjStartSelfCloudUploadFromPresenter(gateHost)", EXPORT)
+        self.assertIn("BOOL AMProjStartSelfCloudUploadFromPresenter(", EXPORT)
+        self.assertIn(
+            "if (amproj_directRequest) return;\n"
+            "            if (!AMProjStartSelfCloudUploadFromPresenter(gateHost))", EXPORT)
+
+    def test_banner_visibility_logs_runtime_state(self):
+        # r78 降级路径（控件没找到/索引读不到）必须留有运行时证据。
+        self.assertIn('banner visibility control=%@ selected=%ld cloudIndex=%ld visible=%d', CLOUD)
+        self.assertIn("segment observer install matched=%d", CLOUD)

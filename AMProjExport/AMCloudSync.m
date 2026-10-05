@@ -1768,6 +1768,7 @@ static void AMCloudInstallSegmentObserverHooks(void) {
             (__unsafe_unretained Class *)calloc((size_t)count, sizeof(Class));
         if (!classes) return;
         count = objc_getClassList(classes, count);
+        int matched = 0;
         for (int i = 0; i < count; i++) {
             Class cls = classes[i];
             NSString *name = NSStringFromClass(cls) ?: @"";
@@ -1791,8 +1792,10 @@ static void AMCloudInstallSegmentObserverHooks(void) {
                 class_replaceMethod(cls, selector, (IMP)AMCloudSegmentSetSelectedIndexHook, types);
             }
             NSLog(@"[AMProjExport] observing %@.setSelectedIndex:", name);
+            matched++;
         }
         free(classes);
+        NSLog(@"[AMProjExport] segment observer install matched=%d", matched);
     });
 }
 
@@ -2612,6 +2615,14 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         NSString *sha = [version[@"sha256"] isKindOfClass:NSString.class]
             ? [version[@"sha256"] lowercaseString] : nil;
         NSDictionary *local = pluginID.length ? installedByID[pluginID] : nil;
+        if (!local && pluginID.length && versionID.length) {
+            // 状态失效（授权代数/协议版本/底包指纹变化）不等于文件失效：
+            // items/ 目录里装好的插件按 pluginID/versionID 落盘且带 item.json，
+            // 直接拿它与清单对账，全部命中就零下载重建目录（升级/中断后续传）。
+            NSDictionary *disk = AMCloudPluginsInstalledItemMetadataFromDisk(
+                pluginID, versionID);
+            if (disk) local = disk;
+        }
         NSString *kind = [plugin[@"kind"] isKindOfClass:NSString.class]
             ? [plugin[@"kind"] lowercaseString] : @"custom_plugin";
         NSString *effectID = [plugin[@"effectId"] isKindOfClass:NSString.class]
@@ -3465,6 +3476,9 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
     NSInteger selected = control ? AMCloudSegmentSelectedIndex(control) : -1;
     NSInteger cloudIndex = control ? AMCloudCloudSegmentIndex(control) : -1;
     BOOL visible = (selected < 0 || cloudIndex < 0) || selected == cloudIndex;
+    NSLog(@"[AMProjExport] banner visibility control=%@ selected=%ld cloudIndex=%ld visible=%d",
+          control ? NSStringFromClass(control.class) : @"(none)",
+          (long)selected, (long)cloudIndex, visible);
     BOOL wasHidden = banner.hidden;
     banner.hidden = !visible;
     if (visible) {

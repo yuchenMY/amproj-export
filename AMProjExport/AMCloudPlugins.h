@@ -70,6 +70,15 @@ FOUNDATION_EXPORT BOOL AMCloudPluginsInstallItemArchiveWithMetadata(
     NSError * _Nullable * _Nullable error);
 
 /**
+ 读取磁盘上已安装单项插件的 item.json 元数据（按 pluginID/versionID 定位）。
+ 清单状态失效（授权代数/协议版本/底包指纹变化）时 items/ 目录仍然有效，
+ 同步侧用它对账即可跳过已装插件，避免整包重下。查无或参数非法返回 nil。
+ */
+FOUNDATION_EXPORT NSDictionary<NSString *, id> * _Nullable
+    AMCloudPluginsInstalledItemMetadataFromDisk(NSString *pluginID,
+                                                NSString *versionID);
+
+/**
  按服务端启用清单重建云端覆盖目录。只会复制清单中的插件；停用插件会从覆盖层
  消失，IPA 原版 BuiltinEffects 始终保留。共享依赖文件内容不一致时拒绝激活。
  */

@@ -447,6 +447,7 @@ static void amproj_writeNativeEventBreadcrumb(NSString *transactionID,
 }
 
 static void amproj_setPersistentStage(NSString *stage) {
+    amproj_directRequestProgressAt = [NSDate date].timeIntervalSince1970;
     NSString *path = amproj_stageFilePath();
     if (!path.length) return;
     if (!stage.length) {
@@ -2099,6 +2100,8 @@ static void amproj_install865ShareTapHook(void) {
 @end
 
 static AMProjDirectRequest *amproj_directRequest = nil;
+// 导出流程最近一次阶段切换的时间（秒）。看门狗用它区分"慢"和"卡死"。
+static double amproj_directRequestProgressAt = 0;
 static BOOL amproj_constructingDirectShare = NO;
 #if AMPROJ_CLOUD_SYNC
 static uint64_t amproj_directAuthorizationGeneration = 0;
@@ -2684,6 +2687,20 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
     // is presented only after the archive is complete.
     request.progressAlert = nil;
     amproj_directRequest = request;
+    // 看门狗：打包/呈现任一环若 10 分钟无阶段推进，判定卡死，失败收尾复位，
+    // 让后续导出不再全部静默 no-op。正常流程（含大工程打包、分享面板交互）
+    // 每次阶段切换都会刷新时间戳，不会误伤。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(600 * NSEC_PER_SEC)),
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (amproj_directRequest != request) return;
+        double now = [NSDate date].timeIntervalSince1970;
+        if (now - amproj_directRequestProgressAt < 540) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (amproj_directRequest != request) return;
+            amproj_finishDirectFailure(request,
+                amproj_directError(55, @"导出流程超时卡住，已自动复位，请重试"));
+        });
+    });
     amproj_setPersistentStage(@"progress_present");
     amproj_beginDirectFlow();
     amproj_logCriticalEvent(@"direct.intercept", @{
@@ -2705,6 +2722,42 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
                    dispatch_get_main_queue(), ^{
         if (amproj_directRequest == request) amproj_buildDirectPackage(request);
     });
+}
+
+// 云端备份方式选择弹窗的稳妥呈现：插件同步的下载提示（UIAlertController）
+// 可能恰好盖在导出页上，此时从下层 presenter 直接 present 会抛 UIKit 异常。
+// 顶层仍是 alert 就稍等重试；重试耗尽走 fallback（此时流程尚未建 request，
+// 不会卡住后续导出）。
+static void amproj_presentCloudChoiceWhenSettled(UIViewController *presenter,
+                                                 UIAlertController *choice,
+                                                 NSInteger retriesLeft,
+                                                 void (^fallback)(void)) {
+    UIViewController *target = amproj_safeDirectPresenter(presenter);
+    if ([target isKindOfClass:UIAlertController.class] && retriesLeft > 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
+            dispatch_get_main_queue(), ^{
+            amproj_presentCloudChoiceWhenSettled(presenter, choice, retriesLeft - 1,
+                                                 fallback);
+        });
+        return;
+    }
+    @try {
+        [target presentViewController:choice animated:YES completion:nil];
+    } @catch (NSException *exception) {
+        amproj_logCriticalEvent(@"direct.cloud_choice_present_exception", @{
+            @"name": exception.name ?: @"NSException",
+            @"reason": exception.reason ?: @""
+        });
+        if (retriesLeft > 0) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
+                dispatch_get_main_queue(), ^{
+                amproj_presentCloudChoiceWhenSettled(presenter, choice, retriesLeft - 1,
+                                                     fallback);
+            });
+            return;
+        }
+        if (fallback) fallback();
+    }
 }
 
 static void amproj_startDirectExportWithDestination(
@@ -2774,7 +2827,9 @@ static void amproj_startDirectExportWithDestination(
                         }]];
                     [mediaChoice addAction:[UIAlertAction actionWithTitle:@"取消"
                         style:UIAlertActionStyleCancel handler:nil]];
-                    [presenter presentViewController:mediaChoice animated:YES completion:nil];
+                    amproj_presentCloudChoiceWhenSettled(presenter, mediaChoice, 8, ^{
+                        amproj_logCriticalEvent(@"direct.cloud_choice_unpresentable", @{});
+                    });
                     return;
                 }
                 amproj_startAuthorizedDirectExport(
@@ -2817,6 +2872,31 @@ BOOL AMProjStartSelfCloudUpload(void) {
         UIViewController *visible =
             ((UINavigationController *)presenter).visibleViewController;
         if (visible) presenter = visible;
+    }
+    if (!presenter) return NO;
+    amproj_startCloudUpload(presenter, nil);
+    return YES;
+}
+
+// 同上，但优先用调用方给定的宿主（登录墙的呈现者=导出面板宿主），保证
+// 后续 shareVC/导出选项识别发生在正确的上下文里；宿主不可用再退回全局 top。
+BOOL AMProjStartSelfCloudUploadFromPresenter(UIViewController *preferred) {
+    UIViewController *presenter = nil;
+    if (preferred && ![preferred isKindOfClass:UIAlertController.class] &&
+        preferred.viewIfLoaded.window) {
+        presenter = preferred;
+    }
+    if (!presenter) {
+        UIWindow *window = amproj_keyWindow();
+        presenter = window.rootViewController;
+        while (presenter.presentedViewController) {
+            presenter = presenter.presentedViewController;
+        }
+        if ([presenter isKindOfClass:UINavigationController.class]) {
+            UIViewController *visible =
+                ((UINavigationController *)presenter).visibleViewController;
+            if (visible) presenter = visible;
+        }
     }
     if (!presenter) return NO;
     amproj_startCloudUpload(presenter, nil);
@@ -17999,7 +18079,14 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             @"presenter": NSStringFromClass([self class]) ?: @""
         });
         if (completion) dispatch_async(dispatch_get_main_queue(), completion);
-        AMProjStartSelfCloudUpload();
+        UIViewController *gateHost = [self isKindOfClass:UIViewController.class]
+            ? (UIViewController *)self : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (amproj_directRequest) return;
+            if (!AMProjStartSelfCloudUploadFromPresenter(gateHost)) {
+                AMProjStartSelfCloudUpload();
+            }
+        });
         return;
     }
 #endif

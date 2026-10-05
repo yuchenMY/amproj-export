@@ -1498,6 +1498,21 @@ BOOL AMCloudPluginsInstallItemArchiveWithMetadata(
     return installed;
 }
 
+NSDictionary<NSString *, id> *AMCloudPluginsInstalledItemMetadataFromDisk(
+    NSString *pluginID, NSString *versionID) {
+    if (!AMCloudPluginReleaseIDIsSafe(pluginID) ||
+        !AMCloudPluginReleaseIDIsSafe(versionID)) return nil;
+    NSURL *versionURL = [[[AMCloudPluginsItemsURL()
+        URLByAppendingPathComponent:pluginID isDirectory:YES]
+        URLByAppendingPathComponent:@"versions" isDirectory:YES]
+        URLByAppendingPathComponent:versionID isDirectory:YES];
+    NSData *data = [NSData dataWithContentsOfURL:
+        [versionURL URLByAppendingPathComponent:@"item.json"]];
+    if (!data.length) return nil;
+    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    return [object isKindOfClass:NSDictionary.class] ? object : nil;
+}
+
 static NSURL *AMCloudPluginsBundledEffectsURL(void) {
     NSURL *URL = [NSBundle.mainBundle.resourceURL
         URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES];
