@@ -1453,7 +1453,7 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         # 云端档位识别用 AM 自家 cloud_subtab_title 文案；读不到分段信息则降级常显
         self.assertIn('@"cloud_subtab_title"', CLOUD)
         # r82：可见性由"官方云子页内容在屏"驱动（空态/云列表出现才盖）。
-        self.assertIn("BOOL cloudOnScreen = AMCloudOfficialCloudContentOnScreen(controller.view, 0);", CLOUD)
+        self.assertIn("BOOL cloudOnScreen = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);", CLOUD)
 
     def test_segment_observer_keeps_original_implementation(self):
         # 只观察不改行为：原 IMP 必须被保留并在 hook 里原样调用。
@@ -1605,5 +1605,33 @@ class NativeXMLScanR81Tests(unittest.TestCase):
         # r82：云端 tab 用自有 backup.html 盖层接管官方空列表，
         # 检测信号=官方云内容在屏（空态文案/云列表视图）。
         self.assertIn("AMCloudOfficialCloudContentOnScreen", CLOUD)
-        self.assertIn('@"上传到云端"', CLOUD)
+        self.assertIn('@"没有项目"', CLOUD)
+        self.assertIn("controller.view.window ?: controller.view", CLOUD)
         self.assertIn("AMCloudSegmentTitles", CLOUD)
+
+
+class ProjectPickerR83Tests(unittest.TestCase):
+    """r83：备份前选工程（点了云按钮要能选备份哪一个）+ 官方云内容窗口级
+    检测（r82 盖层从不显示的根因：官方云内容不在工程控制器子树）。"""
+
+    def test_backup_asks_which_project_first(self):
+        self.assertIn("amproj_pickProjectFromScan", EXPORT)
+        self.assertIn("备份哪个工程？", EXPORT)
+        self.assertIn("amproj_normalizedProjectTitle", EXPORT)
+        # 先选工程再选方式：pick 回调里才弹"云端备份方式"
+        pick_idx = EXPORT.index("amproj_pickProjectFromScan(activePresenter,")
+        media_idx = EXPORT.index("云端备份方式", pick_idx)
+        self.assertLess(pick_idx, media_idx)
+
+    def test_detection_is_tightened_and_window_wide(self):
+        self.assertIn("没有项目", CLOUD)
+        # 导出面板"上传到云端 PRO"行不再误判：必须同时含"没有项目"
+        detector = CLOUD.split("AMCloudOfficialCloudContentOnScreen(UIView *view", 1)[1]
+        detector = detector.split("static BOOL AMCloudViewLooksLikeSegmentControl", 1)[0] if "AMCloudViewLooksLikeSegmentControl" in detector else detector.split("- (void)attachCloudBackupBannerToController", 1)[0]
+        self.assertIn('containsString:@"没有项目"', detector)
+        self.assertNotIn('containsString:@"上传到云端"] ||', detector)
+        self.assertIn("view.alpha < 0.05", detector)
+
+    def test_picker_cancellation_does_not_start_upload(self):
+        self.assertIn("if (cancelled) return;", EXPORT)
+        self.assertIn("direct.project_pick_present_exception", EXPORT)

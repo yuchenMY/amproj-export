@@ -3400,15 +3400,20 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
 // 云储存条融合在页面里，原生浮层横幅取消；只在云端子页激活时显示。
 
 static BOOL AMCloudOfficialCloudContentOnScreen(UIView *view, NSInteger depth) {
-    if (!view || depth > 12 || view.hidden) return NO;
+    if (!view || depth > 14 || view.hidden || view.alpha < 0.05) return NO;
     if ([view isKindOfClass:UILabel.class]) {
         NSString *text = [(UILabel *)view text] ?: @"";
         NSString *folded = text.lowercaseString;
-        if ([text containsString:@"上传到云端"] ||
-            [text containsString:@"上传到雲端"] ||
-            [folded containsString:@"to the cloud"]) {
-            return YES;
-        }
+        // 空态判定必须同时含"没有项目"与云端字样："没有项目上传到云端"。
+        // 导出面板的"上传到云端 PRO"选项行不含"没有项目"，不会误判。
+        BOOL emptyState =
+            ([text containsString:@"没有项目"] ||
+             [text containsString:@"沒有項目"] ||
+             [folded containsString:@"no projects"]) &&
+            ([text containsString:@"云端"] ||
+             [text containsString:@"雲端"] ||
+             [folded containsString:@"cloud"]);
+        if (emptyState) return YES;
     }
     NSString *name = NSStringFromClass(view.class) ?: @"";
     if (([name containsString:@"CloudProject"] ||
@@ -3518,7 +3523,9 @@ static BOOL AMCloudBannerTickRunning = NO;
     if (!overlay) return;
     [AMCloudBannerControllersTable() addObject:controller];
     // 官方云子页在屏（空态/云列表出现）→ 盖上自有备份页；否则藏起。
-    BOOL cloudOnScreen = AMCloudOfficialCloudContentOnScreen(controller.view, 0);
+    // 官方云内容不在工程控制器子树里（r82 实测），从窗口根扫。
+    UIView *scanRoot = controller.view.window ?: controller.view;
+    BOOL cloudOnScreen = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);
     overlay.view.hidden = !cloudOnScreen;
     NSLog(@"[AMProjExport] banner visibility control=overlay selected=%ld cloudIndex=%ld visible=%d",
           (long)0, (long)0, cloudOnScreen);

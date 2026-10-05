@@ -2405,6 +2405,84 @@ static BOOL amproj_shouldResetStaleDirectRequest(void) {
         now - amproj_directRequestProgressAt > 60;
 }
 
+// 备份前选择工程：扫描本地工程 XML 标题（新→旧）列出让用户挑。
+// onPick(title, cancelled)：cancelled=YES 用户取消；title=nil 未取消但没扫到
+// （调用方按"自动取当前工程"处理）。
+static void amproj_pickProjectFromScan(UIViewController *presenter,
+                                       void (^onPick)(NSString *title, BOOL cancelled)) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSMutableArray<NSDictionary *> *projects = [NSMutableArray array];
+        NSMutableSet<NSString *> *seen = [NSMutableSet set];
+        NSArray<NSURL *> *candidates =
+            amproj_expandXMLCandidates(amproj_collectPathCandidates(@[]));
+        for (NSURL *URL in candidates) {
+            NSNumber *size = nil;
+            [URL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+            if (!size || size.unsignedLongLongValue < 64 ||
+                size.unsignedLongLongValue > 64 * 1024 * 1024) continue;
+            NSData *data = [NSData dataWithContentsOfURL:URL
+                                                 options:NSDataReadingMappedIfSafe error:nil];
+            AMProjXMLProbe *probe = amproj_probeXML(data);
+            if (!probe || probe.width <= 0 || probe.height <= 0) continue;
+            NSString *title = probe.title.length ? probe.title
+                : URL.lastPathComponent.stringByDeletingPathExtension;
+            NSString *normalized = amproj_normalizedProjectTitle(title);
+            if (normalized.length && [seen containsObject:normalized]) continue;
+            if (normalized.length) [seen addObject:normalized];
+            NSDate *modified = nil;
+            [URL getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
+            [projects addObject:@{ @"title": title,
+                                   @"modified": modified ?: NSDate.distantPast }];
+        }
+        [projects sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [b[@"modified"] compare:a[@"modified"]];
+        }];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!projects.count) {
+                if (onPick) onPick(nil, NO);
+                return;
+            }
+            UIViewController *host = amproj_safeDirectPresenter(presenter);
+            if (!host) {
+                if (onPick) onPick(nil, YES);
+                return;
+            }
+            UIAlertController *sheet = [UIAlertController
+                alertControllerWithTitle:@"备份哪个工程？"
+                                 message:nil
+                          preferredStyle:UIAlertControllerStyleActionSheet];
+            for (NSDictionary *project in projects) {
+                NSString *title = project[@"title"];
+                [sheet addAction:[UIAlertAction actionWithTitle:title
+                    style:UIAlertActionStyleDefault
+                    handler:^(__unused UIAlertAction *action) {
+                        if (onPick) onPick(title, NO);
+                    }]];
+            }
+            [sheet addAction:[UIAlertAction actionWithTitle:@"取消"
+                style:UIAlertActionStyleCancel
+                handler:^(__unused UIAlertAction *action) {
+                    if (onPick) onPick(nil, YES);
+                }]];
+            UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+            if (popover) {
+                popover.sourceView = host.view;
+                popover.sourceRect = CGRectMake(CGRectGetMidX(host.view.bounds),
+                                                CGRectGetMidY(host.view.bounds), 1, 1);
+                popover.permittedArrowDirections = 0;
+            }
+            @try {
+                [host presentViewController:sheet animated:YES completion:nil];
+            } @catch (NSException *exception) {
+                amproj_logCriticalEvent(@"direct.project_pick_present_exception", @{
+                    @"reason": exception.reason ?: @""
+                });
+                if (onPick) onPick(nil, YES);
+            }
+        });
+    });
+}
+
 // 流程中止不再无声：任何"点击无反应"路径都弹一句人话。
 static void amproj_presentExportAbortAlert(NSString *reason) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -2855,48 +2933,54 @@ static void amproj_startDirectExportWithDestination(
                             return;
                         }
                     }
-                    // 云端上传是完整的备份入口：完整（含素材）/仅工程都在这里选。
-                    // "完整版"不再拆到项目包分享面板那条路上。web 端按钮可带
-                    // media 预选（amproj_cloudForcedMedia），预选时跳过弹窗。
-                    void (^startCloudExport)(BOOL) = ^(BOOL includeMedia) {
-                        amproj_logCriticalEvent(@"direct.cloud_backup_mode", @{
-                            @"include_media": @(includeMedia)
-                        });
-                        amproj_startAuthorizedDirectExport(
-                            activePresenter, originalController, animated,
-                            completion, projectTitle, uploadToCloud, includeMedia);
-                    };
-                    if (amproj_cloudForcedMedia >= 0) {
-                        BOOL forced = amproj_cloudForcedMedia == 1;
-                        amproj_cloudForcedMedia = -1;
-                        startCloudExport(forced);
-                        return;
-                    }
-                    UIAlertController *mediaChoice = [UIAlertController
-                        alertControllerWithTitle:@"云端备份方式"
-                        message:@"完整备份包含全部素材，还原最完整；仅工程只保存工程结构，更省空间，导入后需要重新放置素材。"
-                        preferredStyle:UIAlertControllerStyleAlert];
-                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"完整备份（含素材）"
-                        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-                            startCloudExport(YES);
-                        }]];
-                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"仅工程（不含素材，更省空间）"
-                        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-                            startCloudExport(NO);
-                        }]];
-                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"取消"
-                        style:UIAlertActionStyleCancel handler:nil]];
-                    @try {
-                        [activePresenter presentViewController:mediaChoice
-                                                     animated:YES completion:nil];
-                    } @catch (NSException *exception) {
-                        amproj_logCriticalEvent(@"direct.cloud_choice_present_exception", @{
-                            @"name": exception.name ?: @"NSException",
-                            @"reason": exception.reason ?: @""
-                        });
-                        amproj_presentExportAbortAlert(
-                            @"无法弹出备份方式选择，请回到项目页再试一次");
-                    }
+                    // 云端上传是完整的备份入口：先选工程（备份哪一个），
+                    // 再选方式（完整含素材/仅工程）。web 端按钮可带 media
+                    // 预选（amproj_cloudForcedMedia），预选时跳过方式弹窗。
+                    amproj_pickProjectFromScan(activePresenter,
+                        ^(NSString *picked, BOOL cancelled) {
+                        if (cancelled) return;
+                        NSString *title = picked.length ? picked : projectTitle;
+                        void (^startCloudExport)(BOOL) = ^(BOOL includeMedia) {
+                            amproj_logCriticalEvent(@"direct.cloud_backup_mode", @{
+                                @"include_media": @(includeMedia),
+                                @"project_title": title ?: @""
+                            });
+                            amproj_startAuthorizedDirectExport(
+                                activePresenter, originalController, animated,
+                                completion, title, uploadToCloud, includeMedia);
+                        };
+                        if (amproj_cloudForcedMedia >= 0) {
+                            BOOL forced = amproj_cloudForcedMedia == 1;
+                            amproj_cloudForcedMedia = -1;
+                            startCloudExport(forced);
+                            return;
+                        }
+                        UIAlertController *mediaChoice = [UIAlertController
+                            alertControllerWithTitle:@"云端备份方式"
+                            message:@"完整备份包含全部素材，还原最完整；仅工程只保存工程结构，更省空间，导入后需要重新放置素材。"
+                            preferredStyle:UIAlertControllerStyleAlert];
+                        [mediaChoice addAction:[UIAlertAction actionWithTitle:@"完整备份（含素材）"
+                            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                                startCloudExport(YES);
+                            }]];
+                        [mediaChoice addAction:[UIAlertAction actionWithTitle:@"仅工程（不含素材，更省空间）"
+                            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                                startCloudExport(NO);
+                            }]];
+                        [mediaChoice addAction:[UIAlertAction actionWithTitle:@"取消"
+                            style:UIAlertActionStyleCancel handler:nil]];
+                        @try {
+                            [activePresenter presentViewController:mediaChoice
+                                                         animated:YES completion:nil];
+                        } @catch (NSException *exception) {
+                            amproj_logCriticalEvent(@"direct.cloud_choice_present_exception", @{
+                                @"name": exception.name ?: @"NSException",
+                                @"reason": exception.reason ?: @""
+                            });
+                            amproj_presentExportAbortAlert(
+                                @"无法弹出备份方式选择，请回到项目页再试一次");
+                        }
+                    });
                     return;
                 }
                 amproj_startAuthorizedDirectExport(
