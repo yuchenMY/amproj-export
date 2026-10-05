@@ -453,6 +453,8 @@ static double amproj_directRequestProgressAt = 0;
 // 写死 CFBundleVersion==862，865 上恒为 NO——不跳过的话云端流程会在校验
 // 处静默死掉（r78/r79 点了没反应的根因）。
 static BOOL amproj_cloudIntentExplicit = NO;
+// web 端"完整备份/仅工程"按钮预选：-1 弹窗让选；0 仅工程；1 完整（含素材）。
+static NSInteger amproj_cloudForcedMedia = -1;
 
 static void amproj_setPersistentStage(NSString *stage) {
     amproj_directRequestProgressAt = [NSDate date].timeIntervalSince1970;
@@ -2853,14 +2855,48 @@ static void amproj_startDirectExportWithDestination(
                             return;
                         }
                     }
-                    // 云端上传=不含素材的工程备份（语义固化，不再弹二选一）；
-                    // 含素材完整版走"项目包"导出，再经分享面板的猫鹤云活动上云。
-                    amproj_logCriticalEvent(@"direct.cloud_backup_mode", @{
-                        @"include_media": @NO
-                    });
-                    amproj_startAuthorizedDirectExport(
-                        activePresenter, originalController, animated, completion,
-                        projectTitle, uploadToCloud, NO);
+                    // 云端上传是完整的备份入口：完整（含素材）/仅工程都在这里选。
+                    // "完整版"不再拆到项目包分享面板那条路上。web 端按钮可带
+                    // media 预选（amproj_cloudForcedMedia），预选时跳过弹窗。
+                    void (^startCloudExport)(BOOL) = ^(BOOL includeMedia) {
+                        amproj_logCriticalEvent(@"direct.cloud_backup_mode", @{
+                            @"include_media": @(includeMedia)
+                        });
+                        amproj_startAuthorizedDirectExport(
+                            activePresenter, originalController, animated,
+                            completion, projectTitle, uploadToCloud, includeMedia);
+                    };
+                    if (amproj_cloudForcedMedia >= 0) {
+                        BOOL forced = amproj_cloudForcedMedia == 1;
+                        amproj_cloudForcedMedia = -1;
+                        startCloudExport(forced);
+                        return;
+                    }
+                    UIAlertController *mediaChoice = [UIAlertController
+                        alertControllerWithTitle:@"云端备份方式"
+                        message:@"完整备份包含全部素材，还原最完整；仅工程只保存工程结构，更省空间，导入后需要重新放置素材。"
+                        preferredStyle:UIAlertControllerStyleAlert];
+                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"完整备份（含素材）"
+                        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                            startCloudExport(YES);
+                        }]];
+                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"仅工程（不含素材，更省空间）"
+                        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                            startCloudExport(NO);
+                        }]];
+                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"取消"
+                        style:UIAlertActionStyleCancel handler:nil]];
+                    @try {
+                        [activePresenter presentViewController:mediaChoice
+                                                     animated:YES completion:nil];
+                    } @catch (NSException *exception) {
+                        amproj_logCriticalEvent(@"direct.cloud_choice_present_exception", @{
+                            @"name": exception.name ?: @"NSException",
+                            @"reason": exception.reason ?: @""
+                        });
+                        amproj_presentExportAbortAlert(
+                            @"无法弹出备份方式选择，请回到项目页再试一次");
+                    }
                     return;
                 }
                 amproj_startAuthorizedDirectExport(
@@ -2895,6 +2931,14 @@ static void amproj_startCloudUpload(UIViewController *presenter,
 // AMProjStartSelfCloudUpload 供 AMCloudSync 的云端上传点击接管调用：
 // 从当前界面发起"保存到猫鹤云"完整流程（打包 -> 弹完整备份/仅工程选择 -> 上传），
 // 不经过 AM 官方云，也绝不弹 AM 官方登录。找不到宿主界面时返回 NO。
+// web 备份页的"完整备份/仅工程"按钮入口：带预选直接进打包上传。
+BOOL AMProjStartSelfCloudUploadWithMedia(BOOL includeMedia) {
+    amproj_cloudForcedMedia = includeMedia ? 1 : 0;
+    if (AMProjStartSelfCloudUpload()) return YES;
+    amproj_cloudForcedMedia = -1;
+    return NO;
+}
+
 BOOL AMProjStartSelfCloudUpload(void) {
     UIWindow *window = amproj_keyWindow();
     UIViewController *presenter = window.rootViewController;

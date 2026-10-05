@@ -1541,6 +1541,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
 - (void)attachAccountEntryToController:(UIViewController *)controller;
 extern BOOL AMProjStartSelfCloudUpload(void);
+extern BOOL AMProjStartSelfCloudUploadWithMedia(BOOL includeMedia);
 
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller;
 - (void)showAccountEntry:(id)sender;
@@ -2051,7 +2052,22 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 - (void)handleHandoffURL:(NSURL *)URL {
     NSString *host = URL.host.lowercaseString ?: @"";
     if ([host isEqualToString:@"upload"]) {
-        if (!AMProjStartSelfCloudUpload()) {
+        // web 备份页的"完整备份/仅工程"按钮带 ?media=full|project 直选；
+        // 无参数时弹"云端备份方式"让选（与导出面板"上传到云端"同一入口）。
+        NSString *media = nil;
+        NSURLComponents *uploadComponents =
+            [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:NO];
+        for (NSURLQueryItem *item in uploadComponents.queryItems) {
+            if ([item.name isEqualToString:@"media"]) media = item.value.lowercaseString;
+        }
+        BOOL started = NO;
+        if ([media isEqualToString:@"full"] || [media isEqualToString:@"project"]) {
+            started = AMProjStartSelfCloudUploadWithMedia(
+                [media isEqualToString:@"full"]);
+        } else {
+            started = AMProjStartSelfCloudUpload();
+        }
+        if (!started) {
             [self.manager showError:AMCloudError(40, @"当前界面无法发起备份，请重试")
                           presenter:self];
         }
@@ -3378,76 +3394,61 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
 // 云储存水位卡（p4 样式）：白底圆角卡，标题"云储存"+右侧已用/总量灰字，
 // 下方细进度条随配额平滑填充。只在"云端"子标签页显示：分段控件索引变化
 // 由 setSelectedIndex: 观察 hook 通知，横幅挂载与每次切换都会重新评估。
+// ── 云端子页自有内容盖层 ──────────────────────────────────────
+// 官方云列表永远是空的（官方云未登录），云端子标签这里换成自有备份页
+// （backup.html：云储存 + 我的工程列表），上传到猫鹤云的项目一定看得到。
+// 云储存条融合在页面里，原生浮层横幅取消；只在云端子页激活时显示。
+
+static BOOL AMCloudOfficialCloudContentOnScreen(UIView *view, NSInteger depth) {
+    if (!view || depth > 12 || view.hidden) return NO;
+    if ([view isKindOfClass:UILabel.class]) {
+        NSString *text = [(UILabel *)view text] ?: @"";
+        NSString *folded = text.lowercaseString;
+        if ([text containsString:@"上传到云端"] ||
+            [text containsString:@"上传到雲端"] ||
+            [folded containsString:@"to the cloud"]) {
+            return YES;
+        }
+    }
+    NSString *name = NSStringFromClass(view.class) ?: @"";
+    if (([name containsString:@"CloudProject"] ||
+         [name containsString:@"CloudProjects"]) &&
+        [view isKindOfClass:UIScrollView.class]) {
+        return YES;
+    }
+    for (UIView *child in view.subviews) {
+        if (AMCloudOfficialCloudContentOnScreen(child, depth + 1)) return YES;
+    }
+    return NO;
+}
+
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller {
     if (!AMCloudIsProjectsControllerClass(controller.class) || !controller.viewIfLoaded) return;
-    UIView *banner = objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
-    if (!banner) {
-        banner = [UIView new];
-        banner.translatesAutoresizingMaskIntoConstraints = NO;
-        banner.backgroundColor = [UIColor whiteColor];
-        banner.layer.cornerRadius = 14;
-        banner.layer.borderWidth = 1;
-        banner.layer.borderColor = [UIColor colorWithRed:0.912 green:0.912 blue:0.925 alpha:1.0].CGColor;
-        [controller.view addSubview:banner];
-
-        UILabel *titleLabel = [UILabel new];
-        titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-        titleLabel.textColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.11 alpha:1.0];
-        titleLabel.text = @"云储存";
-        [banner addSubview:titleLabel];
-
-        UIProgressView *bar = [[UIProgressView alloc]
-            initWithProgressViewStyle:UIProgressViewStyleDefault];
-        bar.translatesAutoresizingMaskIntoConstraints = NO;
-        bar.progressTintColor = [UIColor colorWithRed:0.22 green:0.77 blue:0.73 alpha:1.0];
-        bar.trackTintColor = [UIColor colorWithRed:0.925 green:0.925 blue:0.933 alpha:1.0];
-        bar.layer.cornerRadius = 3;
-        bar.layer.masksToBounds = YES;
-        [banner addSubview:bar];
-
-        UILabel *valueLabel = [UILabel new];
-        valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        valueLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightMedium];
-        valueLabel.textColor = [UIColor colorWithRed:0.60 green:0.62 blue:0.64 alpha:1.0];
-        valueLabel.text = @"-- / --";
-        valueLabel.textAlignment = NSTextAlignmentRight;
-        [banner addSubview:valueLabel];
-
+    AMCloudAccountWebViewController *overlay =
+        objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
+    if (!overlay) {
+        overlay = [AMCloudAccountWebViewController new];
+        overlay.manager = self;
+        overlay.page = @"backup";
+        [controller addChildViewController:overlay];
+        overlay.view.translatesAutoresizingMaskIntoConstraints = NO;
+        overlay.view.hidden = YES;
+        overlay.view.backgroundColor = UIColor.clearColor;
+        [controller.view addSubview:overlay.view];
+        [overlay didMoveToParentViewController:controller];
         [NSLayoutConstraint activateConstraints:@[
-            [banner.leadingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.leadingAnchor constant:16],
-            [banner.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-16],
-            [banner.topAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.topAnchor constant:174],
-            [banner.heightAnchor constraintEqualToConstant:78],
-
-            [titleLabel.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor constant:16],
-            [titleLabel.topAnchor constraintEqualToAnchor:banner.topAnchor constant:14],
-
-            [valueLabel.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor constant:-16],
-            [valueLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
-            [valueLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:12],
-
-            [bar.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor constant:16],
-            [bar.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor constant:-16],
-            [bar.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:12],
-            [bar.heightAnchor constraintEqualToConstant:6],
+            [overlay.view.leadingAnchor constraintEqualToAnchor:
+                controller.view.safeAreaLayoutGuide.leadingAnchor],
+            [overlay.view.trailingAnchor constraintEqualToAnchor:
+                controller.view.safeAreaLayoutGuide.trailingAnchor],
+            [overlay.view.topAnchor constraintEqualToAnchor:
+                controller.view.safeAreaLayoutGuide.topAnchor constant:174],
+            [overlay.view.bottomAnchor constraintEqualToAnchor:
+                controller.view.safeAreaLayoutGuide.bottomAnchor],
         ]];
-        // 进度条弹性宽度：右侧数字宽度不固定，让 bar 吸收差值
-        [bar setContentHuggingPriority:UILayoutPriorityDefaultLow
-                               forAxis:UILayoutConstraintAxisHorizontal];
-        [valueLabel setContentHuggingPriority:UILayoutPriorityRequired
-                                       forAxis:UILayoutConstraintAxisHorizontal];
-        [valueLabel setContentCompressionResistancePriority:UILayoutPriorityRequired
-                                                     forAxis:UILayoutConstraintAxisHorizontal];
-
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
-            initWithTarget:self action:@selector(cloudBackupBannerTapped:)];
-        [banner addGestureRecognizer:tap];
-
-        objc_setAssociatedObject(controller, &AMCloudBannerViewKey, banner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(controller, &AMCloudBannerLabelKey, valueLabel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(controller, &AMCloudBannerBarKey, bar, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        NSLog(@"[AMProjExport] cloud banner v3 (p4 card) attached to %@",
+        objc_setAssociatedObject(controller, &AMCloudBannerViewKey, overlay,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSLog(@"[AMProjExport] cloud tab overlay attached to %@",
               NSStringFromClass(controller.class));
         dispatch_async(dispatch_get_main_queue(), ^{
             AMCloudManager *manager = [AMCloudManager shared];
@@ -3455,43 +3456,8 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
             [manager cloudBannerVisibilityTick];
         });
     }
-    [controller.view bringSubviewToFront:
-        objc_getAssociatedObject(controller, &AMCloudBannerViewKey)];
-    UILabel *valueLabel = objc_getAssociatedObject(controller, &AMCloudBannerLabelKey);
-    if (!AMCloudReadToken().length) {
-        valueLabel.text = @"未登录";
-        return;
-    }
-    NSDate *last = objc_getAssociatedObject(self, &AMCloudBannerFetchedKey);
-    if (last && [last timeIntervalSinceNow] > -30) return;
-    objc_setAssociatedObject(self, &AMCloudBannerFetchedKey, [NSDate date],
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    __weak typeof(self) weakSelf = self;
-    __weak UIViewController *weakController = controller;
-    [self.client loadProjects:^(NSDictionary *data, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            AMCloudManager *manager = weakSelf;
-            UIViewController *strongController = weakController;
-            if (!manager || !strongController) return;
-            UILabel *lbl = objc_getAssociatedObject(strongController, &AMCloudBannerLabelKey);
-            UIProgressView *bar = objc_getAssociatedObject(strongController, &AMCloudBannerBarKey);
-            if (!lbl || !bar) return;
-            if (error) {
-                lbl.text = @"读取失败";
-                objc_setAssociatedObject(manager, &AMCloudBannerFetchedKey, nil,
-                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                return;
-            }
-            NSDictionary *usage = [data[@"usage"] isKindOfClass:NSDictionary.class]
-                ? data[@"usage"] : @{};
-            long long used = [usage[@"usedBytes"] longLongValue];
-            long long quota = [usage[@"quotaBytes"] longLongValue];
-            lbl.text = [NSString stringWithFormat:@"%@ / %@",
-                        AMCloudByteText(used), AMCloudByteText(quota)];
-            float ratio = quota > 0 ? (float)((double)used / (double)quota) : 0;
-            [bar setProgress:ratio animated:YES];
-        });
-    }];
+    [controller.view bringSubviewToFront:overlay.view];
+    [self updateCloudBackupBannerVisibilityForController:controller];
 }
 
 - (void)cloudBackupBannerTapped:(id)sender {
@@ -3547,26 +3513,19 @@ static BOOL AMCloudBannerTickRunning = NO;
 
 // 评估横幅可见性：只有选中"云端"档才显示。分段信息读不到时降级为常显。
 - (void)updateCloudBackupBannerVisibilityForController:(UIViewController *)controller {
-    UIView *banner = objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
-    if (!banner) return;
+    AMCloudAccountWebViewController *overlay =
+        objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
+    if (!overlay) return;
     [AMCloudBannerControllersTable() addObject:controller];
-    // 控件在更外层容器（r80 面包屑 control=(none) 实锤），从窗口根搜起。
-    UIView *searchRoot = controller.view.window ?: controller.view;
-    UIView *control = AMCloudFindSegmentControl(searchRoot, 0);
-    if (!control && searchRoot != controller.view) {
-        control = AMCloudFindSegmentControl(controller.view, 0);
-    }
-    NSInteger selected = control ? AMCloudSegmentSelectedIndex(control) : -1;
-    NSInteger cloudIndex = control ? AMCloudCloudSegmentIndex(control) : -1;
-    BOOL visible = (selected < 0 || cloudIndex < 0) || selected == cloudIndex;
-    NSLog(@"[AMProjExport] banner visibility control=%@ selected=%ld cloudIndex=%ld visible=%d",
-          control ? NSStringFromClass(control.class) : @"(none)",
-          (long)selected, (long)cloudIndex, visible);
+    // 官方云子页在屏（空态/云列表出现）→ 盖上自有备份页；否则藏起。
+    BOOL cloudOnScreen = AMCloudOfficialCloudContentOnScreen(controller.view, 0);
+    overlay.view.hidden = !cloudOnScreen;
+    NSLog(@"[AMProjExport] banner visibility control=overlay selected=%ld cloudIndex=%ld visible=%d",
+          (long)0, (long)0, cloudOnScreen);
     @try {
         NSString *crumb = [NSString stringWithFormat:
-            @"control=%@ selected=%ld cloudIndex=%ld visible=%d\n",
-            control ? NSStringFromClass(control.class) : @"(none)",
-            (long)selected, (long)cloudIndex, visible];
+            @"control=overlay cloudOnScreen=%d visible=%d\n",
+            cloudOnScreen, !overlay.view.hidden];
         NSString *path = [NSSearchPathForDirectoriesInDomains(
             NSCachesDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
@@ -3575,14 +3534,8 @@ static BOOL AMCloudBannerTickRunning = NO;
     } @catch (NSException *exception) {
         // 面包屑失败不影响界面
     }
-    BOOL wasHidden = banner.hidden;
-    banner.hidden = !visible;
-    if (visible) {
-        [controller.view bringSubviewToFront:banner];
-        if (wasHidden) {
-            // 回到云端页时顺带刷新配额（内部有 30 秒缓存节流）。
-            [self attachCloudBackupBannerToController:controller];
-        }
+    if (cloudOnScreen) {
+        [controller.view bringSubviewToFront:overlay.view];
     }
 }
 

@@ -1437,12 +1437,12 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         self.assertIn("AMProjIsCloudGateAlert(onScreen)", EXPORT)
 
     def test_banner_renders_p4_storage_card(self):
-        # p4 白卡：白底圆角 + "云储存"标题 + 右灰字 + 细进度条；无毛玻璃无图标无箭头。
-        self.assertIn('titleLabel.text = @"云储存";', CLOUD)
-        self.assertIn("cloud banner v3 (p4 card) attached", CLOUD)
-        self.assertNotIn("UIBlurEffectStyleSystemChromeMaterial", CLOUD)
-        self.assertNotIn('systemImageNamed:@"chevron.right"', CLOUD)
-        self.assertIn("banner.heightAnchor constraintEqualToConstant:78", CLOUD)
+        # r82：原生浮层横幅撤销，云端子页换成自有 backup.html 盖层
+        # （云储存+我的工程列表融合在页面里，传了必看到）。
+        self.assertNotIn('titleLabel.text = @"云储存";', CLOUD)
+        self.assertIn("AMCloudOfficialCloudContentOnScreen", CLOUD)
+        self.assertIn('overlay.page = @"backup";', CLOUD)
+        self.assertIn("cloud tab overlay attached", CLOUD)
 
     def test_banner_shows_only_on_cloud_subtab(self):
         # 分段控件监听：AMSegmentedControl setSelectedIndex: 纯观察 hook。
@@ -1452,10 +1452,8 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         self.assertIn("cloudSegmentSelectionDidChange", CLOUD)
         # 云端档位识别用 AM 自家 cloud_subtab_title 文案；读不到分段信息则降级常显
         self.assertIn('@"cloud_subtab_title"', CLOUD)
-        self.assertIn(
-            "BOOL visible = (selected < 0 || cloudIndex < 0) || selected == cloudIndex;",
-            CLOUD,
-        )
+        # r82：可见性由"官方云子页内容在屏"驱动（空态/云列表出现才盖）。
+        self.assertIn("BOOL cloudOnScreen = AMCloudOfficialCloudContentOnScreen(controller.view, 0);", CLOUD)
 
     def test_segment_observer_keeps_original_implementation(self):
         # 只观察不改行为：原 IMP 必须被保留并在 hook 里原样调用。
@@ -1489,11 +1487,13 @@ class ExportFlowR79Tests(unittest.TestCase):
         self.assertIn("导出流程超时卡住，已自动复位，请重试", EXPORT)
 
     def test_cloud_choice_presentation_waits_for_settled_top(self):
-        # r81 起云端上传=不含素材（语义固化），二选一弹窗已整体移除；
-        # 含素材完整版走"项目包"→分享面板猫鹤云活动。
-        self.assertNotIn("amproj_presentCloudChoiceWhenSettled", EXPORT)
-        self.assertNotIn("云端备份方式", EXPORT)
-        self.assertIn('@"include_media": @NO', EXPORT)
+        # r82：弹窗合回上传入口（完整/仅工程都在"上传到云端"里选），
+        # web 按钮可带 media 预选跳过弹窗；呈现失败出可见中止提示。
+        self.assertIn("云端备份方式", EXPORT)
+        self.assertIn("完整备份（含素材）", EXPORT)
+        self.assertIn("仅工程（不含素材，更省空间）", EXPORT)
+        self.assertIn("amproj_cloudForcedMedia", EXPORT)
+        self.assertIn("direct.cloud_choice_present_exception", EXPORT)
 
     def test_login_wall_takeover_prefers_gate_host(self):
         # 呈现层接管改走墙的呈现者（导出面板宿主），保证 shareVC/选项识别
@@ -1505,7 +1505,8 @@ class ExportFlowR79Tests(unittest.TestCase):
 
     def test_banner_visibility_logs_runtime_state(self):
         # r78 降级路径（控件没找到/索引读不到）必须留有运行时证据。
-        self.assertIn('banner visibility control=%@ selected=%ld cloudIndex=%ld visible=%d', CLOUD)
+        self.assertIn("banner visibility control=overlay", CLOUD)
+        self.assertIn("AMProjExport.bannerlog", CLOUD)
         self.assertIn("segment observer install matched=%d", CLOUD)
 
 
@@ -1593,15 +1594,16 @@ class NativeXMLScanR81Tests(unittest.TestCase):
         self.assertEqual(EXPORT.count("amproj_startCloudUpload(presenter, amproj_currentProjectTitle(presenter));"), 2)
 
     def test_cloud_upload_is_project_only_and_package_is_full(self):
-        # 上传到云端=不含素材；项目包=含素材完整版本；二选一弹窗移除。
-        self.assertNotIn("云端备份方式", EXPORT)
-        self.assertIn('@"include_media": @NO', EXPORT)
-        self.assertIn("projectTitle, uploadToCloud, NO);", EXPORT)
-        self.assertIn("projectTitle, uploadToCloud, YES);", EXPORT)
+        # r82：上传入口不拆开——完整/仅工程在"云端备份方式"弹窗里选；
+        # web 按钮 (?media=full|project) 预选直进打包上传。
+        self.assertIn("AMProjStartSelfCloudUploadWithMedia", EXPORT)
+        self.assertIn("amproj_cloudForcedMedia = includeMedia ? 1 : 0;", EXPORT)
+        self.assertIn('@"include_media": @(includeMedia)', EXPORT)
+        self.assertIn('if ([media isEqualToString:@"full"] || [media isEqualToString:@"project"])', CLOUD)
 
     def test_banner_searches_the_whole_window(self):
-        # r80 面包屑 control=(none)：控件在更外层容器，从窗口根搜起。
-        self.assertIn("controller.view.window ?: controller.view", CLOUD)
+        # r82：云端 tab 用自有 backup.html 盖层接管官方空列表，
+        # 检测信号=官方云内容在屏（空态文案/云列表视图）。
+        self.assertIn("AMCloudOfficialCloudContentOnScreen", CLOUD)
+        self.assertIn('@"上传到云端"', CLOUD)
         self.assertIn("AMCloudSegmentTitles", CLOUD)
-        for key in ('@"titles"', '@"items"', '@"segmentTitles"'):
-            self.assertIn(key, CLOUD)
