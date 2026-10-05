@@ -1317,7 +1317,8 @@ class CloudSyncSourceTests(unittest.TestCase):
         authorization = EXPORT.split(
             "static void amproj_startDirectExportWithDestination", 1
         )[1].split("static void amproj_startDirectExport", 1)[0]
-        self.assertIn("if (!presenter.viewIfLoaded.window)", authorization)
+        self.assertIn("if (!activePresenter.viewIfLoaded.window)", authorization)
+        self.assertIn("amproj_safeDirectPresenter(presenter)", authorization)
         self.assertIn("direct.authorization_presenter_detached", authorization)
 
     def test_import_and_export_require_server_authorization(self):
@@ -1509,3 +1510,59 @@ class ExportFlowR79Tests(unittest.TestCase):
         # r78 降级路径（控件没找到/索引读不到）必须留有运行时证据。
         self.assertIn('banner visibility control=%@ selected=%ld cloudIndex=%ld visible=%d', CLOUD)
         self.assertIn("segment observer install matched=%d", CLOUD)
+
+
+class ExportDeadTapR80Tests(unittest.TestCase):
+    """r80：云端/项目包导出点了没反应的根因修复。
+
+    根因一：amproj_readShareExportOption 写死 CFBundleVersion==862，865 上
+    恒为 NO，云端流程在选项校验处 fail-closed 静默死亡。
+    根因二：r78 的登录墙判定过宽（标题"需要登录"+正文含 AlightMotion 即命中），
+    把项目包导出的登录墙误吞进云端流程再死在同一条校验上。
+    """
+
+    def test_cloud_gate_requires_cloud_specific_body(self):
+        # 标题撞名时正文必须指向"上传到云端"，项目包墙不再被误吞。
+        self.assertIn("cloudShaped", EXPORT)
+        self.assertIn('[message containsString:@"上传到云端"]', EXPORT)
+        self.assertIn("return cloudShaped;", EXPORT)
+        # 品牌词卫兵不再单独放行
+        self.assertNotIn(
+            'return [message containsString:@"AlightMotion"] &&', EXPORT)
+
+    def test_explicit_intent_skips_legacy_option_check(self):
+        # 显式意图（登录墙/上传页拦截）跳过 862 专用校验；校验失败也不再静默。
+        self.assertIn("amproj_cloudIntentExplicit", EXPORT)
+        self.assertIn("amproj_cloudIntentExplicit = YES;", EXPORT)
+        self.assertIn("BOOL intentExplicit = amproj_cloudIntentExplicit;", EXPORT)
+        self.assertIn("if (!intentExplicit) {", EXPORT)
+        self.assertIn("未能确认导出选项，请在导出面板重新选择后再试", EXPORT)
+
+    def test_stale_request_self_heals_at_entries(self):
+        # 残留卡死请求不再吞掉后续点击（60 秒无阶段推进自愈）。
+        self.assertIn("amproj_shouldResetStaleDirectRequest", EXPORT)
+        self.assertIn("now - amproj_directRequestProgressAt > 60", EXPORT)
+        self.assertIn('@"stage": @"destination_entry"', EXPORT)
+        self.assertIn('@"stage": @"authorized_export_entry"', EXPORT)
+        self.assertIn('@"stage": @"gate_intercept"', EXPORT)
+        self.assertIn("上一次导出还在进行中，请稍候再试", EXPORT)
+
+    def test_no_silent_abort_without_visible_feedback(self):
+        # "跟没按一样"从根上消灭：中止必须弹可见提示。
+        self.assertIn("amproj_presentExportAbortAlert", EXPORT)
+        self.assertIn("导出未启动", EXPORT)
+        self.assertIn("原页面已关闭，请回到项目页再试一次", EXPORT)
+        self.assertIn("无法弹出备份方式选择，请回到项目页再试一次", EXPORT)
+
+    def test_package_gate_has_shape_fallback(self):
+        # 项目包登录墙兜底匹配（本地化表读不到时按正文形态识别）。
+        self.assertIn("packageShaped", EXPORT)
+        self.assertIn('[normalizedMessage containsString:@"共享项目包"]', EXPORT)
+
+    def test_banner_discovers_segment_by_capability_and_watches(self):
+        # 横幅：能力探测找分段控件 + 0.8 秒低频复查兜底 + AFC 面包屑。
+        self.assertIn("AMCloudViewLooksLikeSegmentControl", CLOUD)
+        self.assertIn('valueForKey:@"titles"', CLOUD)
+        self.assertIn("cloudBannerVisibilityTickLoop", CLOUD)
+        self.assertIn("AMCloudBannerTickRunning", CLOUD)
+        self.assertIn("AMProjExport.bannerlog", CLOUD)

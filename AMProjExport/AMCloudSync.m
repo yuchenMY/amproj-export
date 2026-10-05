@@ -1599,6 +1599,8 @@ extern BOOL AMProjStartSelfCloudUpload(void);
 - (void)hidePluginDownloadNotice;
 - (void)cancelPluginDownloadNotice;
 - (void)cloudSegmentSelectionDidChange;
+- (void)cloudBannerVisibilityTick;
+- (void)cloudBannerVisibilityTickLoop;
 - (void)updateCloudBackupBannerVisibilityForController:(UIViewController *)controller;
 - (void)updateAccountEntryImage;
 - (void)clearAccountAvatar;
@@ -3247,12 +3249,32 @@ static NSString *AMCloudHomepageCloudTabTitle(void) {
     return cached;
 }
 
-// 在视图树里找 AM 的分段控件（AMSegmentedControl / AMSegmentControl）。
-static UIView *AMCloudFindSegmentControl(UIView *view, NSInteger depth) {
-    if (!view || depth > 10) return nil;
+// 判断一个视图是否像 AM 的子标签分段控件：UISegmentedControl 子类、
+// 类名含 Segment/SubTab，或具备"可设 selectedIndex 且有 titles 数组"的能力。
+static BOOL AMCloudViewLooksLikeSegmentControl(UIView *view) {
+    if (!view) return NO;
+    if ([view isKindOfClass:UISegmentedControl.class]) return YES;
     NSString *name = NSStringFromClass(view.class) ?: @"";
     if ([name containsString:@"AMSegmentedControl"] ||
-        [name containsString:@"AMSegmentControl"]) return view;
+        [name containsString:@"AMSegmentControl"] ||
+        [name containsString:@"SegmentControl"] ||
+        [name containsString:@"SubTab"]) return YES;
+    if ([view respondsToSelector:NSSelectorFromString(@"setSelectedIndex:")]) {
+        @try {
+            id titles = [view valueForKey:@"titles"];
+            if ([titles isKindOfClass:NSArray.class] &&
+                ((NSArray *)titles).count > 1) return YES;
+        } @catch (NSException *exception) {
+            // KVC 未定义键 → 不是分段控件
+        }
+    }
+    return NO;
+}
+
+// 在视图树里找 AM 的分段控件（类名或能力探测，不再依赖特定命名）。
+static UIView *AMCloudFindSegmentControl(UIView *view, NSInteger depth) {
+    if (!view || depth > 12) return nil;
+    if (AMCloudViewLooksLikeSegmentControl(view)) return view;
     for (UIView *child in view.subviews) {
         UIView *hit = AMCloudFindSegmentControl(child, depth + 1);
         if (hit) return hit;
@@ -3298,7 +3320,9 @@ static NSInteger AMCloudCloudSegmentIndex(UIView *control) {
         if ([control respondsToSelector:@selector(titleForSegmentAtIndex:)]) {
             for (NSInteger i = 0; i < count; i++) {
                 NSString *title = [segment titleForSegmentAtIndex:i] ?: @"";
-                if ([title isEqualToString:cloudTitle]) return i;
+                if ([title isEqualToString:cloudTitle] ||
+                    (cloudTitle.length &&
+                     [title containsString:cloudTitle])) return i;
             }
         }
         return count - 1;
@@ -3307,8 +3331,11 @@ static NSInteger AMCloudCloudSegmentIndex(UIView *control) {
         NSArray *titles = [control valueForKey:@"titles"];
         if ([titles isKindOfClass:NSArray.class] && titles.count > 0) {
             for (NSUInteger i = 0; i < titles.count; i++) {
-                if ([titles[i] isKindOfClass:NSString.class] &&
-                    [titles[i] isEqualToString:cloudTitle]) {
+                id candidate = titles[i];
+                if ([candidate isKindOfClass:NSString.class] &&
+                    ([(NSString *)candidate isEqualToString:cloudTitle] ||
+                     (cloudTitle.length &&
+                      [(NSString *)candidate containsString:cloudTitle]))) {
                     return (NSInteger)i;
                 }
             }
@@ -3405,7 +3432,9 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
         NSLog(@"[AMProjExport] cloud banner v3 (p4 card) attached to %@",
               NSStringFromClass(controller.class));
         dispatch_async(dispatch_get_main_queue(), ^{
-            [[AMCloudManager shared] updateCloudBackupBannerVisibilityForController:controller];
+            AMCloudManager *manager = [AMCloudManager shared];
+            [manager updateCloudBackupBannerVisibilityForController:controller];
+            [manager cloudBannerVisibilityTick];
         });
     }
     [controller.view bringSubviewToFront:
@@ -3467,6 +3496,37 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
     });
 }
 
+// 低频周期复查（0.8 秒）：setSelectedIndex: 观察器挂不上时的兜底通道。
+// 只在有工程页挂在窗口上时自续；全部离场后自然停摆，下次挂横幅时重启。
+static BOOL AMCloudBannerTickRunning = NO;
+
+- (void)cloudBannerVisibilityTick {
+    if (AMCloudBannerTickRunning) return;
+    AMCloudBannerTickRunning = YES;
+    [self cloudBannerVisibilityTickLoop];
+}
+
+- (void)cloudBannerVisibilityTickLoop {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+        (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        AMCloudManager *manager = weakSelf;
+        if (!manager) return;
+        BOOL anyOnScreen = NO;
+        for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
+            if (!controller || !controller.viewIfLoaded.window) continue;
+            anyOnScreen = YES;
+            [manager updateCloudBackupBannerVisibilityForController:controller];
+        }
+        if (anyOnScreen) {
+            [manager cloudBannerVisibilityTickLoop];
+        } else {
+            AMCloudBannerTickRunning = NO;
+        }
+    });
+}
+
+
 // 评估横幅可见性：只有选中"云端"档才显示。分段信息读不到时降级为常显。
 - (void)updateCloudBackupBannerVisibilityForController:(UIViewController *)controller {
     UIView *banner = objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
@@ -3479,6 +3539,19 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
     NSLog(@"[AMProjExport] banner visibility control=%@ selected=%ld cloudIndex=%ld visible=%d",
           control ? NSStringFromClass(control.class) : @"(none)",
           (long)selected, (long)cloudIndex, visible);
+    @try {
+        NSString *crumb = [NSString stringWithFormat:
+            @"control=%@ selected=%ld cloudIndex=%ld visible=%d\n",
+            control ? NSStringFromClass(control.class) : @"(none)",
+            (long)selected, (long)cloudIndex, visible];
+        NSString *path = [NSSearchPathForDirectoriesInDomains(
+            NSCachesDirectory, NSUserDomainMask, YES).firstObject
+            stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
+        [crumb writeToFile:path atomically:NO
+                  encoding:NSUTF8StringEncoding error:nil];
+    } @catch (NSException *exception) {
+        // 面包屑失败不影响界面
+    }
     BOOL wasHidden = banner.hidden;
     banner.hidden = !visible;
     if (visible) {

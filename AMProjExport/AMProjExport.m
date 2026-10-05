@@ -448,6 +448,11 @@ static void amproj_writeNativeEventBreadcrumb(NSString *transactionID,
 
 // 导出流程最近一次阶段切换的时间（秒）。看门狗用它区分"慢"和"卡死"。
 static double amproj_directRequestProgressAt = 0;
+// 显式意图：入口来自我们自己的拦截（登录墙/上传页/失败重试），用户点过
+// "上传到云端"，意图明确。分享面板选项校验（amproj_readShareExportOption）
+// 写死 CFBundleVersion==862，865 上恒为 NO——不跳过的话云端流程会在校验
+// 处静默死掉（r78/r79 点了没反应的根因）。
+static BOOL amproj_cloudIntentExplicit = NO;
 
 static void amproj_setPersistentStage(NSString *stage) {
     amproj_directRequestProgressAt = [NSDate date].timeIntervalSince1970;
@@ -2378,6 +2383,37 @@ static UIViewController *amproj_safeDirectPresenter(UIViewController *preferred)
     return preferred;
 }
 
+// 入口自愈：残留的卡死请求不再吞掉后续点击（60 秒无阶段推进即视为卡死）。
+static BOOL amproj_shouldResetStaleDirectRequest(void) {
+    if (!amproj_directRequest) return NO;
+    double now = [NSDate date].timeIntervalSince1970;
+    return amproj_directRequestProgressAt <= 0 ||
+        now - amproj_directRequestProgressAt > 60;
+}
+
+// 流程中止不再无声：任何"点击无反应"路径都弹一句人话。
+static void amproj_presentExportAbortAlert(NSString *reason) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *host = amproj_safeDirectPresenter(
+            amproj_keyWindow().rootViewController);
+        if (!host) return;
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"导出未启动"
+            message:reason ?: @"请再试一次"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"好"
+            style:UIAlertActionStyleCancel handler:nil]];
+        @try {
+            orig_presentVC(host, @selector(presentViewController:animated:completion:),
+                           alert, YES, nil);
+        } @catch (NSException *exception) {
+            amproj_logCriticalEvent(@"direct.abort_alert_exception", @{
+                @"reason": reason ?: @""
+            });
+        }
+    });
+}
+
 #if AMPROJ_CLOUD_SYNC
 static UIViewController *amproj_visibleCloudUploadPresenter(
     UIViewController *preferred) {
@@ -2668,8 +2704,17 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
                                                NSString *projectTitle,
                                                BOOL uploadToCloud,
                                                BOOL includeMedia) {
+    if (amproj_shouldResetStaleDirectRequest()) {
+        amproj_directRequest = nil;
+        amproj_setPersistentStage(nil);
+        amproj_finishDirectFlow(@"stale_reset");
+        amproj_logCriticalEvent(@"direct.stale_request_reset", @{
+            @"stage": @"authorized_export_entry"
+        });
+    }
     if (amproj_directRequest) {
         if (completion) completion();
+        amproj_presentExportAbortAlert(@"上一次导出还在进行中，请稍候再试");
         return;
     }
     AMProjDirectRequest *request = [AMProjDirectRequest new];
@@ -2765,8 +2810,17 @@ static void amproj_startDirectExportWithDestination(
     UIViewController *presenter, UIViewController *originalController,
     BOOL animated, void (^completion)(void), NSString *projectTitle,
     BOOL uploadToCloud) {
+    if (amproj_shouldResetStaleDirectRequest()) {
+        amproj_directRequest = nil;
+        amproj_setPersistentStage(nil);
+        amproj_finishDirectFlow(@"stale_reset");
+        amproj_logCriticalEvent(@"direct.stale_request_reset", @{
+            @"stage": @"destination_entry"
+        });
+    }
     if (amproj_directRequest) {
         if (completion) completion();
+        amproj_presentExportAbortAlert(@"上一次导出还在进行中，请稍候再试");
         return;
     }
 #if AMPROJ_CLOUD_SYNC
@@ -2784,28 +2838,44 @@ static void amproj_startDirectExportWithDestination(
             }
             amproj_directAuthorizationPending = NO;
             if (allowed) {
-                if (!presenter.viewIfLoaded.window) {
-                    amproj_logCriticalEvent(@"direct.authorization_presenter_detached", @{
-                        @"generation": @(authorizationGeneration),
-                        @"destination": uploadToCloud ? @"autfeng_hub" : @"share_sheet"
-                    });
-                    return;
-                }
-                // Keep the destination check on the native export controller.
-                // If an unverified caller reaches this legacy path on 865, it
-                // fails closed instead of taking ownership of the native action.
-                if (uploadToCloud) {
-                    uint8_t selectedExportOption = UINT8_MAX;
-                    UIViewController *shareVC = amproj_shareVCRecursive(
-                        presenter, 0, [NSMutableSet set], &selectedExportOption);
-                    if (!shareVC ||
-                        selectedExportOption != AMProjShareCloudUploadOption) {
-                        amproj_logCriticalEvent(@"direct.authorization_selection_changed", @{
+                UIViewController *activePresenter = presenter;
+                if (!activePresenter.viewIfLoaded.window) {
+                    UIViewController *rescued =
+                        amproj_safeDirectPresenter(presenter);
+                    if (rescued && rescued.viewIfLoaded.window) {
+                        activePresenter = rescued;
+                    } else {
+                        amproj_logCriticalEvent(@"direct.authorization_presenter_detached", @{
                             @"generation": @(authorizationGeneration),
-                            @"selected_export_option": shareVC
-                                ? @(selectedExportOption) : @(-1)
+                            @"destination": uploadToCloud ? @"autfeng_hub" : @"share_sheet"
                         });
+                        amproj_presentExportAbortAlert(
+                            @"原页面已关闭，请回到项目页再试一次");
                         return;
+                    }
+                }
+                // 选项校验只防"未经确认的调用者"接管原生动作。865 上读取器
+                // 写死 862 校验恒为 NO，显式意图（登录墙/上传页拦截，用户已
+                // 点过"上传到云端"）必须跳过；其余路径校验失败也要出声。
+                if (uploadToCloud) {
+                    BOOL intentExplicit = amproj_cloudIntentExplicit;
+                    amproj_cloudIntentExplicit = NO;
+                    if (!intentExplicit) {
+                        uint8_t selectedExportOption = UINT8_MAX;
+                        UIViewController *shareVC = amproj_shareVCRecursive(
+                            activePresenter, 0, [NSMutableSet set],
+                            &selectedExportOption);
+                        if (!shareVC ||
+                            selectedExportOption != AMProjShareCloudUploadOption) {
+                            amproj_logCriticalEvent(@"direct.authorization_selection_changed", @{
+                                @"generation": @(authorizationGeneration),
+                                @"selected_export_option": shareVC
+                                    ? @(selectedExportOption) : @(-1)
+                            });
+                            amproj_presentExportAbortAlert(
+                                @"未能确认导出选项，请在导出面板重新选择后再试");
+                            return;
+                        }
                     }
                     // 云端备份让用户自己挑：完整（含素材）还是仅工程（省空间）。
                     // 此时授权回调已异步回到主线程，原始转场早已结束，弹窗安全。
@@ -2815,8 +2885,8 @@ static void amproj_startDirectExportWithDestination(
                         preferredStyle:UIAlertControllerStyleAlert];
                     void (^startCloudExport)(BOOL) = ^(BOOL includeMedia) {
                         amproj_startAuthorizedDirectExport(
-                            presenter, originalController, animated, completion,
-                            projectTitle, uploadToCloud, includeMedia);
+                            activePresenter, originalController, animated,
+                            completion, projectTitle, uploadToCloud, includeMedia);
                     };
                     [mediaChoice addAction:[UIAlertAction actionWithTitle:@"完整备份（含素材）"
                         style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
@@ -2828,14 +2898,29 @@ static void amproj_startDirectExportWithDestination(
                         }]];
                     [mediaChoice addAction:[UIAlertAction actionWithTitle:@"取消"
                         style:UIAlertActionStyleCancel handler:nil]];
-                    amproj_presentCloudChoiceWhenSettled(presenter, mediaChoice, 8, ^{
+                    amproj_presentCloudChoiceWhenSettled(activePresenter, mediaChoice, 8, ^{
+                        // 最后一搏：换个宿主用原始呈现器直接弹，仍失败才出声。
+                        UIViewController *last = amproj_topViewController(
+                            amproj_keyWindow().rootViewController);
+                        @try {
+                            if (last && !last.presentedViewController) {
+                                orig_presentVC(last,
+                                    @selector(presentViewController:animated:completion:),
+                                    mediaChoice, YES, nil);
+                                return;
+                            }
+                        } @catch (NSException *exception) {
+                            // fall through to the visible abort below
+                        }
                         amproj_logCriticalEvent(@"direct.cloud_choice_unpresentable", @{});
+                        amproj_presentExportAbortAlert(
+                            @"无法弹出备份方式选择，请回到项目页再试一次");
                     });
                     return;
                 }
                 amproj_startAuthorizedDirectExport(
-                    presenter, originalController, animated, completion, projectTitle,
-                    uploadToCloud, YES);
+                    activePresenter, originalController, animated, completion,
+                    projectTitle, uploadToCloud, YES);
             }
         });
 #else
@@ -2856,6 +2941,8 @@ static void amproj_startDirectExport(UIViewController *presenter,
 #if AMPROJ_CLOUD_SYNC
 static void amproj_startCloudUpload(UIViewController *presenter,
                                     NSString *projectTitle) {
+    // 调用方只有登录墙/上传页拦截和失败重试——用户意图都是明确的"上传云端"。
+    amproj_cloudIntentExplicit = YES;
     amproj_startDirectExportWithDestination(
         presenter, nil, YES, nil, projectTitle, YES);
 }
@@ -18031,10 +18118,16 @@ static BOOL AMProjIsCloudGateAlert(UIAlertController *alert) {
         if (title.length && [title isEqualToString:expected]) titleMatches = YES;
     }
     if (!titleMatches || !message.length) return NO;
+    // 标题"需要登录"是通用词，正文撞上"AlightMotion账户"也是两面墙共有
+    // ——项目包导出的登录墙曾在 r78 被误吞进云端流程然后死掉。正文必须
+    // 明确指向"上传到云端"才算云端墙。
     NSString *foldedLower = message.lowercaseString;
-    return [message containsString:@"AlightMotion"] &&
-        ([message containsString:@"账户"] || [message containsString:@"帳戶"] ||
-         [foldedLower containsString:@"account"]);
+    BOOL cloudShaped = [message containsString:@"上传到云端"] ||
+        [message containsString:@"上傳專案到雲端"] ||
+        [message containsString:@"上传到雲端"] ||
+        ([foldedLower containsString:@"cloud"] &&
+         [foldedLower containsString:@"upload"]);
+    return cloudShaped;
 }
 
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
@@ -18083,7 +18176,19 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         UIViewController *gateHost = [self isKindOfClass:UIViewController.class]
             ? (UIViewController *)self : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (amproj_directRequest) return;
+            if (amproj_shouldResetStaleDirectRequest()) {
+                amproj_directRequest = nil;
+                amproj_setPersistentStage(nil);
+                amproj_finishDirectFlow(@"stale_reset");
+                amproj_logCriticalEvent(@"direct.stale_request_reset", @{
+                    @"stage": @"gate_intercept"
+                });
+            }
+            if (amproj_directRequest) {
+                amproj_presentExportAbortAlert(
+                    @"上一次导出还在进行中，请稍候再试");
+                return;
+            }
             if (!AMProjStartSelfCloudUploadFromPresenter(gateHost)) {
                 AMProjStartSelfCloudUpload();
             }
@@ -18208,6 +18313,16 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                 componentsJoinedByString:@""];
             BOOL messageMatches = normalizedExpected.length &&
                 [normalizedMessage isEqualToString:normalizedExpected];
+            NSString *packageGateTitle = AMProjNormalizedGateText(gateAlert.title ?: @"");
+            BOOL packageShaped =
+                [normalizedMessage containsString:@"共享项目包"] ||
+                [normalizedMessage containsString:@"項目包"] ||
+                [normalizedMessage containsString:@"项目包"];
+            if (!messageMatches && packageShaped &&
+                ([packageGateTitle isEqualToString:@"需要登录"] ||
+                 [packageGateTitle isEqualToString:@"需要登入"])) {
+                messageMatches = YES;
+            }
             if (messageMatches &&
                 [self isKindOfClass:UIViewController.class]) {
                 UIViewController *exportPresenter = (UIViewController *)self;
@@ -19941,8 +20056,13 @@ static void AMProjScheduleGateTakeover(UIAlertController *alert) {
             onScreen.message ?: @"");
         NSString *normalizedExpected = AMProjNormalizedGateText(
             NSLocalizedString(@"sign_in_for_package_share_msg", @""));
+        BOOL packageShaped =
+            [normalizedOnScreen containsString:@"共享项目包"] ||
+            [normalizedOnScreen containsString:@"項目包"] ||
+            [normalizedOnScreen containsString:@"项目包"];
         if (!normalizedExpected.length ||
-            ![normalizedOnScreen isEqualToString:normalizedExpected]) return;
+            (![normalizedOnScreen isEqualToString:normalizedExpected] &&
+             !packageShaped)) return;
         amproj_logCriticalEvent(@"direct.865_login_wall_takeover", @{});
         UIViewController *presenter = top.presentingViewController ?: top;
         void (^startExport)(void) = ^{
