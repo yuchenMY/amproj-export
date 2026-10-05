@@ -2931,6 +2931,8 @@ static void amproj_startCloudUpload(UIViewController *presenter,
 // AMProjStartSelfCloudUpload 供 AMCloudSync 的云端上传点击接管调用：
 // 从当前界面发起"保存到猫鹤云"完整流程（打包 -> 弹完整备份/仅工程选择 -> 上传），
 // 不经过 AM 官方云，也绝不弹 AM 官方登录。找不到宿主界面时返回 NO。
+BOOL AMProjStartSelfCloudUpload(void);
+
 // web 备份页的"完整备份/仅工程"按钮入口：带预选直接进打包上传。
 BOOL AMProjStartSelfCloudUploadWithMedia(BOOL includeMedia) {
     amproj_cloudForcedMedia = includeMedia ? 1 : 0;
