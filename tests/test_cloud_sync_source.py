@@ -1489,13 +1489,11 @@ class ExportFlowR79Tests(unittest.TestCase):
         self.assertIn("导出流程超时卡住，已自动复位，请重试", EXPORT)
 
     def test_cloud_choice_presentation_waits_for_settled_top(self):
-        # 插件下载提示(alert)盖在导出页上时不能直接 present：稍等重试 + @try。
-        self.assertIn("amproj_presentCloudChoiceWhenSettled", EXPORT)
-        self.assertIn("direct.cloud_choice_present_exception", EXPORT)
-        self.assertIn("direct.cloud_choice_unpresentable", EXPORT)
-        self.assertNotIn(
-            "[presenter presentViewController:mediaChoice animated:YES completion:nil]",
-            EXPORT)
+        # r81 起云端上传=不含素材（语义固化），二选一弹窗已整体移除；
+        # 含素材完整版走"项目包"→分享面板猫鹤云活动。
+        self.assertNotIn("amproj_presentCloudChoiceWhenSettled", EXPORT)
+        self.assertNotIn("云端备份方式", EXPORT)
+        self.assertIn('@"include_media": @NO', EXPORT)
 
     def test_login_wall_takeover_prefers_gate_host(self):
         # 呈现层接管改走墙的呈现者（导出面板宿主），保证 shareVC/选项识别
@@ -1551,7 +1549,7 @@ class ExportDeadTapR80Tests(unittest.TestCase):
         self.assertIn("amproj_presentExportAbortAlert", EXPORT)
         self.assertIn("导出未启动", EXPORT)
         self.assertIn("原页面已关闭，请回到项目页再试一次", EXPORT)
-        self.assertIn("无法弹出备份方式选择，请回到项目页再试一次", EXPORT)
+        self.assertIn("上一次导出还在进行中，请稍候再试", EXPORT)
 
     def test_package_gate_has_shape_fallback(self):
         # 项目包登录墙兜底匹配（本地化表读不到时按正文形态识别）。
@@ -1561,7 +1559,49 @@ class ExportDeadTapR80Tests(unittest.TestCase):
     def test_banner_discovers_segment_by_capability_and_watches(self):
         # 横幅：能力探测找分段控件 + 0.8 秒低频复查兜底 + AFC 面包屑。
         self.assertIn("AMCloudViewLooksLikeSegmentControl", CLOUD)
-        self.assertIn('valueForKey:@"titles"', CLOUD)
+        self.assertIn('NSSelectorFromString(@"setSelectedIndex:")', CLOUD)
         self.assertIn("cloudBannerVisibilityTickLoop", CLOUD)
         self.assertIn("AMCloudBannerTickRunning", CLOUD)
         self.assertIn("AMProjExport.bannerlog", CLOUD)
+
+
+class NativeXMLScanR81Tests(unittest.TestCase):
+    """r81：'无法生成 .amproj / Unable to locate saved project XML' 根因修复 +
+    云端=不含素材、项目包=含素材完整版的语义固化。"""
+
+    def test_probe_cache_collects_before_eligibility_filter(self):
+        # 兜底池必须先收全部有效场景 XML：标题为空+工程不新时命中过滤
+        # 会全军覆没，兜底靠它拿"最新工程"（r80 死因）。
+        self.assertIn("兜底池必须先收全部有效场景 XML", EXPORT)
+        loop = EXPORT.split("static NSDictionary* amproj_selectNativeXML", 1)[1]
+        loop = loop.split("static NSString* amproj_safeFilename", 1)[0]
+        add_idx = loop.index("[probed addObject:")
+        filter_idx = loop.index("if (!titleMatches && !modifiedForSave) continue;")
+        self.assertLess(add_idx, filter_idx)
+
+    def test_scan_skips_plugin_catalog_directories(self):
+        self.assertIn("[URL.lastPathComponent isEqualToString:@\"AMCloudPlugins\"]", EXPORT)
+        self.assertIn("skipDescendants", EXPORT)
+
+    def test_ambiguous_candidates_fall_back_instead_of_failing(self):
+        # 同分同秒双候选不再一票否决，降级交给兜底按最近修改裁决。
+        self.assertIn("direct.native_xml_ambiguous", EXPORT)
+        self.assertNotIn("return ambiguous ? nil : best;", EXPORT)
+
+    def test_cloud_entries_capture_project_title(self):
+        # 严格匹配靠标题；两个自云入口都补了标题捕获。
+        self.assertEqual(EXPORT.count("amproj_startCloudUpload(presenter, amproj_currentProjectTitle(presenter));"), 2)
+
+    def test_cloud_upload_is_project_only_and_package_is_full(self):
+        # 上传到云端=不含素材；项目包=含素材完整版本；二选一弹窗移除。
+        self.assertNotIn("云端备份方式", EXPORT)
+        self.assertIn('@"include_media": @NO', EXPORT)
+        self.assertIn("projectTitle, uploadToCloud, NO);", EXPORT)
+        self.assertIn("projectTitle, uploadToCloud, YES);", EXPORT)
+
+    def test_banner_searches_the_whole_window(self):
+        # r80 面包屑 control=(none)：控件在更外层容器，从窗口根搜起。
+        self.assertIn("controller.view.window ?: controller.view", CLOUD)
+        self.assertIn("AMCloudSegmentTitles", CLOUD)
+        for key in ('@"titles"', '@"items"', '@"segmentTitles"'):
+            self.assertIn(key, CLOUD)

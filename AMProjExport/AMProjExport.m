@@ -1183,7 +1183,11 @@ static NSArray<NSURL *>* amproj_expandXMLCandidates(NSArray<NSURL *> *roots) {
             NSNumber *isDirectory = nil;
             [URL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
             if (isDirectory.boolValue &&
-                [URL.lastPathComponent caseInsensitiveCompare:@"Caches"] == NSOrderedSame) {
+                ([URL.lastPathComponent caseInsensitiveCompare:@"Caches"] == NSOrderedSame ||
+                 [URL.lastPathComponent isEqualToString:@"AMCloudPlugins"] ||
+                 [URL.lastPathComponent isEqualToString:@"AMProjImports"] ||
+                 [URL.lastPathComponent isEqualToString:@"AMProjV865ProjectHandoff"])) {
+                // 自有插件目录里全是特效 XML（非场景），既拖慢扫描又污染候选池。
                 [enumerator skipDescendants];
                 continue;
             }
@@ -1231,6 +1235,11 @@ static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionar
         NSDate *saveStarted = expected[@"save_started"];
         BOOL modifiedForSave = modified && saveStarted &&
             [modified timeIntervalSinceDate:saveStarted] > -5.0;
+        // 兜底池必须先收全部有效场景 XML：标题为空（拦截路径取不到标题）且
+        // 工程不是刚保存时，命中过滤会全军覆没，兜底要靠这里拿"最新工程"。
+        [probed addObject:@{ @"data": data, @"url": URL, @"probe": probe,
+            @"modified": modified ?: NSDate.distantPast,
+            @"titleMatches": @(titleMatches) }];
         if (!titleMatches && !modifiedForSave) continue;
         eligibleCount++;
 
@@ -1251,9 +1260,6 @@ static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionar
         } else if (score == bestScore && fabs(modifiedTime - bestModified) <= 1.0) {
             ambiguous = YES;
         }
-        [probed addObject:@{ @"data": data, @"url": URL, @"probe": probe,
-            @"modified": modified ?: NSDate.distantPast,
-            @"titleMatches": @(titleMatches) }];
     }
     if (!best && probed.count) {
         // 分发设备实测：分享页标题未必捕获得到、工程也未必在导出前重存，
@@ -1289,7 +1295,13 @@ static NSDictionary* amproj_selectNativeXML(NSArray<NSURL *> *roots, NSDictionar
         @"eligible": @(eligibleCount),
         @"ambiguous": @(ambiguous)
     });
-    return ambiguous ? nil : best;
+    if (ambiguous) {
+        // 同分同秒双候选不再一票否决（历史行为直接报"找不到 XML"）；
+        // 降级交给兜底按最近修改裁决，导出必须能成。
+        amproj_debugEvent(@"direct.native_xml_ambiguous", @{});
+        best = nil;
+    }
+    return best;
 }
 
 static NSString* amproj_safeFilename(NSString *value, NSString *fallback) {
@@ -2770,43 +2782,16 @@ static void amproj_startAuthorizedDirectExport(UIViewController *presenter,
     });
 }
 
-// 云端备份方式选择弹窗的稳妥呈现：插件同步的下载提示（UIAlertController）
-// 可能恰好盖在导出页上，此时从下层 presenter 直接 present 会抛 UIKit 异常。
-// 顶层仍是 alert 就稍等重试；重试耗尽走 fallback（此时流程尚未建 request，
-// 不会卡住后续导出）。
-static void amproj_presentCloudChoiceWhenSettled(UIViewController *presenter,
-                                                 UIAlertController *choice,
-                                                 NSInteger retriesLeft,
-                                                 void (^fallback)(void)) {
-    UIViewController *target = amproj_safeDirectPresenter(presenter);
-    if ([target isKindOfClass:UIAlertController.class] && retriesLeft > 0) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{
-            amproj_presentCloudChoiceWhenSettled(presenter, choice, retriesLeft - 1,
-                                                 fallback);
-        });
-        return;
-    }
-    @try {
-        [target presentViewController:choice animated:YES completion:nil];
-    } @catch (NSException *exception) {
-        amproj_logCriticalEvent(@"direct.cloud_choice_present_exception", @{
-            @"name": exception.name ?: @"NSException",
-            @"reason": exception.reason ?: @""
-        });
-        if (retriesLeft > 0) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
-                dispatch_get_main_queue(), ^{
-                amproj_presentCloudChoiceWhenSettled(presenter, choice, retriesLeft - 1,
-                                                     fallback);
-            });
-            return;
-        }
-        if (fallback) fallback();
-    }
-}
-
-static void amproj_startDirectExportWithDestination(
+                    // 云端上传=不含素材的工程备份（语义固化，不再弹二选一）；
+                    // 含素材完整版走"项目包"导出，再经分享面板的猫鹤云活动上云。
+                    amproj_logCriticalEvent(@"direct.cloud_backup_mode", @{
+                        @"include_media": @NO
+                    });
+                    amproj_startAuthorizedDirectExport(
+                        activePresenter, originalController, animated, completion,
+                        projectTitle, uploadToCloud, NO);
+                    return;
+                }static void amproj_startDirectExportWithDestination(
     UIViewController *presenter, UIViewController *originalController,
     BOOL animated, void (^completion)(void), NSString *projectTitle,
     BOOL uploadToCloud) {
@@ -2877,45 +2862,14 @@ static void amproj_startDirectExportWithDestination(
                             return;
                         }
                     }
-                    // 云端备份让用户自己挑：完整（含素材）还是仅工程（省空间）。
-                    // 此时授权回调已异步回到主线程，原始转场早已结束，弹窗安全。
-                    UIAlertController *mediaChoice = [UIAlertController
-                        alertControllerWithTitle:@"云端备份方式"
-                        message:@"完整备份包含全部素材，还原最完整；仅工程只保存工程结构，更省空间，导入后需要重新放置素材。"
-                        preferredStyle:UIAlertControllerStyleAlert];
-                    void (^startCloudExport)(BOOL) = ^(BOOL includeMedia) {
-                        amproj_startAuthorizedDirectExport(
-                            activePresenter, originalController, animated,
-                            completion, projectTitle, uploadToCloud, includeMedia);
-                    };
-                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"完整备份（含素材）"
-                        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-                            startCloudExport(YES);
-                        }]];
-                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"仅工程（不含素材，更省空间）"
-                        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-                            startCloudExport(NO);
-                        }]];
-                    [mediaChoice addAction:[UIAlertAction actionWithTitle:@"取消"
-                        style:UIAlertActionStyleCancel handler:nil]];
-                    amproj_presentCloudChoiceWhenSettled(activePresenter, mediaChoice, 8, ^{
-                        // 最后一搏：换个宿主用原始呈现器直接弹，仍失败才出声。
-                        UIViewController *last = amproj_topViewController(
-                            amproj_keyWindow().rootViewController);
-                        @try {
-                            if (last && !last.presentedViewController) {
-                                orig_presentVC(last,
-                                    @selector(presentViewController:animated:completion:),
-                                    mediaChoice, YES, nil);
-                                return;
-                            }
-                        } @catch (NSException *exception) {
-                            // fall through to the visible abort below
-                        }
-                        amproj_logCriticalEvent(@"direct.cloud_choice_unpresentable", @{});
-                        amproj_presentExportAbortAlert(
-                            @"无法弹出备份方式选择，请回到项目页再试一次");
+                    // 云端上传=不含素材的工程备份（语义固化，不再弹二选一）；
+                    // 含素材完整版走"项目包"导出，再经分享面板的猫鹤云活动上云。
+                    amproj_logCriticalEvent(@"direct.cloud_backup_mode", @{
+                        @"include_media": @NO
                     });
+                    amproj_startAuthorizedDirectExport(
+                        activePresenter, originalController, animated, completion,
+                        projectTitle, uploadToCloud, NO);
                     return;
                 }
                 amproj_startAuthorizedDirectExport(
@@ -2962,7 +2916,7 @@ BOOL AMProjStartSelfCloudUpload(void) {
         if (visible) presenter = visible;
     }
     if (!presenter) return NO;
-    amproj_startCloudUpload(presenter, nil);
+    amproj_startCloudUpload(presenter, amproj_currentProjectTitle(presenter));
     return YES;
 }
 
@@ -2987,10 +2941,11 @@ BOOL AMProjStartSelfCloudUploadFromPresenter(UIViewController *preferred) {
         }
     }
     if (!presenter) return NO;
-    amproj_startCloudUpload(presenter, nil);
+    amproj_startCloudUpload(presenter, amproj_currentProjectTitle(presenter));
     return YES;
 }
-#endif
+
+// 同上，但优先用调用方给定的宿主
 
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error) {
     dispatch_async(dispatch_get_main_queue(), ^{

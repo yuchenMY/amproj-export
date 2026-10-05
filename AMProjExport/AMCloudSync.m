@@ -3249,8 +3249,24 @@ static NSString *AMCloudHomepageCloudTabTitle(void) {
     return cached;
 }
 
+// 读取分段控件的标题数组：Swift 属性名不一定是 titles，逐个键试探。
+static NSArray *AMCloudSegmentTitles(UIView *control) {
+    for (NSString *key in @[@"titles", @"items", @"segmentTitles", @"allTitles",
+                            @"labels"]) {
+        @try {
+            id titles = [control valueForKey:key];
+            if ([titles isKindOfClass:NSArray.class] && ((NSArray *)titles).count > 1) {
+                return titles;
+            }
+        } @catch (NSException *exception) {
+            // KVC 未定义键 → 试下一个
+        }
+    }
+    return nil;
+}
+
 // 判断一个视图是否像 AM 的子标签分段控件：UISegmentedControl 子类、
-// 类名含 Segment/SubTab，或具备"可设 selectedIndex 且有 titles 数组"的能力。
+// 类名含 Segment/SubTab，或具备"可设 selectedIndex 且有标题数组"的能力。
 static BOOL AMCloudViewLooksLikeSegmentControl(UIView *view) {
     if (!view) return NO;
     if ([view isKindOfClass:UISegmentedControl.class]) return YES;
@@ -3260,20 +3276,14 @@ static BOOL AMCloudViewLooksLikeSegmentControl(UIView *view) {
         [name containsString:@"SegmentControl"] ||
         [name containsString:@"SubTab"]) return YES;
     if ([view respondsToSelector:NSSelectorFromString(@"setSelectedIndex:")]) {
-        @try {
-            id titles = [view valueForKey:@"titles"];
-            if ([titles isKindOfClass:NSArray.class] &&
-                ((NSArray *)titles).count > 1) return YES;
-        } @catch (NSException *exception) {
-            // KVC 未定义键 → 不是分段控件
-        }
+        return AMCloudSegmentTitles(view) != nil;
     }
     return NO;
 }
 
 // 在视图树里找 AM 的分段控件（类名或能力探测，不再依赖特定命名）。
 static UIView *AMCloudFindSegmentControl(UIView *view, NSInteger depth) {
-    if (!view || depth > 12) return nil;
+    if (!view || depth > 14) return nil;
     if (AMCloudViewLooksLikeSegmentControl(view)) return view;
     for (UIView *child in view.subviews) {
         UIView *hit = AMCloudFindSegmentControl(child, depth + 1);
@@ -3286,6 +3296,14 @@ static UIView *AMCloudFindSegmentControl(UIView *view, NSInteger depth) {
 static NSInteger AMCloudSegmentSelectedIndex(UIView *control) {
     if ([control respondsToSelector:@selector(selectedSegmentIndex)]) {
         return [(UISegmentedControl *)control selectedSegmentIndex];
+    }
+    @try {
+        id value = [control valueForKey:@"selectedIndex"];
+        if ([value respondsToSelector:@selector(integerValue)]) {
+            return [value integerValue];
+        }
+    } @catch (NSException *exception) {
+        // KVC 读不到走 NSInvocation
     }
     if ([control respondsToSelector:@selector(selectedIndex)]) {
         @try {
@@ -3328,8 +3346,8 @@ static NSInteger AMCloudCloudSegmentIndex(UIView *control) {
         return count - 1;
     }
     @try {
-        NSArray *titles = [control valueForKey:@"titles"];
-        if ([titles isKindOfClass:NSArray.class] && titles.count > 0) {
+        NSArray *titles = AMCloudSegmentTitles(control);
+        if (titles.count > 0) {
             for (NSUInteger i = 0; i < titles.count; i++) {
                 id candidate = titles[i];
                 if ([candidate isKindOfClass:NSString.class] &&
@@ -3532,7 +3550,12 @@ static BOOL AMCloudBannerTickRunning = NO;
     UIView *banner = objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
     if (!banner) return;
     [AMCloudBannerControllersTable() addObject:controller];
-    UIView *control = AMCloudFindSegmentControl(controller.view, 0);
+    // 控件在更外层容器（r80 面包屑 control=(none) 实锤），从窗口根搜起。
+    UIView *searchRoot = controller.view.window ?: controller.view;
+    UIView *control = AMCloudFindSegmentControl(searchRoot, 0);
+    if (!control && searchRoot != controller.view) {
+        control = AMCloudFindSegmentControl(controller.view, 0);
+    }
     NSInteger selected = control ? AMCloudSegmentSelectedIndex(control) : -1;
     NSInteger cloudIndex = control ? AMCloudCloudSegmentIndex(control) : -1;
     BOOL visible = (selected < 0 || cloudIndex < 0) || selected == cloudIndex;
