@@ -2935,8 +2935,7 @@ BOOL AMProjStartSelfCloudUploadFromPresenter(UIViewController *preferred) {
     amproj_startCloudUpload(presenter, amproj_currentProjectTitle(presenter));
     return YES;
 }
-
-// 同上，但优先用调用方给定的宿主
+#endif
 
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error) {
     dispatch_async(dispatch_get_main_queue(), ^{
