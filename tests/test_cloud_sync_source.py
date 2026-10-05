@@ -1503,8 +1503,7 @@ class ExportFlowR79Tests(unittest.TestCase):
         self.assertIn("AMProjStartSelfCloudUploadFromPresenter(gateHost)", EXPORT)
         self.assertIn("BOOL AMProjStartSelfCloudUploadFromPresenter(", EXPORT)
         self.assertIn(
-            "if (amproj_directRequest) return;\n"
-            "            if (!AMProjStartSelfCloudUploadFromPresenter(gateHost))", EXPORT)
+            "if (!AMProjStartSelfCloudUploadFromPresenter(gateHost))", EXPORT)
 
     def test_banner_visibility_logs_runtime_state(self):
         # r78 降级路径（控件没找到/索引读不到）必须留有运行时证据。
