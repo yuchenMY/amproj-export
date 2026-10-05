@@ -446,6 +446,9 @@ static void amproj_writeNativeEventBreadcrumb(NSString *transactionID,
     }
 }
 
+// 导出流程最近一次阶段切换的时间（秒）。看门狗用它区分"慢"和"卡死"。
+static double amproj_directRequestProgressAt = 0;
+
 static void amproj_setPersistentStage(NSString *stage) {
     amproj_directRequestProgressAt = [NSDate date].timeIntervalSince1970;
     NSString *path = amproj_stageFilePath();
@@ -2100,8 +2103,6 @@ static void amproj_install865ShareTapHook(void) {
 @end
 
 static AMProjDirectRequest *amproj_directRequest = nil;
-// 导出流程最近一次阶段切换的时间（秒）。看门狗用它区分"慢"和"卡死"。
-static double amproj_directRequestProgressAt = 0;
 static BOOL amproj_constructingDirectShare = NO;
 #if AMPROJ_CLOUD_SYNC
 static uint64_t amproj_directAuthorizationGeneration = 0;
