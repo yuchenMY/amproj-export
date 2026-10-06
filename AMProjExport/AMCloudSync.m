@@ -3459,21 +3459,36 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
 // （backup.html：云储存 + 我的工程列表），上传到猫鹤云的项目一定看得到。
 // 云储存条融合在页面里，原生浮层横幅取消；只在云端子页激活时显示。
 
+// 空态文本判定：必须同时含"没有项目"与云端字样（"没有项目上传到云端"）。
+// 导出面板的"上传到云端 PRO"选项行不含"没有项目"，不会误判。
+static BOOL AMCloudCloudEmptyStateText(NSString *text) {
+    if (!text.length) return NO;
+    NSString *folded = text.lowercaseString;
+    BOOL hasProject = [text containsString:@"没有项目"] ||
+        [text containsString:@"沒有項目"] ||
+        [folded containsString:@"no projects"];
+    BOOL hasCloud = [text containsString:@"云端"] ||
+        [text containsString:@"雲端"] ||
+        [folded containsString:@"cloud"];
+    return hasProject && hasCloud;
+}
+
 static BOOL AMCloudOfficialCloudContentOnScreen(UIView *view, NSInteger depth) {
-    if (!view || depth > 14 || view.hidden || view.alpha < 0.05) return NO;
+    if (!view || depth > 16 || view.hidden || view.alpha < 0.05) return NO;
     if ([view isKindOfClass:UILabel.class]) {
-        NSString *text = [(UILabel *)view text] ?: @"";
-        NSString *folded = text.lowercaseString;
-        // 空态判定必须同时含"没有项目"与云端字样："没有项目上传到云端"。
-        // 导出面板的"上传到云端 PRO"选项行不含"没有项目"，不会误判。
-        BOOL emptyState =
-            ([text containsString:@"没有项目"] ||
-             [text containsString:@"沒有項目"] ||
-             [folded containsString:@"no projects"]) &&
-            ([text containsString:@"云端"] ||
-             [text containsString:@"雲端"] ||
-             [folded containsString:@"cloud"]);
-        if (emptyState) return YES;
+        if (AMCloudCloudEmptyStateText([(UILabel *)view text])) return YES;
+    }
+    // SwiftUI 空态画布没有 UILabel：查无障碍标签与自定义 text 属性。
+    if (AMCloudCloudEmptyStateText(view.accessibilityLabel) ||
+        AMCloudCloudEmptyStateText(view.accessibilityIdentifier)) {
+        return YES;
+    }
+    @try {
+        id value = [view valueForKey:@"text"];
+        if ([value isKindOfClass:NSString.class] &&
+            AMCloudCloudEmptyStateText((NSString *)value)) return YES;
+    } @catch (NSException *exception) {
+        // 无 text 属性 → 忽略
     }
     NSString *name = NSStringFromClass(view.class) ?: @"";
     if (([name containsString:@"CloudProject"] ||
@@ -3585,19 +3600,28 @@ static BOOL AMCloudBannerTickRunning = NO;
     // 官方云子页在屏（空态/云列表出现）→ 盖上自有备份页；否则藏起。
     // 官方云内容不在工程控制器子树里（r82 实测），从窗口根扫。
     UIView *scanRoot = controller.view.window ?: controller.view;
-    BOOL cloudOnScreen = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);
-    if (!cloudOnScreen) {
-        // 旁证：云端子标签埋点 3 秒内触发过也算（空态随后接棒）。
-        NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-        cloudOnScreen = AMCloudSubtabSignalAt > 0 && now - AMCloudSubtabSignalAt < 3.0;
-    }
+    // 通道一：空态文本（UILabel / 无障碍 / KVC text）
+    BOOL textSignal = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);
+    // 通道二：分段控件选中"云端"（窗口级查找，云端为最后一档）
+    UIView *segControl = AMCloudFindSegmentControl(scanRoot, 0);
+    NSInteger segSelected = segControl ? AMCloudSegmentSelectedIndex(segControl) : -1;
+    NSInteger segCloudIndex = segControl ? AMCloudCloudSegmentIndex(segControl) : -1;
+    BOOL segSignal = segControl && segSelected >= 0 && segCloudIndex >= 0 &&
+        segSelected == segCloudIndex;
+    // 通道三：cloudSubtabOpened 埋点 3 秒窗口
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    BOOL signalRecent = AMCloudSubtabSignalAt > 0 &&
+        now - AMCloudSubtabSignalAt < 3.0;
+    BOOL cloudOnScreen = textSignal || segSignal || signalRecent;
     overlay.view.hidden = !cloudOnScreen;
-    NSLog(@"[AMProjExport] banner visibility control=overlay selected=%ld cloudIndex=%ld visible=%d",
-          (long)0, (long)0, cloudOnScreen);
+    NSLog(@"[AMProjExport] banner visibility seg=%d sel=%ld ci=%ld text=%d signal=%d visible=%d",
+          segControl != nil, (long)segSelected, (long)segCloudIndex,
+          textSignal, signalRecent, cloudOnScreen);
     @try {
         NSString *crumb = [NSString stringWithFormat:
-            @"control=overlay cloudOnScreen=%d visible=%d\n",
-            cloudOnScreen, !overlay.view.hidden];
+            @"seg=%d sel=%ld ci=%ld text=%d signal=%d visible=%d\n",
+            segControl != nil, (long)segSelected, (long)segCloudIndex,
+            textSignal, signalRecent, !overlay.view.hidden];
         NSString *path = [NSSearchPathForDirectoriesInDomains(
             NSCachesDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"AMProjExport.bannerlog"];

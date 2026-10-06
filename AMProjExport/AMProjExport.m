@@ -2477,16 +2477,27 @@ static BOOL amproj_shouldResetStaleDirectRequest(void) {
 }
 @end
 
-// 工程缩略图：与 <UUID>.xml 同目录的 <UUID>.png/.jpg（AM 本地缓存）。
+// 工程缩略图：AM 存于 Caches/projectThumbs/<UUID>_<时间戳>.png（设备取证
+// 实锤），UUID 与工程 XML 同名；同名多份取时间戳最新的一份。
 static NSString *amproj_projectThumbnailPath(NSString *xmlPath) {
-    NSString *base = [xmlPath stringByDeletingPathExtension];
-    for (NSString *ext in @[@"png", @"jpg", @"jpeg", @"PNG", @"JPG"]) {
-        NSString *candidate = [base stringByAppendingPathExtension:ext];
-        if ([NSFileManager.defaultManager fileExistsAtPath:candidate]) {
-            return candidate;
+    NSString *base = xmlPath.lastPathComponent.stringByDeletingPathExtension;
+    if (!base.length) return nil;
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(
+        NSCachesDirectory, NSUserDomainMask, YES).firstObject
+        stringByAppendingPathComponent:@"projectThumbs"];
+    NSArray<NSString *> *entries = [NSFileManager.defaultManager
+        contentsOfDirectoryAtPath:dir error:nil];
+    NSString *best = nil;
+    NSString *bestStamp = nil;
+    for (NSString *name in entries) {
+        if (![name hasPrefix:base] || !name.lowercaseString.hasSuffix(@"png")) continue;
+        NSString *stamp = [name substringFromIndex:base.length];
+        if (!best || [stamp compare:bestStamp] == NSOrderedDescending) {
+            best = [dir stringByAppendingPathComponent:name];
+            bestStamp = stamp;
         }
     }
-    return nil;
+    return best;
 }
 
 static void amproj_pickProjectFromScan(UIViewController *presenter,

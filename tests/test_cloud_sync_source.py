@@ -1453,7 +1453,8 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         # 云端档位识别用 AM 自家 cloud_subtab_title 文案；读不到分段信息则降级常显
         self.assertIn('@"cloud_subtab_title"', CLOUD)
         # r82：可见性由"官方云子页内容在屏"驱动（空态/云列表出现才盖）。
-        self.assertIn("BOOL cloudOnScreen = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);", CLOUD)
+        self.assertIn("BOOL textSignal = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);", CLOUD)
+        self.assertIn("BOOL segSignal = segControl && segSelected >= 0", CLOUD)
 
     def test_segment_observer_keeps_original_implementation(self):
         # 只观察不改行为：原 IMP 必须被保留并在 hook 里原样调用。
@@ -1505,7 +1506,7 @@ class ExportFlowR79Tests(unittest.TestCase):
 
     def test_banner_visibility_logs_runtime_state(self):
         # r78 降级路径（控件没找到/索引读不到）必须留有运行时证据。
-        self.assertIn("banner visibility control=overlay", CLOUD)
+        self.assertIn("banner visibility seg=%d sel=%ld ci=%ld", CLOUD)
         self.assertIn("AMProjExport.bannerlog", CLOUD)
         self.assertIn("segment observer install matched=%d", CLOUD)
 
@@ -1625,11 +1626,13 @@ class ProjectPickerR83Tests(unittest.TestCase):
     def test_detection_is_tightened_and_window_wide(self):
         self.assertIn("没有项目", CLOUD)
         # 导出面板"上传到云端 PRO"行不再误判：必须同时含"没有项目"
-        detector = CLOUD.split("AMCloudOfficialCloudContentOnScreen(UIView *view", 1)[1]
-        detector = detector.split("static BOOL AMCloudViewLooksLikeSegmentControl", 1)[0] if "AMCloudViewLooksLikeSegmentControl" in detector else detector.split("- (void)attachCloudBackupBannerToController", 1)[0]
-        self.assertIn('containsString:@"没有项目"', detector)
-        self.assertNotIn('containsString:@"上传到云端"] ||', detector)
-        self.assertIn("view.alpha < 0.05", detector)
+        rule = CLOUD.split("AMCloudCloudEmptyStateText(NSString *text)", 1)[1]
+        rule = rule.split("static BOOL AMCloudOfficialCloudContentOnScreen", 1)[0]
+        self.assertIn('containsString:@"没有项目"', rule)
+        self.assertIn("hasProject && hasCloud", rule)
+        # 无障碍与 KVC text 通道（SwiftUI 画布无 UILabel 的兜底）
+        self.assertIn("view.accessibilityLabel", CLOUD)
+        self.assertIn('valueForKey:@"text"', CLOUD)
 
     def test_picker_cancellation_does_not_start_upload(self):
         self.assertIn("if (cancelled) return;", EXPORT)
