@@ -2490,7 +2490,8 @@ static NSString *amproj_projectThumbnailPath(NSString *xmlPath) {
     NSString *best = nil;
     NSString *bestStamp = nil;
     for (NSString *name in entries) {
-        if (![name hasPrefix:base] || !name.lowercaseString.hasSuffix(@"png")) continue;
+        if (![name hasPrefix:base] ||
+            ![name.lowercaseString hasSuffix:@"png"]) continue;
         NSString *stamp = [name substringFromIndex:base.length];
         if (!best || [stamp compare:bestStamp] == NSOrderedDescending) {
             best = [dir stringByAppendingPathComponent:name];
