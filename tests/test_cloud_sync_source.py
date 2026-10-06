@@ -1618,10 +1618,9 @@ class ProjectPickerR83Tests(unittest.TestCase):
         self.assertIn("amproj_pickProjectFromScan", EXPORT)
         self.assertIn("备份哪个工程？", EXPORT)
         self.assertIn("amproj_normalizedProjectTitle", EXPORT)
-        # 先选工程再选方式：pick 回调里才弹"云端备份方式"
-        pick_idx = EXPORT.index("amproj_pickProjectFromScan(activePresenter,")
-        media_idx = EXPORT.index("云端备份方式", pick_idx)
-        self.assertLess(pick_idx, media_idx)
+        # 选择结果回调里才弹"云端备份方式"（先工程后方式）
+        self.assertIn("void (^afterProjectPicked)(NSString *, BOOL)", EXPORT)
+        self.assertIn("amproj_pickProjectFromScan(activePresenter, afterProjectPicked);", EXPORT)
 
     def test_detection_is_tightened_and_window_wide(self):
         self.assertIn("没有项目", CLOUD)
@@ -1635,3 +1634,24 @@ class ProjectPickerR83Tests(unittest.TestCase):
     def test_picker_cancellation_does_not_start_upload(self):
         self.assertIn("if (cancelled) return;", EXPORT)
         self.assertIn("direct.project_pick_present_exception", EXPORT)
+
+
+class ThumbPickerR84Tests(unittest.TestCase):
+    """r84：导出面板路径直传（不再弹项目选择）、通用备份入口的选择器带缩略图、
+    云端子标签旁证信号（cloudSubtabOpened 观察）。"""
+
+    def test_export_flow_skips_project_picker(self):
+        # 登录墙拦截（导出面板）工程已知：置跳过标志直进方式弹窗。
+        self.assertIn("amproj_cloudSkipProjectPicker", EXPORT)
+        self.assertIn("amproj_cloudSkipProjectPicker = YES;", EXPORT)
+        self.assertIn("afterProjectPicked(nil, NO);", EXPORT)
+
+    def test_picker_has_thumbnails(self):
+        self.assertIn("AMProjProjectPickViewController", EXPORT)
+        self.assertIn("amproj_projectThumbnailPath", EXPORT)
+        self.assertIn('@"备份哪个工程？"', EXPORT)
+
+    def test_cloud_subtab_signal_observer(self):
+        self.assertIn("AMCloudInstallSubtabObserverHooks", CLOUD)
+        self.assertIn('NSSelectorFromString(@"cloudSubtabOpened")', CLOUD)
+        self.assertIn("now - AMCloudSubtabSignalAt < 3.0", CLOUD)

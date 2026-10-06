@@ -1709,6 +1709,7 @@ static void AMCloudProjectsViewDidAppear(id self, SEL selector, BOOL animated) {
 }
 
 static void AMCloudInstallSegmentObserverHooks(void);
+static void AMCloudInstallSubtabObserverHooks(void);
 
 static void AMCloudInstallProjectsHooks(void) {
     int count = objc_getClassList(NULL, 0);
@@ -1736,6 +1737,65 @@ static void AMCloudInstallProjectsHooks(void) {
     }
     free(classes);
     AMCloudInstallSegmentObserverHooks();
+    AMCloudInstallSubtabObserverHooks();
+}
+
+// ── 云端子标签旁证信号 ────────────────────────────────────────
+// AM 的 cloudSubtabOpened 若以无参 @objc 方法暴露（埋点），挂纯观察：
+// 触发即记时间戳，作为"云端子标签刚打开"的旁证。空态检测找不到内容时
+// 靠它先把盖层亮出来（3 秒窗口），空态随后接棒。
+
+static void *AMCloudSubtabOriginalIMPKey = &AMCloudSubtabOriginalIMPKey;
+static NSTimeInterval AMCloudSubtabSignalAt = 0;
+
+static IMP AMCloudOriginalSubtabOpened(Class cls) {
+    for (Class current = cls; current; current = class_getSuperclass(current)) {
+        NSValue *value = objc_getAssociatedObject((id)current, AMCloudSubtabOriginalIMPKey);
+        if (value) return value.pointerValue;
+    }
+    return NULL;
+}
+
+static void AMCloudSubtabOpenedHook(id self, SEL _cmd) {
+    IMP original = AMCloudOriginalSubtabOpened(object_getClass(self));
+    if (original) ((void (*)(id, SEL))original)(self, _cmd);
+    AMCloudSubtabSignalAt = [NSDate date].timeIntervalSince1970;
+    NSLog(@"[AMProjExport] cloud subtab signal fired");
+}
+
+static void AMCloudInstallSubtabObserverHooks(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        SEL selector = NSSelectorFromString(@"cloudSubtabOpened");
+        int count = objc_getClassList(NULL, 0);
+        if (count <= 0) return;
+        Class __unsafe_unretained *classes =
+            (__unsafe_unretained Class *)calloc((size_t)count, sizeof(Class));
+        if (!classes) return;
+        count = objc_getClassList(classes, count);
+        int matched = 0;
+        for (int i = 0; i < count; i++) {
+            Class cls = classes[i];
+            if (![cls isSubclassOfClass:NSObject.class]) continue;
+            Method method = class_getInstanceMethod(cls, selector);
+            if (!method) continue;
+            const char *types = method_getTypeEncoding(method);
+            // 只挂无参 "v@:" 形态，防 ABI 猜测。
+            if (!types || strcmp(types, "v@:") != 0) continue;
+            if (objc_getAssociatedObject((id)cls, AMCloudSubtabOriginalIMPKey)) continue;
+            IMP original = method_getImplementation(method);
+            if (original == (IMP)AMCloudSubtabOpenedHook) continue;
+            objc_setAssociatedObject((id)cls, AMCloudSubtabOriginalIMPKey,
+                [NSValue valueWithPointer:original], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (!class_addMethod(cls, selector, (IMP)AMCloudSubtabOpenedHook, types)) {
+                class_replaceMethod(cls, selector, (IMP)AMCloudSubtabOpenedHook, types);
+            }
+            matched++;
+            NSLog(@"[AMProjExport] observing %@.cloudSubtabOpened", NSStringFromClass(cls));
+        }
+        free(classes);
+        NSLog(@"[AMProjExport] subtab observer install matched=%d", matched);
+    });
 }
 
 // ── 子标签分段控件监听 ──────────────────────────────────────────
@@ -3526,6 +3586,11 @@ static BOOL AMCloudBannerTickRunning = NO;
     // 官方云内容不在工程控制器子树里（r82 实测），从窗口根扫。
     UIView *scanRoot = controller.view.window ?: controller.view;
     BOOL cloudOnScreen = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);
+    if (!cloudOnScreen) {
+        // 旁证：云端子标签埋点 3 秒内触发过也算（空态随后接棒）。
+        NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+        cloudOnScreen = AMCloudSubtabSignalAt > 0 && now - AMCloudSubtabSignalAt < 3.0;
+    }
     overlay.view.hidden = !cloudOnScreen;
     NSLog(@"[AMProjExport] banner visibility control=overlay selected=%ld cloudIndex=%ld visible=%d",
           (long)0, (long)0, cloudOnScreen);

@@ -455,6 +455,9 @@ static double amproj_directRequestProgressAt = 0;
 static BOOL amproj_cloudIntentExplicit = NO;
 // web 端"完整备份/仅工程"按钮预选：-1 弹窗让选；0 仅工程；1 完整（含素材）。
 static NSInteger amproj_cloudForcedMedia = -1;
+// 跳过"备份哪个工程"选择：导出面板（登录墙拦截）已在具体工程的导出
+// 流程里，直接传当前工程；通用备份入口（底部云按钮/网页按钮）才弹选择。
+static BOOL amproj_cloudSkipProjectPicker = NO;
 
 static void amproj_setPersistentStage(NSString *stage) {
     amproj_directRequestProgressAt = [NSDate date].timeIntervalSince1970;
@@ -2405,9 +2408,87 @@ static BOOL amproj_shouldResetStaleDirectRequest(void) {
         now - amproj_directRequestProgressAt > 60;
 }
 
-// 备份前选择工程：扫描本地工程 XML 标题（新→旧）列出让用户挑。
-// onPick(title, cancelled)：cancelled=YES 用户取消；title=nil 未取消但没扫到
-// （调用方按"自动取当前工程"处理）。
+// ── 备份工程选择（带缩略图） ──────────────────────────────────
+// 通用备份入口（底部云按钮/网页备份按钮）弹此列表让用户挑工程；
+// 导出面板路径（登录墙拦截）已在具体工程的导出流程里，跳过此步直传。
+
+@interface AMProjProjectPickViewController : UITableViewController
+@property(nonatomic, copy) void (^onPick)(NSString *title, BOOL cancelled);
+@property(nonatomic, strong) NSArray<NSDictionary *> *projects;
+@end
+
+@implementation AMProjProjectPickViewController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"备份哪个工程？";
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
+                             target:self action:@selector(pickCancelled)];
+    self.tableView.rowHeight = 64;
+}
+- (void)pickCancelled {
+    if (self.onPick) self.onPick(nil, YES);
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView; (void)section;
+    return (NSInteger)self.projects.count;
+}
+- (UITableViewCell *)tableView:(UITableView *)tableView
+         cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *identifier = @"project";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:identifier];
+        cell.imageView.contentMode = UIViewContentModeScaleAspectFill;
+        cell.imageView.layer.cornerRadius = 6;
+        cell.imageView.layer.masksToBounds = YES;
+        cell.imageView.clipsToBounds = YES;
+    }
+    NSDictionary *project = self.projects[(NSUInteger)indexPath.row];
+    NSString *title = project[@"title"] ?: @"未命名工程";
+    NSDate *modified = project[@"modified"];
+    cell.textLabel.text = title;
+    cell.detailTextLabel.text = modified
+        ? [NSDateFormatter localizedStringFromDate:modified
+                                         dateStyle:NSDateFormatterMediumStyle
+                                         timeStyle:NSDateFormatterShortStyle]
+        : @"";
+    NSString *thumbPath = project[@"thumb"];
+    UIImage *thumb = thumbPath.length
+        ? [UIImage imageWithContentsOfFile:thumbPath] : nil;
+    cell.imageView.image = thumb ?: ({
+        UIGraphicsBeginImageContextWithOptions(CGSizeMake(56, 56), YES, 0);
+        [[UIColor colorWithWhite:0.92 alpha:1] setFill];
+        UIRectFill(CGRectMake(0, 0, 56, 56));
+        UIImage *placeholder = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        placeholder;
+    });
+    return cell;
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSDictionary *project = self.projects[(NSUInteger)indexPath.row];
+    NSString *title = project[@"title"];
+    if (self.onPick) self.onPick(title, NO);
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+@end
+
+// 工程缩略图：与 <UUID>.xml 同目录的 <UUID>.png/.jpg（AM 本地缓存）。
+static NSString *amproj_projectThumbnailPath(NSString *xmlPath) {
+    NSString *base = [xmlPath stringByDeletingPathExtension];
+    for (NSString *ext in @[@"png", @"jpg", @"jpeg", @"PNG", @"JPG"]) {
+        NSString *candidate = [base stringByAppendingPathExtension:ext];
+        if ([NSFileManager.defaultManager fileExistsAtPath:candidate]) {
+            return candidate;
+        }
+    }
+    return nil;
+}
+
 static void amproj_pickProjectFromScan(UIViewController *presenter,
                                        void (^onPick)(NSString *title, BOOL cancelled)) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -2431,8 +2512,10 @@ static void amproj_pickProjectFromScan(UIViewController *presenter,
             if (normalized.length) [seen addObject:normalized];
             NSDate *modified = nil;
             [URL getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
-            [projects addObject:@{ @"title": title,
-                                   @"modified": modified ?: NSDate.distantPast }];
+            [projects addObject:[@{ @"title": title,
+                                   @"modified": modified ?: NSDate.distantPast,
+                                   @"thumb": amproj_projectThumbnailPath(URL.path)
+                                       ?: [NSNull null] } mutableCopy]];
         }
         [projects sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
             return [b[@"modified"] compare:a[@"modified"]];
@@ -2447,32 +2530,18 @@ static void amproj_pickProjectFromScan(UIViewController *presenter,
                 if (onPick) onPick(nil, YES);
                 return;
             }
-            UIAlertController *sheet = [UIAlertController
-                alertControllerWithTitle:@"备份哪个工程？"
-                                 message:nil
-                          preferredStyle:UIAlertControllerStyleActionSheet];
-            for (NSDictionary *project in projects) {
-                NSString *title = project[@"title"];
-                [sheet addAction:[UIAlertAction actionWithTitle:title
-                    style:UIAlertActionStyleDefault
-                    handler:^(__unused UIAlertAction *action) {
-                        if (onPick) onPick(title, NO);
-                    }]];
+            for (NSMutableDictionary *project in projects) {
+                if (project[@"thumb"] == [NSNull null]) [project removeObjectForKey:@"thumb"];
             }
-            [sheet addAction:[UIAlertAction actionWithTitle:@"取消"
-                style:UIAlertActionStyleCancel
-                handler:^(__unused UIAlertAction *action) {
-                    if (onPick) onPick(nil, YES);
-                }]];
-            UIPopoverPresentationController *popover = sheet.popoverPresentationController;
-            if (popover) {
-                popover.sourceView = host.view;
-                popover.sourceRect = CGRectMake(CGRectGetMidX(host.view.bounds),
-                                                CGRectGetMidY(host.view.bounds), 1, 1);
-                popover.permittedArrowDirections = 0;
-            }
+            AMProjProjectPickViewController *picker =
+                [[AMProjProjectPickViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            picker.projects = projects;
+            picker.onPick = onPick;
+            UINavigationController *navigation = [[UINavigationController alloc]
+                initWithRootViewController:picker];
+            navigation.modalPresentationStyle = UIModalPresentationPageSheet;
             @try {
-                [host presentViewController:sheet animated:YES completion:nil];
+                [host presentViewController:navigation animated:YES completion:nil];
             } @catch (NSException *exception) {
                 amproj_logCriticalEvent(@"direct.project_pick_present_exception", @{
                     @"reason": exception.reason ?: @""
@@ -2936,8 +3005,7 @@ static void amproj_startDirectExportWithDestination(
                     // 云端上传是完整的备份入口：先选工程（备份哪一个），
                     // 再选方式（完整含素材/仅工程）。web 端按钮可带 media
                     // 预选（amproj_cloudForcedMedia），预选时跳过方式弹窗。
-                    amproj_pickProjectFromScan(activePresenter,
-                        ^(NSString *picked, BOOL cancelled) {
+                    void (^afterProjectPicked)(NSString *, BOOL) = ^(NSString *picked, BOOL cancelled) {
                         if (cancelled) return;
                         NSString *title = picked.length ? picked : projectTitle;
                         void (^startCloudExport)(BOOL) = ^(BOOL includeMedia) {
@@ -2980,7 +3048,13 @@ static void amproj_startDirectExportWithDestination(
                             amproj_presentExportAbortAlert(
                                 @"无法弹出备份方式选择，请回到项目页再试一次");
                         }
-                    });
+                    };
+                    if (amproj_cloudSkipProjectPicker) {
+                        amproj_cloudSkipProjectPicker = NO;
+                        afterProjectPicked(nil, NO);
+                    } else {
+                        amproj_pickProjectFromScan(activePresenter, afterProjectPicked);
+                    }
                     return;
                 }
                 amproj_startAuthorizedDirectExport(
@@ -18264,6 +18338,8 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                     @"上一次导出还在进行中，请稍候再试");
                 return;
             }
+            // 登录墙=导出面板里选了"上传到云端"点导出：工程已知，直传。
+            amproj_cloudSkipProjectPicker = YES;
             if (!AMProjStartSelfCloudUploadFromPresenter(gateHost)) {
                 AMProjStartSelfCloudUpload();
             }
