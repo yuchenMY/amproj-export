@@ -1658,3 +1658,13 @@ class ThumbPickerR84Tests(unittest.TestCase):
         self.assertIn("AMCloudInstallSubtabObserverHooks", CLOUD)
         self.assertIn('NSSelectorFromString(@"cloudSubtabOpened")', CLOUD)
         self.assertIn("now - AMCloudSubtabSignalAt < 3.0", CLOUD)
+
+
+class SwiftClassSafetyR86Tests(unittest.TestCase):
+    """r86：闪退修复——对纯 Swift 根类发 isSubclassOfClass: 会 unrecognized
+    selector（EXC_BREAKPOINT）；类过滤只准用 C API。"""
+
+    def test_class_filters_never_message_class_objects(self):
+        self.assertIn("AMCloudClassIsNSObjectDerived", CLOUD)
+        self.assertIn("class_getSuperclass", CLOUD)
+        self.assertNotIn("isSubclassOfClass:NSObject.class", CLOUD)

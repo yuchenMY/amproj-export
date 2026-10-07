@@ -1741,6 +1741,14 @@ static void AMCloudInstallProjectsHooks(void) {
 }
 
 // ── 云端子标签旁证信号 ────────────────────────────────────────
+// 类过滤只用 C API：objc_getClassList 会返回纯 Swift 根类（根不是
+// NSObject），对它们发 ObjC 消息会 unrecognized selector 崩溃。
+static BOOL AMCloudClassIsNSObjectDerived(Class cls) {
+    for (Class current = cls; current; current = class_getSuperclass(current)) {
+        if (current == [NSObject class]) return YES;
+    }
+    return NO;
+}
 // AM 的 cloudSubtabOpened 若以无参 @objc 方法暴露（埋点），挂纯观察：
 // 触发即记时间戳，作为"云端子标签刚打开"的旁证。空态检测找不到内容时
 // 靠它先把盖层亮出来（3 秒窗口），空态随后接棒。
@@ -1776,11 +1784,11 @@ static void AMCloudInstallSubtabObserverHooks(void) {
         int matched = 0;
         for (int i = 0; i < count; i++) {
             Class cls = classes[i];
-            if (![cls isSubclassOfClass:NSObject.class]) continue;
+            if (!AMCloudClassIsNSObjectDerived(cls)) continue;
             Method method = class_getInstanceMethod(cls, selector);
             if (!method) continue;
             const char *types = method_getTypeEncoding(method);
-            // 只挂无参 "v@:" 形态，防 ABI 猜测。
+            // 只挂无参 "v@:" 形态，防 ABI 猜测（含帧偏移的变体跳过）。
             if (!types || strcmp(types, "v@:") != 0) continue;
             if (objc_getAssociatedObject((id)cls, AMCloudSubtabOriginalIMPKey)) continue;
             IMP original = method_getImplementation(method);
@@ -1837,7 +1845,7 @@ static void AMCloudInstallSegmentObserverHooks(void) {
             NSString *name = NSStringFromClass(cls) ?: @"";
             if (![name containsString:@"AMSegmentedControl"] &&
                 ![name containsString:@"AMSegmentControl"]) continue;
-            if (![cls isSubclassOfClass:NSObject.class]) continue;
+            if (!AMCloudClassIsNSObjectDerived(cls)) continue;
             Method method = class_getInstanceMethod(cls, selector);
             if (!method) continue;
             const char *types = method_getTypeEncoding(method);
