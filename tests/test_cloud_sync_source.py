@@ -1668,3 +1668,23 @@ class SwiftClassSafetyR86Tests(unittest.TestCase):
         self.assertIn("AMCloudClassIsNSObjectDerived", CLOUD)
         self.assertIn("class_getSuperclass", CLOUD)
         self.assertNotIn("isSubclassOfClass:NSObject.class", CLOUD)
+
+
+class StablePluginKeyR87Tests(unittest.TestCase):
+    """r87：插件循环下载根因修复——目录状态原绑 SHA256(会话token)，token
+    随登录/心跳轮换，每次轮换都清空已装目录触发全量重下（老版本用户
+    单 IP 下载数万次的循环）。状态改绑设备派生的稳定密钥。"""
+
+    def test_plugin_key_is_device_derived_not_token_derived(self):
+        self.assertIn("AMCloudStablePluginAuthorizationKey", CLOUD)
+        self.assertIn('@"amproj-plugin-v1:%@"', CLOUD)
+        self.assertIn(
+            "if (authorizationKey) *authorizationKey = AMCloudStablePluginAuthorizationKey();",
+            CLOUD)
+
+    def test_empty_manifest_never_wipes_installed_catalog(self):
+        self.assertIn("cloud.plugins.empty_manifest_kept_installed", CLOUD)
+        guard = CLOUD.split("if (plugins.count == 0 && preInstalled.count > 0)", 1)[1]
+        keep = guard.split("return;", 1)[0]
+        self.assertIn("finishPluginSyncAllowingPending:YES", keep)
+        self.assertNotIn("AMCloudPluginsRemoveAllIf", keep)

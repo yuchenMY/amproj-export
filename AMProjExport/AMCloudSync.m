@@ -510,6 +510,26 @@ static OSStatus AMCloudDeleteTokenUnlocked(void) {
     return SecItemDelete((__bridge CFDictionaryRef)query);
 }
 
+static NSString *AMCloudDeviceIdentifier(void);
+
+// 插件目录状态绑定"稳定密钥"：过去绑 SHA256(会话token)，而 token 随登录/
+// 心跳轮换——每次轮换都把已装目录判无效→清空→全量重下（老版本用户
+// "一直循环下载"的根因，日志里单 IP 下载数万次）。改由设备标识派生，
+// 登录态变化不再清目录。
+static NSString *AMCloudStablePluginAuthorizationKey(void) {
+    NSString *deviceId = AMCloudDeviceIdentifier();
+    if (!deviceId.length) deviceId = @"unknown-device";
+    NSData *data = [[NSString stringWithFormat:@"amproj-plugin-v1:%@", deviceId]
+        dataUsingEncoding:NSUTF8StringEncoding];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
+        [hex appendFormat:@"%02x", digest[index]];
+    }
+    return hex;
+}
+
 static NSString *AMCloudTokenAuthorizationKey(NSString *token) {
     if (!token.length) return @"";
     NSData *data = [token dataUsingEncoding:NSUTF8StringEncoding];
@@ -533,7 +553,8 @@ static void AMCloudReadAuthContext(NSString **token, uint64_t *generation,
     });
     if (token) *token = currentToken;
     if (generation) *generation = currentGeneration;
-    if (authorizationKey) *authorizationKey = AMCloudTokenAuthorizationKey(currentToken);
+    // 插件目录状态用稳定密钥（设备派生）：token 轮换不再使已装目录失效。
+    if (authorizationKey) *authorizationKey = AMCloudStablePluginAuthorizationKey();
 }
 
 static NSString *AMCloudReadToken(void) {
@@ -2683,6 +2704,18 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         [visiblePlugins addObject:plugin];
     }
     plugins = visiblePlugins;
+    // 空清单保护：清单没有插件但本地还有已装目录（权限闪断/服务异常）时，
+    // 绝不激活空目录把已装效果清零——只结束本轮同步并保住现状。
+    NSDictionary *preState = AMCloudPluginsCurrentState();
+    NSArray *preInstalled = [preState[@"plugins"] isKindOfClass:NSArray.class]
+        ? preState[@"plugins"] : @[];
+    if (plugins.count == 0 && preInstalled.count > 0) {
+        AMCloudDiagnostic(@"cloud.plugins.empty_manifest_kept_installed", @{
+            @"installed": @(preInstalled.count)
+        });
+        [self finishPluginSyncAllowingPending:YES];
+        return;
+    }
     NSDictionary *state = AMCloudPluginsCurrentState();
     NSArray *installed = [state[@"plugins"] isKindOfClass:NSArray.class] ? state[@"plugins"] : @[];
     NSMutableDictionary<NSString *, NSDictionary *> *installedByID = [NSMutableDictionary dictionary];
