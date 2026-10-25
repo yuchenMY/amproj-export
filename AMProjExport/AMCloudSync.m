@@ -3500,6 +3500,34 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
 // （backup.html：云储存 + 我的工程列表），上传到猫鹤云的项目一定看得到。
 // 云储存条融合在页面里，原生浮层横幅取消；只在云端子页激活时显示。
 
+// 无障碍元素取标签：SwiftUI 的 Text/Button 会暴露成 a11y 元素。
+static NSString *AMCloudAccessibilityLabelOf(id element) {
+    if (!element) return nil;
+    @try {
+        SEL sel = @selector(accessibilityLabel);
+        if (![element respondsToSelector:sel]) return nil;
+        return [element performSelector:sel];
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+// 无障碍特征：元素是否带"选中"态（SwiftUI 分段选中胶囊会带）。
+static BOOL AMCloudAccessibilitySelected(id element) {
+    if (!element) return NO;
+    @try {
+        SEL sel = @selector(accessibilityTraits);
+        if (![element respondsToSelector:sel]) return NO;
+        id value = [element performSelector:sel];
+        if ([value isKindOfClass:NSNumber.class]) {
+            return (((NSNumber *)value).unsignedLongLongValue &
+                    UIAccessibilityTraitSelected) != 0;
+        }
+    } @catch (NSException *exception) {
+    }
+    return NO;
+}
+
 // 空态文本判定：必须同时含"没有项目"与云端字样（"没有项目上传到云端"）。
 // 导出面板的"上传到云端 PRO"选项行不含"没有项目"，不会误判。
 static BOOL AMCloudCloudEmptyStateText(NSString *text) {
@@ -3531,6 +3559,17 @@ static BOOL AMCloudOfficialCloudContentOnScreen(UIView *view, NSInteger depth) {
     } @catch (NSException *exception) {
         // 无 text 属性 → 忽略
     }
+    // SwiftUI 的 a11y 元素挂在宿主视图的 accessibilityElements 里
+    // （r87 面包屑 seg=0 text=0：子视图扫描全部落空的根因）。
+    @try {
+        NSArray *elements = view.accessibilityElements;
+        for (id element in elements ?: @[]) {
+            NSString *label = AMCloudAccessibilityLabelOf(element);
+            if (AMCloudCloudEmptyStateText(label)) return YES;
+        }
+    } @catch (NSException *exception) {
+        // a11y 读取失败 → 忽略
+    }
     NSString *name = NSStringFromClass(view.class) ?: @"";
     if (([name containsString:@"CloudProject"] ||
          [name containsString:@"CloudProjects"]) &&
@@ -3541,6 +3580,31 @@ static BOOL AMCloudOfficialCloudContentOnScreen(UIView *view, NSInteger depth) {
         if (AMCloudOfficialCloudContentOnScreen(child, depth + 1)) return YES;
     }
     return NO;
+}
+
+// 在视图及其 a11y 树里找带 Selected 态的"云端"胶囊（SwiftUI 分段选中态）。
+static void AMCloudScanAccessibilityForSelectedTab(UIView *view, NSString *cloudTitle,
+                                                   NSInteger depth, BOOL *outSelected) {
+    if (!view || depth > 10 || *outSelected) return;
+    @try {
+        NSArray *elements = view.accessibilityElements;
+        for (id element in elements ?: @[]) {
+            if (*outSelected) return;
+            NSString *label = AMCloudAccessibilityLabelOf(element);
+            if (label.length && cloudTitle.length &&
+                [label containsString:cloudTitle] &&
+                AMCloudAccessibilitySelected(element)) {
+                *outSelected = YES;
+                return;
+            }
+        }
+    } @catch (NSException *exception) {
+        return;
+    }
+    for (UIView *child in view.subviews) {
+        AMCloudScanAccessibilityForSelectedTab(child, cloudTitle, depth + 1, outSelected);
+        if (*outSelected) return;
+    }
 }
 
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller {
@@ -3641,6 +3705,9 @@ static BOOL AMCloudBannerTickRunning = NO;
     // 官方云子页在屏（空态/云列表出现）→ 盖上自有备份页；否则藏起。
     // 官方云内容不在工程控制器子树里（r82 实测），从窗口根扫。
     UIView *scanRoot = controller.view.window ?: controller.view;
+    // 通道〇：a11y 树里"云端"胶囊带 Selected trait（SwiftUI 分段选中态，
+    // 框架无关；空态检测失败时的强信号）。
+    BOOL a11yCloudSelected = NO;
     // 通道一：空态文本（UILabel / 无障碍 / KVC text）
     BOOL textSignal = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);
     // 通道二：分段控件选中"云端"（窗口级查找，云端为最后一档）
@@ -3653,7 +3720,20 @@ static BOOL AMCloudBannerTickRunning = NO;
     NSTimeInterval now = [NSDate date].timeIntervalSince1970;
     BOOL signalRecent = AMCloudSubtabSignalAt > 0 &&
         now - AMCloudSubtabSignalAt < 3.0;
-    BOOL cloudOnScreen = textSignal || segSignal || signalRecent;
+    // 通道〇实现：窗口 a11y 树里找"云端"胶囊（带 Selected trait）。
+    // 子标签标题取 AM 自家 cloud_subtab_title，读不到用中文兜底。
+    @try {
+        NSString *cloudTitle = AMCloudHomepageCloudTabTitle();
+        for (UIView *view in scanRoot.subviews) {
+            if (a11yCloudSelected) break;
+            AMCloudScanAccessibilityForSelectedTab(view, cloudTitle, 0,
+                &a11yCloudSelected);
+        }
+    } @catch (NSException *exception) {
+        a11yCloudSelected = NO;
+    }
+    BOOL cloudOnScreen = textSignal || segSignal || signalRecent ||
+        a11yCloudSelected;
     overlay.view.hidden = !cloudOnScreen;
     NSLog(@"[AMProjExport] banner visibility seg=%d sel=%ld ci=%ld text=%d signal=%d visible=%d",
           segControl != nil, (long)segSelected, (long)segCloudIndex,
