@@ -597,7 +597,8 @@ class CloudSyncSourceTests(unittest.TestCase):
 
     def test_catalog_activation_repairs_stale_cached_items_once(self):
         self.assertIn("pluginCatalogRepairAttempted", CLOUD)
-        self.assertIn("AMCloudCatalogActivationErrorMayBeStaleCache", CLOUD)
+        # r89：修复不再限 4 种错误字符串——任何激活失败都触发一次修复。
+        self.assertIn("cloud.plugins.catalog_repair_reason", CLOUD)
         self.assertIn("cloud.plugins.catalog_repair_begin", CLOUD)
         self.assertIn("cloud.plugins.catalog_repair_retry", CLOUD)
         self.assertIn("cloud.plugins.catalog_repair_failed", CLOUD)
@@ -1709,3 +1710,35 @@ class A11yDetectionR88Tests(unittest.TestCase):
         self.assertIn("AMCloudHomepageCloudTabTitle()", CLOUD)
         self.assertIn("BOOL a11yCloudSelected = NO;", CLOUD)
         self.assertIn("signalRecent ||", CLOUD)
+
+
+class RuntimeReactivationR89Tests(unittest.TestCase):
+    """r89：无下载死锁自愈——磁盘 items 全在、state.json 与清单一致但运行时
+    激活态丢失（权限闪断/底包指纹变化后 ActivatePersistedCatalog 失败）时，
+    catalog_up_to_date 分支以前直接 return：零下载、零激活，效果永远显示
+    "?"（服务器日志实锤：manifest 200 后 0 个 item 下载）。"""
+
+    def test_up_to_date_branch_checks_runtime_activation(self):
+        self.assertIn("cloud.plugins.runtime_reactivation_needed", CLOUD)
+        block = CLOUD.split("cloud.plugins.catalog_up_to_date", 2)[2]
+        block = block.split("finishPluginSyncAllowingPending:YES];", 1)[0]
+        self.assertIn("AMCloudPluginsCurrentState()", block)
+        self.assertIn("activatePersistedCatalogAfterSync", block)
+
+    def test_reactivation_helper_restores_then_falls_back_to_rebuild(self):
+        self.assertIn("activatePersistedCatalogAfterSync:", CLOUD)
+        helper = CLOUD[CLOUD.rindex(
+            "- (void)activatePersistedCatalogAfterSync:"):]
+        helper = helper.split("- (void)syncPluginCatalog:", 1)[0]
+        self.assertIn("AMCloudPluginsRestoreInstalledReleaseForAuthorization", helper)
+        self.assertIn("cloud.plugins.runtime_reactivated", helper)
+        self.assertIn("cloud.plugins.runtime_reactivation_failed", helper)
+        self.assertIn("AMCloudPluginsRemoveAllIf", helper)
+
+    def test_quiet_reauth_throttle_shrunk(self):
+        self.assertIn("now - lastAttempt < 90.0", CLOUD)
+
+    def test_plugin_sync_events_have_file_breadcrumb(self):
+        self.assertIn("AMProjExport.pluginlog", CLOUD)
+        self.assertIn("cloud.plugins.runtime_reactivation_failed", CLOUD)
+        self.assertIn("cloud.plugins.catalog_activation_failed", CLOUD)

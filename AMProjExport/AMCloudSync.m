@@ -108,6 +108,48 @@ static NSString *AMCloudClassName(id object) {
 static void AMCloudDiagnostic(NSString *name, NSDictionary *fields) {
     NSLog(@"[AMProjExport] %@ %@", name ?: @"cloud.account", fields ?: @{});
     [[AMDebugTransport shared] emitCriticalEvent:name fields:fields ?: @{}];
+    // 插件同步链路的事件落一份文件面包屑（AFC 可读）：真机不连线也能
+    // 回溯"下载了却看不见"这类问题的最后一步。
+    static NSArray<NSString *> *cloudBreadcrumbEvents;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cloudBreadcrumbEvents = @[
+            @"cloud.plugins.sync_begin", @"cloud.plugins.manifest_failed",
+            @"cloud.plugins.catalog_up_to_date",
+            @"cloud.plugins.runtime_reactivation_needed",
+            @"cloud.plugins.runtime_reactivated",
+            @"cloud.plugins.runtime_reactivation_failed",
+            @"cloud.plugins.catalog_activation_failed",
+            @"cloud.plugins.catalog_activated",
+            @"cloud.plugins.catalog_repair_begin",
+            @"cloud.plugins.catalog_repair_retry",
+            @"cloud.plugins.catalog_repair_failed",
+            @"cloud.plugins.empty_manifest_kept_installed",
+            @"cloud.plugins.cleared", @"cloud.plugins.download_failed",
+            @"cloud.plugins.install_failed", @"cloud.plugins.installed",
+            @"cloud.plugins.session_activation_failed",
+            @"cloud.plugins.up_to_date"];
+    });
+    if (![cloudBreadcrumbEvents containsObject:name]) return;
+    @try {
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n",
+            [NSDate date].timeIntervalSince1970, name];
+        NSString *path = [NSSearchPathForDirectoriesInDomains(
+            NSCachesDirectory, NSUserDomainMask, YES).firstObject
+            stringByAppendingPathComponent:@"AMProjExport.pluginlog"];
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSData *existing = [NSData dataWithContentsOfFile:path];
+        NSMutableData *merged = existing ? [existing mutableCopy]
+                                         : [NSMutableData data];
+        [merged appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        if (merged.length > 64 * 1024) {
+            merged = [[merged subdataWithRange:
+                NSMakeRange(merged.length - 48 * 1024, 48 * 1024)] mutableCopy];
+        }
+        [fm createFileAtPath:path contents:merged attributes:nil];
+    } @catch (NSException *exception) {
+        // 面包屑失败不影响主流程
+    }
 }
 
 // This flag is deliberately opt-in. A com.autfeng item is otherwise a
@@ -129,20 +171,6 @@ static NSError *AMCloudError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:AMCloudErrorDomain code:code
                             userInfo:@{NSLocalizedDescriptionKey:
                                 message.length ? message : @"云服务请求失败"}];
-}
-
-static BOOL AMCloudCatalogActivationErrorMayBeStaleCache(NSError *error) {
-    NSString *message = error.localizedDescription.lowercaseString;
-    if (!message.length) return NO;
-    for (NSString *fragment in @[
-        @"legacy plugin override xml effect id does not match metadata",
-        @"legacy plugin target xml effect id does not match metadata",
-        @"installed plugin item is incomplete",
-        @"builtin override xml effect id does not match effectid"
-    ]) {
-        if ([message containsString:fragment]) return YES;
-    }
-    return NO;
 }
 
 static void AMCloudCompleteOnMain(AMCloudResult completion, id data, NSError *error) {
@@ -1627,6 +1655,13 @@ extern BOOL AMProjStartSelfCloudUploadWithMedia(BOOL includeMedia);
 - (void)updateAccountEntryImage;
 - (void)clearAccountAvatar;
 - (void)loadCachedAccountAvatar;
+// r89：磁盘持久化目录的重激活（失败则清目录走全量重建）。
+- (void)activatePersistedCatalogAfterSync:(NSArray<NSDictionary *> *)plugins
+                                 revision:(NSNumber *)revision
+                                    token:(NSString *)token
+                  authorizationGeneration:(uint64_t)authorizationGeneration
+                         authorizationKey:(NSString *)authorizationKey
+                              operationID:(NSString *)operationID;
 - (void)syncPluginCatalog:(NSArray<NSDictionary *> *)plugins
                  revision:(NSNumber *)revision
                     token:(NSString *)token
@@ -2681,6 +2716,51 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     }];
 }
 
+// r89：从磁盘持久化状态重建运行时激活态。state.json 校验通过即恢复可见；
+// 校验失败（密钥/指纹/清单身份不符）则清掉目录，让下一轮 sync 走全量下载
+// 重建——保证"已下载过但不显示"永远有出口。
+- (void)activatePersistedCatalogAfterSync:(NSArray<NSDictionary *> *)plugins
+                                 revision:(NSNumber *)revision
+                                    token:(NSString *)token
+                  authorizationGeneration:(uint64_t)authorizationGeneration
+                         authorizationKey:(NSString *)authorizationKey
+                              operationID:(NSString *)operationID {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL restored = AMCloudPluginsRestoreInstalledReleaseForAuthorization(
+            authorizationKey, authorizationGeneration);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
+            if (!AMCloudAuthMatches(token, authorizationGeneration)) {
+                [self finishPluginSyncAllowingPending:YES];
+                return;
+            }
+            if (restored) {
+                AMCloudDiagnostic(@"cloud.plugins.runtime_reactivated", @{
+                    @"plugin_count": @(plugins.count)
+                });
+                [self finishPluginSyncAllowingPending:YES];
+                return;
+            }
+            // 持久化状态救不回来：清目录（保留 items 供对账），下一轮
+            // sync 会用磁盘 item.json 零下载重建目录；items 也坏时才会
+            // 真正重新下载。
+            AMCloudDiagnostic(@"cloud.plugins.runtime_reactivation_failed", @{
+                @"plugin_count": @(plugins.count)
+            });
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                AMCloudPluginsRemoveAllIf(^BOOL{
+                    return AMCloudAuthMatches(token, authorizationGeneration);
+                });
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
+                    self.pluginSyncPending = YES;
+                    [self finishPluginSyncAllowingPending:YES];
+                });
+            });
+        });
+    });
+}
+
 - (void)syncPluginCatalog:(NSArray<NSDictionary *> *)plugins
                  revision:(NSNumber *)revision
                      token:(NSString *)token
@@ -2775,6 +2855,21 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         AMCloudDiagnostic(@"cloud.plugins.catalog_up_to_date", @{
             @"plugin_count": @(plugins.count), @"catalog_revision": revision ?: @0
         });
+        // r89 自愈：state.json 与清单一致不代表运行时已激活。权限闪断/
+        // 指纹变化会让持久化激活失败并把内存态清空；这条路径以前直接
+        // return，效果从此永远隐形且不再下载。这里若内存态丢失就重激活。
+        NSDictionary *runtimeState = AMCloudPluginsCurrentState();
+        if (![runtimeState[@"plugins"] isKindOfClass:NSArray.class] ||
+            [runtimeState[@"plugins"] count] != plugins.count) {
+            AMCloudDiagnostic(@"cloud.plugins.runtime_reactivation_needed", @{
+                @"plugin_count": @(plugins.count),
+                @"runtime_active": @(runtimeState != nil)
+            });
+            [self activatePersistedCatalogAfterSync:plugins revision:revision
+                token:token authorizationGeneration:authorizationGeneration
+              authorizationKey:authorizationKey operationID:operationID];
+            return;
+        }
         [self finishPluginSyncAllowingPending:YES];
         return;
     }
@@ -2817,9 +2912,11 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 }, &activationError);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (![self.pluginSyncOperationID isEqualToString:operationID]) return;
-                    if (!activated && !self.pluginCatalogRepairAttempted &&
-                        AMCloudCatalogActivationErrorMayBeStaleCache(activationError)) {
+                    if (!activated && !self.pluginCatalogRepairAttempted) {
                         self.pluginCatalogRepairAttempted = YES;
+                        AMCloudDiagnostic(@"cloud.plugins.catalog_repair_reason", @{
+                            @"error": activationError.localizedDescription ?: @""
+                        });
                         NSError *originalError = activationError;
                         AMCloudDiagnostic(@"cloud.plugins.catalog_repair_begin", @{
                             @"plugin_count": @(plugins.count),
@@ -4815,7 +4912,8 @@ static BOOL AMCloudBannerTickRunning = NO;
 static void AMCloudQuietReauthAttempt(void) {
     static CFAbsoluteTime lastAttempt = 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - lastAttempt < 600.0) return;
+    // 90s 节流：600s 时服务器端修复后用户要等近 10 分钟才能自愈。
+    if (now - lastAttempt < 90.0) return;
     lastAttempt = now;
     AMCloudManager *manager = [AMCloudManager shared];
     if (!manager) return;
