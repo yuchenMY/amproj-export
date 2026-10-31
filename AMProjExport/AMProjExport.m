@@ -20739,6 +20739,20 @@ static void amproj_probeMediaLibraryAccess(void) {
     title.textAlignment = NSTextAlignmentCenter;
     title.translatesAutoresizingMaskIntoConstraints = NO;
     [bar addSubview:title];
+    // 右上角相册图标（老版样式占位装饰）
+    UIButton *galleryIcon = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImage *galleryImage = [UIImage systemImageNamed:@"photo.on.rectangle.angled"];
+    [galleryIcon setImage:galleryImage forState:UIControlStateNormal];
+    galleryIcon.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
+    galleryIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [bar addSubview:galleryIcon];
+    [NSLayoutConstraint activateConstraints:@[
+        [galleryIcon.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor
+                                                   constant:-14],
+        [galleryIcon.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [galleryIcon.widthAnchor constraintEqualToConstant:24],
+        [galleryIcon.heightAnchor constraintEqualToConstant:20],
+    ]];
 
     // 视频预览
     UIView *preview = [[UIView alloc] initWithFrame:CGRectZero];
