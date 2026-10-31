@@ -2,7 +2,24 @@
 #import "AMProjImportArchive.h"
 
 #import <CommonCrypto/CommonDigest.h>
+#import <CommonCrypto/CommonCryptor.h>
+#import <Security/Security.h>
+
+// GCM one-shot 接口在新 SDK 里不再随公开头文件提供，但符号一直在
+// libcommonCrypto.dylib（iOS 12+）。手动声明，链接时解析。
+extern CCCryptorStatus
+CCCryptorGCMOneshotEncrypt(uint32_t alg, const void *key, size_t keyLength,
+    const void *iv, size_t ivLength, const void *dataIn, size_t dataInLength,
+    void *dataOut, void *tag, size_t *tagLength);
+extern CCCryptorStatus
+CCCryptorGCMOneshotDecrypt(uint32_t alg, const void *key, size_t keyLength,
+    const void *iv, size_t ivLength, const void *dataIn, size_t dataInLength,
+    void *dataOut, const void *tag, size_t tagLength, size_t *dataOutMoved);
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+
+// r90 内容静态加密：解密感知读取（定义在 root URL 助手之后）。
+static NSData *AMCloudPluginsReadContentData(NSURL *URL);
 
 static NSString *AMCloudPluginsNormalizeEffectResourceReference(NSString *value) {
     if (![value isKindOfClass:NSString.class]) return nil;
@@ -348,7 +365,7 @@ static AMCloudPluginsEffectIdentityParser *AMCloudPluginsParseEffectData(
 }
 
 static NSString *AMCloudPluginsEffectIDForXMLURL(NSURL *URL, NSError **error) {
-    NSData *data = URL ? [NSData dataWithContentsOfURL:URL options:0 error:error] : nil;
+    NSData *data = URL ? AMCloudPluginsReadContentData(URL) : nil;
     AMCloudPluginsEffectIdentityParser *delegate = AMCloudPluginsParseEffectData(data, error);
     if (!delegate) return nil;
     return delegate.effectID;
@@ -356,7 +373,7 @@ static NSString *AMCloudPluginsEffectIDForXMLURL(NSURL *URL, NSError **error) {
 
 static NSString *AMCloudPluginsRootAttributeForXMLURL(
     NSURL *URL, NSString *attribute, NSError **error) {
-    NSData *data = URL ? [NSData dataWithContentsOfURL:URL options:0 error:error] : nil;
+    NSData *data = URL ? AMCloudPluginsReadContentData(URL) : nil;
     AMCloudPluginsEffectIdentityParser *delegate = AMCloudPluginsParseEffectData(data, error);
     if (!delegate) return nil;
     return delegate.rootAttributes[attribute.lowercaseString];
@@ -371,7 +388,7 @@ static NSString *AMCloudPluginsEscapeXMLAttributeValue(NSString *value) {
 static BOOL AMCloudPluginsEnsureRootAttribute(
     NSURL *URL, NSString *attribute, NSString *value, NSError **error) {
     if (!URL || !attribute.length || !value.length) return YES;
-    NSData *data = [NSData dataWithContentsOfURL:URL options:0 error:error];
+    NSData *data = AMCloudPluginsReadContentData(URL);
     NSString *source = data.length ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
     if (!source.length) {
         if (error && !*error) *error = AMCloudPluginsValidationError(
@@ -472,7 +489,7 @@ static BOOL AMCloudPluginsRepairBuiltinCompatibility(
 
 static NSSet<NSString *> *AMCloudPluginsReferencedPathsForXMLURL(
     NSURL *URL, NSError **error) {
-    NSData *data = URL ? [NSData dataWithContentsOfURL:URL options:0 error:error] : nil;
+    NSData *data = URL ? AMCloudPluginsReadContentData(URL) : nil;
     AMCloudPluginsEffectIdentityParser *delegate = AMCloudPluginsParseEffectData(data, error);
     if (!delegate) return nil;
     return delegate.referencedPaths ?: [NSSet set];
@@ -480,15 +497,16 @@ static NSSet<NSString *> *AMCloudPluginsReferencedPathsForXMLURL(
 
 static NSSet<NSString *> *AMCloudPluginsReferencedEffectIDsForXMLURL(
     NSURL *URL, NSError **error) {
-    NSData *data = URL ? [NSData dataWithContentsOfURL:URL options:0 error:error] : nil;
+    NSData *data = URL ? AMCloudPluginsReadContentData(URL) : nil;
     AMCloudPluginsEffectIdentityParser *delegate = AMCloudPluginsParseEffectData(data, error);
     if (!delegate) return nil;
     return delegate.referencedEffectIDs ?: [NSSet set];
 }
 
 static NSData *AMCloudPluginsDataAtURL(NSURL *URL) {
-    if (!URL) return nil;
-    return [NSData dataWithContentsOfURL:URL options:0 error:nil];
+    // r90：统一走解密感知读取——items/catalog 落盘为密文、bundled 为明文，
+    // 这里是全部内容比较/校验的汇聚点（明文原样返回，密文先解）。
+    return AMCloudPluginsReadContentData(URL);
 }
 
 static NSString *AMCloudPluginsBundledEffectsFingerprint(NSURL *effectsURL) {
@@ -689,6 +707,257 @@ static NSURL *AMCloudPluginsItemsURL(void) {
 
 static NSURL *AMCloudPluginsCatalogURL(void) {
     return [AMCloudPluginsRootURL() URLByAppendingPathComponent:@"catalog" isDirectory:YES];
+}
+
+/* ================================================================ r90 =====
+ * 内容静态加密（防本地提取）。已装插件以 AES-256-GCM 落盘，密钥为本机
+ * 随机生成（Keychain ThisDeviceOnly + Library 镜像兜底），不随备份/容器
+ * 拷贝流转：备份提取（爱思/iMazing）拿到的只有密文。运行时 AM 通过
+ * Bundle Hook 取资源，取到的是解密后的临时副本（Caches，退后台即清）。
+ * 内部校验/对账读取统一走 AMCloudPluginsReadContentData（明文/密文通吃），
+ * 迁移零下载：激活后后台把存量明文逐个原子加密。
+ * ======================================================================== */
+static NSData *AMCloudPluginsContentKeyForced(BOOL forceCreate);
+static NSURL *AMCloudPluginsContentKeyMirrorURL(void);
+
+static NSURL *AMCloudPluginsContentKeyMirrorURL(void) {
+    NSURL *library = [NSFileManager.defaultManager
+        URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
+    return [library URLByAppendingPathComponent:@"amplug-content-key"];
+}
+
+static NSData *AMCloudPluginsReadKeychainContentKey(void) {
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: @"com.ayakameow.amplug.content",
+        (__bridge id)kSecAttrAccount: @"content-key-v1",
+        (__bridge id)kSecReturnData: @YES,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
+    };
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (status != errSecSuccess || !result) return nil;
+    NSData *data = CFBridgingRelease(result);
+    return data.length == 32 ? data : nil;
+}
+
+static BOOL AMCloudPluginsWriteKeychainContentKey(NSData *key) {
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: @"com.ayakameow.amplug.content",
+        (__bridge id)kSecAttrAccount: @"content-key-v1"
+    };
+    SecItemDelete((__bridge CFDictionaryRef)query);
+    NSDictionary *add = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: @"com.ayakameow.amplug.content",
+        (__bridge id)kSecAttrAccount: @"content-key-v1",
+        (__bridge id)kSecValueData: key,
+        (__bridge id)kSecAttrAccessible:
+            (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    };
+    return SecItemAdd((__bridge CFDictionaryRef)add, NULL) == errSecSuccess;
+}
+
+static NSData *AMCloudPluginsContentKeyForced(BOOL forceCreate) {
+    NSData *key = AMCloudPluginsReadKeychainContentKey();
+    if (key) return key;
+    NSData *mirrored = [NSData dataWithContentsOfURL:AMCloudPluginsContentKeyMirrorURL()];
+    if (mirrored.length == 32) {
+        if (forceCreate) AMCloudPluginsWriteKeychainContentKey(mirrored);
+        return mirrored;
+    }
+    if (!forceCreate) return nil;
+    NSMutableData *generated = [NSMutableData dataWithLength:32];
+    OSStatus status = SecRandomCopyBytes(kSecRandomDefault, 32, generated.mutableBytes);
+    if (status != errSecSuccess) {
+        arc4random_buf(generated.mutableBytes, 32);
+    }
+    if (!AMCloudPluginsWriteKeychainContentKey(generated)) return nil;
+    NSData *plainKey = [generated copy];
+    [plainKey writeToURL:AMCloudPluginsContentKeyMirrorURL() atomically:YES];
+    [NSFileManager.defaultManager setAttributes:
+        @{NSFilePosixPermissions: @0600}
+        ofItemAtPath:AMCloudPluginsContentKeyMirrorURL().path error:nil];
+    return plainKey;
+}
+
+static NSData *AMCloudPluginsContentKey(void) {
+    static NSData *cached = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cached = AMCloudPluginsContentKeyForced(YES);
+    });
+    return cached;
+}
+
+static BOOL AMCloudPluginsContentDataIsEncrypted(NSData *data) {
+    if (data.length <= 5 + 12 + 16) return NO;
+    return [[data subdataWithRange:NSMakeRange(0, 5)]
+        isEqualToData:[NSData dataWithBytes:"AMPE1" length:5]];
+}
+
+static NSData *AMCloudPluginsEncryptContentData(NSData *plain, NSError **error) {
+    if (!plain.length) return nil;
+    NSData *key = AMCloudPluginsContentKey();
+    if (!key) return nil;
+    NSMutableData *nonce = [NSMutableData dataWithLength:12];
+    if (SecRandomCopyBytes(kSecRandomDefault, 12, nonce.mutableBytes) != errSecSuccess) {
+        arc4random_buf(nonce.mutableBytes, 12);
+    }
+    NSMutableData *cipher = [NSMutableData dataWithLength:plain.length];
+    NSMutableData *tag = [NSMutableData dataWithLength:16];
+    size_t tagLength = 16;
+    CCCryptorStatus status = CCCryptorGCMOneshotEncrypt(
+        kCCAlgorithmAES, key.bytes, key.length, nonce.bytes, nonce.length,
+        plain.bytes, plain.length, cipher.mutableBytes,
+        tag.mutableBytes, &tagLength);
+    if (status != kCCSuccess || tagLength != 16) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Plugin content encryption failed");
+        return nil;
+    }
+    NSMutableData *out = [NSMutableData dataWithCapacity:5 + 12 + plain.length + 16];
+    [out appendData:[NSData dataWithBytes:"AMPE1" length:5]];
+    [out appendData:nonce];
+    [out appendData:cipher];
+    [out appendData:tag];
+    return out;
+}
+
+static NSData *AMCloudPluginsDecryptContentData(NSData *stored, NSError **error) {
+    if (!AMCloudPluginsContentDataIsEncrypted(stored)) return nil;
+    NSData *key = AMCloudPluginsContentKey();
+    if (!key) return nil;
+    NSData *nonce = [stored subdataWithRange:NSMakeRange(5, 12)];
+    NSUInteger cipherLength = stored.length - 5 - 12 - 16;
+    NSData *cipher = [stored subdataWithRange:NSMakeRange(17, cipherLength)];
+    NSData *tag = [stored subdataWithRange:NSMakeRange(stored.length - 16, 16)];
+    NSMutableData *plain = [NSMutableData dataWithLength:cipherLength];
+    size_t moved = 0;
+    CCCryptorStatus status = CCCryptorGCMOneshotDecrypt(
+        kCCAlgorithmAES, key.bytes, key.length, nonce.bytes, nonce.length,
+        cipher.bytes, cipher.length, plain.mutableBytes,
+        tag.bytes, tag.length, &moved);
+    if (status != kCCSuccess || moved != cipherLength) {
+        if (error) *error = AMCloudPluginsValidationError(
+            @"Plugin content decryption failed");
+        return nil;
+    }
+    return plain;
+}
+
+static BOOL AMCloudPluginsURLIsUnderCloudRoot(NSURL *URL) {
+    if (!URL || !URL.path) return NO;
+    NSString *rootPath = AMCloudPluginsRootURL().URLByStandardizingPath.path;
+    NSString *path = URL.URLByStandardizingPath.path;
+    if (!rootPath.length || !path.length) return NO;
+    return [path hasPrefix:[rootPath stringByAppendingString:@"/"]];
+}
+
+static NSData *AMCloudPluginsReadContentData(NSURL *URL) {
+    NSData *raw = URL ? [NSData dataWithContentsOfURL:URL options:0 error:nil] : nil;
+    if (!raw.length || !AMCloudPluginsURLIsUnderCloudRoot(URL) ||
+        !AMCloudPluginsContentDataIsEncrypted(raw)) {
+        return raw;
+    }
+    return AMCloudPluginsDecryptContentData(raw, nil);
+}
+
+// 运行时 AM 通过 Bundle Hook 拿到的是文件路径；密文文件在这里解到
+// Caches 临时副本返回（退后台/授权失效即清）。明文（未迁移存量）原样返回。
+static NSURL *AMCloudPluginsServingURLForCloudURL(NSURL *cloudURL) {
+    if (!cloudURL || !AMCloudPluginsURLIsUnderCloudRoot(cloudURL)) return cloudURL;
+    NSData *raw = [NSData dataWithContentsOfURL:cloudURL options:0 error:nil];
+    if (!raw.length || !AMCloudPluginsContentDataIsEncrypted(raw)) return cloudURL;
+    NSData *plain = AMCloudPluginsDecryptContentData(raw, nil);
+    if (!plain.length) return nil;
+    NSURL *serveRoot = [NSFileManager.defaultManager
+        URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    serveRoot = [serveRoot URLByAppendingPathComponent:@"AMCloudPluginsServe"
+                                           isDirectory:YES];
+    // 确定性命名（云路径的 SHA256 前缀）：同一文件多次查找复用同一副本。
+    NSData *pathData = [cloudURL.path dataUsingEncoding:NSUTF8StringEncoding];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(pathData.bytes, (CC_LONG)pathData.length, digest);
+    NSMutableString *key = [NSMutableString stringWithCapacity:32];
+    for (NSUInteger index = 0; index < 8; index++) {
+        [key appendFormat:@"%02x", digest[index]];
+    }
+    NSURL *destination = [[[serveRoot URLByAppendingPathComponent:key
+                                                     isDirectory:YES]
+        URLByAppendingPathComponent:cloudURL.lastPathComponent] URLByStandardizingPath];
+    NSNumber *exists = nil;
+    if (![destination getResourceValue:&exists forKey:NSURLIsRegularFileKey
+                                 error:nil] || !exists.boolValue) {
+        if (![plain writeToURL:destination options:NSDataWritingAtomic error:nil]) return nil;
+        [NSFileManager.defaultManager setAttributes:
+            @{NSFilePosixPermissions: @0600} ofItemAtPath:destination.path error:nil];
+    }
+    return destination;
+}
+
+static void AMCloudPluginsWipeServingCache(void) {
+    NSURL *serveRoot = [NSFileManager.defaultManager
+        URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    serveRoot = [serveRoot URLByAppendingPathComponent:@"AMCloudPluginsServe"
+                                           isDirectory:YES];
+    [NSFileManager.defaultManager removeItemAtURL:serveRoot error:nil];
+}
+
+static void AMCloudPluginsExcludeFromBackup(NSURL *URL) {
+    if (!URL) return;
+    [URL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+}
+
+// 后台把存量明文（items/ + catalog/ 的效果内容）逐个原子加密，并给整棵
+// 树打上"不参与备份"标记。item.json/state.json/吊销标记保持明文（仅元数据，
+// 对账/恢复要用）。跑在插件串行队列上，与安装/激活互斥。
+static void AMCloudPluginsEncryptTreePass(void) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    AMCloudPluginsExcludeFromBackup(AMCloudPluginsRootURL());
+    AMCloudPluginsExcludeFromBackup(AMCloudPluginsContentKeyMirrorURL());
+    NSSet<NSString *> *skip = [NSSet setWithArray:@[
+        @"item.json", @"state.json", AMCloudPluginsRevocationName]];
+    NSArray<NSURL *> *roots = @[
+        AMCloudPluginsItemsURL(), AMCloudPluginsCatalogURL()];
+    for (NSURL *root in roots) {
+        NSNumber *directory = nil;
+        if (![root getResourceValue:&directory forKey:NSURLIsDirectoryKey
+                              error:nil] || !directory.boolValue) continue;
+        NSDirectoryEnumerator *enumerator = [manager
+            enumeratorAtURL:root includingPropertiesForKeys:nil
+                    options:NSDirectoryEnumerationSkipsPackageDescendants
+               errorHandler:nil];
+        for (NSURL *URL in enumerator) {
+            AMCloudPluginsExcludeFromBackup(URL);
+            NSString *name = URL.lastPathComponent;
+            if ([skip containsObject:name]) continue;
+            NSNumber *isDirectory = nil;
+            if (![URL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey
+                                 error:nil] || isDirectory.boolValue) continue;
+            NSData *raw = [NSData dataWithContentsOfURL:URL options:0 error:nil];
+            if (!raw.length || AMCloudPluginsContentDataIsEncrypted(raw)) continue;
+            NSData *cipher = AMCloudPluginsEncryptContentData(raw, nil);
+            if (!cipher.length) continue;
+            NSURL *temporary = [[root URLByAppendingPathComponent:
+                [NSString stringWithFormat:@".enc-%@", NSUUID.UUID.UUIDString]]
+                URLByStandardizingPath];
+            if (![cipher writeToURL:temporary options:NSDataWritingAtomic error:nil]) continue;
+            if (![manager replaceItemAtURL:URL withItemAtURL:temporary
+                     backupItemName:nil options:0 resultingItemURL:nil error:nil]) {
+                [manager removeItemAtURL:temporary error:nil];
+            }
+        }
+    }
+}
+
+static void AMCloudPluginsScheduleContentEncryption(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        AMCloudPluginsPerformMutation(^{
+            AMCloudPluginsEncryptTreePass();
+        });
+    });
 }
 
 static NSString *AMCloudPluginsItemVersionID(NSDictionary *plugin) {
@@ -1175,6 +1444,7 @@ static void AMCloudPluginsSetActiveState(NSDictionary<NSString *, id> *state,
                                          NSURL *effectsURL,
                                          uint64_t authorizationGeneration) {
     AMCloudPluginsClearRuntimeCaches();
+    if (!state) AMCloudPluginsWipeServingCache();
     @synchronized (NSBundle.class) {
         AMCloudActiveState = [state copy];
         AMCloudActiveEffectsURL = effectsURL;
@@ -1335,6 +1605,7 @@ static BOOL AMCloudPluginsActivatePersistedCatalog(
         !directory.boolValue ||
         authorizationGeneration != AMCloudPluginsAuthorizationGeneration()) return NO;
     AMCloudPluginsSetActiveState(state, effectsURL, authorizationGeneration);
+    AMCloudPluginsScheduleContentEncryption();
     return YES;
 }
 
@@ -1494,6 +1765,7 @@ BOOL AMCloudPluginsInstallItemArchiveWithMetadata(
         }
         installed = YES;
     });
+    if (installed) AMCloudPluginsScheduleContentEncryption();
     if (!installed && error) *error = installError;
     return installed;
 }
@@ -1553,8 +1825,10 @@ static BOOL AMCloudPluginsCopyCatalogDirectorySkippingPaths(
 					![manager copyItemAtURL:source toURL:destination error:error]) return NO;
 				continue;
 			}
-            NSData *existing = [NSData dataWithContentsOfURL:destination options:0 error:error];
-            NSData *incoming = [NSData dataWithContentsOfURL:source options:0 error:error];
+            // 已装文件可能已被静态加密：比较必须用解密感知读取，否则同一
+            // 内容因 nonce 不同被误判为依赖冲突。
+            NSData *existing = AMCloudPluginsReadContentData(destination);
+            NSData *incoming = AMCloudPluginsReadContentData(source);
             if (!existing || !incoming || ![existing isEqualToData:incoming]) {
                 if (error && !*error) *error = [NSError errorWithDomain:NSCocoaErrorDomain
                     code:NSFileWriteFileExistsError
@@ -1922,6 +2196,7 @@ BOOL AMCloudPluginsActivateCatalog(NSArray<NSDictionary<NSString *,id> *> *plugi
                 AMCloudPluginsSetActiveState(state,
                     [catalogURL URLByAppendingPathComponent:@"BuiltinEffects" isDirectory:YES],
                     authorizationGeneration);
+                AMCloudPluginsScheduleContentEncryption();
                 activated = YES;
             }
         };
@@ -2104,7 +2379,13 @@ static NSArray<NSURL *> *AMCloudBundleURLsHook(id self, SEL selector,
             !AMCloudPluginsRelativeDirectory(subdirectory)) return bundled ?: @[];
         NSArray<NSURL *> *cloud = AMCloudPluginsFiles(
             AMCloudPluginsActiveDirectoryURL(subdirectory), extension);
-        return AMCloudPluginsMergeResourceURLs(bundled, cloud);
+        NSArray<NSURL *> *merged = AMCloudPluginsMergeResourceURLs(bundled, cloud);
+        NSMutableArray<NSURL *> *serving = [NSMutableArray arrayWithCapacity:merged.count];
+        for (NSURL *URL in merged) {
+            NSURL *served = AMCloudPluginsServingURLForCloudURL(URL);
+            [serving addObject:served ?: URL];
+        }
+        return serving;
     } @finally {
         AMCloudPluginsLeaveBundleHook();
     }
@@ -2122,7 +2403,9 @@ static NSURL *AMCloudBundleURLHook(id self, SEL selector, NSString *name,
         if (self == NSBundle.mainBundle) {
             if (AMCloudPluginsRelativeDirectory(subdirectory)) {
                 NSURL *cloud = AMCloudPluginsResourceURL(name, extension, subdirectory);
-                if (AMCloudPluginsShouldUseCloudResource(cloud, bundled)) return cloud;
+                if (AMCloudPluginsShouldUseCloudResource(cloud, bundled)) {
+                    return AMCloudPluginsServingURLForCloudURL(cloud) ?: cloud;
+                }
             }
         }
         return bundled;
@@ -2152,7 +2435,9 @@ static NSArray<NSString *> *AMCloudBundlePathsHook(id self, SEL selector,
                                              extension));
         NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithCapacity:merged.count];
         for (NSURL *URL in merged) {
-            if (URL.path.length) [paths addObject:URL.path];
+            if (!URL.path.length) continue;
+            NSURL *served = AMCloudPluginsServingURLForCloudURL(URL) ?: URL;
+            [paths addObject:served.path];
         }
         return paths;
     } @finally {
@@ -2173,7 +2458,10 @@ static NSString *AMCloudBundlePathHook(id self, SEL selector, NSString *name,
             if (AMCloudPluginsRelativeDirectory(subdirectory)) {
                 NSURL *cloud = AMCloudPluginsResourceURL(name, extension, subdirectory);
                 NSURL *bundledURL = bundled.length ? [NSURL fileURLWithPath:bundled] : nil;
-                if (AMCloudPluginsShouldUseCloudResource(cloud, bundledURL)) return cloud.path;
+                if (AMCloudPluginsShouldUseCloudResource(cloud, bundledURL)) {
+                    NSURL *served = AMCloudPluginsServingURLForCloudURL(cloud) ?: cloud;
+                    return served.path;
+                }
             }
         }
         return bundled;
@@ -2196,6 +2484,17 @@ static IMP AMCloudPluginsInstallHook(Class bundleClass, SEL selector, IMP hook) 
 void AMCloudPluginsInstallBundleHooks(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // 解密临时副本的生命周期：退后台/锁屏/终止即整目录清除，
+        // 静态落盘永远是密文。
+        void (^wipe)(NSNotification *) = ^(__unused NSNotification *note) {
+            AMCloudPluginsWipeServingCache();
+        };
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:UIApplicationDidEnterBackgroundNotification
+                        object:nil queue:nil usingBlock:wipe];
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:UIApplicationWillTerminateNotification
+                        object:nil queue:nil usingBlock:wipe];
         Class bundleClass = object_getClass(NSBundle.mainBundle);
         AMCloudOriginalBundleURLs = (AMCloudBundleURLsIMP)AMCloudPluginsInstallHook(
             bundleClass, @selector(URLsForResourcesWithExtension:subdirectory:),

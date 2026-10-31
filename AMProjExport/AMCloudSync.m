@@ -357,6 +357,8 @@ static void AMCloudWriteTokenMirror(NSString *token) {
            encoding:NSUTF8StringEncoding error:nil];
     [NSFileManager.defaultManager setAttributes:
         @{NSFilePosixPermissions: @0600} ofItemAtPath:url.path error:nil];
+    // r90：登录凭据不进备份（防容器拷贝提取）。
+    [url setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
 }
 
 static NSString *AMCloudReadTokenMirror(void) {

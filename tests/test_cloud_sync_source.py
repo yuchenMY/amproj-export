@@ -902,7 +902,11 @@ class CloudSyncSourceTests(unittest.TestCase):
         self.assertIn("? replacement : URL", PLUGINS)
         self.assertIn("[merged addObjectsFromArray:newURLs]", PLUGINS)
         self.assertIn("contentsOfDirectoryAtURL", PLUGINS)
-        self.assertNotIn("enumeratorAtURL", PLUGINS)
+        # r90：禁令针对 Hook 服务路径；后台加密巡检（插件队列维护路径）
+        # 用 enumeratorAtURL 做整树深扫，不影响服务语义。
+        hook_region = PLUGINS[PLUGINS.index("static NSArray<NSURL *> *AMCloudBundleURLsHook"):
+                              PLUGINS.index("static IMP AMCloudPluginsInstallHook")]
+        self.assertNotIn("enumeratorAtURL", hook_region)
         self.assertIn("AMCloudPluginsRelativeDirectory", PLUGINS)
         self.assertNotIn("AMCloudPluginsBuiltinEffectsRootURL", PLUGINS)
         self.assertIn("NSURL *bundled = AMCloudOriginalBundleURL", PLUGINS)
@@ -1751,3 +1755,62 @@ class RuntimeReactivationR89Tests(unittest.TestCase):
         self.assertNotIn(
             "[NSDate date].timeIntervalSince1970, name];", CLOUD)
 
+
+
+class AntiExtractionR90Tests(unittest.TestCase):
+    """r90：防本地提取——已装插件内容以 AES-256-GCM 落盘，密钥本机随机
+    （Keychain ThisDeviceOnly + Library 镜像），不随备份/容器拷贝流转；
+    运行时 Bundle Hook 返回解密后的 Caches 临时副本，退后台/授权失效即清；
+    存量明文在激活后后台原子加密，迁移零下载。"""
+
+    def test_content_encryption_gcm_exists(self):
+        self.assertIn("CCCryptorGCMOneshotEncrypt", PLUGINS)
+        self.assertIn("CCCryptorGCMOneshotDecrypt", PLUGINS)
+        self.assertIn('"AMPE1"', PLUGINS)
+
+    def test_key_is_device_only_and_mirrored(self):
+        self.assertIn(
+            "kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly", PLUGINS)
+        self.assertIn("amplug-content-key", PLUGINS)
+        self.assertIn("NSFilePosixPermissions: @0600", PLUGINS)
+
+    def test_backup_exclusion_applied(self):
+        self.assertIn("NSURLIsExcludedFromBackupKey", PLUGINS)
+        self.assertIn("AMCloudPluginsExcludeFromBackup(AMCloudPluginsRootURL())", PLUGINS)
+
+    def test_metadata_files_stay_plaintext(self):
+        self.assertIn('@"item.json", @"state.json", AMCloudPluginsRevocationName', PLUGINS)
+
+    def test_hooks_serve_decrypted_copies(self):
+        for hook in ["return serving;", "AMCloudPluginsServingURLForCloudURL(cloud) ?: cloud"]:
+            self.assertIn(hook, PLUGINS)
+        self.assertIn("AMCloudPluginsServe", PLUGINS)
+
+    def test_serving_cache_wiped_on_background_and_lapse(self):
+        self.assertIn(
+            "UIApplicationDidEnterBackgroundNotification", PLUGINS)
+        self.assertIn("if (!state) AMCloudPluginsWipeServingCache();", PLUGINS)
+
+    def test_internal_reads_are_decrypt_aware(self):
+        self.assertIn("return AMCloudPluginsReadContentData(URL);", PLUGINS)
+        self.assertIn("static NSData *AMCloudPluginsReadContentData(NSURL *URL);", PLUGINS)
+        self.assertIn("NSData *existing = AMCloudPluginsReadContentData(destination);", PLUGINS)
+
+    def test_encryption_scheduled_after_activation_and_install(self):
+        self.assertEqual(PLUGINS.count("AMCloudPluginsScheduleContentEncryption()"), 3)
+
+    def test_encryption_pass_runs_on_mutation_queue(self):
+        block = PLUGINS.split(
+            "static void AMCloudPluginsScheduleContentEncryption(void) {", 1)[1]
+        block = block.split("}", 1)[0]
+        self.assertIn("AMCloudPluginsPerformMutation", block)
+
+    def test_serving_uses_deterministic_temp_names(self):
+        block = PLUGINS.split(
+            "static NSURL *AMCloudPluginsServingURLForCloudURL(NSURL *cloudURL) {", 1)[1]
+        block = block.split("static void AMCloudPluginsWipeServingCache", 1)[0]
+        self.assertIn("CC_SHA256(pathData.bytes", block)
+        self.assertIn("NSURLIsRegularFileKey", block)
+
+    def test_token_mirror_excluded_from_backup(self):
+        self.assertIn("NSURLIsExcludedFromBackupKey", CLOUD)
