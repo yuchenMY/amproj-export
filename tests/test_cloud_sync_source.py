@@ -1742,3 +1742,12 @@ class RuntimeReactivationR89Tests(unittest.TestCase):
         self.assertIn("AMProjExport.pluginlog", CLOUD)
         self.assertIn("cloud.plugins.runtime_reactivation_failed", CLOUD)
         self.assertIn("cloud.plugins.catalog_activation_failed", CLOUD)
+    def test_breadcrumb_timestamp_is_boxed_number(self):
+        """r89b：%@ 遇到裸 double 会把位模式当对象指针调 respondsToSelector，
+        直接 EXC_BAD_ACCESS（r89 交付闪退根因，.ips 栈顶实锤）。时间戳必须
+        装箱为 NSNumber。"""
+        self.assertIn("@([NSDate date].timeIntervalSince1970), name", CLOUD)
+        # 旧的裸 double 传参不允许再出现
+        self.assertNotIn(
+            "[NSDate date].timeIntervalSince1970, name];", CLOUD)
+

@@ -132,8 +132,11 @@ static void AMCloudDiagnostic(NSString *name, NSDictionary *fields) {
     });
     if (![cloudBreadcrumbEvents containsObject:name]) return;
     @try {
+        // 时间戳必须装箱为 NSNumber：%@ 遇到裸 double 会把位模式当对象
+        // 指针调用 respondsToSelector，直接 EXC_BAD_ACCESS（r89 首次交付
+        // 闪退的根因，.ips 栈顶实锤）。
         NSString *line = [NSString stringWithFormat:@"%@ %@\n",
-            [NSDate date].timeIntervalSince1970, name];
+            @([NSDate date].timeIntervalSince1970), name];
         NSString *path = [NSSearchPathForDirectoriesInDomains(
             NSCachesDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"AMProjExport.pluginlog"];
