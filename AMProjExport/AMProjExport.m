@@ -21642,6 +21642,59 @@ static BOOL AMProjReplicaLooksLikeMP4(NSURL *URL) {
     return bytes[4] == 'f' && bytes[5] == 't' && bytes[6] == 'y' && bytes[7] == 'p';
 }
 
+// App 真实导出目录：Library/Caches/export/<exportHash>/<项目名>.mp4，旁边
+// 有 meta.json。关键点：同一次导出被反复打开时，AM 只更新 meta.json 里的
+// shareDates，视频文件 mtime 一直停在最初那次导入——所以"按时间戳找"必然
+// 找不到。这里直接读 meta，谁最新就用谁的成片。
+static NSURL *AMProjReplicaExportCacheVideoURL(void) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSString *caches = [NSSearchPathForDirectoriesInDomains(
+        NSCachesDirectory, NSUserDomainMask, YES) firstObject];
+    if (!caches.length) return nil;
+    NSString *root = [caches stringByAppendingPathComponent:@"export"];
+    NSURL *bestVideo = nil;
+    NSTimeInterval bestStamp = 0;
+    for (NSString *name in [manager contentsOfDirectoryAtPath:root error:nil]) {
+        NSString *dir = [root stringByAppendingPathComponent:name];
+        NSNumber *isDirectory = nil;
+        if (![[NSURL fileURLWithPath:dir] getResourceValue:&isDirectory
+                                                    forKey:NSURLIsDirectoryKey
+                                                     error:nil] ||
+            !isDirectory.boolValue) continue;
+        NSData *metaData = [NSData dataWithContentsOfFile:
+            [dir stringByAppendingPathComponent:@"meta.json"]];
+        NSDictionary *meta = metaData.length
+            ? [NSJSONSerialization JSONObjectWithData:metaData options:0 error:nil] : nil;
+        NSTimeInterval stamp = 0;
+        if ([meta isKindOfClass:NSDictionary.class]) {
+            NSArray *shares = [meta[@"shareDates"] isKindOfClass:NSArray.class]
+                ? meta[@"shareDates"] : @[];
+            for (NSNumber *value in shares) {
+                if ([value isKindOfClass:NSNumber.class]) {
+                    stamp = MAX(stamp, value.doubleValue);
+                }
+            }
+            if ([meta[@"exportDate"] isKindOfClass:NSNumber.class]) {
+                stamp = MAX(stamp, [meta[@"exportDate"] doubleValue]);
+            }
+        }
+        for (NSString *file in [manager contentsOfDirectoryAtPath:dir error:nil]) {
+            NSURL *candidate = [NSURL fileURLWithPath:
+                [dir stringByAppendingPathComponent:file]];
+            if (!AMProjReplicaURLIsVideoFile(candidate)) continue;
+            NSNumber *size = nil;
+            [candidate getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+            if (size.longLongValue < 64 * 1024) continue;
+            if (!bestVideo || stamp >= bestStamp) {
+                bestVideo = candidate;
+                bestStamp = stamp;
+            }
+            break;
+        }
+    }
+    return bestVideo;
+}
+
 static NSURL *AMProjReplicaRecentContainerVideoURL(NSTimeInterval maxAge) {
     NSFileManager *manager = NSFileManager.defaultManager;
     NSString *home = NSHomeDirectory();
@@ -21735,6 +21788,13 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) 
         capturedAge <= AMProjReplicaVideoMaxAge) {
         resolved = AMProjReplicaCapturedVideoURL;
         source = @"photos_save_hook";
+    }
+    if (!resolved) {
+        NSURL *cached = AMProjReplicaExportCacheVideoURL();
+        if (cached) {
+            resolved = cached;
+            source = @"export_cache";
+        }
     }
     for (NSString *key in @[@"videoURL", @"outputURL", @"savedURL", @"fileURL",
                             @"exportURL", @"movieURL", @"url"]) {

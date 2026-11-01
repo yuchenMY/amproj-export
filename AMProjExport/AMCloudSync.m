@@ -2411,6 +2411,8 @@ static NSString *AMCloudBackupTabStyleScript(void) {
 // r99：云 tab 的整块替换不再赌"类名/生命周期钩子"。每秒扫一次窗口里的
 // 控制器树，只要页面上出现工程页（带分段控件）就确保 overlay 挂上；已经
 // 挂过的会被记录，不会重复挂。
+static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
+
 - (void)startCloudOverlayWatchdog {
     static BOOL running = NO;
     if (running) return;
@@ -2421,6 +2423,12 @@ static NSString *AMCloudBackupTabStyleScript(void) {
         AMCloudManager *manager = weakSelf;
         if (!manager) { running = NO; return; }
         AMCloudAttachVisibleProjectsControllers();
+        // 顺带保持"当前是不是云端 tab"的判定在跑：这条判定直接决定 overlay
+        // 显不显示，而且它的面包屑是我们离线排障唯一的眼睛。
+        for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
+            if (!controller.viewIfLoaded.window) continue;
+            [manager updateCloudBackupBannerVisibilityForController:controller];
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (tick) tick();
@@ -3958,6 +3966,10 @@ static BOOL AMCloudBannerTickRunning = NO;
     // 子标签标题取 AM 自家 cloud_subtab_title，读不到用中文兜底。
     @try {
         NSString *cloudTitle = AMCloudHomepageCloudTabTitle();
+        // 865 的本地化包里这个 key 有时取不到，取不到就退中文常量：
+        // 之前 a11y 通道因为 title 为空而永远匹配不上，云 tab 就一直判定
+        // 为"不在屏"。
+        if (!cloudTitle.length) cloudTitle = @"云端";
         for (UIView *view in scanRoot.subviews) {
             if (a11yCloudSelected) break;
             AMCloudScanAccessibilityForSelectedTab(view, cloudTitle, 0,
@@ -3974,14 +3986,21 @@ static BOOL AMCloudBannerTickRunning = NO;
           textSignal, signalRecent, cloudOnScreen);
     @try {
         NSString *crumb = [NSString stringWithFormat:
-            @"seg=%d sel=%ld ci=%ld text=%d signal=%d visible=%d\n",
-            segControl != nil, (long)segSelected, (long)segCloudIndex,
-            textSignal, signalRecent, !overlay.view.hidden];
+            @"%.0f seg=%d sel=%ld ci=%ld text=%d signal=%d a11y=%d visible=%d\n",
+            [NSDate date].timeIntervalSince1970, segControl != nil,
+            (long)segSelected, (long)segCloudIndex, textSignal, signalRecent,
+            a11yCloudSelected, !overlay.view.hidden];
         NSString *path = [NSSearchPathForDirectoriesInDomains(
             NSCachesDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
-        [crumb writeToFile:path atomically:NO
-                  encoding:NSUTF8StringEncoding error:nil];
+        NSMutableData *logData = [[NSData dataWithContentsOfFile:path] mutableCopy]
+            ?: [NSMutableData data];
+        [logData appendData:[crumb dataUsingEncoding:NSUTF8StringEncoding]];
+        if (logData.length > 32 * 1024) {
+            logData = [[logData subdataWithRange:
+                NSMakeRange(logData.length - 24 * 1024, 24 * 1024)] mutableCopy];
+        }
+        [logData writeToFile:path atomically:NO];
     } @catch (NSException *exception) {
         // 面包屑失败不影响界面
     }
