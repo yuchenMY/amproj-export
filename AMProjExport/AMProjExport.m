@@ -20766,15 +20766,16 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithRed:0.106 green:0.137
-                                                blue:0.184 alpha:1.0];
+    // 页面底色取自老版截图实测：#1B1E31（上一版用的偏青，肉眼看得出差异）
+    self.view.backgroundColor = [UIColor colorWithRed:27/255.0 green:30/255.0
+                                                blue:49/255.0 alpha:1.0];
     self.modalPresentationStyle = UIModalPresentationFullScreen;
 
     // 标题栏
     UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
     bar.translatesAutoresizingMaskIntoConstraints = NO;
-    bar.backgroundColor = [UIColor colorWithRed:0.137 green:0.173
-                                          blue:0.224 alpha:1.0];
+    bar.backgroundColor = [UIColor colorWithRed:27/255.0 green:30/255.0
+                                          blue:49/255.0 alpha:1.0];
     [self.view addSubview:bar];
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
     [close setTitle:@"✕" forState:UIControlStateNormal];
@@ -20806,12 +20807,20 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
         [galleryIcon.heightAnchor constraintEqualToConstant:20],
     ]];
 
+    // 老版是两段式：上面一块纯黑内容卡（预览 + 标题 + 胶片条），下面深蓝
+    // 页脚放"节省 / 分享 / 关闭"。上一版整屏铺一个深蓝，和截图对不上。
+    UIView *content = [[UIView alloc] initWithFrame:CGRectZero];
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    content.backgroundColor = [UIColor colorWithRed:21/255.0 green:22/255.0
+                                              blue:27/255.0 alpha:1.0];
+    [self.view addSubview:content];
+
     // 视频预览
     UIView *preview = [[UIView alloc] initWithFrame:CGRectZero];
     preview.translatesAutoresizingMaskIntoConstraints = NO;
     preview.backgroundColor = UIColor.blackColor;
     preview.tag = 9001;
-    [self.view addSubview:preview];
+    [content addSubview:preview];
 
     // 拿不到"这一次导出"的视频时绝不拿相册里别的视频顶替：只显示占位文案，
     // 让用户知道文件已经存好了、去相册里看。
@@ -20841,7 +20850,7 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
     self.titleLabel.hidden = self.videoTitle.length == 0;
     self.titleLabel.text = self.videoTitle;
     self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.titleLabel];
+    [content addSubview:self.titleLabel];
 
     self.playButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if (@available(iOS 13.0, *)) {
@@ -20854,7 +20863,7 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
     self.playButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.playButton addTarget:self action:@selector(onTogglePlay)
         forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.playButton];
+    [content addSubview:self.playButton];
 
     // 胶片帧预览条：黑底容器 + 帧缩略图横排；滑条叠在上面只露白色滑块
     self.stripContainer = [UIView new];
@@ -20866,7 +20875,7 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
     self.stripContainer.layer.borderWidth = 1.0;
     self.stripContainer.layer.borderColor =
         [UIColor colorWithWhite:1 alpha:0.85].CGColor;
-    [self.view addSubview:self.stripContainer];
+    [content addSubview:self.stripContainer];
 
     self.filmstripStack = [[UIStackView alloc] init];
     self.filmstripStack.axis = UILayoutConstraintAxisHorizontal;
@@ -20887,7 +20896,7 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
     self.scrubber.maximumTrackTintColor = UIColor.clearColor;
     [self.scrubber addTarget:self action:@selector(onScrub)
         forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:self.scrubber];
+    [content addSubview:self.scrubber];
 
     // 节省 / 分享
     UIButton *save = [self actionButtonWithTitle:@"节省" systemImage:@"arrow.down.to.line"];
@@ -20934,23 +20943,29 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
         [title.centerXAnchor constraintEqualToAnchor:bar.centerXAnchor],
         [title.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
 
-        [preview.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
-        [preview.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [preview.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        // 老版是固定 16:9 信箱式预览（P4）：竖屏视频左右留黑边居中，
-        // 不随长宽比把整屏撑满；标题始终落在视频框下方。
+        [content.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
+        [content.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [content.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        // 老版内容卡的高宽比实测约 1.12（截图里 575×642）
+        [content.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
+                                            multiplier:1.12],
+
+        [preview.topAnchor constraintEqualToAnchor:content.topAnchor constant:54],
+        [preview.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [preview.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        // 固定 16:9 信箱式预览（P4）：竖屏视频左右留黑边居中。
         [preview.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
                                           multiplier:9.0 / 16.0],
 
-        [self.titleLabel.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:16],
-        [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [self.titleLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+        [self.titleLabel.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:20],
+        [self.titleLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:20],
+        [self.titleLabel.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-20],
 
         // P4 的胶片条从暂停键右侧才开始：暂停键在条外，条本身靠右留窄边。
         [self.stripContainer.leadingAnchor constraintEqualToAnchor:self.playButton.trailingAnchor
                                                           constant:10],
-        [self.stripContainer.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-        [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:16],
+        [self.stripContainer.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
+        [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:20],
         [self.stripContainer.heightAnchor constraintEqualToConstant:40],
 
         [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
@@ -20964,10 +20979,10 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
         [self.scrubber.topAnchor constraintEqualToAnchor:self.stripContainer.topAnchor constant:-6],
         [self.scrubber.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:6],
 
-        [row.topAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:44],
+        [row.topAnchor constraintEqualToAnchor:content.bottomAnchor constant:44],
         [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
         [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
-        [row.heightAnchor constraintEqualToConstant:64],
+        [row.heightAnchor constraintEqualToConstant:56],
 
         [bottomClose.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [bottomClose.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:28],
@@ -21054,8 +21069,8 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
 - (UIButton *)actionButtonWithTitle:(NSString *)title systemImage:(NSString *)symbol {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.translatesAutoresizingMaskIntoConstraints = NO;
-    button.backgroundColor = [UIColor colorWithRed:0.231 green:0.278
-                                            blue:0.337 alpha:1.0];
+    button.backgroundColor = [UIColor colorWithRed:42/255.0 green:46/255.0
+                                            blue:71/255.0 alpha:1.0];
     button.layer.cornerRadius = 12;
     UIImage *icon = [UIImage systemImageNamed:symbol];
     [button setImage:icon forState:UIControlStateNormal];
