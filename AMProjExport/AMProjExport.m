@@ -21054,11 +21054,12 @@ static UIViewController *AMProjBuildLegacyShareVideoPage(
 // 运行时按名取不到（实测回退成了 SF 符号，形状不对）。这里直接按 P1 的
 // 形状描两条路径：下载=箭头+托盘，分享=断角方框+斜箭头。
 static UIImage *AMProjDrawnShareIcon(BOOL isSave) {
-    CGFloat side = 24.0;
+    CGFloat side = 20.0;
     UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
         initWithSize:CGSizeMake(side, side)];
     UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        (void)context;
+        // 画在 24 的坐标系里再整体缩到 20：形状不变、尺寸对上 p2
+        CGContextScaleCTM(context.CGContext, 20.0 / 24.0, 20.0 / 24.0);
         UIBezierPath *path = [UIBezierPath bezierPath];
         path.lineWidth = 1.9;
         path.lineCapStyle = kCGLineCapRound;
@@ -21280,8 +21281,8 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         self.playheadLeading,
         [self.playhead.centerYAnchor constraintEqualToAnchor:self.stripContainer.centerYAnchor],
         [self.playhead.heightAnchor constraintEqualToAnchor:self.stripContainer.heightAnchor
-                                                   constant:8],
-        [self.playhead.widthAnchor constraintEqualToConstant:8],
+                                                   constant:6],
+        [self.playhead.widthAnchor constraintEqualToConstant:7],
     ]];
 
     self.scrubber = [[UISlider alloc] initWithFrame:CGRectZero];
@@ -21361,7 +21362,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                                                           constant:10],
         [self.stripContainer.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
         [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:26],
-        [self.stripContainer.heightAnchor constraintEqualToConstant:44],
+        [self.stripContainer.heightAnchor constraintEqualToConstant:34],
 
         [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [self.playButton.widthAnchor constraintEqualToConstant:24],
@@ -21460,7 +21461,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
             CGFloat progress = (float)(CMTimeGetSeconds(time) /
                                        CMTimeGetSeconds(item.duration));
             strongSelf.scrubber.value = progress;
-            CGFloat travel = CGRectGetWidth(strongSelf.stripContainer.bounds) - 8;
+            CGFloat travel = CGRectGetWidth(strongSelf.stripContainer.bounds) - 7;
             if (travel > 0) {
                 strongSelf.playheadLeading.constant =
                     MAX(0, MIN(travel, travel * progress));
