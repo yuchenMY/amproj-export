@@ -2424,7 +2424,8 @@ static BOOL amproj_shouldResetStaleDirectRequest(void) {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
                              target:self action:@selector(pickCancelled)];
-    self.tableView.rowHeight = 64;
+    self.tableView.rowHeight = 72;
+    self.tableView.backgroundColor = UIColor.clearColor;
 }
 - (void)pickCancelled {
     void (^callback)(NSString *, BOOL) = self.onPick;
@@ -2452,6 +2453,9 @@ static BOOL amproj_shouldResetStaleDirectRequest(void) {
     NSString *title = project[@"title"] ?: @"未命名工程";
     NSDate *modified = project[@"modified"];
     cell.textLabel.text = title;
+    cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
+    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
     cell.detailTextLabel.text = modified
         ? [NSDateFormatter localizedStringFromDate:modified
                                          dateStyle:NSDateFormatterMediumStyle

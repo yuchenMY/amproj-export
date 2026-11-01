@@ -1975,6 +1975,42 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     }
 }
 
+// 云 tab 里直接显示备份网页时，网页那套"站点外壳"（大标题、渐变配额卡、
+// 统计格、维护公告）在 App 里显得很怪。这里注入一段样式把它压成 AM 自家
+// 列表的样子：白底、系统字体、白卡配额外加一行分隔线列表。
+static NSString *AMCloudBackupTabStyleScript(void) {
+    return @"(function(){if(!document.body){return;}"
+    "var css='"
+    "html,body{background:#fff !important;color:#111 !important;"
+    "font-family:-apple-system,sans-serif !important;}"
+    ".af-topbar,.af-bottomnav,.af-tabbar,footer,.af-eyebrow,h1{display:none !important;}"
+    "main#main{padding:0 !important;max-width:none !important;}"
+    ".af-shell{max-width:none !important;margin:0 !important;padding:10px 16px 28px !important;}"
+    ".bk-quota{background:#fff !important;color:#111 !important;"
+    "border:1px solid #E6E8EC !important;border-radius:14px !important;"
+    "padding:14px 16px !important;box-shadow:none !important;}"
+    ".bk-quota .lbl{color:#8A8F98 !important;font-size:11px !important;}"
+    ".bk-quota .num,.bk-quota .num .big{color:#111 !important;}"
+    ".bk-bar{background:#F1F2F4 !important;height:6px !important;"
+    "border-radius:3px !important;overflow:hidden !important;}"
+    ".bk-bar .fill{background:#39C5BB !important;}"
+    ".bk-quota .bk-foot{color:#8A8F98 !important;}"
+    ".bk-stats,.bk-notice{display:none !important;}"
+    "#projList{display:block !important;}"
+    ".bk-proj{background:#fff !important;border:0 !important;"
+    "border-bottom:1px solid #EFF0F2 !important;border-radius:0 !important;"
+    "box-shadow:none !important;margin:0 !important;padding:12px 0 !important;}"
+    ".bk-proj .t{font-size:16px !important;font-weight:600 !important;color:#111 !important;}"
+    ".bk-proj .meta{font-size:12px !important;color:#8A8F98 !important;margin-top:2px !important;}"
+    ".bk-acts{display:flex !important;gap:8px !important;margin-top:10px !important;}"
+    ".bk-acts .af-btn{border-radius:9px !important;font-size:13px !important;}"
+    "h2{font-size:15px !important;font-weight:600 !important;color:#111 !important;}"
+    ".af-glass{background:#fff !important;border:1px solid #E6E8EC !important;"
+    "box-shadow:none !important;}';"
+    "var s=document.createElement('style');s.textContent=css;"
+    "document.documentElement.appendChild(s);})();";
+}
+
 @implementation AMCloudAccountWebViewController
 
 - (void)viewDidLoad {
@@ -2069,6 +2105,12 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     [content addUserScript:[[WKUserScript alloc] initWithSource:source
                                                  injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                                               forMainFrameOnly:YES]];
+    if ([self.page isEqualToString:@"backup"]) {
+        [content addUserScript:[[WKUserScript alloc]
+            initWithSource:AMCloudBackupTabStyleScript()
+             injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
+          forMainFrameOnly:YES]];
+    }
     [content addScriptMessageHandler:
         [AMCloudWeakScriptMessageHandler handlerWithTarget:self] name:@"amAccount"];
     WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
