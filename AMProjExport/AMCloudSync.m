@@ -1932,13 +1932,18 @@ static void AMCloudInstallSegmentObserverHooks(void) {
     });
 }
 
+static UIView *AMCloudFindSegmentControl(UIView *view, NSInteger depth);
+
 static void AMCloudAttachProjectsInControllerTree(UIViewController *controller,
                                                    NSMutableSet<NSValue *> *visited) {
     if (!controller) return;
     NSValue *identity = [NSValue valueWithPointer:(__bridge const void *)controller];
     if ([visited containsObject:identity]) return;
     [visited addObject:identity];
-    if (AMCloudIsProjectsControllerClass(controller.class)) {
+    // 865 的工程页类名不一定还叫 ProjectsVC：只要页面上有那条分段控件，
+    // 就按工程页处理，否则云 tab 的整块替换永远不会被挂上去。
+    if (AMCloudIsProjectsControllerClass(controller.class) ||
+        AMCloudFindSegmentControl(controller.viewIfLoaded, 0) != nil) {
         [[AMCloudManager shared] attachAccountEntryToController:controller];
     }
     for (UIViewController *child in controller.childViewControllers) {
@@ -3478,6 +3483,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
 // showCloudBackupManager: 打开完全自有的云端备份管理器（自有界面 + 自有服务器数据，
 // 不依赖 AM 官方的任何在线服务；AM 官方服务下线也不影响云工程功能）。
 static char AMCloudBannerViewKey;
+static char AMCloudBannerTopKey;
 static char AMCloudBannerLabelKey;
 static char AMCloudBannerBarKey;
 static char AMCloudBannerFetchedKey;
@@ -3747,7 +3753,9 @@ static void AMCloudScanAccessibilityForSelectedTab(UIView *view, NSString *cloud
 }
 
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller {
-    if (!AMCloudIsProjectsControllerClass(controller.class) || !controller.viewIfLoaded) return;
+    if (!controller.viewIfLoaded) return;
+    if (!AMCloudIsProjectsControllerClass(controller.class) &&
+        !AMCloudFindSegmentControl(controller.view, 0)) return;
     AMCloudAccountWebViewController *overlay =
         objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
     if (!overlay) {
@@ -3760,16 +3768,20 @@ static void AMCloudScanAccessibilityForSelectedTab(UIView *view, NSString *cloud
         overlay.view.backgroundColor = UIColor.clearColor;
         [controller.view addSubview:overlay.view];
         [overlay didMoveToParentViewController:controller];
+        NSLayoutConstraint *topConstraint =
+            [overlay.view.topAnchor constraintEqualToAnchor:controller.view.topAnchor
+                                                   constant:174];
         [NSLayoutConstraint activateConstraints:@[
             [overlay.view.leadingAnchor constraintEqualToAnchor:
                 controller.view.safeAreaLayoutGuide.leadingAnchor],
             [overlay.view.trailingAnchor constraintEqualToAnchor:
                 controller.view.safeAreaLayoutGuide.trailingAnchor],
-            [overlay.view.topAnchor constraintEqualToAnchor:
-                controller.view.safeAreaLayoutGuide.topAnchor constant:174],
+            topConstraint,
             [overlay.view.bottomAnchor constraintEqualToAnchor:
                 controller.view.safeAreaLayoutGuide.bottomAnchor],
         ]];
+        objc_setAssociatedObject(controller, &AMCloudBannerTopKey, topConstraint,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(controller, &AMCloudBannerViewKey, overlay,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         NSLog(@"[AMProjExport] cloud tab overlay attached to %@",
@@ -3853,6 +3865,22 @@ static BOOL AMCloudBannerTickRunning = NO;
     UIView *segControl = AMCloudFindSegmentControl(scanRoot, 0);
     NSInteger segSelected = segControl ? AMCloudSegmentSelectedIndex(segControl) : -1;
     NSInteger segCloudIndex = segControl ? AMCloudCloudSegmentIndex(segControl) : -1;
+    // 云 tab 的内容区起点跟着官方分段控件走：贴片以前写死 174pt，落点全队
+    // 不对（有时盖住标题栏，有时浮在半空）。这里按控件的真实位置动态对齐。
+    if (segControl) {
+        NSLayoutConstraint *topConstraint =
+            objc_getAssociatedObject(controller, &AMCloudBannerTopKey);
+        @try {
+            CGRect frame = [segControl convertRect:segControl.bounds toView:controller.view];
+            CGFloat desired = CGRectGetMaxY(frame) + 8;
+            if (topConstraint && desired > 0 &&
+                fabs(topConstraint.constant - desired) > 0.5) {
+                topConstraint.constant = desired;
+            }
+        } @catch (NSException *exception) {
+            // 坐标转换失败就保持原值
+        }
+    }
     BOOL segSignal = segControl && segSelected >= 0 && segCloudIndex >= 0 &&
         segSelected == segCloudIndex;
     // 通道三：cloudSubtabOpened 埋点 3 秒窗口
