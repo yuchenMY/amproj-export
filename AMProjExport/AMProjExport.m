@@ -21326,23 +21326,6 @@ static NSString *AMProjReplicaDiagnosticReport(void);
     self.toastLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.toastLabel];
 
-    // 临时诊断入口：点一下把"扫到了什么"复制到剪贴板。
-    UIButton *diagnose = [UIButton buttonWithType:UIButtonTypeSystem];
-    [diagnose setTitle:@"诊断" forState:UIControlStateNormal];
-    [diagnose setTitleColor:[UIColor colorWithWhite:1 alpha:0.35]
-                   forState:UIControlStateNormal];
-    diagnose.titleLabel.font = [UIFont systemFontOfSize:11];
-    diagnose.translatesAutoresizingMaskIntoConstraints = NO;
-    [diagnose addTarget:self action:@selector(onCopyDiagnostics)
-       forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:diagnose];
-    [NSLayoutConstraint activateConstraints:@[
-        [diagnose.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor
-                                               constant:14],
-        [diagnose.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor
-                                              constant:-6],
-    ]];
-
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [bar.topAnchor constraintEqualToAnchor:safe.topAnchor],
@@ -21572,6 +21555,24 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                             self.previewAspectConstraint.active = YES;
                             [self.view layoutIfNeeded];
                         }
+                    }
+                }
+                // 旋转过的视频用 naturalSize 算比例会错，预览框就会偏高/
+                // 偏低、上下留黑边。改成用播放器给的 presentationSize。
+                CGSize presented = self.player.currentItem.presentationSize;
+                if (presented.width > 1 && presented.height > 1) {
+                    CGFloat aspect = presented.width / presented.height;
+                    CGFloat ratio = MIN(MAX(1.0 / MAX(aspect, 0.35), 0.4), 1.05);
+                    if (self.previewAspectConstraint) {
+                        self.previewAspectConstraint.active = NO;
+                    }
+                    UIView *box = [self.view viewWithTag:9001];
+                    if (box) {
+                        self.previewAspectConstraint =
+                            [box.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
+                                                          multiplier:ratio];
+                        self.previewAspectConstraint.active = YES;
+                        [self.view layoutIfNeeded];
                     }
                 }
                 if (loaded && seconds > 0 && !self.filmstripGenerated) {
