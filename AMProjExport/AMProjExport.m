@@ -21050,6 +21050,52 @@ static UIViewController *AMProjBuildLegacyShareVideoPage(
 // AM 自己的分享页图标（ic_save_arrow / ic_share_new）在
 // AlightMotion_ShareVideoAndPackage.bundle 的 Assets.car 里；系统 SF 符号
 // 怎么调都对不上（分享那个是斜箭头穿角）。直接用它的原图。
+// AM 包里的 ic_save_arrow / ic_share_new 在 Assets.car 里是按名编码的，
+// 运行时按名取不到（实测回退成了 SF 符号，形状不对）。这里直接按 P1 的
+// 形状描两条路径：下载=箭头+托盘，分享=断角方框+斜箭头。
+static UIImage *AMProjDrawnShareIcon(BOOL isSave) {
+    CGFloat side = 24.0;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
+        initWithSize:CGSizeMake(side, side)];
+    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        (void)context;
+        UIBezierPath *path = [UIBezierPath bezierPath];
+        path.lineWidth = 1.9;
+        path.lineCapStyle = kCGLineCapRound;
+        path.lineJoinStyle = kCGLineJoinRound;
+        if (isSave) {
+            [path moveToPoint:CGPointMake(12, 3.5)];
+            [path addLineToPoint:CGPointMake(12, 13)];
+            [path moveToPoint:CGPointMake(7.6, 8.8)];
+            [path addLineToPoint:CGPointMake(12, 13.2)];
+            [path addLineToPoint:CGPointMake(16.4, 8.8)];
+            [path moveToPoint:CGPointMake(3.8, 15)];
+            [path addLineToPoint:CGPointMake(3.8, 18.6)];
+            [path addQuadCurveToPoint:CGPointMake(6, 20.8) controlPoint:CGPointMake(3.8, 20.8)];
+            [path addLineToPoint:CGPointMake(18, 20.8)];
+            [path addQuadCurveToPoint:CGPointMake(20.2, 18.6) controlPoint:CGPointMake(20.2, 20.8)];
+            [path addLineToPoint:CGPointMake(20.2, 15)];
+        } else {
+            [path moveToPoint:CGPointMake(10.5, 7.5)];
+            [path addLineToPoint:CGPointMake(6.6, 7.5)];
+            [path addQuadCurveToPoint:CGPointMake(4, 10.1) controlPoint:CGPointMake(4, 7.5)];
+            [path addLineToPoint:CGPointMake(4, 17.6)];
+            [path addQuadCurveToPoint:CGPointMake(6.6, 20.2) controlPoint:CGPointMake(4, 20.2)];
+            [path addLineToPoint:CGPointMake(17.4, 20.2)];
+            [path addQuadCurveToPoint:CGPointMake(20, 17.6) controlPoint:CGPointMake(20, 20.2)];
+            [path addLineToPoint:CGPointMake(20, 14)];
+            [path moveToPoint:CGPointMake(11, 10.5)];
+            [path addLineToPoint:CGPointMake(19.6, 1.9)];
+            [path moveToPoint:CGPointMake(14.2, 1.9)];
+            [path addLineToPoint:CGPointMake(19.6, 1.9)];
+            [path addLineToPoint:CGPointMake(19.6, 7.3)];
+        }
+        [[UIColor whiteColor] setStroke];
+        [path stroke];
+    }];
+    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
 static UIImage *AMProjLegacyAssetNamed(NSString *name) {
     static NSBundle *resourceBundle = nil;
     static dispatch_once_t onceToken;
@@ -21222,16 +21268,20 @@ static NSString *AMProjReplicaDiagnosticReport(void);
     self.playhead = [UIView new];
     self.playhead.translatesAutoresizingMaskIntoConstraints = NO;
     self.playhead.backgroundColor = UIColor.whiteColor;
-    self.playhead.layer.cornerRadius = 3;
+    self.playhead.layer.cornerRadius = 4;
     self.playhead.userInteractionEnabled = NO;
-    [self.stripContainer addSubview:self.playhead];
+    // 进度柄要"顶出"胶片条上下各 4pt（P4 实拍），所以不能放进会被裁剪的
+    // stripContainer 里，挂到同一层的父视图上。
+    UIView *playheadHost = self.stripContainer.superview ?: self.stripContainer;
+    [playheadHost addSubview:self.playhead];
     self.playheadLeading = [self.playhead.leadingAnchor
         constraintEqualToAnchor:self.stripContainer.leadingAnchor];
     [NSLayoutConstraint activateConstraints:@[
         self.playheadLeading,
-        [self.playhead.topAnchor constraintEqualToAnchor:self.stripContainer.topAnchor constant:3],
-        [self.playhead.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:-3],
-        [self.playhead.widthAnchor constraintEqualToConstant:6],
+        [self.playhead.centerYAnchor constraintEqualToAnchor:self.stripContainer.centerYAnchor],
+        [self.playhead.heightAnchor constraintEqualToAnchor:self.stripContainer.heightAnchor
+                                                   constant:8],
+        [self.playhead.widthAnchor constraintEqualToConstant:8],
     ]];
 
     self.scrubber = [[UISlider alloc] initWithFrame:CGRectZero];
@@ -21328,7 +21378,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                                                           constant:10],
         [self.stripContainer.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
         [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:26],
-        [self.stripContainer.heightAnchor constraintEqualToConstant:38],
+        [self.stripContainer.heightAnchor constraintEqualToConstant:44],
 
         [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [self.playButton.widthAnchor constraintEqualToConstant:24],
@@ -21427,7 +21477,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
             CGFloat progress = (float)(CMTimeGetSeconds(time) /
                                        CMTimeGetSeconds(item.duration));
             strongSelf.scrubber.value = progress;
-            CGFloat travel = CGRectGetWidth(strongSelf.stripContainer.bounds) - 6;
+            CGFloat travel = CGRectGetWidth(strongSelf.stripContainer.bounds) - 8;
             if (travel > 0) {
                 strongSelf.playheadLeading.constant =
                     MAX(0, MIN(travel, travel * progress));
@@ -21452,17 +21502,15 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                                             blue:71/255.0 alpha:1.0];
     button.layer.cornerRadius = 12;
     UIImage *icon = nil;
-    if ([title isEqualToString:@"节省"]) {
-        icon = AMProjLegacyAssetNamed(@"ic_save_arrow");
-    } else if ([title isEqualToString:@"分享"]) {
-        icon = AMProjLegacyAssetNamed(@"ic_share_new");
-    }
-    if (!icon) {
-        icon = [UIImage systemImageNamed:symbol];
-    }
+    BOOL isSave = [title isEqualToString:@"节省"];
+    BOOL isShare = [title isEqualToString:@"分享"];
+    if (isSave) icon = AMProjLegacyAssetNamed(@"ic_save_arrow");
+    if (isShare) icon = AMProjLegacyAssetNamed(@"ic_share_new");
+    if (!icon && (isSave || isShare)) icon = AMProjDrawnShareIcon(isSave);
+    if (!icon) icon = [UIImage systemImageNamed:symbol];
     // 包里的原图尺寸不一（有 @2x/@3x），统一缩放到 24pt 再当模板色用，
     // 免得比文字大出一截。
-    if (icon && icon.size.height > 0) {
+    if (icon && icon.size.height > 0 && !(isSave || isShare)) {
         CGFloat target = 24.0;
         CGFloat scale = MIN(target / icon.size.width, target / icon.size.height);
         CGSize fitted = CGSizeMake(icon.size.width * scale, icon.size.height * scale);
@@ -21543,7 +21591,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
     generator.appliesPreferredTrackTransform = YES;
     generator.maximumSize = CGSizeMake(160, 160);
-    int frames = 10;
+    int frames = 8;
     NSMutableArray<NSValue *> *times = [NSMutableArray array];
     for (int i = 0; i < frames; i++) {
         double t = seconds * (i + 0.5) / frames;
