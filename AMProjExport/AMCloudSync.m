@@ -2408,10 +2408,35 @@ static NSString *AMCloudBackupTabStyleScript(void) {
     self.asyncImportHandler = importHandler;
 }
 
+// r99：云 tab 的整块替换不再赌"类名/生命周期钩子"。每秒扫一次窗口里的
+// 控制器树，只要页面上出现工程页（带分段控件）就确保 overlay 挂上；已经
+// 挂过的会被记录，不会重复挂。
+- (void)startCloudOverlayWatchdog {
+    static BOOL running = NO;
+    if (running) return;
+    running = YES;
+    __weak typeof(self) weakSelf = self;
+    __block void (^tick)(void);
+    tick = ^{
+        AMCloudManager *manager = weakSelf;
+        if (!manager) { running = NO; return; }
+        AMCloudAttachVisibleProjectsControllers();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (tick) tick();
+        });
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (tick) tick();
+    });
+}
+
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
     (void)notification;
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
+    [self startCloudOverlayWatchdog];
     [self showPluginDownloadNoticeIfPossible];
     [self syncPluginsNow:@"did_become_active"];
 	[self refreshAccountAvatar];

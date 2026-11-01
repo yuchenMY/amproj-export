@@ -21046,6 +21046,66 @@ static UIViewController *AMProjBuildLegacyShareVideoPage(
     }
 }
 
+// r99：临时诊断。设备端 AFC 读不到（Windows 配对 183），就改用"用户点一下
+// 复制"，把导出页到底扫到了什么原样带回来。
+static NSString *AMProjReplicaDiagnosticReport(void) {
+    NSMutableString *report = [NSMutableString string];
+    [report appendFormat:@"home=%@\n", NSHomeDirectory()];
+    [report appendFormat:@"photosHook=%@\n",
+        AMProjReplicaCapturedVideoURL.path ?: @"none"];
+    [report appendFormat:@"hookAge=%.0fs\n",
+        AMProjReplicaCapturedVideoURL
+            ? [NSDate date].timeIntervalSince1970 - AMProjReplicaCapturedVideoAt : -1.0];
+    NSMutableArray<NSDictionary *> *found = [NSMutableArray array];
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSDate *threshold = [NSDate dateWithTimeIntervalSinceNow:-3600];
+    NSMutableArray<NSURL *> *stack = [NSMutableArray arrayWithObject:
+        [NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES]];
+    NSUInteger visited = 0;
+    while (stack.count && visited < 8000) {
+        NSURL *directory = stack.lastObject;
+        [stack removeLastObject];
+        NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:directory
+            includingPropertiesForKeys:@[NSURLIsDirectoryKey,
+                                         NSURLContentModificationDateKey,
+                                         NSURLFileSizeKey]
+            options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
+        for (NSURL *child in children) {
+            if (visited++ > 8000) break;
+            NSNumber *isDirectory = nil;
+            if (![child getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey
+                                   error:nil]) continue;
+            if (isDirectory.boolValue) {
+                if ([child.lastPathComponent hasPrefix:@"com.apple."]) continue;
+                [stack addObject:child];
+                continue;
+            }
+            NSDate *modified = nil;
+            NSNumber *size = nil;
+            [child getResourceValue:&modified
+                             forKey:NSURLContentModificationDateKey error:nil];
+            [child getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+            if (!modified || [modified compare:threshold] == NSOrderedAscending) continue;
+            if (size.longLongValue < 128 * 1024) continue;
+            if (!AMProjReplicaURLIsVideoFile(child) &&
+                !AMProjReplicaLooksLikeMP4(child)) continue;
+            [found addObject:@{ @"path": child.path ?: @"",
+                                @"size": size ?: @0,
+                                @"mtime": modified }];
+        }
+    }
+    [found sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [b[@"mtime"] compare:a[@"mtime"]];
+    }];
+    [report appendFormat:@"candidates=%lu\n", (unsigned long)found.count];
+    for (NSUInteger index = 0; index < MIN(found.count, 8); index++) {
+        NSDictionary *item = found[index];
+        [report appendFormat:@"%@@%.0fKB %@\n",
+            item[@"mtime"], [item[@"size"] doubleValue] / 1024.0, item[@"path"]];
+    }
+    return report;
+}
+
 static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
 
 @interface AMProjShareVideoReplicaVC : UIViewController
@@ -21237,6 +21297,23 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
     self.toastLabel.alpha = 0;
     self.toastLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.toastLabel];
+
+    // 临时诊断入口：点一下把"扫到了什么"复制到剪贴板。
+    UIButton *diagnose = [UIButton buttonWithType:UIButtonTypeSystem];
+    [diagnose setTitle:@"诊断" forState:UIControlStateNormal];
+    [diagnose setTitleColor:[UIColor colorWithWhite:1 alpha:0.35]
+                   forState:UIControlStateNormal];
+    diagnose.titleLabel.font = [UIFont systemFontOfSize:11];
+    diagnose.translatesAutoresizingMaskIntoConstraints = NO;
+    [diagnose addTarget:self action:@selector(onCopyDiagnostics)
+       forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:diagnose];
+    [NSLayoutConstraint activateConstraints:@[
+        [diagnose.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor
+                                               constant:14],
+        [diagnose.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor
+                                              constant:-6],
+    ]];
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
@@ -21516,6 +21593,12 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
+- (void)onCopyDiagnostics {
+    NSString *report = AMProjReplicaDiagnosticReport();
+    UIPasteboard.generalPasteboard.string = report;
+    [self showToast:@"诊断已复制，发给我"];
+}
+
 - (void)showToast:(NSString *)text {
     self.toastLabel.text = text;
     self.toastLabel.alpha = 1;
@@ -21567,17 +21650,42 @@ static id AMProjReplicaSwizzledCreationRequest(id self, SEL _cmd, NSURL *URL) {
     return AMProjReplicaOriginalCreationRequest(self, _cmd, URL);
 }
 
+static void (*AMProjReplicaOriginalAddResource)(id, SEL, NSInteger, NSURL *, id) = NULL;
+
+// 现代写法走的是 PHAssetCreationRequest 的 addResource...，老接口
+// creationRequestForAssetFromVideoAtFileURL: 不一定被调用。两个都挂上，
+// 只要视频进了相册就能拿到它的真实文件地址。
+static void AMProjReplicaSwizzledAddResource(id self, SEL _cmd, NSInteger type,
+                                             NSURL *URL, id options) {
+    AMProjReplicaCaptureVideoURL(URL);
+    if (AMProjReplicaOriginalAddResource) {
+        AMProjReplicaOriginalAddResource(self, _cmd, type, URL, options);
+    }
+}
+
 static void AMProjReplicaInstallPhotosCapture(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         Class requestClass = NSClassFromString(@"PHAssetChangeRequest");
         SEL selector = NSSelectorFromString(@"creationRequestForAssetFromVideoAtFileURL:");
-        if (!requestClass || ![requestClass respondsToSelector:selector]) return;
-        Method method = class_getClassMethod(requestClass, selector);
-        if (!method) return;
-        AMProjReplicaOriginalCreationRequest =
-            (id (*)(id, SEL, NSURL *))method_getImplementation(method);
-        method_setImplementation(method, (IMP)AMProjReplicaSwizzledCreationRequest);
+        if (requestClass && [requestClass respondsToSelector:selector]) {
+            Method method = class_getClassMethod(requestClass, selector);
+            if (method) {
+                AMProjReplicaOriginalCreationRequest =
+                    (id (*)(id, SEL, NSURL *))method_getImplementation(method);
+                method_setImplementation(method, (IMP)AMProjReplicaSwizzledCreationRequest);
+            }
+        }
+        Class creationClass = NSClassFromString(@"PHAssetCreationRequest");
+        SEL addSelector = NSSelectorFromString(@"addResourceWithType:fileURL:options:");
+        if (creationClass && [creationClass instancesRespondToSelector:addSelector]) {
+            Method method = class_getInstanceMethod(creationClass, addSelector);
+            if (method) {
+                AMProjReplicaOriginalAddResource =
+                    (void (*)(id, SEL, NSInteger, NSURL *, id))method_getImplementation(method);
+                method_setImplementation(method, (IMP)AMProjReplicaSwizzledAddResource);
+            }
+        }
     });
 }
 
