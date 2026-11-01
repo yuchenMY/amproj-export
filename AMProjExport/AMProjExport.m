@@ -21127,7 +21127,7 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
     // 拿不到"这一次导出"的视频时绝不拿相册里别的视频顶替：只显示占位文案，
     // 让用户知道文件已经存好了、去相册里看。
     self.previewPlaceholder = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.previewPlaceholder.text = @"已保存到设备\n可在相册中查看";
+    self.previewPlaceholder.text = @"预览加载中…";
     self.previewPlaceholder.textColor = [UIColor colorWithWhite:1 alpha:0.72];
     self.previewPlaceholder.font = [UIFont systemFontOfSize:15];
     self.previewPlaceholder.textAlignment = NSTextAlignmentCenter;
@@ -21314,22 +21314,34 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self installPlayerIfNeeded];
+    [self scheduleLateVideoResolutionAttempt:1];
+}
+
+// 导出成片/相册资产常常比完成页晚一步就位：分三档延迟再捞，捞到就换上去。
+- (void)scheduleLateVideoResolutionAttempt:(NSInteger)attempt {
     if (self.videoURL) return;
-    // 相册资产/容器文件可能比完成页晚一步就位：1.5 秒后补取一次，
-    // 取到了就把播放器和胶片条换上，仍然取不到就维持占位。
+    if (attempt > 3) {
+        // 三档都捞不到就明说"没预览"，别让用户以为视频没导出。
+        self.previewPlaceholder.text = @"预览不可用 · 视频已导出";
+        return;
+    }
+    NSTimeInterval delay = attempt == 1 ? 1.0 : (attempt == 2 ? 3.0 : 6.0);
     __weak AMProjShareVideoReplicaVC *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AMProjShareVideoReplicaVC *strongSelf = weakSelf;
         if (!strongSelf || strongSelf.videoURL) return;
         NSURL *late = AMProjReplicaVideoURLFromController(strongSelf.sourceController);
-        if (!late) return;
-        strongSelf.videoURL = late;
-        strongSelf.previewPlaceholder.hidden = YES;
-        strongSelf.playButton.hidden = NO;
-        strongSelf.scrubber.hidden = NO;
-        strongSelf.stripContainer.hidden = NO;
-        [strongSelf installPlayerIfNeeded];
+        if (late) {
+            strongSelf.videoURL = late;
+            strongSelf.previewPlaceholder.hidden = YES;
+            strongSelf.playButton.hidden = NO;
+            strongSelf.scrubber.hidden = NO;
+            strongSelf.stripContainer.hidden = NO;
+            [strongSelf installPlayerIfNeeded];
+            return;
+        }
+        [strongSelf scheduleLateVideoResolutionAttempt:attempt + 1];
     });
 }
 
@@ -21533,49 +21545,95 @@ static BOOL AMProjReplicaURLIsVideoFile(NSURL *URL) {
     return [extensions containsObject:URL.pathExtension];
 }
 
+// App 调 Photos 保存视频时用的文件 URL：导出成片在那一刻还真实存在，
+// 之后可能被删掉——这是最可靠的一次抓取机会，先记下来。
+static NSURL *AMProjReplicaCapturedVideoURL = nil;
+static NSTimeInterval AMProjReplicaCapturedVideoAt = 0;
+static void (*AMProjReplicaOriginalCreationRequest)(id, SEL, NSURL *) = NULL;
+
+static void AMProjReplicaCaptureVideoURL(NSURL *URL) {
+    if (![URL isKindOfClass:NSURL.class] || !URL.isFileURL) return;
+    AMProjReplicaCapturedVideoURL = URL;
+    AMProjReplicaCapturedVideoAt = [NSDate date].timeIntervalSince1970;
+}
+
+static id AMProjReplicaSwizzledCreationRequest(id self, SEL _cmd, NSURL *URL) {
+    AMProjReplicaCaptureVideoURL(URL);
+    if (!AMProjReplicaOriginalCreationRequest) return nil;
+    return AMProjReplicaOriginalCreationRequest(self, _cmd, URL);
+}
+
+static void AMProjReplicaInstallPhotosCapture(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class requestClass = NSClassFromString(@"PHAssetChangeRequest");
+        SEL selector = NSSelectorFromString(@"creationRequestForAssetFromVideoAtFileURL:");
+        if (!requestClass || ![requestClass respondsToSelector:selector]) return;
+        Method method = class_getClassMethod(requestClass, selector);
+        if (!method) return;
+        AMProjReplicaOriginalCreationRequest =
+            (void (*)(id, SEL, NSURL *))method_getImplementation(method);
+        method_setImplementation(method, (IMP)AMProjReplicaSwizzledCreationRequest);
+    });
+}
+
+// 有些导出临时文件根本没有扩展名（AmprojExport-<uuid> 之类），只靠后缀
+// 会整片漏掉。这里读前 16 字节看有没有 ISO-BMFF 的 ftyp 盒。
+static BOOL AMProjReplicaLooksLikeMP4(NSURL *URL) {
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingFromURL:URL error:nil];
+    if (!handle) return NO;
+    NSData *head = [handle readDataOfLength:16];
+    [handle closeFile];
+    if (head.length < 12) return NO;
+    const uint8_t *bytes = head.bytes;
+    return bytes[4] == 'f' && bytes[5] == 't' && bytes[6] == 'y' && bytes[7] == 'p';
+}
+
 static NSURL *AMProjReplicaRecentContainerVideoURL(NSTimeInterval maxAge) {
     NSFileManager *manager = NSFileManager.defaultManager;
-    NSMutableArray<NSURL *> *roots = [NSMutableArray array];
-    NSString *temporary = NSTemporaryDirectory();
-    if (temporary.length) {
-        [roots addObject:[NSURL fileURLWithPath:temporary isDirectory:YES]];
-    }
-    NSURL *documents = [manager URLsForDirectory:NSDocumentDirectory
-                                       inDomains:NSUserDomainMask].firstObject;
-    if (documents) [roots addObject:documents];
-    // 只扫 tmp 与 Documents：官方导出先写临时文件再存相册，Caches 里
-    // 全是缩略图，深扫既慢又会把历史的编码缓存卷进来。
+    NSString *home = NSHomeDirectory();
+    if (!home.length) return nil;
     NSDate *threshold = [NSDate dateWithTimeIntervalSinceNow:-maxAge];
     NSURL *best = nil;
     NSDate *bestDate = nil;
-    for (NSURL *root in roots) {
-        NSDirectoryEnumerator<NSURL *> *enumerator = [manager
-            enumeratorAtURL:root
- includingPropertiesForKeys:@[NSURLContentModificationDateKey,
-                              NSURLFileSizeKey, NSURLIsRegularFileKey]
-                    options:NSDirectoryEnumerationSkipsHiddenFiles
-               errorHandler:^BOOL(NSURL *url, NSError *error) {
-            (void)url;
-            (void)error;
-            return YES;
-        }];
-        for (NSURL *file in enumerator) {
-            if (!AMProjReplicaURLIsVideoFile(file)) continue;
-            NSNumber *regular = nil;
-            NSDate *modified = nil;
-            NSNumber *size = nil;
-            if (![file getResourceValue:&regular forKey:NSURLIsRegularFileKey
-                                  error:nil] || !regular.boolValue) {
+    NSUInteger visited = 0;
+    // 以前只扫 tmp/Documents，实测导出成片会落在别的目录（Library 下），
+    // 结果预览整块空白。这里整沙盒扫一遍，带访问上限防止卡主线程。
+    NSMutableArray<NSURL *> *stack = [NSMutableArray arrayWithObject:
+        [NSURL fileURLWithPath:home isDirectory:YES]];
+    while (stack.count && visited < 8000) {
+        NSURL *directory = stack.lastObject;
+        [stack removeLastObject];
+        NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:directory
+            includingPropertiesForKeys:@[NSURLIsDirectoryKey,
+                                         NSURLContentModificationDateKey,
+                                         NSURLFileSizeKey]
+            options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
+        for (NSURL *child in children) {
+            if (visited++ > 8000) break;
+            NSNumber *isDirectory = nil;
+            if (![child getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey
+                                   error:nil]) continue;
+            if (isDirectory.boolValue) {
+                NSString *name = child.lastPathComponent;
+                // 系统/第三方缓存目录里全是缩略图，跳过省时间
+                if ([name hasPrefix:@"com.apple."] ||
+                    [name isEqualToString:@"__MACOSX"]) continue;
+                [stack addObject:child];
                 continue;
             }
-            [file getResourceValue:&modified
-                            forKey:NSURLContentModificationDateKey error:nil];
-            [file getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+            NSDate *modified = nil;
+            NSNumber *size = nil;
+            [child getResourceValue:&modified
+                             forKey:NSURLContentModificationDateKey error:nil];
+            [child getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
             if (!modified ||
                 [modified compare:threshold] == NSOrderedAscending) continue;
-            if (size.longLongValue < 64 * 1024) continue;
+            if (size.longLongValue < 128 * 1024) continue;
+            if (!AMProjReplicaURLIsVideoFile(child) &&
+                !AMProjReplicaLooksLikeMP4(child)) continue;
             if (!bestDate || [modified compare:bestDate] == NSOrderedDescending) {
-                best = file;
+                best = child;
                 bestDate = modified;
             }
         }
@@ -21617,6 +21675,14 @@ static NSURL *AMProjReplicaRecentAlbumVideoURL(NSTimeInterval maxAge) {
 static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) {
     NSURL *resolved = nil;
     NSString *source = @"none";
+    AMProjReplicaInstallPhotosCapture();
+    NSTimeInterval capturedAge = [NSDate date].timeIntervalSince1970 -
+        AMProjReplicaCapturedVideoAt;
+    if (AMProjReplicaCapturedVideoURL && capturedAge >= 0 &&
+        capturedAge <= AMProjReplicaVideoMaxAge) {
+        resolved = AMProjReplicaCapturedVideoURL;
+        source = @"photos_save_hook";
+    }
     for (NSString *key in @[@"videoURL", @"outputURL", @"savedURL", @"fileURL",
                             @"exportURL", @"movieURL", @"url"]) {
         @try {

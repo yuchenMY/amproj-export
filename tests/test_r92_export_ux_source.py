@@ -58,7 +58,7 @@ class ReplicaVideoSourceR92Tests(unittest.TestCase):
         self.assertIn("AMProjReplicaURLIsVideoFile", region)
 
     def test_missing_source_degrades_to_placeholder(self):
-        self.assertIn("已保存到设备\\n可在相册中查看", EXPORT)
+        self.assertIn("预览加载中", EXPORT)
         self.assertIn(
             "if (!self.videoURL) {\n        self.playButton.hidden = YES;", EXPORT
         )
@@ -67,6 +67,20 @@ class ReplicaVideoSourceR92Tests(unittest.TestCase):
     def test_resolution_result_is_logged_with_its_source(self):
         self.assertIn("share.replica_video_source", EXPORT)
         self.assertIn('@"source": source', EXPORT)
+
+    def test_video_url_capture_runs_through_the_photos_save_hook(self):
+        self.assertIn("photos_save_hook", EXPORT)
+        self.assertIn("creationRequestForAssetFromVideoAtFileURL:", EXPORT)
+
+    def test_container_scan_covers_the_whole_sandbox(self):
+        region = _slice(
+            EXPORT,
+            "static NSURL *AMProjReplicaRecentContainerVideoURL",
+            "static NSURL *AMProjReplicaRecentAlbumVideoURL",
+        )
+        self.assertIn("NSHomeDirectory()", region)
+        self.assertIn("AMProjReplicaLooksLikeMP4", region)
+        self.assertIn("visited < 8000", region)
 
 
 class ReplicaLayoutR92Tests(unittest.TestCase):
