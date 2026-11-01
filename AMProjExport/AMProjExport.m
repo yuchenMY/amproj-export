@@ -20905,7 +20905,7 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
     [share addTarget:self action:@selector(onShare) forControlEvents:UIControlEventTouchUpInside];
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[save, share]];
     row.axis = UILayoutConstraintAxisHorizontal;
-    row.spacing = 20;
+    row.spacing = 18;
     row.distribution = UIStackViewDistributionFillEqually;
     row.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:row];
@@ -20937,7 +20937,7 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
         [bar.topAnchor constraintEqualToAnchor:safe.topAnchor],
         [bar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [bar.heightAnchor constraintEqualToConstant:52],
+        [bar.heightAnchor constraintEqualToConstant:58],
         [close.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:12],
         [close.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
         [title.centerXAnchor constraintEqualToAnchor:bar.centerXAnchor],
@@ -20946,9 +20946,9 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
         [content.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
         [content.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [content.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        // 老版内容卡的高宽比实测约 1.12（截图里 575×642）
-        [content.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
-                                            multiplier:1.12],
+        // 老版内容卡是收紧在内容上的：胶片条下面只留约 30pt 黑边
+        [content.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor
+                                             constant:30],
 
         [preview.topAnchor constraintEqualToAnchor:content.topAnchor constant:54],
         [preview.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
@@ -20957,7 +20957,7 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
         [preview.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
                                           multiplier:9.0 / 16.0],
 
-        [self.titleLabel.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:20],
+        [self.titleLabel.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:34],
         [self.titleLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:20],
         [self.titleLabel.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-20],
 
@@ -20965,8 +20965,8 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
         [self.stripContainer.leadingAnchor constraintEqualToAnchor:self.playButton.trailingAnchor
                                                           constant:10],
         [self.stripContainer.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
-        [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:20],
-        [self.stripContainer.heightAnchor constraintEqualToConstant:40],
+        [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:26],
+        [self.stripContainer.heightAnchor constraintEqualToConstant:32],
 
         [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [self.playButton.widthAnchor constraintEqualToConstant:24],
@@ -20979,13 +20979,13 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
         [self.scrubber.topAnchor constraintEqualToAnchor:self.stripContainer.topAnchor constant:-6],
         [self.scrubber.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:6],
 
-        [row.topAnchor constraintEqualToAnchor:content.bottomAnchor constant:44],
-        [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
-        [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
-        [row.heightAnchor constraintEqualToConstant:56],
+        [row.bottomAnchor constraintEqualToAnchor:bottomClose.topAnchor constant:-34],
+        [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:44],
+        [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-44],
+        [row.heightAnchor constraintEqualToConstant:54],
 
         [bottomClose.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [bottomClose.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:28],
+        [bottomClose.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-52],
 
         [self.toastLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [self.toastLabel.bottomAnchor constraintEqualToAnchor:row.topAnchor constant:-24],

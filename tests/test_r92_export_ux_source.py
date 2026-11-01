@@ -77,7 +77,7 @@ class ReplicaLayoutR92Tests(unittest.TestCase):
         self.assertNotIn("previewHeightConstraint", EXPORT)
 
     def test_filmstrip_is_a_short_bordered_strip(self):
-        self.assertIn("constraintEqualToConstant:40]", EXPORT)
+        self.assertIn("constraintEqualToConstant:32]", EXPORT)
         self.assertIn("self.stripContainer.layer.borderWidth = 1.0;", EXPORT)
 
 
