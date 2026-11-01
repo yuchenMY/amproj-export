@@ -21083,6 +21083,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
 @property(nonatomic, strong) UIView *stripContainer;
 @property(nonatomic, strong) UIStackView *filmstripStack;
 @property(nonatomic, strong) UIView *playhead;
+@property(nonatomic, strong) NSLayoutConstraint *previewAspectConstraint;
 @property(nonatomic, strong) NSLayoutConstraint *playheadLeading;
 @property(nonatomic, strong) UILabel *previewPlaceholder;
 @property(nonatomic, assign) BOOL filmstripGenerated;
@@ -21314,8 +21315,9 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [preview.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [preview.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         // 固定 16:9 信箱式预览（P4）：竖屏视频左右留黑边居中。
-        [preview.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
-                                          multiplier:9.0 / 16.0],
+        (self.previewAspectConstraint =
+            [preview.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
+                                               multiplier:9.0 / 16.0]),
 
         [self.titleLabel.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:34],
         [self.titleLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:20],
@@ -21497,8 +21499,33 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                                                error:&trackError] == AVKeyValueStatusLoaded;
             double seconds = CMTimeGetSeconds(asset.duration);
             dispatch_async(dispatch_get_main_queue(), ^{
-                // 预览框固定 16:9 信箱式（P4），不再按视频长宽比改高度：
-                // 竖屏视频左右留黑边、横屏上下留黑边，标题始终在框下方。
+                // 老版是"满宽 + 按视频自身比例定高"：横视频就是矮横条，
+                // 方视频就是方块，两边不留黑边。写死 16:9 会让方/竖视频出现
+                // 左右大黑边，整体也被撑高（用户说的"位置不对"就是这个）。
+                if (loaded) {
+                    AVAssetTrack *track =
+                        [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+                    if (track) {
+                        CGSize natural = track.naturalSize;
+                        CGSize shown =
+                            CGSizeApplyAffineTransform(natural, track.preferredTransform);
+                        CGFloat aspect = fabs(shown.height) > 1
+                            ? fabs(shown.width / shown.height) : 16.0 / 9.0;
+                        CGFloat ratio = 1.0 / MAX(aspect, 0.35);
+                        ratio = MIN(MAX(ratio, 0.4), 1.2);
+                        if (self.previewAspectConstraint) {
+                            self.previewAspectConstraint.active = NO;
+                        }
+                        UIView *previewBox = [self.view viewWithTag:9001];
+                        if (previewBox) {
+                            self.previewAspectConstraint =
+                                [previewBox.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
+                                                                      multiplier:ratio];
+                            self.previewAspectConstraint.active = YES;
+                            [self.view layoutIfNeeded];
+                        }
+                    }
+                }
                 if (loaded && seconds > 0 && !self.filmstripGenerated) {
                     self.filmstripGenerated = YES;
                     [self generateFilmstripForAsset:asset seconds:seconds];
