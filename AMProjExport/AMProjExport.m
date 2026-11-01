@@ -21047,6 +21047,7 @@ static UIViewController *AMProjBuildLegacyShareVideoPage(
 }
 
 static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
+static NSString *AMProjReplicaDiagnosticReport(void);
 
 @interface AMProjShareVideoReplicaVC : UIViewController
 @property(nonatomic, copy) NSURL *videoURL;
