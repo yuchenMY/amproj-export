@@ -89,6 +89,14 @@ FOUNDATION_EXPORT BOOL AMCloudPluginsActivateCatalog(
     NSError * _Nullable * _Nullable error);
 
 /**
+ 只作废 catalog/state.json，保留 items/ 里已下载的插件包（覆盖更新换 IPA 后
+ 目录状态失效但插件文件仍然有效，重建目录应当零下载）。validator 失效时
+ 什么都不做。该函数同步阻塞调用线程。
+ */
+FOUNDATION_EXPORT BOOL AMCloudPluginsInvalidateCatalogPreservingItemsIf(
+    BOOL (^ _Nullable validator)(void));
+
+/**
  在插件串行队列中重新执行 validator，仅条件仍成立时清理全部插件。
  返回 YES 仅表示插件根目录已不存在；返回 NO 表示 validator 已失效或磁盘清理失败。
  只要 validator 通过，内存状态会先失效，磁盘状态也会在删除根目录前禁止冷启动恢复。

@@ -1585,6 +1585,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic) NSUInteger pluginDownloadTotalItems;
 @property(nonatomic) BOOL pluginDownloadNoticeBusy;
 @property(nonatomic) BOOL pluginDownloadNoticeSuppressed;
+@property(nonatomic) NSUInteger pluginDownloadNoticeRetryCount;
 @property(nonatomic) BOOL pluginDownloadRequiresRestart;
 @property(nonatomic, strong) UIImage *accountAvatarImage;
 @property(nonatomic, copy) NSString *accountAvatarURL;
@@ -2537,6 +2538,11 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         });
         return;
     }
+    // 每轮同步（含回前台）都补一次下载提示：启动早期没有窗口时提示建不
+    // 出来，回前台必须能接着显示。
+    if (self.pluginDownloadNoticeBusy && !self.pluginDownloadOverlay) {
+        [self showPluginDownloadNoticeIfPossible];
+    }
     NSString *token = nil;
     NSString *authorizationKey = nil;
     uint64_t authorizationGeneration = 0;
@@ -2753,7 +2759,11 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
                 @"plugin_count": @(plugins.count)
             });
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                AMCloudPluginsRemoveAllIf(^BOOL{
+                // 只废 catalog/state，绝不连 items/ 一起删：覆盖更新换 IPA
+                // 之后走的就是这条路，以前 RemoveAllIf 会把已下载的插件包
+                // 全删掉，导致下一轮 manifest 只能全量重下（223 个包，用户
+                // 完全无感知）。保留 items 后 item.json 对账即可零下载重建。
+                AMCloudPluginsInvalidateCatalogPreservingItemsIf(^BOOL{
                     return AMCloudAuthMatches(token, authorizationGeneration);
                 });
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -3107,6 +3117,11 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         ? [NSString stringWithFormat:@"已准备下载 %@，下载完成后会自动安装。",
                                       AMCloudByteText(size.longLongValue)]
         : @"正在准备云端插件，下载完成后会自动安装。";
+    if (self.pluginDownloadRequiresRestart) {
+        self.pluginDownloadNoticeMessage = [self.pluginDownloadNoticeMessage
+            stringByAppendingString:@"部分插件需要彻底关闭并重新打开 App 后生效。"];
+    }
+    self.pluginDownloadNoticeRetryCount = 0;
     self.pluginDownloadExpectedBytes = MAX(0, size.longLongValue);
     self.pluginDownloadCompletedBytes = 0;
     self.pluginDownloadCompletedItems = 0;
@@ -3128,6 +3143,13 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.pluginDownloadCompletedItems = completedItems;
     if (totalItems > 0) self.pluginDownloadTotalItems = totalItems;
     UIView *overlay = self.pluginDownloadOverlay;
+    // 启动早期（或切后台）时还没有 key window，overlay 建不出来；以前这里
+    // 直接 return，于是整轮下载直到结束都不会再弹——用户完全无感知。现在
+    // 进度一到就把提示补上。
+    if (!overlay) {
+        [self showPluginDownloadNoticeIfPossible];
+        return;
+    }
     AMCloudGradientProgressView *progressView = [overlay viewWithTag:7311];
     UILabel *progressLabel = [overlay viewWithTag:7312];
     UILabel *message = [overlay viewWithTag:7313];
@@ -3212,7 +3234,21 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
         }
         if (window) break;
     }
-    if (!window) return;
+    if (!window) {
+        // 没有前台窗口就等一下再来：整轮下载可能几十分钟，提示必须能补上，
+        // 否则用户全程不知道插件在下载、更不知道要重启才生效。
+        if (self.pluginDownloadNoticeOperationID.length &&
+            !self.pluginDownloadOverlay &&
+            self.pluginDownloadNoticeRetryCount < 120) {
+            self.pluginDownloadNoticeRetryCount += 1;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self showPluginDownloadNoticeIfPossible];
+            });
+        }
+        return;
+    }
+    self.pluginDownloadNoticeRetryCount = 0;
 
     UIView *overlay = [[UIView alloc] initWithFrame:window.bounds];
     overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -3366,6 +3402,7 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
     self.pluginDownloadTotalItems = 0;
     self.pluginDownloadNoticeBusy = NO;
     self.pluginDownloadNoticeSuppressed = NO;
+    self.pluginDownloadNoticeRetryCount = 0;
 }
 
 - (void)finishPluginSyncAllowingPending:(BOOL)allowPending {

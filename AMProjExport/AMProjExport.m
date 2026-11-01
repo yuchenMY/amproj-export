@@ -2427,8 +2427,10 @@ static BOOL amproj_shouldResetStaleDirectRequest(void) {
     self.tableView.rowHeight = 64;
 }
 - (void)pickCancelled {
-    if (self.onPick) self.onPick(nil, YES);
-    [self dismissViewControllerAnimated:YES completion:nil];
+    void (^callback)(NSString *, BOOL) = self.onPick;
+    [self dismissViewControllerAnimated:YES completion:^{
+        if (callback) callback(nil, YES);
+    }];
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView; (void)section;
@@ -2470,10 +2472,21 @@ static BOOL amproj_shouldResetStaleDirectRequest(void) {
 }
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if ((NSUInteger)indexPath.row >= self.projects.count) return;
     NSDictionary *project = self.projects[(NSUInteger)indexPath.row];
     NSString *title = project[@"title"];
-    if (self.onPick) self.onPick(title, NO);
-    [self dismissViewControllerAnimated:YES completion:nil];
+    // r92：回调必须等选择器真正消失之后再发。以前是先 onPick 再 dismiss，
+    // 回调里立刻向上层 present「备份方式」弹窗，而此刻 dismiss 动画还没结
+    // 束，系统把这次 present 丢掉（控制台一条 "while a presentation is in
+    // progress" 警告），表现为：点了工程 → 窗口消失 → 之后毫无反应。
+    void (^callback)(NSString *, BOOL) = self.onPick;
+    if (!callback) {
+        [self dismissViewControllerAnimated:YES completion:nil];
+        return;
+    }
+    [self dismissViewControllerAnimated:YES completion:^{
+        callback(title, NO);
+    }];
 }
 @end
 
@@ -2588,6 +2601,50 @@ static void amproj_presentExportAbortAlert(NSString *reason) {
 }
 
 #if AMPROJ_CLOUD_SYNC
+// r92：备份方式弹窗要等上一个 modal 真正消失之后再弹，并且经得起
+// "presenter 已经换人"。以前直接对旧的 activePresenter 调 present，
+// 而选择器 dismiss 动画还没结束，系统会静默丢弃这次 present（控制台
+// 只留一条警告）——用户看到的就是：点了工程、窗口消失、之后毫无反应。
+static void amproj_presentCloudMediaChoiceAttempt(UIAlertController *alert,
+                                                  UIViewController *preferred,
+                                                  NSInteger attempt) {
+    if (!alert) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *host = amproj_safeDirectPresenter(preferred);
+        if (!host) host = amproj_topViewController(amproj_keyWindow().rootViewController);
+        if (!host || host.presentedViewController) {
+            if (attempt < 3) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)((attempt + 1) * 0.35 * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+                        amproj_presentCloudMediaChoiceAttempt(
+                            alert, host ?: preferred, attempt + 1);
+                    });
+                return;
+            }
+            amproj_logCriticalEvent(@"direct.cloud_choice_present_busy", @{});
+            amproj_presentExportAbortAlert(
+                @"备份方式弹窗被其他页面挡住，请回到项目页再试一次");
+            return;
+        }
+        @try {
+            [host presentViewController:alert animated:YES completion:nil];
+        } @catch (NSException *exception) {
+            amproj_logCriticalEvent(@"direct.cloud_choice_present_exception", @{
+                @"name": exception.name ?: @"NSException",
+                @"reason": exception.reason ?: @""
+            });
+            amproj_presentExportAbortAlert(
+                @"无法弹出备份方式选择，请回到项目页再试一次");
+        }
+    });
+}
+
+static void amproj_presentCloudMediaChoice(UIAlertController *alert,
+                                           UIViewController *preferred) {
+    amproj_presentCloudMediaChoiceAttempt(alert, preferred, 0);
+}
+
 static UIViewController *amproj_visibleCloudUploadPresenter(
     UIViewController *preferred) {
     UIViewController *candidate = amproj_topViewController(preferred);
@@ -3049,17 +3106,9 @@ static void amproj_startDirectExportWithDestination(
                             }]];
                         [mediaChoice addAction:[UIAlertAction actionWithTitle:@"取消"
                             style:UIAlertActionStyleCancel handler:nil]];
-                        @try {
-                            [activePresenter presentViewController:mediaChoice
-                                                         animated:YES completion:nil];
-                        } @catch (NSException *exception) {
-                            amproj_logCriticalEvent(@"direct.cloud_choice_present_exception", @{
-                                @"name": exception.name ?: @"NSException",
-                                @"reason": exception.reason ?: @""
-                            });
-                            amproj_presentExportAbortAlert(
-                                @"无法弹出备份方式选择，请回到项目页再试一次");
-                        }
+                        // 选择器刚 dismiss 完就 pop 备份方式弹窗：交给带重试的
+                        // 统一入口，避免 present 被"另一个 modal 正在消失"吞掉。
+                        amproj_presentCloudMediaChoice(mediaChoice, activePresenter);
                     };
                     if (amproj_cloudSkipProjectPicker) {
                         amproj_cloudSkipProjectPicker = NO;
@@ -20691,8 +20740,11 @@ static void amproj_probeMediaLibraryAccess(void) {
 // 标题栏 + 视频预览/进度 + 节省/分享 + 绿色关闭。
 #import <AVFoundation/AVFoundation.h>
 
+static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
+
 @interface AMProjShareVideoReplicaVC : UIViewController
 @property(nonatomic, copy) NSURL *videoURL;
+@property(nonatomic, strong) UIViewController *sourceController;
 @end
 
 @interface AMProjShareVideoReplicaVC ()
@@ -20706,7 +20758,7 @@ static void amproj_probeMediaLibraryAccess(void) {
 @property(nonatomic, strong) UILabel *titleLabel;
 @property(nonatomic, strong) UIView *stripContainer;
 @property(nonatomic, strong) UIStackView *filmstripStack;
-@property(nonatomic, strong) NSLayoutConstraint *previewHeightConstraint;
+@property(nonatomic, strong) UILabel *previewPlaceholder;
 @property(nonatomic, assign) BOOL filmstripGenerated;
 @end
 
@@ -20761,6 +20813,26 @@ static void amproj_probeMediaLibraryAccess(void) {
     preview.tag = 9001;
     [self.view addSubview:preview];
 
+    // 拿不到"这一次导出"的视频时绝不拿相册里别的视频顶替：只显示占位文案，
+    // 让用户知道文件已经存好了、去相册里看。
+    self.previewPlaceholder = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.previewPlaceholder.text = @"已保存到设备\n可在相册中查看";
+    self.previewPlaceholder.textColor = [UIColor colorWithWhite:1 alpha:0.72];
+    self.previewPlaceholder.font = [UIFont systemFontOfSize:15];
+    self.previewPlaceholder.textAlignment = NSTextAlignmentCenter;
+    self.previewPlaceholder.numberOfLines = 2;
+    self.previewPlaceholder.hidden = self.videoURL != nil;
+    self.previewPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
+    [preview addSubview:self.previewPlaceholder];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.previewPlaceholder.centerXAnchor
+            constraintEqualToAnchor:preview.centerXAnchor],
+        [self.previewPlaceholder.centerYAnchor
+            constraintEqualToAnchor:preview.centerYAnchor],
+        [self.previewPlaceholder.leadingAnchor
+            constraintGreaterThanOrEqualToAnchor:preview.leadingAnchor constant:24],
+    ]];
+
     self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.titleLabel.textColor = UIColor.whiteColor;
     self.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
@@ -20790,6 +20862,10 @@ static void amproj_probeMediaLibraryAccess(void) {
     self.stripContainer.translatesAutoresizingMaskIntoConstraints = NO;
     self.stripContainer.clipsToBounds = YES;
     self.stripContainer.layer.cornerRadius = 2;
+    // P4：胶片条是一圈白色描边的矮条，贴在预览框下沿。
+    self.stripContainer.layer.borderWidth = 1.0;
+    self.stripContainer.layer.borderColor =
+        [UIColor colorWithWhite:1 alpha:0.85].CGColor;
     [self.view addSubview:self.stripContainer];
 
     self.filmstripStack = [[UIStackView alloc] init];
@@ -20861,8 +20937,10 @@ static void amproj_probeMediaLibraryAccess(void) {
         [preview.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
         [preview.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [preview.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        self.previewHeightConstraint =
-            [preview.heightAnchor constraintEqualToConstant:330],
+        // 老版是固定 16:9 信箱式预览（P4）：竖屏视频左右留黑边居中，
+        // 不随长宽比把整屏撑满；标题始终落在视频框下方。
+        [preview.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
+                                          multiplier:9.0 / 16.0],
 
         [self.titleLabel.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:16],
         [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
@@ -20871,7 +20949,7 @@ static void amproj_probeMediaLibraryAccess(void) {
         [self.stripContainer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
         [self.stripContainer.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
         [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:16],
-        [self.stripContainer.heightAnchor constraintEqualToConstant:38],
+        [self.stripContainer.heightAnchor constraintEqualToConstant:40],
 
         [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:14],
         [self.playButton.centerYAnchor constraintEqualToAnchor:self.stripContainer.centerYAnchor],
@@ -20895,6 +20973,13 @@ static void amproj_probeMediaLibraryAccess(void) {
         [self.toastLabel.widthAnchor constraintGreaterThanOrEqualToConstant:200],
         [self.toastLabel.heightAnchor constraintEqualToConstant:40],
     ]];
+
+    // 没有可信的视频源就不摆播放器/胶片条，只留"已保存到设备"占位。
+    if (!self.videoURL) {
+        self.playButton.hidden = YES;
+        self.scrubber.hidden = YES;
+        self.stripContainer.hidden = YES;
+    }
 }
 
 - (void)viewDidLayoutSubviews {
@@ -20907,30 +20992,50 @@ static void amproj_probeMediaLibraryAccess(void) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    if (!self.player && self.videoURL) {
-        self.player = [AVPlayer playerWithURL:self.videoURL];
-        self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
-        self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-        UIView *preview = [self.view viewWithTag:9001];
-        self.playerLayer.frame = preview.bounds;
-        [preview.layer addSublayer:self.playerLayer];
-        [self.player play];
-        [self loadVideoMetadata];
-        __weak AMProjShareVideoReplicaVC *weakSelf = self;
-        self.timeObserver = [self.player addPeriodicTimeObserverForInterval:
-            CMTimeMake(1, 4) queue:dispatch_get_main_queue()
-            usingBlock:^(CMTime time) {
-            AMProjShareVideoReplicaVC *strongSelf = weakSelf;
-            if (!strongSelf || !strongSelf.player) return;
-            AVPlayerItem *item = strongSelf.player.currentItem;
-            if (item && CMTIME_IS_NUMERIC(item.duration) &&
-                item.duration.value > 0) {
-                strongSelf.scrubber.value =
-                    (float)(CMTimeGetSeconds(time) /
-                            CMTimeGetSeconds(item.duration));
-            }
-        }];
-    }
+    [self installPlayerIfNeeded];
+    if (self.videoURL) return;
+    // 相册资产/容器文件可能比完成页晚一步就位：1.5 秒后补取一次，
+    // 取到了就把播放器和胶片条换上，仍然取不到就维持占位。
+    __weak AMProjShareVideoReplicaVC *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AMProjShareVideoReplicaVC *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.videoURL) return;
+        NSURL *late = AMProjReplicaVideoURLFromController(strongSelf.sourceController);
+        if (!late) return;
+        strongSelf.videoURL = late;
+        strongSelf.previewPlaceholder.hidden = YES;
+        strongSelf.playButton.hidden = NO;
+        strongSelf.scrubber.hidden = NO;
+        strongSelf.stripContainer.hidden = NO;
+        [strongSelf installPlayerIfNeeded];
+    });
+}
+
+- (void)installPlayerIfNeeded {
+    if (self.player || !self.videoURL) return;
+    self.player = [AVPlayer playerWithURL:self.videoURL];
+    self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
+    self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+    UIView *preview = [self.view viewWithTag:9001];
+    self.playerLayer.frame = preview.bounds;
+    [preview.layer addSublayer:self.playerLayer];
+    [self.player play];
+    [self loadVideoMetadata];
+    __weak AMProjShareVideoReplicaVC *weakSelf = self;
+    self.timeObserver = [self.player addPeriodicTimeObserverForInterval:
+        CMTimeMake(1, 4) queue:dispatch_get_main_queue()
+        usingBlock:^(CMTime time) {
+        AMProjShareVideoReplicaVC *strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.player) return;
+        AVPlayerItem *item = strongSelf.player.currentItem;
+        if (item && CMTIME_IS_NUMERIC(item.duration) &&
+            item.duration.value > 0) {
+            strongSelf.scrubber.value =
+                (float)(CMTimeGetSeconds(time) /
+                        CMTimeGetSeconds(item.duration));
+        }
+    }];
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
@@ -20971,25 +21076,9 @@ static void amproj_probeMediaLibraryAccess(void) {
                                                error:&trackError] == AVKeyValueStatusLoaded;
             double seconds = CMTimeGetSeconds(asset.duration);
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (loaded) {
-                    AVAssetTrack *track =
-                        [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
-                    if (track) {
-                        CGSize natural = track.naturalSize;
-                        CGSize transformed =
-                            CGSizeApplyAffineTransform(natural, track.preferredTransform);
-                        CGFloat aspect =
-                            fabs(transformed.height) > 1
-                                ? fabs(transformed.width / transformed.height)
-                                : 16.0 / 9.0;
-                        CGFloat width = UIScreen.mainScreen.bounds.size.width;
-                        CGFloat height = width / aspect;
-                        self.previewHeightConstraint.constant =
-                            MIN(MAX(height, 160), 460);
-                        [self.view layoutIfNeeded];
-                    }
-                }
-                if (seconds > 0 && !self.filmstripGenerated) {
+                // 预览框固定 16:9 信箱式（P4），不再按视频长宽比改高度：
+                // 竖屏视频左右留黑边、横屏上下留黑边，标题始终在框下方。
+                if (loaded && seconds > 0 && !self.filmstripGenerated) {
                     self.filmstripGenerated = YES;
                     [self generateFilmstripForAsset:asset seconds:seconds];
                 }
@@ -21073,7 +21162,10 @@ static void amproj_probeMediaLibraryAccess(void) {
 }
 
 - (void)onShare {
-    if (!self.videoURL) return;
+    if (!self.videoURL) {
+        [self showToast:@"视频已保存到相册，请在相册中分享"];
+        return;
+    }
     UIActivityViewController *activity =
         [[UIActivityViewController alloc] initWithActivityItems:@[self.videoURL]
                                           applicationActivities:nil];
@@ -21100,23 +21192,84 @@ static void amproj_probeMediaLibraryAccess(void) {
 
 @end
 
-// 从被替换的 ExportSuccessVC 上捞导出视频地址（属性名不确定，逐个试）；
-// 拿不到就取相册里最新的视频。
-static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) {
-    for (NSString *key in @[@"videoURL", @"outputURL", @"savedURL",
-                            @"fileURL", @"exportURL", @"url"]) {
-        @try {
-            id value = [controller valueForKey:key];
-            if ([value isKindOfClass:NSURL.class] &&
-                [(NSURL *)value isFileURL]) {
-                return value;
+// 导出视频定位：只认"这一次导出"的产物，绝不退回"相册最新视频"。
+// 旧实现直接取相册最新一条视频，结果把用户自己的录屏当成导出成片播了
+// 出来（P3 实锤）。现在的顺序：
+//   ① ExportSuccessVC 上的属性 / ivar（真实字段名随版本变，用 runtime 兜底）
+//   ② 应用容器里 10 分钟内新写入的视频文件（官方流程是先落盘再存相册）
+//   ③ 10 分钟内新建的相册视频（官方刚存进去的那一条，时间窗卡死）
+// 三条都落空就返回 nil，由复刻页显示"已保存到设备"占位，宁缺毋滥。
+static const NSTimeInterval AMProjReplicaVideoMaxAge = 600;
+
+static BOOL AMProjReplicaURLIsVideoFile(NSURL *URL) {
+    if (![URL isKindOfClass:NSURL.class] || !URL.isFileURL) return NO;
+    static NSSet<NSString *> *extensions = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        extensions = [NSSet setWithObjects:@"mp4", @"mov", @"m4v",
+                                               @"MP4", @"MOV", @"M4V", nil];
+    });
+    return [extensions containsObject:URL.pathExtension];
+}
+
+static NSURL *AMProjReplicaRecentContainerVideoURL(NSTimeInterval maxAge) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSMutableArray<NSURL *> *roots = [NSMutableArray array];
+    NSString *temporary = NSTemporaryDirectory();
+    if (temporary.length) {
+        [roots addObject:[NSURL fileURLWithPath:temporary isDirectory:YES]];
+    }
+    NSURL *documents = [manager URLsForDirectory:NSDocumentDirectory
+                                       inDomains:NSUserDomainMask].firstObject;
+    if (documents) [roots addObject:documents];
+    // 只扫 tmp 与 Documents：官方导出先写临时文件再存相册，Caches 里
+    // 全是缩略图，深扫既慢又会把历史的编码缓存卷进来。
+    NSDate *threshold = [NSDate dateWithTimeIntervalSinceNow:-maxAge];
+    NSURL *best = nil;
+    NSDate *bestDate = nil;
+    for (NSURL *root in roots) {
+        NSDirectoryEnumerator<NSURL *> *enumerator = [manager
+            enumeratorAtURL:root
+ includingPropertiesForKeys:@[NSURLContentModificationDateKey,
+                              NSURLFileSizeKey, NSURLIsRegularFileKey]
+                    options:NSDirectoryEnumerationSkipsHiddenFiles
+               errorHandler:^BOOL(NSURL *url, NSError *error) {
+            (void)url;
+            (void)error;
+            return YES;
+        }];
+        for (NSURL *file in enumerator) {
+            if (!AMProjReplicaURLIsVideoFile(file)) continue;
+            NSNumber *regular = nil;
+            NSDate *modified = nil;
+            NSNumber *size = nil;
+            if (![file getResourceValue:&regular forKey:NSURLIsRegularFileKey
+                                  error:nil] || !regular.boolValue) {
+                continue;
             }
-        } @catch (NSException *exception) {
+            [file getResourceValue:&modified
+                            forKey:NSURLContentModificationDateKey error:nil];
+            [file getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+            if (!modified ||
+                [modified compare:threshold] == NSOrderedAscending) continue;
+            if (size.longLongValue < 64 * 1024) continue;
+            if (!bestDate || [modified compare:bestDate] == NSOrderedDescending) {
+                best = file;
+                bestDate = modified;
+            }
         }
     }
+    return best;
+}
+
+static NSURL *AMProjReplicaRecentAlbumVideoURL(NSTimeInterval maxAge) {
     PHFetchOptions *options = [PHFetchOptions new];
     options.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate"
                                                               ascending:NO]];
+    // 时间窗是这段代码的全部安全边界：只接受"刚刚"存进去的那一条，
+    // 历史视频（录屏等）一律不会被选中。
+    options.predicate = [NSPredicate predicateWithFormat:@"creationDate >= %@",
+        [NSDate dateWithTimeIntervalSinceNow:-maxAge]];
     options.fetchLimit = 1;
     PHFetchResult<PHAsset *> *result =
         [PHAsset fetchAssetsWithMediaType:PHAssetMediaTypeVideo options:options];
@@ -21126,15 +21279,82 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) 
     __block NSURL *resolved = nil;
     [[PHImageManager defaultManager]
         requestAVAssetForVideo:asset options:nil
-        resultHandler:^(AVAsset *avAsset, AVAudioMix *audioMix,
-                        NSDictionary *info) {
+                 resultHandler:^(AVAsset *avAsset, AVAudioMix *audioMix,
+                                 NSDictionary *info) {
+        (void)audioMix;
+        (void)info;
         if ([avAsset isKindOfClass:AVURLAsset.class]) {
             resolved = ((AVURLAsset *)avAsset).URL;
         }
         dispatch_semaphore_signal(sema);
     }];
     dispatch_semaphore_wait(sema,
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+    return resolved;
+}
+
+static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) {
+    NSURL *resolved = nil;
+    NSString *source = @"none";
+    for (NSString *key in @[@"videoURL", @"outputURL", @"savedURL", @"fileURL",
+                            @"exportURL", @"movieURL", @"url"]) {
+        @try {
+            id value = [controller valueForKey:key];
+            if ([value isKindOfClass:NSURL.class] &&
+                [(NSURL *)value isFileURL]) {
+                resolved = value;
+                source = @"kvc";
+                break;
+            }
+            if ([value isKindOfClass:AVURLAsset.class]) {
+                resolved = ((AVURLAsset *)value).URL;
+                source = @"kvc_asset";
+                break;
+            }
+        } @catch (NSException *exception) {
+        }
+    }
+    if (!resolved) {
+        // Swift 侧字段名和 KVC 名对不上时，按类型扫一遍 ivar 兜底。
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList([controller class], &count);
+        for (unsigned int index = 0; index < count && !resolved; index++) {
+            const char *name = ivar_getName(ivars[index]);
+            const char *type = ivar_getTypeEncoding(ivars[index]);
+            if (!name || !type || type[0] != '@') continue;
+            NSString *key = [@(name) lowercaseString];
+            if (![key containsString:@"url"] && ![key containsString:@"video"] &&
+                ![key containsString:@"movie"] && ![key containsString:@"file"]) {
+                continue;
+            }
+            @try {
+                id value = [controller valueForKey:@(name)];
+                if ([value isKindOfClass:NSURL.class] &&
+                    [(NSURL *)value isFileURL]) {
+                    resolved = value;
+                    source = @"ivar";
+                } else if ([value isKindOfClass:AVURLAsset.class]) {
+                    resolved = ((AVURLAsset *)value).URL;
+                    source = @"ivar_asset";
+                }
+            } @catch (NSException *exception) {
+            }
+        }
+        free(ivars);
+    }
+    if (!resolved) {
+        resolved = AMProjReplicaRecentContainerVideoURL(AMProjReplicaVideoMaxAge);
+        if (resolved) source = @"container_recent";
+    }
+    if (!resolved) {
+        resolved = AMProjReplicaRecentAlbumVideoURL(AMProjReplicaVideoMaxAge);
+        if (resolved) source = @"album_recent";
+    }
+    amproj_logCriticalEvent(@"share.replica_video_source", @{
+        @"source": source,
+        @"file": resolved.lastPathComponent ?: @"",
+        @"controller": NSStringFromClass(controller.class) ?: @""
+    });
     return resolved;
 }
 
@@ -21143,6 +21363,9 @@ static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess
         AMProjShareVideoReplicaVC *replica = [AMProjShareVideoReplicaVC new];
         replica.videoURL = AMProjReplicaVideoURLFromController(exportSuccess);
         replica.videoTitle = amproj_currentProjectTitle(exportSuccess);
+        // 留一个强引用：原完成页没有被 present，可能立刻释放；复刻页
+        // 1.5 秒后补取视频地址时还要用它做 runtime 探测。
+        replica.sourceController = exportSuccess;
         return replica;
     } @catch (NSException *exception) {
         amproj_logCriticalEvent(@"share.replica_failed", @{

@@ -1737,7 +1737,11 @@ class RuntimeReactivationR89Tests(unittest.TestCase):
         self.assertIn("AMCloudPluginsRestoreInstalledReleaseForAuthorization", helper)
         self.assertIn("cloud.plugins.runtime_reactivated", helper)
         self.assertIn("cloud.plugins.runtime_reactivation_failed", helper)
-        self.assertIn("AMCloudPluginsRemoveAllIf", helper)
+        # r92：这条自愈路径只准作废 catalog/state，不许连 items/ 一起删。
+        # 覆盖更新换了 IPA 底包指纹后必然走到这里，删 items 的结果就是
+        # 223 个已下载插件包全部重下（用户完全无感知）。
+        self.assertIn("AMCloudPluginsInvalidateCatalogPreservingItemsIf", helper)
+        self.assertNotIn("AMCloudPluginsRemoveAllIf", helper)
 
     def test_quiet_reauth_throttle_shrunk(self):
         self.assertIn("now - lastAttempt < 90.0", CLOUD)

@@ -2677,6 +2677,27 @@ BOOL AMCloudPluginsInstallArchive(NSURL *archiveURL, NSString *releaseID,
     return installed;
 }
 
+// r92：只作废 catalog/state，保留 items/ 里已下载的插件包。
+// 覆盖更新换了 IPA（底包指纹变化）时 catalog 必然失效，但插件包本身
+// 一字未动；以前这里走 RemoveAllIf 把整个根目录删掉，下一轮 sync 只能
+// 全量重下（223 个包）。保留 items 后 item.json 对账即可零下载重建。
+BOOL AMCloudPluginsInvalidateCatalogPreservingItemsIf(BOOL (^validator)(void)) {
+    __block BOOL invalidated = NO;
+    AMCloudPluginsPerformMutation(^{
+        if (validator && !validator()) return;
+        NSFileManager *manager = NSFileManager.defaultManager;
+        AMCloudPluginsSetActiveState(nil, nil, 0);
+        invalidated = AMCloudPluginsInvalidateStaleCatalog(manager);
+        [manager removeItemAtURL:[AMCloudPluginsRootURL()
+            URLByAppendingPathComponent:@"catalog-staging" isDirectory:YES]
+                           error:nil];
+        [manager removeItemAtURL:[AMCloudPluginsRootURL()
+            URLByAppendingPathComponent:@"catalog-old" isDirectory:YES]
+                           error:nil];
+    });
+    return invalidated;
+}
+
 BOOL AMCloudPluginsRemoveAllIf(BOOL (^validator)(void)) {
     __block BOOL removed = NO;
     AMCloudPluginsPerformMutation(^{
