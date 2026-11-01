@@ -21549,7 +21549,7 @@ static BOOL AMProjReplicaURLIsVideoFile(NSURL *URL) {
 // 之后可能被删掉——这是最可靠的一次抓取机会，先记下来。
 static NSURL *AMProjReplicaCapturedVideoURL = nil;
 static NSTimeInterval AMProjReplicaCapturedVideoAt = 0;
-static void (*AMProjReplicaOriginalCreationRequest)(id, SEL, NSURL *) = NULL;
+static id (*AMProjReplicaOriginalCreationRequest)(id, SEL, NSURL *) = NULL;
 
 static void AMProjReplicaCaptureVideoURL(NSURL *URL) {
     if (![URL isKindOfClass:NSURL.class] || !URL.isFileURL) return;
@@ -21572,7 +21572,7 @@ static void AMProjReplicaInstallPhotosCapture(void) {
         Method method = class_getClassMethod(requestClass, selector);
         if (!method) return;
         AMProjReplicaOriginalCreationRequest =
-            (void (*)(id, SEL, NSURL *))method_getImplementation(method);
+            (id (*)(id, SEL, NSURL *))method_getImplementation(method);
         method_setImplementation(method, (IMP)AMProjReplicaSwizzledCreationRequest);
     });
 }
