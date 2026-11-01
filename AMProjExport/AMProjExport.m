@@ -21046,66 +21046,6 @@ static UIViewController *AMProjBuildLegacyShareVideoPage(
     }
 }
 
-// r99：临时诊断。设备端 AFC 读不到（Windows 配对 183），就改用"用户点一下
-// 复制"，把导出页到底扫到了什么原样带回来。
-static NSString *AMProjReplicaDiagnosticReport(void) {
-    NSMutableString *report = [NSMutableString string];
-    [report appendFormat:@"home=%@\n", NSHomeDirectory()];
-    [report appendFormat:@"photosHook=%@\n",
-        AMProjReplicaCapturedVideoURL.path ?: @"none"];
-    [report appendFormat:@"hookAge=%.0fs\n",
-        AMProjReplicaCapturedVideoURL
-            ? [NSDate date].timeIntervalSince1970 - AMProjReplicaCapturedVideoAt : -1.0];
-    NSMutableArray<NSDictionary *> *found = [NSMutableArray array];
-    NSFileManager *manager = NSFileManager.defaultManager;
-    NSDate *threshold = [NSDate dateWithTimeIntervalSinceNow:-3600];
-    NSMutableArray<NSURL *> *stack = [NSMutableArray arrayWithObject:
-        [NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES]];
-    NSUInteger visited = 0;
-    while (stack.count && visited < 8000) {
-        NSURL *directory = stack.lastObject;
-        [stack removeLastObject];
-        NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:directory
-            includingPropertiesForKeys:@[NSURLIsDirectoryKey,
-                                         NSURLContentModificationDateKey,
-                                         NSURLFileSizeKey]
-            options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
-        for (NSURL *child in children) {
-            if (visited++ > 8000) break;
-            NSNumber *isDirectory = nil;
-            if (![child getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey
-                                   error:nil]) continue;
-            if (isDirectory.boolValue) {
-                if ([child.lastPathComponent hasPrefix:@"com.apple."]) continue;
-                [stack addObject:child];
-                continue;
-            }
-            NSDate *modified = nil;
-            NSNumber *size = nil;
-            [child getResourceValue:&modified
-                             forKey:NSURLContentModificationDateKey error:nil];
-            [child getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-            if (!modified || [modified compare:threshold] == NSOrderedAscending) continue;
-            if (size.longLongValue < 128 * 1024) continue;
-            if (!AMProjReplicaURLIsVideoFile(child) &&
-                !AMProjReplicaLooksLikeMP4(child)) continue;
-            [found addObject:@{ @"path": child.path ?: @"",
-                                @"size": size ?: @0,
-                                @"mtime": modified }];
-        }
-    }
-    [found sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-        return [b[@"mtime"] compare:a[@"mtime"]];
-    }];
-    [report appendFormat:@"candidates=%lu\n", (unsigned long)found.count];
-    for (NSUInteger index = 0; index < MIN(found.count, 8); index++) {
-        NSDictionary *item = found[index];
-        [report appendFormat:@"%@@%.0fKB %@\n",
-            item[@"mtime"], [item[@"size"] doubleValue] / 1024.0, item[@"path"]];
-    }
-    return report;
-}
-
 static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
 
 @interface AMProjShareVideoReplicaVC : UIViewController
@@ -21855,6 +21795,66 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) 
         @"controller": NSStringFromClass(controller.class) ?: @""
     });
     return resolved;
+}
+
+// r99：临时诊断。设备端 AFC 读不到（Windows 配对 183），就改用"用户点一下
+// 复制"，把导出页到底扫到了什么原样带回来。
+static NSString *AMProjReplicaDiagnosticReport(void) {
+    NSMutableString *report = [NSMutableString string];
+    [report appendFormat:@"home=%@\n", NSHomeDirectory()];
+    [report appendFormat:@"photosHook=%@\n",
+        AMProjReplicaCapturedVideoURL.path ?: @"none"];
+    [report appendFormat:@"hookAge=%.0fs\n",
+        AMProjReplicaCapturedVideoURL
+            ? [NSDate date].timeIntervalSince1970 - AMProjReplicaCapturedVideoAt : -1.0];
+    NSMutableArray<NSDictionary *> *found = [NSMutableArray array];
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSDate *threshold = [NSDate dateWithTimeIntervalSinceNow:-3600];
+    NSMutableArray<NSURL *> *stack = [NSMutableArray arrayWithObject:
+        [NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES]];
+    NSUInteger visited = 0;
+    while (stack.count && visited < 8000) {
+        NSURL *directory = stack.lastObject;
+        [stack removeLastObject];
+        NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:directory
+            includingPropertiesForKeys:@[NSURLIsDirectoryKey,
+                                         NSURLContentModificationDateKey,
+                                         NSURLFileSizeKey]
+            options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
+        for (NSURL *child in children) {
+            if (visited++ > 8000) break;
+            NSNumber *isDirectory = nil;
+            if (![child getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey
+                                   error:nil]) continue;
+            if (isDirectory.boolValue) {
+                if ([child.lastPathComponent hasPrefix:@"com.apple."]) continue;
+                [stack addObject:child];
+                continue;
+            }
+            NSDate *modified = nil;
+            NSNumber *size = nil;
+            [child getResourceValue:&modified
+                             forKey:NSURLContentModificationDateKey error:nil];
+            [child getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+            if (!modified || [modified compare:threshold] == NSOrderedAscending) continue;
+            if (size.longLongValue < 128 * 1024) continue;
+            if (!AMProjReplicaURLIsVideoFile(child) &&
+                !AMProjReplicaLooksLikeMP4(child)) continue;
+            [found addObject:@{ @"path": child.path ?: @"",
+                                @"size": size ?: @0,
+                                @"mtime": modified }];
+        }
+    }
+    [found sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [b[@"mtime"] compare:a[@"mtime"]];
+    }];
+    [report appendFormat:@"candidates=%lu\n", (unsigned long)found.count];
+    for (NSUInteger index = 0; index < MIN(found.count, 8); index++) {
+        NSDictionary *item = found[index];
+        [report appendFormat:@"%@@%.0fKB %@\n",
+            item[@"mtime"], [item[@"size"] doubleValue] / 1024.0, item[@"path"]];
+    }
+    return report;
 }
 
 static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess) {
