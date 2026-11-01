@@ -20740,6 +20740,308 @@ static void amproj_probeMediaLibraryAccess(void) {
 // 标题栏 + 视频预览/进度 + 节省/分享 + 绿色关闭。
 #import <AVFoundation/AVFoundation.h>
 
+// ── r95：原样复用 App 自带的老版「分享视频」页 ─────────────────────
+// 6.2.58 仍完整带着 ExportPreviewVC.storyboardc（标题栏 / 预览容器 /
+// Save / Share / 关闭 / 胶片条控件全在），只是新版导出完成后改弹白色
+// ExportSuccessVC，不再展示它。与其照截图重画，不如直接把原版界面实例化
+// 出来，塞进我们的播放器和胶片帧、按钮改接我们的处理；任何一步取不到
+// 就退回复刻页，绝不把用户卡在黑屏上。
+static id AMProjLegacyOutlet(UIViewController *page, NSString *key) {
+    @try {
+        return [page valueForKey:key];
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+@interface AMProjLegacyPlayerView : UIView
+@end
+
+@implementation AMProjLegacyPlayerView
++ (Class)layerClass { return AVPlayerLayer.class; }
+@end
+
+// 胶片帧条：原版那条是 VisualAssetTrimThumbnailView，要喂它自家的视觉资产，
+// 从外部塞不进去；这里用同尺寸的条替上去，位置和外观仍由原版 storyboard
+// 的约束决定。
+@interface AMProjLegacyStripView : UIView
+@property(nonatomic, strong) UIStackView *stack;
+@end
+
+@implementation AMProjLegacyStripView
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = UIColor.blackColor;
+        self.clipsToBounds = YES;
+        self.layer.cornerRadius = 2;
+        self.layer.borderWidth = 1;
+        self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.85].CGColor;
+        _stack = [[UIStackView alloc] init];
+        _stack.axis = UILayoutConstraintAxisHorizontal;
+        _stack.distribution = UIStackViewDistributionFillEqually;
+        _stack.spacing = 1;
+        _stack.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:_stack];
+        [NSLayoutConstraint activateConstraints:@[
+            [_stack.topAnchor constraintEqualToAnchor:self.topAnchor],
+            [_stack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+            [_stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+            [_stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        ]];
+    }
+    return self;
+}
+
+- (void)loadVideoURL:(NSURL *)URL {
+    if (!URL) return;
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:URL options:nil];
+    AVAssetImageGenerator *generator =
+        [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
+    generator.appliesPreferredTrackTransform = YES;
+    generator.maximumSize = CGSizeMake(160, 160);
+    __weak AMProjLegacyStripView *weakSelf = self;
+    [asset loadValuesAsynchronouslyForKeys:@[@"duration"] completionHandler:^{
+        double seconds = CMTimeGetSeconds(asset.duration);
+        if (!isfinite(seconds) || seconds <= 0) return;
+        int frames = 14;
+        NSMutableArray<NSValue *> *times = [NSMutableArray array];
+        for (int i = 0; i < frames; i++) {
+            double t = seconds * (i + 0.5) / frames;
+            [times addObject:[NSValue valueWithCMTime:CMTimeMakeWithSeconds(t, 600)]];
+        }
+        [generator generateCGImagesAsynchronouslyForTimes:times
+            completionHandler:^(CMTime requested, CGImageRef image, CMTime actual,
+                                AVAssetImageGeneratorResult result, NSError *error) {
+            if (result != AVAssetImageGeneratorSucceeded || !image) return;
+            UIImage *thumb = [UIImage imageWithCGImage:image];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AMProjLegacyStripView *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                UIImageView *view = [UIImageView new];
+                view.image = thumb;
+                view.contentMode = UIViewContentModeScaleAspectFill;
+                view.clipsToBounds = YES;
+                [strongSelf.stack addArrangedSubview:view];
+            });
+        }];
+    }];
+}
+@end
+
+@interface AMProjLegacyPreviewRelay : NSObject
+@property(nonatomic, strong) NSURL *videoURL;
+@property(nonatomic, weak) UIViewController *host;
+@property(nonatomic, strong) AVPlayer *player;
+@property(nonatomic, strong) UIButton *toggle;
+@end
+
+@implementation AMProjLegacyPreviewRelay
+- (void)onToggle {
+    if (!self.player) return;
+    BOOL playing = self.player.rate > 0;
+    if (playing) {
+        [self.player pause];
+    } else {
+        [self.player play];
+    }
+    if (@available(iOS 13.0, *)) {
+        [self.toggle setImage:[UIImage systemImageNamed:
+            playing ? @"play.fill" : @"pause.fill"] forState:UIControlStateNormal];
+    }
+}
+
+- (void)onSave {
+    UIViewController *host = self.host;
+    if (!self.videoURL || !host) return;
+    NSURL *URL = self.videoURL;
+    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:URL];
+    } completionHandler:^(BOOL success, NSError *error) {
+        if (success) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"保存失败"
+                message:error.localizedDescription ?: @"请检查相册权限后重试"
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"好"
+                style:UIAlertActionStyleCancel handler:nil]];
+            [host presentViewController:alert animated:YES completion:nil];
+        });
+    }];
+}
+
+- (void)onShare {
+    UIViewController *host = self.host;
+    if (!self.videoURL || !host) return;
+    UIActivityViewController *activity = [[UIActivityViewController alloc]
+        initWithActivityItems:@[self.videoURL] applicationActivities:nil];
+    activity.popoverPresentationController.sourceView = host.view;
+    activity.popoverPresentationController.sourceRect = CGRectMake(
+        CGRectGetMidX(host.view.bounds), CGRectGetMidY(host.view.bounds), 1, 1);
+    [host presentViewController:activity animated:YES completion:nil];
+}
+
+- (void)onClose {
+    [self.player pause];
+    [self.host dismissViewControllerAnimated:YES completion:nil];
+}
+@end
+
+// 原版页面的关闭键没有 outlet（storyboard 里只有一张 ic_close_thin），
+// 用"排除 Save/Share 后最靠左上角的那颗按钮"来定位。
+static UIButton *AMProjLegacyFindCloseButton(UIView *root, UIButton *save,
+                                             UIButton *share) {
+    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
+    while (queue.count && buttons.count < 40) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([view isKindOfClass:UIButton.class]) [buttons addObject:(UIButton *)view];
+        [queue addObjectsFromArray:view.subviews];
+    }
+    UIButton *best = nil;
+    for (UIButton *button in buttons) {
+        if (button == save || button == share) continue;
+        if (!best) { best = button; continue; }
+        CGPoint probe = [button convertPoint:CGPointZero toView:root];
+        CGPoint bestProbe = [best convertPoint:CGPointZero toView:root];
+        if (probe.y < bestProbe.y ||
+            (probe.y == bestProbe.y && probe.x < bestProbe.x)) {
+            best = button;
+        }
+    }
+    return best;
+}
+
+static UIViewController *AMProjBuildLegacyShareVideoPage(
+    NSURL *videoURL, NSString *title, NSString **outReason) {
+    if (!videoURL) {
+        if (outReason) *outReason = @"no_video_url";
+        return nil;
+    }
+    @try {
+        UIStoryboard *storyboard = [UIStoryboard storyboardWithName:@"ExportPreviewVC"
+                                                             bundle:nil];
+        UIViewController *page = [storyboard instantiateInitialViewController];
+        if (!page) {
+            if (outReason) *outReason = @"no_initial_vc";
+            return nil;
+        }
+        [page loadViewIfNeeded];
+        page.modalPresentationStyle = UIModalPresentationFullScreen;
+        UIView *root = page.view;
+        UIView *preview = AMProjLegacyOutlet(page, @"previewContainerView");
+        UIButton *save = AMProjLegacyOutlet(page, @"storeButton");
+        UIButton *share = AMProjLegacyOutlet(page, @"shareButton");
+        if (!root || ![preview isKindOfClass:UIView.class] ||
+            ![save isKindOfClass:UIButton.class] ||
+            ![share isKindOfClass:UIButton.class]) {
+            if (outReason) *outReason = @"outlets_missing";
+            return nil;
+        }
+
+        UILabel *titleLabel = AMProjLegacyOutlet(page, @"titleLabel");
+        if ([titleLabel isKindOfClass:UILabel.class] && title.length) {
+            titleLabel.text = title;
+            titleLabel.hidden = NO;
+        }
+        // 没喂 source 时原版会摆"无录屏"占位，这里全部收起来。
+        for (NSString *key in @[@"previewNoRecordView", @"previewNoRecordImageView",
+                                @"previewIndicator", @"previewDimmView",
+                                @"fullSizeDimmView", @"descLabel"]) {
+            id view = AMProjLegacyOutlet(page, key);
+            if ([view isKindOfClass:UIView.class]) ((UIView *)view).hidden = YES;
+        }
+
+        // 播放器：塞进原版预览容器，等比信箱式，随容器自动改尺寸。
+        AMProjLegacyPlayerView *playerView = [AMProjLegacyPlayerView new];
+        playerView.translatesAutoresizingMaskIntoConstraints = NO;
+        AVPlayer *player = [AVPlayer playerWithURL:videoURL];
+        AVPlayerLayer *playerLayer = (AVPlayerLayer *)playerView.layer;
+        playerLayer.player = player;
+        playerLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        [preview addSubview:playerView];
+        [NSLayoutConstraint activateConstraints:@[
+            [playerView.topAnchor constraintEqualToAnchor:preview.topAnchor],
+            [playerView.bottomAnchor constraintEqualToAnchor:preview.bottomAnchor],
+            [playerView.leadingAnchor constraintEqualToAnchor:preview.leadingAnchor],
+            [playerView.trailingAnchor constraintEqualToAnchor:preview.trailingAnchor],
+        ]];
+
+        // 胶片条 + 播放键：占住原版 videoControlView 的位置（隐藏它自己的内容）
+        UIView *control = AMProjLegacyOutlet(page, @"videoControlView");
+        UIView *stripAnchor = [control isKindOfClass:UIView.class] ? control : preview;
+        if ([control isKindOfClass:UIView.class]) {
+            control.hidden = YES;
+        }
+        AMProjLegacyStripView *strip = [[AMProjLegacyStripView alloc] initWithFrame:CGRectZero];
+        strip.translatesAutoresizingMaskIntoConstraints = NO;
+        [stripAnchor.superview addSubview:strip];
+        UIButton *toggle = [UIButton buttonWithType:UIButtonTypeSystem];
+        if (@available(iOS 13.0, *)) {
+            [toggle setImage:[UIImage systemImageNamed:@"pause.fill"]
+                    forState:UIControlStateNormal];
+        }
+        toggle.tintColor = UIColor.whiteColor;
+        toggle.translatesAutoresizingMaskIntoConstraints = NO;
+        [stripAnchor.superview addSubview:toggle];
+        [NSLayoutConstraint activateConstraints:@[
+            [toggle.leadingAnchor constraintEqualToAnchor:stripAnchor.leadingAnchor
+                                                 constant:-34],
+            [toggle.centerYAnchor constraintEqualToAnchor:stripAnchor.centerYAnchor],
+            [toggle.widthAnchor constraintEqualToConstant:24],
+            [toggle.heightAnchor constraintEqualToConstant:24],
+            [strip.leadingAnchor constraintEqualToAnchor:stripAnchor.leadingAnchor],
+            [strip.trailingAnchor constraintEqualToAnchor:stripAnchor.trailingAnchor],
+            [strip.centerYAnchor constraintEqualToAnchor:stripAnchor.centerYAnchor],
+            [strip.heightAnchor constraintEqualToAnchor:stripAnchor.heightAnchor],
+        ]];
+        [strip loadVideoURL:videoURL];
+
+        // 按钮全部改接我们自己的处理：原版按钮的 action 会去读它自己的
+        // source（nil），绝不能留给他们。
+        UIButton *close = AMProjLegacyFindCloseButton(root, save, share);
+        for (UIButton *button in @[save, share]) {
+            [button removeTarget:nil action:NULL forControlEvents:UIControlEventAllEvents];
+        }
+        if (close) {
+            [close removeTarget:nil action:NULL forControlEvents:UIControlEventAllEvents];
+        }
+
+        AMProjLegacyPreviewRelay *relay = [AMProjLegacyPreviewRelay new];
+        relay.videoURL = videoURL;
+        relay.host = page;
+        relay.player = player;
+        relay.toggle = toggle;
+        [save addTarget:relay action:@selector(onSave)
+            forControlEvents:UIControlEventTouchUpInside];
+        [share addTarget:relay action:@selector(onShare)
+            forControlEvents:UIControlEventTouchUpInside];
+        [toggle addTarget:relay action:@selector(onToggle)
+            forControlEvents:UIControlEventTouchUpInside];
+        if (close) {
+            [close addTarget:relay action:@selector(onClose)
+                forControlEvents:UIControlEventTouchUpInside];
+        }
+        objc_setAssociatedObject(page, "AMProjLegacyPreviewRelay",
+                                 relay, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [player play];
+        });
+        if (outReason) *outReason = @"reused";
+        return page;
+    } @catch (NSException *exception) {
+        amproj_logCriticalEvent(@"share.legacy_page_failed", @{
+            @"reason": exception.reason ?: @""
+        });
+        if (outReason) *outReason = @"exception";
+        return nil;
+    }
+}
+
 static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
 
 @interface AMProjShareVideoReplicaVC : UIViewController
@@ -21379,9 +21681,20 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) 
 
 static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess) {
     @try {
+        NSURL *videoURL = AMProjReplicaVideoURLFromController(exportSuccess);
+        NSString *title = amproj_currentProjectTitle(exportSuccess);
+        // 首选：App 自带的老版页面原样复用（真·老版本外观）。
+        NSString *reason = nil;
+        UIViewController *legacy = AMProjBuildLegacyShareVideoPage(videoURL, title, &reason);
+        amproj_logCriticalEvent(@"share.page_choice", @{
+            @"legacy": legacy ? @YES : @NO,
+            @"reason": reason ?: @""
+        });
+        if (legacy) return legacy;
+        // 兜底：复刻页（拿到 URL 时才有画面，否则显示占位）。
         AMProjShareVideoReplicaVC *replica = [AMProjShareVideoReplicaVC new];
-        replica.videoURL = AMProjReplicaVideoURLFromController(exportSuccess);
-        replica.videoTitle = amproj_currentProjectTitle(exportSuccess);
+        replica.videoURL = videoURL;
+        replica.videoTitle = title;
         // 留一个强引用：原完成页没有被 present，可能立刻释放；复刻页
         // 1.5 秒后补取视频地址时还要用它做 runtime 探测。
         replica.sourceController = exportSuccess;
