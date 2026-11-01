@@ -20835,7 +20835,7 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
 
     self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.titleLabel.textColor = UIColor.whiteColor;
-    self.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
+    self.titleLabel.font = [UIFont systemFontOfSize:21 weight:UIFontWeightBold];
     self.titleLabel.textAlignment = NSTextAlignmentCenter;
     self.titleLabel.numberOfLines = 2;
     self.titleLabel.hidden = self.videoTitle.length == 0;
@@ -20946,21 +20946,25 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
         [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
         [self.titleLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
 
-        [self.stripContainer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [self.stripContainer.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+        // P4 的胶片条从暂停键右侧才开始：暂停键在条外，条本身靠右留窄边。
+        [self.stripContainer.leadingAnchor constraintEqualToAnchor:self.playButton.trailingAnchor
+                                                          constant:10],
+        [self.stripContainer.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
         [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:16],
         [self.stripContainer.heightAnchor constraintEqualToConstant:40],
 
-        [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:14],
+        [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [self.playButton.widthAnchor constraintEqualToConstant:24],
+        [self.playButton.heightAnchor constraintEqualToConstant:24],
         [self.playButton.centerYAnchor constraintEqualToAnchor:self.stripContainer.centerYAnchor],
 
-        [self.scrubber.leadingAnchor constraintEqualToAnchor:self.playButton.trailingAnchor constant:12],
+        [self.scrubber.leadingAnchor constraintEqualToAnchor:self.stripContainer.leadingAnchor constant:8],
         [self.scrubber.trailingAnchor constraintEqualToAnchor:self.stripContainer.trailingAnchor constant:-8],
         [self.scrubber.centerYAnchor constraintEqualToAnchor:self.stripContainer.centerYAnchor],
         [self.scrubber.topAnchor constraintEqualToAnchor:self.stripContainer.topAnchor constant:-6],
         [self.scrubber.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:6],
 
-        [row.topAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:32],
+        [row.topAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:44],
         [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24],
         [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
         [row.heightAnchor constraintEqualToConstant:64],
