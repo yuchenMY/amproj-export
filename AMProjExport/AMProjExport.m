@@ -21047,6 +21047,22 @@ static UIViewController *AMProjBuildLegacyShareVideoPage(
     }
 }
 
+// AM 自己的分享页图标（ic_save_arrow / ic_share_new）在
+// AlightMotion_ShareVideoAndPackage.bundle 的 Assets.car 里；系统 SF 符号
+// 怎么调都对不上（分享那个是斜箭头穿角）。直接用它的原图。
+static UIImage *AMProjLegacyAssetNamed(NSString *name) {
+    static NSBundle *resourceBundle = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *path = [NSBundle.mainBundle.bundlePath
+            stringByAppendingPathComponent:@"AlightMotion_ShareVideoAndPackage.bundle"];
+        resourceBundle = [NSBundle bundleWithPath:path];
+    });
+    if (!resourceBundle) return nil;
+    return [UIImage imageNamed:name inBundle:resourceBundle
+        compatibleWithTraitCollection:nil];
+}
+
 static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller);
 static NSString *AMProjReplicaDiagnosticReport(void);
 
@@ -21433,12 +21449,31 @@ static NSString *AMProjReplicaDiagnosticReport(void);
     button.backgroundColor = [UIColor colorWithRed:42/255.0 green:46/255.0
                                             blue:71/255.0 alpha:1.0];
     button.layer.cornerRadius = 12;
-    UIImage *icon = [UIImage systemImageNamed:symbol];
-    if (@available(iOS 13.0, *)) {
-        // P1 的图标明显比文字大一号，默认尺寸偏小
-        icon = [icon imageWithConfiguration:
-            [UIImageSymbolConfiguration configurationWithPointSize:21
-                                                            weight:UIFontWeightRegular]];
+    UIImage *icon = nil;
+    if ([title isEqualToString:@"节省"]) {
+        icon = AMProjLegacyAssetNamed(@"ic_save_arrow");
+    } else if ([title isEqualToString:@"分享"]) {
+        icon = AMProjLegacyAssetNamed(@"ic_share_new");
+    }
+    if (!icon) {
+        icon = [UIImage systemImageNamed:symbol];
+    }
+    // 包里的原图尺寸不一（有 @2x/@3x），统一缩放到 24pt 再当模板色用，
+    // 免得比文字大出一截。
+    if (icon && icon.size.height > 0) {
+        CGFloat target = 24.0;
+        CGFloat scale = MIN(target / icon.size.width, target / icon.size.height);
+        CGSize fitted = CGSizeMake(icon.size.width * scale, icon.size.height * scale);
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
+            initWithSize:CGSizeMake(target, target)];
+        UIImage *source = icon;
+        icon = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+            (void)context;
+            [source drawInRect:CGRectMake((target - fitted.width) / 2.0,
+                                          (target - fitted.height) / 2.0,
+                                          fitted.width, fitted.height)];
+        }];
+        icon = [icon imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [button setImage:icon forState:UIControlStateNormal];
     [button setTitle:title forState:UIControlStateNormal];
@@ -21970,6 +22005,10 @@ static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess
         }
         // 兜底：复刻页（拿到 URL 时才有画面，否则显示占位）。
         AMProjShareVideoReplicaVC *replica = [AMProjShareVideoReplicaVC new];
+        // 必须在 present 之前设，写在 viewDidLoad 里是无效的（这就是之前
+        // 一直是"半屏卡片、圆角顶部"的原因）。
+        replica.modalPresentationStyle = UIModalPresentationFullScreen;
+        replica.modalTransitionStyle = UIModalTransitionStyleCoverVertical;
         replica.videoURL = videoURL;
         replica.videoTitle = title;
         // 留一个强引用：原完成页没有被 present，可能立刻释放；复刻页
