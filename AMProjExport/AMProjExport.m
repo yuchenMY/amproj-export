@@ -20974,32 +20974,33 @@ static UIViewController *AMProjBuildLegacyShareVideoPage(
         ]];
 
         // 胶片条 + 播放键：占住原版 videoControlView 的位置（隐藏它自己的内容）
+        // 原版那条胶片条控件此刻高度是 0（没喂 source），把我们的条绑上去
+        // 会被压成 0 —— 上一版"预览下面什么都没有"就是这么来的。这里不再
+        // 依赖它：直接贴在预览容器下方，固定高度。
         UIView *control = AMProjLegacyOutlet(page, @"videoControlView");
-        UIView *stripAnchor = [control isKindOfClass:UIView.class] ? control : preview;
-        if ([control isKindOfClass:UIView.class]) {
-            control.hidden = YES;
-        }
-        AMProjLegacyStripView *strip = [[AMProjLegacyStripView alloc] initWithFrame:CGRectZero];
+        if ([control isKindOfClass:UIView.class]) control.hidden = YES;
+        UIView *host = preview.superview ?: preview;
+        AMProjLegacyStripView *strip =
+            [[AMProjLegacyStripView alloc] initWithFrame:CGRectZero];
         strip.translatesAutoresizingMaskIntoConstraints = NO;
-        [stripAnchor.superview addSubview:strip];
+        [host addSubview:strip];
         UIButton *toggle = [UIButton buttonWithType:UIButtonTypeSystem];
         if (@available(iOS 13.0, *)) {
             [toggle setImage:[UIImage systemImageNamed:@"pause.fill"]
                     forState:UIControlStateNormal];
         }
-        toggle.tintColor = UIColor.whiteColor;
+        toggle.tintColor = [UIColor colorWithWhite:0.12 alpha:1.0];
         toggle.translatesAutoresizingMaskIntoConstraints = NO;
-        [stripAnchor.superview addSubview:toggle];
+        [host addSubview:toggle];
         [NSLayoutConstraint activateConstraints:@[
-            [toggle.leadingAnchor constraintEqualToAnchor:stripAnchor.leadingAnchor
-                                                 constant:-34],
-            [toggle.centerYAnchor constraintEqualToAnchor:stripAnchor.centerYAnchor],
-            [toggle.widthAnchor constraintEqualToConstant:24],
-            [toggle.heightAnchor constraintEqualToConstant:24],
-            [strip.leadingAnchor constraintEqualToAnchor:stripAnchor.leadingAnchor],
-            [strip.trailingAnchor constraintEqualToAnchor:stripAnchor.trailingAnchor],
-            [strip.centerYAnchor constraintEqualToAnchor:stripAnchor.centerYAnchor],
-            [strip.heightAnchor constraintEqualToAnchor:stripAnchor.heightAnchor],
+            [strip.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:16],
+            [strip.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-16],
+            [strip.leadingAnchor constraintEqualToAnchor:toggle.trailingAnchor constant:12],
+            [strip.heightAnchor constraintEqualToConstant:42],
+            [toggle.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
+            [toggle.centerYAnchor constraintEqualToAnchor:strip.centerYAnchor],
+            [toggle.widthAnchor constraintEqualToConstant:26],
+            [toggle.heightAnchor constraintEqualToConstant:26],
         ]];
         [strip loadVideoURL:videoURL];
 
