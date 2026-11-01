@@ -21291,7 +21291,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                                                           constant:10],
         [self.stripContainer.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
         [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:26],
-        [self.stripContainer.heightAnchor constraintEqualToConstant:32],
+        [self.stripContainer.heightAnchor constraintEqualToConstant:38],
 
         [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [self.playButton.widthAnchor constraintEqualToConstant:24],
@@ -21919,18 +21919,25 @@ static NSString *AMProjReplicaDiagnosticReport(void) {
     return report;
 }
 
+// 实测：App 自带的 ExportPreviewVC 是**白底**的那一版，用户要的是深色
+// 「分享视频」页（P1）。两者不是一个设计，所以默认走复刻页；原版页面那条
+// 路径留着，需要时把它改回 YES 即可。
+static BOOL AMProjUseLegacyExportPage = NO;
+
 static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess) {
     @try {
         NSURL *videoURL = AMProjReplicaVideoURLFromController(exportSuccess);
         NSString *title = amproj_currentProjectTitle(exportSuccess);
-        // 首选：App 自带的老版页面原样复用（真·老版本外观）。
-        NSString *reason = nil;
-        UIViewController *legacy = AMProjBuildLegacyShareVideoPage(videoURL, title, &reason);
-        amproj_logCriticalEvent(@"share.page_choice", @{
-            @"legacy": legacy ? @YES : @NO,
-            @"reason": reason ?: @""
-        });
-        if (legacy) return legacy;
+        if (AMProjUseLegacyExportPage) {
+            NSString *reason = nil;
+            UIViewController *legacy =
+                AMProjBuildLegacyShareVideoPage(videoURL, title, &reason);
+            amproj_logCriticalEvent(@"share.page_choice", @{
+                @"legacy": legacy ? @YES : @NO,
+                @"reason": reason ?: @""
+            });
+            if (legacy) return legacy;
+        }
         // 兜底：复刻页（拿到 URL 时才有画面，否则显示占位）。
         AMProjShareVideoReplicaVC *replica = [AMProjShareVideoReplicaVC new];
         replica.videoURL = videoURL;
