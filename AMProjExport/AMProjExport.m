@@ -21066,6 +21066,8 @@ static NSString *AMProjReplicaDiagnosticReport(void);
 @property(nonatomic, strong) UILabel *titleLabel;
 @property(nonatomic, strong) UIView *stripContainer;
 @property(nonatomic, strong) UIStackView *filmstripStack;
+@property(nonatomic, strong) UIView *playhead;
+@property(nonatomic, strong) NSLayoutConstraint *playheadLeading;
 @property(nonatomic, strong) UILabel *previewPlaceholder;
 @property(nonatomic, assign) BOOL filmstripGenerated;
 @end
@@ -21198,6 +21200,23 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [self.filmstripStack.trailingAnchor constraintEqualToAnchor:self.stripContainer.trailingAnchor],
     ]];
 
+    // 老版胶片条上有一根白色竖条进度柄（P1 实拍），之前只有透明滑条，
+    // 视觉上就是"条还在、进度没了"。
+    self.playhead = [UIView new];
+    self.playhead.translatesAutoresizingMaskIntoConstraints = NO;
+    self.playhead.backgroundColor = UIColor.whiteColor;
+    self.playhead.layer.cornerRadius = 3;
+    self.playhead.userInteractionEnabled = NO;
+    [self.stripContainer addSubview:self.playhead];
+    self.playheadLeading = [self.playhead.leadingAnchor
+        constraintEqualToAnchor:self.stripContainer.leadingAnchor];
+    [NSLayoutConstraint activateConstraints:@[
+        self.playheadLeading,
+        [self.playhead.topAnchor constraintEqualToAnchor:self.stripContainer.topAnchor constant:3],
+        [self.playhead.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:-3],
+        [self.playhead.widthAnchor constraintEqualToConstant:6],
+    ]];
+
     self.scrubber = [[UISlider alloc] initWithFrame:CGRectZero];
     self.scrubber.translatesAutoresizingMaskIntoConstraints = NO;
     self.scrubber.minimumTrackTintColor = UIColor.clearColor;
@@ -21307,7 +21326,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [row.bottomAnchor constraintEqualToAnchor:bottomClose.topAnchor constant:-34],
         [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:44],
         [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-44],
-        [row.heightAnchor constraintEqualToConstant:54],
+        [row.heightAnchor constraintEqualToConstant:58],
 
         [bottomClose.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [bottomClose.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-52],
@@ -21387,9 +21406,14 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         AVPlayerItem *item = strongSelf.player.currentItem;
         if (item && CMTIME_IS_NUMERIC(item.duration) &&
             item.duration.value > 0) {
-            strongSelf.scrubber.value =
-                (float)(CMTimeGetSeconds(time) /
-                        CMTimeGetSeconds(item.duration));
+            CGFloat progress = (float)(CMTimeGetSeconds(time) /
+                                       CMTimeGetSeconds(item.duration));
+            strongSelf.scrubber.value = progress;
+            CGFloat travel = CGRectGetWidth(strongSelf.stripContainer.bounds) - 6;
+            if (travel > 0) {
+                strongSelf.playheadLeading.constant =
+                    MAX(0, MIN(travel, travel * progress));
+            }
         }
     }];
 }
@@ -21410,6 +21434,12 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                                             blue:71/255.0 alpha:1.0];
     button.layer.cornerRadius = 12;
     UIImage *icon = [UIImage systemImageNamed:symbol];
+    if (@available(iOS 13.0, *)) {
+        // P1 的图标明显比文字大一号，默认尺寸偏小
+        icon = [icon imageWithConfiguration:
+            [UIImageSymbolConfiguration configurationWithPointSize:21
+                                                            weight:UIFontWeightRegular]];
+    }
     [button setImage:icon forState:UIControlStateNormal];
     [button setTitle:title forState:UIControlStateNormal];
     button.tintColor = UIColor.whiteColor;
@@ -21451,7 +21481,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
     generator.appliesPreferredTrackTransform = YES;
     generator.maximumSize = CGSizeMake(160, 160);
-    int frames = 14;
+    int frames = 10;
     NSMutableArray<NSValue *> *times = [NSMutableArray array];
     for (int i = 0; i < frames; i++) {
         double t = seconds * (i + 0.5) / frames;
