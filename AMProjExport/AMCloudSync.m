@@ -4004,14 +4004,23 @@ static UIView *AMCloudSelectionHeaderView(void) {
 // 返回 -1 表示没截到（不做判断），0 表示别的 tab，1 表示云端。
 static NSInteger AMCloudDetectCloudPillSelected(void) {
     UIView *header = AMCloudSelectionHeaderView();
-    if (!header) return -1;
-    CGSize size = header.bounds.size;
-    if (size.width < 50 || size.height < 20) return -1;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size];
+    UIWindow *window = AMCloudActiveWindow();
+    if (!header || !window) return -1;
+    CGRect rect = [header convertRect:header.bounds toView:window];
+    if (CGRectGetWidth(rect) < 50 || CGRectGetHeight(rect) < 30) return -1;
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.scale = 1.0;   // 判色不需要 3 倍，省 CPU
+    UIGraphicsImageRenderer *renderer =
+        [[UIGraphicsImageRenderer alloc] initWithSize:rect.size format:format];
     UIImage *snapshot = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        [header.layer renderInContext:context.CGContext];
+        // SwiftUI 的 layer renderInContext 截出来是黑的，必须走 drawViewHierarchy
+        [window drawViewHierarchyInRect:CGRectMake(-rect.origin.x, -rect.origin.y,
+                                                   CGRectGetWidth(window.bounds),
+                                                   CGRectGetHeight(window.bounds))
+                     afterScreenUpdates:NO];
+        (void)context;
     }];
-    if (!snapshot) return -1;
     CGImageRef cgImage = snapshot.CGImage;
     if (!cgImage) return -1;
     size_t width = CGImageGetWidth(cgImage);
@@ -4028,22 +4037,30 @@ static NSInteger AMCloudDetectCloudPillSelected(void) {
     CGContextDrawImage(context, CGRectMake(0, 0, width, height), cgImage);
     CGContextRelease(context);
 
-    double sumX = 0;
-    NSUInteger darkCount = 0;
-    for (size_t y = height / 2; y < height; y++) {
-        for (size_t x = 0; x < width; x++) {
+    // 逐列统计下半部分的深色像素（选中的胶囊是深底白字）
+    size_t top = height / 2;
+    NSUInteger columnThreshold = MAX(2, (height - top) / 6);
+    NSInteger rightmostEnd = -1;
+    NSInteger runStart = -1;
+    for (size_t x = 0; x < width; x++) {
+        NSUInteger dark = 0;
+        for (size_t y = top; y < height; y++) {
             uint8_t *pixel = pixels + y * bytesPerRow + x * 4;
-            NSUInteger luminance = (NSUInteger)pixel[0] + pixel[1] + pixel[2];
-            if (luminance < 240) {   // 深色胶囊（#1B1E31 一类）
-                sumX += (double)x;
-                darkCount += 1;
-            }
+            if ((NSUInteger)pixel[0] + pixel[1] + pixel[2] < 330) dark += 1;
+        }
+        BOOL isDarkColumn = dark > columnThreshold;
+        if (isDarkColumn && runStart < 0) runStart = (NSInteger)x;
+        if (!isDarkColumn && runStart >= 0) {
+            rightmostEnd = (NSInteger)x;   // 只关心最后一个连续段的结束
+            runStart = -1;
         }
     }
+    if (runStart >= 0) rightmostEnd = (NSInteger)width;
     free(pixels);
-    if (darkCount < width / 2) return -1;
-    double centerX = sumX / (double)darkCount;
-    return centerX > (double)width * 0.62 ? 1 : 0;
+    if (rightmostEnd < 0) return -1;
+    double ratio = (double)rightmostEnd / (double)width;
+    // 云端是最右那个胶囊：它的右边缘应该落在画面右侧 1/3 处
+    return ratio > 0.66 ? 1 : 0;
 }
 
 // 把云空间列表直接挂到窗口内容区（底部 tab 栏以上），不依赖任何控制器类名。
@@ -4070,10 +4087,16 @@ static NSInteger AMCloudDetectCloudPillSelected(void) {
     if (tabBar && tabBar.bounds.size.height > 40) {
         tabBarHeight = tabBar.bounds.size.height;
     }
+    // 顶部从 tab 条下方开始，别盖住"项目/您的模板/元素/云端"那排胶囊，
+    // 否则显示后就切不回去了。
+    NSLayoutConstraint *topConstraint =
+        [overlayView.topAnchor constraintEqualToAnchor:hostView.topAnchor constant:120];
+    objc_setAssociatedObject(window, &AMCloudBannerTopKey, topConstraint,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [NSLayoutConstraint activateConstraints:@[
         [overlayView.leadingAnchor constraintEqualToAnchor:hostView.leadingAnchor],
         [overlayView.trailingAnchor constraintEqualToAnchor:hostView.trailingAnchor],
-        [overlayView.topAnchor constraintEqualToAnchor:hostView.topAnchor],
+        topConstraint,
         [overlayView.bottomAnchor constraintEqualToAnchor:hostView.bottomAnchor
                                                   constant:-tabBarHeight],
     ]];
@@ -4088,6 +4111,16 @@ static NSInteger AMCloudDetectCloudPillSelected(void) {
     AMCloudLibraryViewController *overlay =
         objc_getAssociatedObject(window, &AMCloudBannerViewKey);
     if (!overlay) { [self installWindowCloudOverlay]; return; }
+    UIView *header = AMCloudSelectionHeaderView();
+    NSLayoutConstraint *topConstraint =
+        objc_getAssociatedObject(window, &AMCloudBannerTopKey);
+    if (header && topConstraint) {
+        CGRect frame = [header convertRect:header.bounds toView:overlay.view.superview];
+        CGFloat desired = CGRectGetMaxY(frame) + 8;
+        if (desired > 0 && fabs(topConstraint.constant - desired) > 0.5) {
+            topConstraint.constant = desired;
+        }
+    }
     NSInteger state = AMCloudDetectCloudPillSelected();
     BOOL show = (state == 1);
     if (overlay.view.hidden == show) {
