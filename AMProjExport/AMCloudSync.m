@@ -2338,6 +2338,7 @@ static NSString *AMCloudBackupTabStyleScript(void) {
 
 @interface AMCloudLibraryViewController : UIViewController
 @property(nonatomic, weak) AMCloudManager *manager;
+- (void)reload;
 @end
 extern NSNotificationName const AMCloudLibraryDidChangeNotification;
 
