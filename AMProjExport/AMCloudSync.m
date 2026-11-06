@@ -2432,6 +2432,12 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
         AMCloudManager *manager = weakSelf;
         if (!manager) { running = NO; return; }
         AMCloudAttachVisibleProjectsControllers();
+        static NSTimeInterval lastDump = 0;
+        NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+        if (now - lastDump > 5.0) {
+            lastDump = now;
+            AMCloudDumpViewTree();
+        }
         // 顺带保持"当前是不是云端 tab"的判定在跑：这条判定直接决定 overlay
         // 显不显示，而且它的面包屑是我们离线排障唯一的眼睛。
         for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
@@ -3912,6 +3918,46 @@ static NSString *AMCloudLabelAtPoint(UIView *view, CGPoint point, NSInteger dept
         }
     }
     return best;
+}
+
+// 探针：把当前窗口的控制器/视图类名+尺寸落到文件，用来确认 865 的云端
+// 页面到底由什么类承载（a11y 和文字都读不到，只能靠结构）。
+static void AMCloudDumpNode(UIView *view, NSInteger depth, NSMutableString *out) {
+    if (!view || depth > 12) return;
+    CGRect frame = view.frame;
+    if (CGRectGetWidth(frame) * CGRectGetHeight(frame) < 400) return;
+    [out appendFormat:@"%@%@ (%.0f,%.0f,%.0fx%.0f)\n",
+        depth ? "  " : "", NSStringFromClass(view.class),
+        frame.origin.x, frame.origin.y,
+        CGRectGetWidth(frame), CGRectGetHeight(frame)];
+    for (UIView *child in view.subviews) {
+        AMCloudDumpNode(child, depth + 1, out);
+    }
+}
+
+static void AMCloudDumpViewTree(void) {
+    UIWindow *window = AMCloudTopController(nil).view.window ?:
+        UIApplication.sharedApplication.keyWindow;
+    if (!window) return;
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"--- %@\n", [NSDate date]];
+    UIViewController *controller = window.rootViewController;
+    while (controller) {
+        [out appendFormat:@"VC %@ presented=%@\n", NSStringFromClass(controller.class),
+            controller.presentedViewController
+                ? NSStringFromClass(controller.presentedViewController.class) : @"-"];
+        UIViewController *next = controller.presentedViewController;
+        if (!next && [controller isKindOfClass:UINavigationController.class]) {
+            next = ((UINavigationController *)controller).topViewController;
+        }
+        controller = next;
+    }
+    AMCloudDumpNode(window, 0, out);
+    if (out.length > 12000) out = [[out substringToIndex:12000] mutableCopy];
+    NSString *path = [NSSearchPathForDirectoriesInDomains(
+        NSCachesDirectory, NSUserDomainMask, YES).firstObject
+        stringByAppendingPathComponent:@"AMProjExport.viewtree"];
+    [out writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (void)installCloudTabTapWatcher {
