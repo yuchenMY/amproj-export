@@ -2336,7 +2336,9 @@ static NSString *AMCloudBackupTabStyleScript(void) {
 
 @end
 
-@class AMCloudLibraryViewController;
+@interface AMCloudLibraryViewController : UIViewController
+@property(nonatomic, weak) AMCloudManager *manager;
+@end
 extern NSNotificationName const AMCloudLibraryDidChangeNotification;
 
 @implementation AMCloudManager
@@ -5365,10 +5367,6 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
         (void)context;
     }];
 }
-
-@interface AMCloudLibraryViewController : UIViewController
-@property(nonatomic, weak) AMCloudManager *manager;
-@end
 
 @interface AMCloudLibraryViewController () <UITableViewDataSource, UITableViewDelegate>
 @property(nonatomic, strong) UITableView *tableView;
