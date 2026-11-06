@@ -3946,8 +3946,11 @@ static void AMCloudDumpNode(UIView *view, NSInteger depth, NSMutableString *out)
     if (!view || depth > 12) return;
     CGRect frame = view.frame;
     if (CGRectGetWidth(frame) * CGRectGetHeight(frame) < 400) return;
+    // 注意：第一个 %@ 必须是对象。以前传的是 C 字符串 "  "，运行时把它
+    // 当对象调 respondsToSelector → EXC_BREAKPOINT 闪退（r118 的崩溃）。
+    NSString *indent = depth > 0 ? @"  " : @"";
     [out appendFormat:@"%@%@ (%.0f,%.0f,%.0fx%.0f)\n",
-        depth ? "  " : "", NSStringFromClass(view.class),
+        indent, NSStringFromClass(view.class) ?: @"?",
         frame.origin.x, frame.origin.y,
         CGRectGetWidth(frame), CGRectGetHeight(frame)];
     for (UIView *child in view.subviews) {
