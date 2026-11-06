@@ -21279,7 +21279,15 @@ static NSString *AMProjReplicaDiagnosticReport(void);
     self.scrubber.maximumTrackTintColor = UIColor.clearColor;
     [self.scrubber addTarget:self action:@selector(onScrub)
         forControlEvents:UIControlEventValueChanged];
+    // 轨道透明、滑块忘记去掉 → 胶片条上出现一块白饼。滑条整个停用，
+    // 改成直接拖胶片条来拖进度（见 onStripPan:）。
+    self.scrubber.hidden = YES;
+    self.scrubber.userInteractionEnabled = NO;
     [content addSubview:self.scrubber];
+
+    UIPanGestureRecognizer *stripPan = [[UIPanGestureRecognizer alloc]
+        initWithTarget:self action:@selector(onStripPan:)];
+    [self.stripContainer addGestureRecognizer:stripPan];
 
     // 节省 / 分享
     UIButton *save = [self actionButtonWithTitle:@"节省" systemImage:@"arrow.down.to.line"];
@@ -21618,6 +21626,22 @@ static NSString *AMProjReplicaDiagnosticReport(void);
             [self.playButton setImage:[UIImage systemImageNamed:@"pause.fill"]
                              forState:UIControlStateNormal];
         }
+    }
+}
+
+- (void)onStripPan:(UIPanGestureRecognizer *)pan {
+    if (!self.player || !self.player.currentItem) return;
+    CGFloat width = CGRectGetWidth(self.stripContainer.bounds);
+    if (width <= 0) return;
+    NSTimeInterval total = CMTimeGetSeconds(self.player.currentItem.duration);
+    if (!isfinite(total) || total <= 0) return;
+    CGPoint point = [pan locationInView:self.stripContainer];
+    CGFloat progress = MIN(MAX(point.x / width, 0), 1);
+    [self.player seekToTime:CMTimeMakeWithSeconds(total * progress, 600)
+        toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+    CGFloat travel = width - 7;
+    if (travel > 0) {
+        self.playheadLeading.constant = MAX(0, MIN(travel, travel * progress));
     }
 }
 
