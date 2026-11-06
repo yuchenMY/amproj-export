@@ -1600,6 +1600,8 @@ extern BOOL AMProjStartSelfCloudUpload(void);
 extern BOOL AMProjStartSelfCloudUploadWithMedia(BOOL includeMedia);
 
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller;
+- (void)installCloudTabTapWatcher;
+- (void)setCloudLibraryVisible:(BOOL)visible;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
 - (void)refreshAccountAvatar;
@@ -2452,6 +2454,7 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
     [self startCloudOverlayWatchdog];
+    [self installCloudTabTapWatcher];
     [self showPluginDownloadNoticeIfPossible];
     [self syncPluginsNow:@"did_become_active"];
 	[self refreshAccountAvatar];
@@ -3789,7 +3792,12 @@ static BOOL AMCloudCloudEmptyStateText(NSString *text) {
     BOOL hasCloud = [text containsString:@"云端"] ||
         [text containsString:@"雲端"] ||
         [folded containsString:@"cloud"];
-    return hasProject && hasCloud;
+    // 空态副标题本身就是"有没有云端"的强信号，单独命中即可；之前要求
+    // 标题和副标题在同一串里，SwiftUI 拆成两个元素后就再也匹配不上了。
+    BOOL cloudPhrase = [text containsString:@"上传到云端"] ||
+        [text containsString:@"上傳到雲端"] ||
+        [folded containsString:@"uploaded to the cloud"];
+    return (hasProject && hasCloud) || cloudPhrase;
 }
 
 static BOOL AMCloudOfficialCloudContentOnScreen(UIView *view, NSInteger depth) {
@@ -3854,6 +3862,120 @@ static void AMCloudScanAccessibilityForSelectedTab(UIView *view, NSString *cloud
     for (UIView *child in view.subviews) {
         AMCloudScanAccessibilityForSelectedTab(child, cloudTitle, depth + 1, outSelected);
         if (*outSelected) return;
+    }
+}
+
+// 865 的云端 tab 是 SwiftUI 胶囊，分段控件、空态文案、Selected trait 三条
+// 通道在真机上全部读不到（bannerlog: seg=0 text=0 signal=0）。所以不再猜状态，
+// 直接监听窗口上的点击：点到"云端"就显示我们的云空间列表，点到别的基础
+// tab 就收起。a11y 标签和 frame 是 SwiftUI 唯一稳定暴露的东西。
+static NSString *AMCloudLabelAtPoint(UIView *view, CGPoint point, NSInteger depth) {
+    if (!view || depth > 24 || view.hidden || view.alpha < 0.05) return nil;
+    NSString *best = nil;
+    CGFloat bestArea = CGFLOAT_MAX;
+    for (id element in view.accessibilityElements ?: @[]) {
+        NSString *label = AMCloudAccessibilityLabelOf(element);
+        if (!label.length) continue;
+        CGRect frame = CGRectZero;
+        @try {
+            frame = [element accessibilityFrame];
+        } @catch (NSException *exception) {
+            continue;
+        }
+        if (CGRectIsEmpty(frame) || !CGRectContainsPoint(frame, point)) continue;
+        CGFloat area = CGRectGetWidth(frame) * CGRectGetHeight(frame);
+        if (area < bestArea) {
+            bestArea = area;
+            best = label;
+        }
+    }
+    if (view.isAccessibilityElement) {
+        CGRect frame = view.accessibilityFrame;
+        if (!CGRectIsEmpty(frame) && CGRectContainsPoint(frame, point)) {
+            CGFloat area = CGRectGetWidth(frame) * CGRectGetHeight(frame);
+            if (area < bestArea) {
+                bestArea = area;
+                best = AMCloudAccessibilityLabelOf(view);
+            }
+        }
+    }
+    for (UIView *child in view.subviews) {
+        NSString *label = AMCloudLabelAtPoint(child, point, depth + 1);
+        if (!label.length) continue;
+        CGRect frame = child.accessibilityFrame;
+        CGFloat area = CGRectGetWidth(frame) * CGRectGetHeight(frame);
+        if (!CGSizeEqualToSize(frame.size, CGSizeZero) && area < bestArea) {
+            bestArea = area;
+            best = label;
+        } else if (!best.length) {
+            best = label;
+        }
+    }
+    return best;
+}
+
+- (void)installCloudTabTapWatcher {
+    static BOOL installed = NO;
+    if (installed) return;
+    UIWindow *window = AMCloudTopController(nil).view.window;
+    if (!window) window = UIApplication.sharedApplication.keyWindow;
+    if (!window) return;
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(handleCloudTabTap:)];
+    tap.cancelsTouchesInView = NO;
+    tap.delegate = (id<UIGestureRecognizerDelegate>)self;
+    [window addGestureRecognizer:tap];
+    installed = YES;
+    NSLog(@"[AMProjExport] cloud tab tap watcher installed");
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    (void)gestureRecognizer; (void)other;
+    return YES;
+}
+
+- (void)handleCloudTabTap:(UITapGestureRecognizer *)recognizer {
+    UIView *host = recognizer.view;
+    if (!host) return;
+    CGPoint point = [recognizer locationInView:host];
+    NSString *label = AMCloudLabelAtPoint(host, point, 0);
+    if (!label.length) return;
+    NSString *folded = label.lowercaseString;
+    BOOL isCloud = [label containsString:@"云端"] || [label containsString:@"雲端"] ||
+        [folded containsString:@"cloud"];
+    BOOL isOtherTab = [label containsString:@"项目"] || [label containsString:@"您的模板"] ||
+        [label containsString:@"元素"] || [label containsString:@"模板"];
+    if (isCloud) {
+        [self setCloudLibraryVisible:YES];
+    } else if (isOtherTab) {
+        [self setCloudLibraryVisible:NO];
+    }
+    @try {
+        NSString *path = [NSSearchPathForDirectoriesInDomains(
+            NSCachesDirectory, NSUserDomainMask, YES).firstObject
+            stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
+        NSString *line = [NSString stringWithFormat:@"tap label=%@ cloud=%d other=%d\n",
+                          label, isCloud, isOtherTab];
+        NSMutableData *data = [[NSData dataWithContentsOfFile:path] mutableCopy]
+            ?: [NSMutableData data];
+        [data appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [data writeToFile:path atomically:NO];
+    } @catch (NSException *exception) {
+        // 面包屑失败不影响主流程
+    }
+}
+
+- (void)setCloudLibraryVisible:(BOOL)visible {
+    for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
+        AMCloudLibraryViewController *overlay =
+            objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
+        if (!overlay) continue;
+        overlay.view.hidden = !visible;
+        if (visible) {
+            [controller.view bringSubviewToFront:overlay.view];
+            [overlay reload];
+        }
     }
 }
 
