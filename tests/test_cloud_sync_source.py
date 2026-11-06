@@ -1446,7 +1446,9 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         # （云储存+我的工程列表融合在页面里，传了必看到）。
         self.assertNotIn('titleLabel.text = @"云储存";', CLOUD)
         self.assertIn("AMCloudOfficialCloudContentOnScreen", CLOUD)
-        self.assertIn('overlay.page = @"backup";', CLOUD)
+        # r115：云 tab 的内容从网页换成了原生云空间列表
+        self.assertIn("AMCloudLibraryViewController", CLOUD)
+        self.assertIn("loadProjects", CLOUD)
         self.assertIn("cloud tab overlay attached", CLOUD)
 
     def test_banner_shows_only_on_cloud_subtab(self):

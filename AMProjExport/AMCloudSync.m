@@ -3855,12 +3855,12 @@ static void AMCloudScanAccessibilityForSelectedTab(UIView *view, NSString *cloud
     if (!controller.viewIfLoaded) return;
     if (!AMCloudIsProjectsControllerClass(controller.class) &&
         !AMCloudFindSegmentControl(controller.view, 0)) return;
-    AMCloudAccountWebViewController *overlay =
+    AMCloudLibraryViewController *overlay =
         objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
     if (!overlay) {
-        overlay = [AMCloudAccountWebViewController new];
+        // 云 tab 的内容换成我们自己的原生云空间列表（不再套网页）
+        overlay = [AMCloudLibraryViewController new];
         overlay.manager = self;
-        overlay.page = @"backup";
         [controller addChildViewController:overlay];
         overlay.view.translatesAutoresizingMaskIntoConstraints = NO;
         overlay.view.hidden = YES;
@@ -3948,7 +3948,7 @@ static BOOL AMCloudBannerTickRunning = NO;
 
 // 评估横幅可见性：只有选中"云端"档才显示。分段信息读不到时降级为常显。
 - (void)updateCloudBackupBannerVisibilityForController:(UIViewController *)controller {
-    AMCloudAccountWebViewController *overlay =
+    AMCloudLibraryViewController *overlay =
         objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
     if (!overlay) return;
     [AMCloudBannerControllersTable() addObject:controller];
@@ -4004,7 +4004,13 @@ static BOOL AMCloudBannerTickRunning = NO;
     }
     BOOL cloudOnScreen = textSignal || segSignal || signalRecent ||
         a11yCloudSelected;
+    BOOL wasHidden = overlay.view.hidden;
     overlay.view.hidden = !cloudOnScreen;
+    // 每次切回云端 tab 都刷一次（上传完立刻切回来能看到新工程）
+    if (wasHidden && cloudOnScreen &&
+        [overlay respondsToSelector:@selector(reload)]) {
+        [(AMCloudLibraryViewController *)overlay reload];
+    }
     NSLog(@"[AMProjExport] banner visibility seg=%d sel=%ld ci=%ld text=%d signal=%d visible=%d",
           segControl != nil, (long)segSelected, (long)segCloudIndex,
           textSignal, signalRecent, cloudOnScreen);
@@ -4446,6 +4452,8 @@ static BOOL AMCloudBannerTickRunning = NO;
                 style:UIAlertActionStyleDefault handler:nil]];
             [top presentViewController:success animated:YES completion:nil];
             [weakSelf reloadAccountControllerIfSupported];
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:AMCloudLibraryDidChangeNotification object:nil];
         }];
     }];
 }
@@ -5326,3 +5334,332 @@ void AMCloudSyncBeginUploadFile(NSURL *fileURL, NSString *projectTitle,
                                        title:projectTitle
                                    presenter:presenter];
 }
+
+// ── 云空间原生列表（云端 tab 的内容） ───────────────────────────────
+// 只放两样东西：云空间用量 + 我们自己的备份工程列表。AM 官方的云空间
+// 内容不再出现；未开通云空间的账号只看到一句提示。
+NSNotificationName const AMCloudLibraryDidChangeNotification =
+    @"AMCloudLibraryDidChangeNotification";
+
+static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
+    CGSize size = CGSizeMake(44, 44);
+    UIGraphicsImageRenderer *renderer =
+        [[UIGraphicsImageRenderer alloc] initWithSize:size];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:
+            CGRectMake(0, 0, size.width, size.height) cornerRadius:10];
+        [[UIColor colorWithWhite:0.93 alpha:1] setFill];
+        [path fill];
+        NSString *initial = title.length ? [title substringToIndex:1] : @"AM";
+        NSDictionary *attributes = @{
+            NSFontAttributeName: [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold],
+            NSForegroundColorAttributeName: [UIColor colorWithWhite:0.42 alpha:1]
+        };
+        CGSize textSize = [initial sizeWithAttributes:attributes];
+        [initial drawAtPoint:CGPointMake((size.width - textSize.width) / 2.0,
+                                         (size.height - textSize.height) / 2.0)
+              withAttributes:attributes];
+        (void)context;
+    }];
+}
+
+@interface AMCloudLibraryViewController : UIViewController
+@property(nonatomic, weak) AMCloudManager *manager;
+@end
+
+@interface AMCloudLibraryViewController () <UITableViewDataSource, UITableViewDelegate>
+@property(nonatomic, strong) UITableView *tableView;
+@property(nonatomic, strong) UIRefreshControl *refreshControl;
+@property(nonatomic, strong) NSArray<NSDictionary *> *projects;
+@property(nonatomic, strong) NSDictionary *usage;
+@property(nonatomic, strong) UILabel *quotaValueLabel;
+@property(nonatomic, strong) UILabel *quotaCaptionLabel;
+@property(nonatomic, strong) UIView *quotaBarFill;
+@property(nonatomic, strong) NSLayoutConstraint *quotaBarFillWidth;
+@property(nonatomic, strong) UILabel *stateLabel;
+@property(nonatomic) BOOL loading;
+@end
+
+@implementation AMCloudLibraryViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.projects = @[];
+    self.usage = @{};
+    [self buildHeader];
+    [self buildTable];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+        selector:@selector(handleLibraryDidChange:)
+            name:AMCloudLibraryDidChangeNotification object:nil];
+    [self reload];
+}
+
+- (void)buildHeader {
+    UIView *card = [UIView new];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    card.layer.cornerRadius = 14;
+    [self.view addSubview:card];
+
+    UILabel *caption = [UILabel new];
+    caption.translatesAutoresizingMaskIntoConstraints = NO;
+    caption.text = @"云空间";
+    caption.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    caption.textColor = UIColor.secondaryLabelColor;
+
+    UILabel *value = [UILabel new];
+    value.translatesAutoresizingMaskIntoConstraints = NO;
+    value.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold];
+    value.textColor = UIColor.labelColor;
+    value.text = @"--";
+    self.quotaValueLabel = value;
+
+    UIView *track = [UIView new];
+    track.translatesAutoresizingMaskIntoConstraints = NO;
+    track.backgroundColor = [UIColor colorWithWhite:0.88 alpha:1];
+    track.layer.cornerRadius = 3;
+    track.clipsToBounds = YES;
+
+    self.quotaBarFill = [UIView new];
+    self.quotaBarFill.translatesAutoresizingMaskIntoConstraints = NO;
+    self.quotaBarFill.backgroundColor = AMCloudBrandColor();
+    self.quotaBarFill.layer.cornerRadius = 3;
+    [track addSubview:self.quotaBarFill];
+
+    UILabel *caption2 = [UILabel new];
+    caption2.translatesAutoresizingMaskIntoConstraints = NO;
+    caption2.font = [UIFont systemFontOfSize:12];
+    caption2.textColor = UIColor.secondaryLabelColor;
+    self.quotaCaptionLabel = caption2;
+
+    UIButton *upload = [UIButton buttonWithType:UIButtonTypeSystem];
+    upload.translatesAutoresizingMaskIntoConstraints = NO;
+    [upload setTitle:@"上传备份" forState:UIControlStateNormal];
+    upload.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    [upload setTitleColor:AMCloudBrandColor() forState:UIControlStateNormal];
+    [upload addTarget:self action:@selector(onUpload) forControlEvents:UIControlEventTouchUpInside];
+
+    for (UIView *view in @[caption, value, track, caption2, upload]) [card addSubview:view];
+    [NSLayoutConstraint activateConstraints:@[
+        [card.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor
+                                       constant:12],
+        [card.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [card.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [card.heightAnchor constraintEqualToConstant:112],
+
+        [caption.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
+        [caption.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [upload.centerYAnchor constraintEqualToAnchor:caption.centerYAnchor],
+        [upload.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
+
+        [value.topAnchor constraintEqualToAnchor:caption.bottomAnchor constant:6],
+        [value.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [value.trailingAnchor constraintLessThanOrEqualToAnchor:card.trailingAnchor constant:-16],
+
+        [track.topAnchor constraintEqualToAnchor:value.bottomAnchor constant:10],
+        [track.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [track.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
+        [track.heightAnchor constraintEqualToConstant:6],
+
+        [caption2.topAnchor constraintEqualToAnchor:track.bottomAnchor constant:8],
+        [caption2.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [caption2.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
+    ]];
+    self.quotaBarFillWidth = [self.quotaBarFill.widthAnchor constraintEqualToConstant:0];
+    self.quotaBarFillWidth.active = YES;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.quotaBarFill.leadingAnchor constraintEqualToAnchor:track.leadingAnchor],
+        [self.quotaBarFill.topAnchor constraintEqualToAnchor:track.topAnchor],
+        [self.quotaBarFill.bottomAnchor constraintEqualToAnchor:track.bottomAnchor],
+    ]];
+}
+
+- (void)buildTable {
+    UITableView *table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    table.translatesAutoresizingMaskIntoConstraints = NO;
+    table.dataSource = self;
+    table.delegate = self;
+    table.rowHeight = 68;
+    table.separatorInset = UIEdgeInsetsMake(0, 76, 0, 0);
+    table.tableFooterView = [UIView new];
+    table.backgroundColor = UIColor.systemBackgroundColor;
+    [self.view addSubview:table];
+    self.tableView = table;
+
+    UILabel *state = [UILabel new];
+    state.translatesAutoresizingMaskIntoConstraints = NO;
+    state.textAlignment = NSTextAlignmentCenter;
+    state.numberOfLines = 0;
+    state.font = [UIFont systemFontOfSize:15];
+    state.textColor = UIColor.secondaryLabelColor;
+    state.text = @"还没有备份工程\n点右上角「上传备份」上传一个";
+    [self.view addSubview:state];
+    self.stateLabel = state;
+
+    UIRefreshControl *refresh = [UIRefreshControl new];
+    [refresh addTarget:self action:@selector(reload) forControlEvents:UIControlEventValueChanged];
+    [table addSubview:refresh];
+    self.refreshControl = refresh;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [table.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor
+                                        constant:136],
+        [table.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [table.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [table.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [state.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [state.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+        [state.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor
+                                                        constant:24],
+    ]];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reload];
+}
+
+- (void)handleLibraryDidChange:(NSNotification *)notification {
+    (void)notification;
+    [self reloadAndScrollTop];
+}
+
+- (void)reloadAndScrollTop {
+    [self reload];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.projects.count) {
+            [self.tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]
+                                  atScrollPosition:UITableViewScrollPositionTop animated:YES];
+        }
+    });
+}
+
+- (void)reload {
+    if (self.loading) return;
+    AMCloudManager *manager = self.manager;
+    if (!manager) return;
+    self.loading = YES;
+    [manager.client loadProjects:^(NSDictionary *data, NSError *error) {
+        self.loading = NO;
+        [self.refreshControl endRefreshing];
+        self.projects = [data[@"projects"] isKindOfClass:NSArray.class]
+            ? data[@"projects"] : @[];
+        self.usage = [data[@"usage"] isKindOfClass:NSDictionary.class]
+            ? data[@"usage"] : @{};
+        [self applyUsage];
+        [self.tableView reloadData];
+    }];
+}
+
+- (void)applyUsage {
+    long long used = [self.usage[@"usedBytes"] longLongValue];
+    long long quota = [self.usage[@"quotaBytes"] longLongValue];
+    if (quota <= 0) {
+        self.quotaValueLabel.text = @"未开通";
+        self.quotaCaptionLabel.text = @"当前账号未开通云空间";
+        self.quotaBarFillWidth.constant = 0;
+        self.projects = @[];
+        self.stateLabel.text = @"当前账号未开通云空间";
+        self.stateLabel.hidden = NO;
+        self.tableView.hidden = YES;
+        return;
+    }
+    self.quotaValueLabel.text = [NSString stringWithFormat:@"%@ / %@",
+        AMCloudByteText(used), AMCloudByteText(quota)];
+    self.quotaCaptionLabel.text = [NSString stringWithFormat:@"剩余 %@ · %lu 个工程",
+        AMCloudByteText(quota > used ? quota - used : 0),
+        (unsigned long)self.projects.count];
+    CGFloat ratio = quota > 0 ? MIN(1.0, (double)used / (double)quota) : 0;
+    [self.view layoutIfNeeded];
+    CGFloat trackWidth = MAX(0, CGRectGetWidth(self.view.bounds) - 64);
+    self.quotaBarFillWidth.constant = trackWidth * ratio;
+    self.tableView.hidden = NO;
+    self.stateLabel.hidden = self.projects.count > 0;
+}
+
+- (void)onUpload {
+    extern BOOL AMProjStartSelfCloudUpload(void);
+    if (!AMProjStartSelfCloudUpload()) {
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"无法开始上传"
+            message:@"请回到项目页再试一次" preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"好"
+            style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    }
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView; (void)section;
+    return (NSInteger)self.projects.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView
+         cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *identifier = @"AMCloudLibraryCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:identifier];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.imageView.layer.cornerRadius = 10;
+        cell.imageView.clipsToBounds = YES;
+    }
+    NSDictionary *project = self.projects[(NSUInteger)indexPath.row];
+    NSString *title = [project[@"title"] isKindOfClass:NSString.class]
+        ? project[@"title"] : @"未命名工程";
+    cell.textLabel.text = title;
+    cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    NSDictionary *version = [project[@"currentVersion"] isKindOfClass:NSDictionary.class]
+        ? project[@"currentVersion"] : nil;
+    long long size = [version[@"sizeBytes"] longLongValue];
+    double created = [version[@"createdAt"] doubleValue];
+    NSString *dateText = created > 0
+        ? [NSDateFormatter localizedStringFromDate:
+            [NSDate dateWithTimeIntervalSince1970:created]
+                                        dateStyle:NSDateFormatterMediumStyle
+                                        timeStyle:NSDateFormatterShortStyle] : @"";
+    cell.detailTextLabel.text = version
+        ? [NSString stringWithFormat:@"v%@ · %@ · %@",
+            version[@"versionNumber"] ?: @1, AMCloudByteText(size), dateText]
+        : @"尚未上传项目包";
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
+    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    cell.imageView.image = AMCloudLibraryPlaceholderCover(title);
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if ((NSUInteger)indexPath.row >= self.projects.count) return;
+    [self.manager downloadAndImportProject:self.projects[(NSUInteger)indexPath.row]
+                                 presenter:self];
+}
+
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+    trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if ((NSUInteger)indexPath.row >= self.projects.count) return nil;
+    NSDictionary *project = self.projects[(NSUInteger)indexPath.row];
+    __weak typeof(self) weakSelf = self;
+    UIContextualAction *more = [UIContextualAction contextualActionWithStyle:
+        UIContextualActionStyleNormal title:@"更多"
+        handler:^(__unused UIContextualAction *action, __unused UIView *view,
+                  void (^completion)(BOOL)) {
+        completion(YES);
+        [weakSelf.manager showActionsForProject:project presenter:weakSelf];
+    }];
+    more.backgroundColor = [UIColor colorWithWhite:0.55 alpha:1];
+    UIContextualAction *remove = [UIContextualAction contextualActionWithStyle:
+        UIContextualActionStyleDestructive title:@"删除"
+        handler:^(__unused UIContextualAction *action, __unused UIView *view,
+                  void (^completion)(BOOL)) {
+        completion(YES);
+        [weakSelf.manager showActionsForProject:project presenter:weakSelf];
+    }];
+    return [UISwipeActionsConfiguration configurationWithActions:@[remove, more]];
+}
+
+@end
+
