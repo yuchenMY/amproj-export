@@ -21299,7 +21299,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
     [share addTarget:self action:@selector(onShare) forControlEvents:UIControlEventTouchUpInside];
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[save, share]];
     row.axis = UILayoutConstraintAxisHorizontal;
-    row.spacing = 18;
+    row.spacing = 19;
     row.distribution = UIStackViewDistributionFillEqually;
     row.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:row];
@@ -21342,10 +21342,10 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [content.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         // 老版内容卡是收紧在内容上的：胶片条下面只留约 30pt 黑边
         [content.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor
-                                             constant:30],
+                                             constant:44],
 
         // P1 里预览是紧贴标题栏的：之前这 54pt 上边距让白画面"飘"在黑中间
-        [preview.topAnchor constraintEqualToAnchor:content.topAnchor],
+        [preview.topAnchor constraintEqualToAnchor:content.topAnchor constant:52],
         [preview.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [preview.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         // 固定 16:9 信箱式预览（P4）：竖屏视频左右留黑边居中。
@@ -21362,7 +21362,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                                                           constant:10],
         [self.stripContainer.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
         [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:26],
-        [self.stripContainer.heightAnchor constraintEqualToConstant:34],
+        [self.stripContainer.heightAnchor constraintEqualToConstant:35],
 
         [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [self.playButton.widthAnchor constraintEqualToConstant:24],
@@ -21375,13 +21375,13 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [self.scrubber.topAnchor constraintEqualToAnchor:self.stripContainer.topAnchor constant:-6],
         [self.scrubber.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:6],
 
-        [row.bottomAnchor constraintEqualToAnchor:bottomClose.topAnchor constant:-34],
-        [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:44],
-        [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-44],
-        [row.heightAnchor constraintEqualToConstant:58],
+        [row.topAnchor constraintEqualToAnchor:content.bottomAnchor constant:67],
+        [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:50],
+        [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-50],
+        [row.heightAnchor constraintEqualToConstant:44],
 
         [bottomClose.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [bottomClose.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-52],
+        [bottomClose.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:28],
 
         [self.toastLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [self.toastLabel.bottomAnchor constraintEqualToAnchor:row.topAnchor constant:-24],
