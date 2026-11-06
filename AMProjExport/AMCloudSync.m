@@ -2336,6 +2336,9 @@ static NSString *AMCloudBackupTabStyleScript(void) {
 
 @end
 
+@class AMCloudLibraryViewController;
+extern NSNotificationName const AMCloudLibraryDidChangeNotification;
+
 @implementation AMCloudManager
 
 + (instancetype)shared {
