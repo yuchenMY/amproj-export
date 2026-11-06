@@ -21058,38 +21058,37 @@ static UIImage *AMProjDrawnShareIcon(BOOL isSave) {
     UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
         initWithSize:CGSizeMake(side, side)];
     UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        // 画在 24 的坐标系里再整体缩到 20：形状不变、尺寸对上 p2
-        CGContextScaleCTM(context.CGContext, 20.0 / 24.0, 20.0 / 24.0);
+        CGContextScaleCTM(context.CGContext, side / 24.0, side / 24.0);
         UIBezierPath *path = [UIBezierPath bezierPath];
-        path.lineWidth = 1.9;
+        path.lineWidth = 1.55;
         path.lineCapStyle = kCGLineCapRound;
         path.lineJoinStyle = kCGLineJoinRound;
         if (isSave) {
-            [path moveToPoint:CGPointMake(12, 3.5)];
-            [path addLineToPoint:CGPointMake(12, 13)];
-            [path moveToPoint:CGPointMake(7.6, 8.8)];
-            [path addLineToPoint:CGPointMake(12, 13.2)];
-            [path addLineToPoint:CGPointMake(16.4, 8.8)];
-            [path moveToPoint:CGPointMake(3.8, 15)];
-            [path addLineToPoint:CGPointMake(3.8, 18.6)];
-            [path addQuadCurveToPoint:CGPointMake(6, 20.8) controlPoint:CGPointMake(3.8, 20.8)];
-            [path addLineToPoint:CGPointMake(18, 20.8)];
-            [path addQuadCurveToPoint:CGPointMake(20.2, 18.6) controlPoint:CGPointMake(20.2, 20.8)];
-            [path addLineToPoint:CGPointMake(20.2, 15)];
+            [path moveToPoint:CGPointMake(12, 4.2)];
+            [path addLineToPoint:CGPointMake(12, 12.6)];
+            [path moveToPoint:CGPointMake(9.2, 9.8)];
+            [path addLineToPoint:CGPointMake(12, 12.6)];
+            [path addLineToPoint:CGPointMake(14.8, 9.8)];
+            [path moveToPoint:CGPointMake(5.6, 15.2)];
+            [path addLineToPoint:CGPointMake(5.6, 18.4)];
+            [path addQuadCurveToPoint:CGPointMake(7.6, 20.4) controlPoint:CGPointMake(5.6, 20.4)];
+            [path addLineToPoint:CGPointMake(16.4, 20.4)];
+            [path addQuadCurveToPoint:CGPointMake(18.4, 18.4) controlPoint:CGPointMake(18.4, 20.4)];
+            [path addLineToPoint:CGPointMake(18.4, 15.2)];
         } else {
-            [path moveToPoint:CGPointMake(10.5, 7.5)];
-            [path addLineToPoint:CGPointMake(6.6, 7.5)];
-            [path addQuadCurveToPoint:CGPointMake(4, 10.1) controlPoint:CGPointMake(4, 7.5)];
-            [path addLineToPoint:CGPointMake(4, 17.6)];
-            [path addQuadCurveToPoint:CGPointMake(6.6, 20.2) controlPoint:CGPointMake(4, 20.2)];
-            [path addLineToPoint:CGPointMake(17.4, 20.2)];
-            [path addQuadCurveToPoint:CGPointMake(20, 17.6) controlPoint:CGPointMake(20, 20.2)];
-            [path addLineToPoint:CGPointMake(20, 14)];
-            [path moveToPoint:CGPointMake(11, 10.5)];
-            [path addLineToPoint:CGPointMake(19.6, 1.9)];
-            [path moveToPoint:CGPointMake(14.2, 1.9)];
-            [path addLineToPoint:CGPointMake(19.6, 1.9)];
-            [path addLineToPoint:CGPointMake(19.6, 7.3)];
+            [path moveToPoint:CGPointMake(11, 6)];
+            [path addLineToPoint:CGPointMake(5.9, 6)];
+            [path addQuadCurveToPoint:CGPointMake(4, 7.9) controlPoint:CGPointMake(4, 6)];
+            [path addLineToPoint:CGPointMake(4, 19.1)];
+            [path addQuadCurveToPoint:CGPointMake(5.9, 21) controlPoint:CGPointMake(4, 21)];
+            [path addLineToPoint:CGPointMake(17.1, 21)];
+            [path addQuadCurveToPoint:CGPointMake(19, 19.1) controlPoint:CGPointMake(19, 21)];
+            [path addLineToPoint:CGPointMake(19, 11)];
+            [path moveToPoint:CGPointMake(10.4, 14.2)];
+            [path addLineToPoint:CGPointMake(16.4, 8.2)];
+            [path moveToPoint:CGPointMake(12.9, 8.2)];
+            [path addLineToPoint:CGPointMake(16.4, 8.2)];
+            [path addLineToPoint:CGPointMake(16.4, 11.7)];
         }
         [[UIColor whiteColor] setStroke];
         [path stroke];
