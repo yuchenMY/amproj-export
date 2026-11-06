@@ -21345,7 +21345,8 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [content.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor
                                              constant:30],
 
-        [preview.topAnchor constraintEqualToAnchor:content.topAnchor constant:54],
+        // P1 里预览是紧贴标题栏的：之前这 54pt 上边距让白画面"飘"在黑中间
+        [preview.topAnchor constraintEqualToAnchor:content.topAnchor],
         [preview.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [preview.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         // 固定 16:9 信箱式预览（P4）：竖屏视频左右留黑边居中。
