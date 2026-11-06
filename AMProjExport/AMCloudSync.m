@@ -4057,23 +4057,25 @@ static NSInteger AMCloudDetectCloudPillSelected(void) {
     if (!host) return;
     overlay = [AMCloudLibraryViewController new];
     overlay.manager = self;
-    [host addChildViewController:overlay];
-    overlay.view.translatesAutoresizingMaskIntoConstraints = NO;
-    overlay.view.hidden = YES;
-    overlay.view.backgroundColor = UIColor.systemBackgroundColor;
-    [window addSubview:overlay.view];
-    [overlay didMoveToParentViewController:host];
+    // 不做 childViewController 容器：之前既 addChild 又把 view 加到 window，
+    // UIKit 认为"控制器不在该 view 的父链上"，直接抛异常 SIGABRT。
+    UIView *hostView = host.view ?: window;
+    UIView *overlayView = overlay.view;
+    overlayView.translatesAutoresizingMaskIntoConstraints = NO;
+    overlayView.hidden = YES;
+    overlayView.backgroundColor = UIColor.systemBackgroundColor;
+    [hostView addSubview:overlayView];
     CGFloat tabBarHeight = 114.0;
     UIView *tabBar = AMCloudFindViewWithClassName(window, @"HomepageTabBarView", 0);
     if (tabBar && tabBar.bounds.size.height > 40) {
         tabBarHeight = tabBar.bounds.size.height;
     }
     [NSLayoutConstraint activateConstraints:@[
-        [overlay.view.leadingAnchor constraintEqualToAnchor:window.leadingAnchor],
-        [overlay.view.trailingAnchor constraintEqualToAnchor:window.trailingAnchor],
-        [overlay.view.topAnchor constraintEqualToAnchor:window.topAnchor],
-        [overlay.view.bottomAnchor constraintEqualToAnchor:window.bottomAnchor
-                                                constant:-tabBarHeight],
+        [overlayView.leadingAnchor constraintEqualToAnchor:hostView.leadingAnchor],
+        [overlayView.trailingAnchor constraintEqualToAnchor:hostView.trailingAnchor],
+        [overlayView.topAnchor constraintEqualToAnchor:hostView.topAnchor],
+        [overlayView.bottomAnchor constraintEqualToAnchor:hostView.bottomAnchor
+                                                  constant:-tabBarHeight],
     ]];
     objc_setAssociatedObject(window, &AMCloudBannerViewKey, overlay,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
