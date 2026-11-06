@@ -1568,6 +1568,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic) BOOL pluginSyncInstalled;
 @property(nonatomic) BOOL pluginSyncInFlight;
 @property(nonatomic) BOOL pluginSyncPending;
+@property(nonatomic) NSUInteger pluginSyncFailureCount;
 @property(nonatomic, copy) NSString *pluginSyncOperationID;
 @property(nonatomic) BOOL pluginCatalogRepairAttempted;
 @property(nonatomic, copy) NSString *pluginIOSSessionToken;
@@ -2611,6 +2612,19 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
     }
 }
 
+// 服务器 500/403 时不要每几秒重试一次（日志里能看到 3 秒一轮的轰炸），
+// 改成 1 分钟起步的指数退避，上限 15 分钟。
+- (void)schedulePluginSyncRetryAfterFailure {
+    self.pluginSyncFailureCount += 1;
+    NSUInteger steps = MIN(self.pluginSyncFailureCount, 4);
+    NSTimeInterval delay = MIN(900.0, 60.0 * pow(2.0, (double)steps));
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [weakSelf syncPluginsNow:@"retry_after_failure"];
+    });
+}
+
 - (void)syncPluginsNow:(NSString *)reason {
     if (!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -2661,6 +2675,7 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
             return;
         }
         if (error) {
+            [self schedulePluginSyncRetryAfterFailure];
             AMCloudDiagnostic(@"cloud.plugins.manifest_failed", @{
                 @"reason": reason ?: @"unknown",
                 @"error": error.localizedDescription ?: @""
@@ -3272,6 +3287,14 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
     }
     NSNumber *effectCount = [state[@"effect_count"] isKindOfClass:NSNumber.class]
         ? state[@"effect_count"] : nil;
+    if (!installed) {
+        static BOOL failureNoticeShown = NO;
+        if (failureNoticeShown) {
+            [self cancelPluginDownloadNotice];
+            return;
+        }
+        failureNoticeShown = YES;
+    }
     self.pluginDownloadNoticeBusy = NO;
     self.pluginDownloadNoticeSuppressed = NO;
     self.pluginDownloadNoticeTitle = installed
@@ -3488,6 +3511,7 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
 - (void)finishPluginSyncAllowingPending:(BOOL)allowPending {
     self.pluginSyncInFlight = NO;
     self.pluginSyncOperationID = nil;
+    if (allowPending) self.pluginSyncFailureCount = 0;
     if (!allowPending) {
         self.pluginSyncPending = NO;
         return;
