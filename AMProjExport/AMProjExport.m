@@ -21125,7 +21125,6 @@ static NSString *AMProjReplicaDiagnosticReport(void);
 @property(nonatomic, strong) UIButton *playButton;
 @property(nonatomic, strong) UILabel *toastLabel;
 @property(nonatomic, strong) id timeObserver;
-@property(nonatomic, strong) UILabel *titleLabel;
 @property(nonatomic, strong) UIView *stripContainer;
 @property(nonatomic, strong) UIStackView *filmstripStack;
 @property(nonatomic, strong) UIView *playhead;
@@ -21214,16 +21213,6 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [self.previewPlaceholder.leadingAnchor
             constraintGreaterThanOrEqualToAnchor:preview.leadingAnchor constant:24],
     ]];
-
-    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.titleLabel.textColor = UIColor.whiteColor;
-    self.titleLabel.font = [UIFont systemFontOfSize:21 weight:UIFontWeightBold];
-    self.titleLabel.textAlignment = NSTextAlignmentCenter;
-    self.titleLabel.numberOfLines = 2;
-    self.titleLabel.hidden = self.videoTitle.length == 0;
-    self.titleLabel.text = self.videoTitle;
-    self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:self.titleLabel];
 
     self.playButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if (@available(iOS 13.0, *)) {
@@ -21353,15 +21342,12 @@ static NSString *AMProjReplicaDiagnosticReport(void);
             [preview.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
                                                multiplier:9.0 / 16.0]),
 
-        [self.titleLabel.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:34],
-        [self.titleLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:20],
-        [self.titleLabel.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-20],
 
         // P4 的胶片条从暂停键右侧才开始：暂停键在条外，条本身靠右留窄边。
         [self.stripContainer.leadingAnchor constraintEqualToAnchor:self.playButton.trailingAnchor
                                                           constant:10],
         [self.stripContainer.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
-        [self.stripContainer.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:26],
+        [self.stripContainer.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:26],
         [self.stripContainer.heightAnchor constraintEqualToConstant:35],
 
         [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
