@@ -2432,6 +2432,7 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
         AMCloudManager *manager = weakSelf;
         if (!manager) { running = NO; return; }
         AMCloudAttachVisibleProjectsControllers();
+        [manager refreshWindowCloudOverlayVisibility];
         static NSTimeInterval lastDump = 0;
         NSTimeInterval now = [NSDate date].timeIntervalSince1970;
         if (now - lastDump > 5.0) {
@@ -3980,6 +3981,136 @@ static void AMCloudDumpViewTree(void) {
         NSCachesDirectory, NSUserDomainMask, YES).firstObject
         stringByAppendingPathComponent:@"AMProjExport.viewtree"];
     [out writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
+}
+
+// 865 的项目页是 SwiftUI（Homepage.SelectionHeaderView / TabBarView），
+// 分段控件、文字、无障碍全部读不到。唯一稳定的信息是"选中的胶囊是深色"，
+// 所以直接截那一行判色：深色块的中心偏右 = 云端被选中。
+static UIView *AMCloudFindViewWithClassName(UIView *view, NSString *needle, NSInteger depth) {
+    if (!view || depth > 24) return nil;
+    if ([NSStringFromClass(view.class) containsString:needle]) return view;
+    for (UIView *child in view.subviews) {
+        UIView *match = AMCloudFindViewWithClassName(child, needle, depth + 1);
+        if (match) return match;
+    }
+    return nil;
+}
+
+static UIView *AMCloudSelectionHeaderView(void) {
+    UIWindow *window = AMCloudActiveWindow();
+    return window ? AMCloudFindViewWithClassName(window, @"SelectionHeaderView", 0) : nil;
+}
+
+// 返回 -1 表示没截到（不做判断），0 表示别的 tab，1 表示云端。
+static NSInteger AMCloudDetectCloudPillSelected(void) {
+    UIView *header = AMCloudSelectionHeaderView();
+    if (!header) return -1;
+    CGSize size = header.bounds.size;
+    if (size.width < 50 || size.height < 20) return -1;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size];
+    UIImage *snapshot = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [header.layer renderInContext:context.CGContext];
+    }];
+    if (!snapshot) return -1;
+    CGImageRef cgImage = snapshot.CGImage;
+    if (!cgImage) return -1;
+    size_t width = CGImageGetWidth(cgImage);
+    size_t height = CGImageGetHeight(cgImage);
+    if (!width || !height) return -1;
+    size_t bytesPerRow = width * 4;
+    uint8_t *pixels = calloc(bytesPerRow * height, 1);
+    if (!pixels) return -1;
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(pixels, width, height, 8, bytesPerRow,
+        space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    if (!context) { free(pixels); return -1; }
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), cgImage);
+    CGContextRelease(context);
+
+    double sumX = 0;
+    NSUInteger darkCount = 0;
+    for (size_t y = height / 2; y < height; y++) {
+        for (size_t x = 0; x < width; x++) {
+            uint8_t *pixel = pixels + y * bytesPerRow + x * 4;
+            NSUInteger luminance = (NSUInteger)pixel[0] + pixel[1] + pixel[2];
+            if (luminance < 240) {   // 深色胶囊（#1B1E31 一类）
+                sumX += (double)x;
+                darkCount += 1;
+            }
+        }
+    }
+    free(pixels);
+    if (darkCount < width / 2) return -1;
+    double centerX = sumX / (double)darkCount;
+    return centerX > (double)width * 0.62 ? 1 : 0;
+}
+
+// 把云空间列表直接挂到窗口内容区（底部 tab 栏以上），不依赖任何控制器类名。
+- (void)installWindowCloudOverlay {
+    UIWindow *window = AMCloudActiveWindow();
+    if (!window) return;
+    AMCloudLibraryViewController *overlay =
+        objc_getAssociatedObject(window, &AMCloudBannerViewKey);
+    if (overlay) return;
+    UIViewController *host = window.rootViewController;
+    if (!host) return;
+    overlay = [AMCloudLibraryViewController new];
+    overlay.manager = self;
+    [host addChildViewController:overlay];
+    overlay.view.translatesAutoresizingMaskIntoConstraints = NO;
+    overlay.view.hidden = YES;
+    overlay.view.backgroundColor = UIColor.systemBackgroundColor;
+    [window addSubview:overlay.view];
+    [overlay didMoveToParentViewController:host];
+    CGFloat tabBarHeight = 114.0;
+    UIView *tabBar = AMCloudFindViewWithClassName(window, @"HomepageTabBarView", 0);
+    if (tabBar && tabBar.bounds.size.height > 40) {
+        tabBarHeight = tabBar.bounds.size.height;
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        [overlay.view.leadingAnchor constraintEqualToAnchor:window.leadingAnchor],
+        [overlay.view.trailingAnchor constraintEqualToAnchor:window.trailingAnchor],
+        [overlay.view.topAnchor constraintEqualToAnchor:window.topAnchor],
+        [overlay.view.bottomAnchor constraintEqualToAnchor:window.bottomAnchor
+                                                constant:-tabBarHeight],
+    ]];
+    objc_setAssociatedObject(window, &AMCloudBannerViewKey, overlay,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSLog(@"[AMProjExport] window cloud overlay installed");
+}
+
+- (void)refreshWindowCloudOverlayVisibility {
+    UIWindow *window = AMCloudActiveWindow();
+    if (!window) return;
+    AMCloudLibraryViewController *overlay =
+        objc_getAssociatedObject(window, &AMCloudBannerViewKey);
+    if (!overlay) { [self installWindowCloudOverlay]; return; }
+    NSInteger state = AMCloudDetectCloudPillSelected();
+    BOOL show = (state == 1);
+    if (overlay.view.hidden == show) {
+        overlay.view.hidden = !show;
+        if (show) {
+            [window bringSubviewToFront:overlay.view];
+            [overlay reload];
+        }
+    }
+    @try {
+        NSString *path = [NSSearchPathForDirectoriesInDomains(
+            NSCachesDirectory, NSUserDomainMask, YES).firstObject
+            stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
+        NSString *line = [NSString stringWithFormat:@"pill=%ld shown=%d\n",
+                          (long)state, !overlay.view.hidden];
+        NSMutableData *data = [[NSData dataWithContentsOfFile:path] mutableCopy]
+            ?: [NSMutableData data];
+        [data appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        if (data.length > 32 * 1024) {
+            data = [[data subdataWithRange:NSMakeRange(data.length - 24 * 1024, 24 * 1024)] mutableCopy];
+        }
+        [data writeToFile:path atomically:NO];
+    } @catch (NSException *exception) {
+        // 面包屑失败不影响主流程
+    }
 }
 
 - (void)installCloudTabTapWatcher {
