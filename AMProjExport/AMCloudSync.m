@@ -3922,6 +3922,26 @@ static NSString *AMCloudLabelAtPoint(UIView *view, CGPoint point, NSInteger dept
 
 // 探针：把当前窗口的控制器/视图类名+尺寸落到文件，用来确认 865 的云端
 // 页面到底由什么类承载（a11y 和文字都读不到，只能靠结构）。
+// iOS 26 上 UIApplication.keyWindow 返回 nil（早就废弃），之前探针和
+// 点击监听都因为这个提前 return，等于一直没装上。这里按场景找真正的前台窗口。
+static UIWindow *AMCloudActiveWindow(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        for (UIWindow *window in windowScene.windows) {
+            if (window.isKeyWindow) return window;
+        }
+        for (UIWindow *window in windowScene.windows) {
+            if (!window.hidden && window.alpha > 0.01) return window;
+        }
+    }
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (window.isKeyWindow) return window;
+    }
+    return UIApplication.sharedApplication.windows.firstObject;
+}
+
 static void AMCloudDumpNode(UIView *view, NSInteger depth, NSMutableString *out) {
     if (!view || depth > 12) return;
     CGRect frame = view.frame;
@@ -3936,8 +3956,7 @@ static void AMCloudDumpNode(UIView *view, NSInteger depth, NSMutableString *out)
 }
 
 static void AMCloudDumpViewTree(void) {
-    UIWindow *window = AMCloudTopController(nil).view.window ?:
-        UIApplication.sharedApplication.keyWindow;
+    UIWindow *window = AMCloudActiveWindow();
     if (!window) return;
     NSMutableString *out = [NSMutableString string];
     [out appendFormat:@"--- %@\n", [NSDate date]];
@@ -3963,8 +3982,7 @@ static void AMCloudDumpViewTree(void) {
 - (void)installCloudTabTapWatcher {
     static BOOL installed = NO;
     if (installed) return;
-    UIWindow *window = AMCloudTopController(nil).view.window;
-    if (!window) window = UIApplication.sharedApplication.keyWindow;
+    UIWindow *window = AMCloudActiveWindow();
     if (!window) return;
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
         initWithTarget:self action:@selector(handleCloudTabTap:)];
