@@ -21335,8 +21335,11 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [title.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
 
         [content.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
-        [content.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [content.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        // iPad：内容和预览都限宽居中，否则按宽度算比例会把整页撑爆
+        [content.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor],
+        [content.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor],
+        [content.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [content.widthAnchor constraintLessThanOrEqualToConstant:640],
         // 老版内容卡是收紧在内容上的：胶片条下面只留约 30pt 黑边
         [content.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor
                                              constant:44],
@@ -21346,9 +21349,15 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [preview.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [preview.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         // 固定 16:9 信箱式预览（P4）：竖屏视频左右留黑边居中。
-        (self.previewAspectConstraint =
-            [preview.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
-                                               multiplier:9.0 / 16.0]),
+        (self.previewAspectConstraint = ({
+            NSLayoutConstraint *constraint =
+                [preview.heightAnchor constraintEqualToAnchor:content.widthAnchor
+                                                   multiplier:9.0 / 16.0];
+            constraint.priority = UILayoutPriorityDefaultHigh;  // 让位给高度上限
+            constraint;
+        })),
+        [preview.heightAnchor constraintLessThanOrEqualToAnchor:self.view.heightAnchor
+                                                     multiplier:0.55],
 
 
         // P4 的胶片条从暂停键右侧才开始：暂停键在条外，条本身靠右留窄边。
@@ -21370,8 +21379,10 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [self.scrubber.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:6],
 
         [row.topAnchor constraintEqualToAnchor:content.bottomAnchor constant:67],
-        [row.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:50],
-        [row.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-50],
+        [row.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:50],
+        [row.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-50],
+        [row.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [row.widthAnchor constraintLessThanOrEqualToConstant:480],
         [row.heightAnchor constraintEqualToConstant:44],
 
         [bottomClose.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
@@ -21543,11 +21554,14 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                             self.previewAspectConstraint.active = NO;
                         }
                         UIView *previewBox = [self.view viewWithTag:9001];
-                        if (previewBox) {
-                            self.previewAspectConstraint =
-                                [previewBox.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
+                        UIView *contentBox = previewBox.superview;
+                        if (previewBox && contentBox) {
+                            NSLayoutConstraint *constraint =
+                                [previewBox.heightAnchor constraintEqualToAnchor:contentBox.widthAnchor
                                                                       multiplier:ratio];
-                            self.previewAspectConstraint.active = YES;
+                            constraint.priority = UILayoutPriorityDefaultHigh;
+                            self.previewAspectConstraint = constraint;
+                            constraint.active = YES;
                             [self.view layoutIfNeeded];
                         }
                     }
@@ -21562,11 +21576,14 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                         self.previewAspectConstraint.active = NO;
                     }
                     UIView *box = [self.view viewWithTag:9001];
-                    if (box) {
-                        self.previewAspectConstraint =
-                            [box.heightAnchor constraintEqualToAnchor:self.view.widthAnchor
-                                                          multiplier:ratio];
-                        self.previewAspectConstraint.active = YES;
+                    UIView *contentBox = box.superview;
+                    if (box && contentBox) {
+                        NSLayoutConstraint *constraint =
+                            [box.heightAnchor constraintEqualToAnchor:contentBox.widthAnchor
+                                                           multiplier:ratio];
+                        constraint.priority = UILayoutPriorityDefaultHigh;
+                        self.previewAspectConstraint = constraint;
+                        constraint.active = YES;
                         [self.view layoutIfNeeded];
                     }
                 }
