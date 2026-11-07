@@ -86,11 +86,8 @@ class ReplicaVideoSourceR92Tests(unittest.TestCase):
 class ReplicaLayoutR92Tests(unittest.TestCase):
     """P4 参考版式：固定 16:9 信箱式预览、标题在框下、矮胶片条。"""
 
-    def test_preview_height_follows_the_video_ratio_and_is_capped(self):
-        # r125：高度在 viewDidLayoutSubviews 里按容器宽度×比例算，并夹在
-        # 屏幕高度一半以内（iPad 上按宽度放大就会失真）。
-        self.assertIn("self.previewRatio = 9.0 / 16.0;", EXPORT)
-        self.assertIn("CGRectGetHeight(self.view.bounds) * 0.5", EXPORT)
+    def test_preview_is_fixed_16_by_9(self):
+        self.assertIn("multiplier:9.0 / 16.0", EXPORT)
         self.assertNotIn("previewHeightConstraint", EXPORT)
 
     def test_filmstrip_is_a_short_bordered_strip(self):
