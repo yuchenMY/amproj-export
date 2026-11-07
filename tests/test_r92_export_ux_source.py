@@ -87,7 +87,10 @@ class ReplicaLayoutR92Tests(unittest.TestCase):
     """P4 参考版式：固定 16:9 信箱式预览、标题在框下、矮胶片条。"""
 
     def test_preview_is_fixed_16_by_9(self):
-        self.assertIn("multiplier:9.0 / 16.0", EXPORT)
+        # 现在高度是常量约束，由 viewDidLayoutSubviews 按"卡片宽×视频比例、
+        # 且整列放得下"来算；默认比例仍是 16:9。
+        self.assertIn("self.previewRatio = 9.0 / 16.0;", EXPORT)
+        self.assertIn("screenHeight - 422.0", EXPORT)
         self.assertNotIn("previewHeightConstraint", EXPORT)
 
     def test_filmstrip_is_a_short_bordered_strip(self):
