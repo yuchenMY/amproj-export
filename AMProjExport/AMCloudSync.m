@@ -4105,6 +4105,25 @@ static NSInteger AMCloudDetectCloudPillSelected(void) {
     NSLog(@"[AMProjExport] window cloud overlay installed");
 }
 
+// 第三个信号：窗口里有没有"占了大半屏、类名带 Cloud"的视图（AM 的云页面
+// 容器类名历代都带 Cloud）。三个信号任意一个成立就认为是云端 tab。
+static BOOL AMCloudWindowHasCloudContentView(UIView *view, CGSize windowSize,
+                                            NSInteger depth) {
+    if (!view || depth > 26 || view.hidden || view.alpha < 0.05) return NO;
+    NSString *name = NSStringFromClass(view.class) ?: @"";
+    if ([name rangeOfString:@"Cloud" options:NSCaseInsensitiveSearch].location != NSNotFound &&
+        ![name hasPrefix:@"AMCloudLibrary"] && ![name hasPrefix:@"AMCloudAccount"] &&
+        ![name hasPrefix:@"AMCloudBanner"]) {
+        CGFloat area = CGRectGetWidth(view.bounds) * CGRectGetHeight(view.bounds);
+        CGFloat windowArea = windowSize.width * windowSize.height;
+        if (windowArea > 0 && area / windowArea > 0.25) return YES;
+    }
+    for (UIView *child in view.subviews) {
+        if (AMCloudWindowHasCloudContentView(child, windowSize, depth + 1)) return YES;
+    }
+    return NO;
+}
+
 - (void)refreshWindowCloudOverlayVisibility {
     UIWindow *window = AMCloudActiveWindow();
     if (!window) return;
@@ -4122,7 +4141,10 @@ static NSInteger AMCloudDetectCloudPillSelected(void) {
         }
     }
     NSInteger state = AMCloudDetectCloudPillSelected();
-    BOOL show = (state == 1);
+    BOOL cloudContent = AMCloudWindowHasCloudContentView(window, window.bounds.size, 0);
+    BOOL cloudText = AMCloudOfficialCloudContentOnScreen(window, 0);
+    // 明确判成"别的 tab"（state==0）时以它为准；否则任一信号成立就显示。
+    BOOL show = (state == 1) || (state < 0 && (cloudContent || cloudText));
     if (overlay.view.hidden == show) {
         overlay.view.hidden = !show;
         if (show) {
@@ -4134,8 +4156,9 @@ static NSInteger AMCloudDetectCloudPillSelected(void) {
         NSString *path = [NSSearchPathForDirectoriesInDomains(
             NSCachesDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
-        NSString *line = [NSString stringWithFormat:@"pill=%ld shown=%d\n",
-                          (long)state, !overlay.view.hidden];
+        NSString *line = [NSString stringWithFormat:
+            @"pill=%ld class=%d text=%d shown=%d\n",
+            (long)state, cloudContent, cloudText, !overlay.view.hidden];
         NSMutableData *data = [[NSData dataWithContentsOfFile:path] mutableCopy]
             ?: [NSMutableData data];
         [data appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
