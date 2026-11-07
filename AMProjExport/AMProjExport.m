@@ -21129,6 +21129,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
 @property(nonatomic, strong) UIStackView *filmstripStack;
 @property(nonatomic, strong) UIView *playhead;
 @property(nonatomic, strong) NSLayoutConstraint *previewAspectConstraint;
+@property(nonatomic, assign) CGFloat previewRatio;
 @property(nonatomic, strong) NSLayoutConstraint *playheadLeading;
 @property(nonatomic, strong) UILabel *previewPlaceholder;
 @property(nonatomic, assign) BOOL filmstripGenerated;
@@ -21139,6 +21140,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
 - (void)viewDidLoad {
     [super viewDidLoad];
     // 页面底色取自老版截图实测：#1B1E31（上一版用的偏青，肉眼看得出差异）
+    self.previewRatio = 9.0 / 16.0;
     self.view.backgroundColor = [UIColor colorWithRed:27/255.0 green:30/255.0
                                                 blue:49/255.0 alpha:1.0];
     self.modalPresentationStyle = UIModalPresentationFullScreen;
@@ -21349,15 +21351,8 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [preview.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [preview.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         // 固定 16:9 信箱式预览（P4）：竖屏视频左右留黑边居中。
-        (self.previewAspectConstraint = ({
-            NSLayoutConstraint *constraint =
-                [preview.heightAnchor constraintEqualToAnchor:content.widthAnchor
-                                                   multiplier:9.0 / 16.0];
-            constraint.priority = UILayoutPriorityDefaultHigh;  // 让位给高度上限
-            constraint;
-        })),
-        [preview.heightAnchor constraintLessThanOrEqualToAnchor:self.view.heightAnchor
-                                                     multiplier:0.55],
+        (self.previewAspectConstraint =
+            [preview.heightAnchor constraintEqualToConstant:220]),
 
 
         // P4 的胶片条从暂停键右侧才开始：暂停键在条外，条本身靠右留窄边。
@@ -21367,7 +21362,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [self.stripContainer.topAnchor constraintEqualToAnchor:preview.bottomAnchor constant:26],
         [self.stripContainer.heightAnchor constraintEqualToConstant:35],
 
-        [self.playButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [self.playButton.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
         [self.playButton.widthAnchor constraintEqualToConstant:24],
         [self.playButton.heightAnchor constraintEqualToConstant:24],
         [self.playButton.centerYAnchor constraintEqualToAnchor:self.stripContainer.centerYAnchor],
@@ -21379,10 +21374,14 @@ static NSString *AMProjReplicaDiagnosticReport(void);
         [self.scrubber.bottomAnchor constraintEqualToAnchor:self.stripContainer.bottomAnchor constant:6],
 
         [row.topAnchor constraintEqualToAnchor:content.bottomAnchor constant:67],
-        [row.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:50],
-        [row.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-50],
-        [row.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [row.widthAnchor constraintLessThanOrEqualToConstant:480],
+        [row.centerXAnchor constraintEqualToAnchor:content.centerXAnchor],
+        [row.widthAnchor constraintLessThanOrEqualToAnchor:content.widthAnchor constant:-48],
+        ({
+            NSLayoutConstraint *preferred =
+                [row.widthAnchor constraintEqualToConstant:420];
+            preferred.priority = UILayoutPriorityDefaultHigh;
+            preferred;
+        }),
         [row.heightAnchor constraintEqualToConstant:44],
 
         [bottomClose.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
@@ -21405,7 +21404,21 @@ static NSString *AMProjReplicaDiagnosticReport(void);
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     UIView *preview = [self.view viewWithTag:9001];
-    if (self.playerLayer && preview) {
+    if (!preview) return;
+    // 高度 = 容器宽度 × 视频比例，再夹到屏幕一半以内：iPhone 上就是原来的
+    // 效果，iPad 上也不会被按宽度放大成巨幅。
+    UIView *contentBox = preview.superview ?: self.view;
+    CGFloat width = CGRectGetWidth(contentBox.bounds);
+    if (width > 10) {
+        CGFloat desired = width * self.previewRatio;
+        CGFloat limit = CGRectGetHeight(self.view.bounds) * 0.5;
+        desired = MIN(desired, limit);
+        desired = MAX(desired, 120);
+        if (fabs(self.previewAspectConstraint.constant - desired) > 0.5) {
+            self.previewAspectConstraint.constant = desired;
+        }
+    }
+    if (self.playerLayer) {
         self.playerLayer.frame = preview.bounds;
     }
 }
@@ -21553,16 +21566,8 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                         if (self.previewAspectConstraint) {
                             self.previewAspectConstraint.active = NO;
                         }
-                        UIView *previewBox = [self.view viewWithTag:9001];
-                        UIView *contentBox = previewBox.superview;
-                        if (previewBox && contentBox) {
-                            NSLayoutConstraint *constraint =
-                                [previewBox.heightAnchor constraintEqualToAnchor:contentBox.widthAnchor
-                                                                      multiplier:ratio];
-                            constraint.priority = UILayoutPriorityDefaultHigh;
-                            self.previewAspectConstraint = constraint;
-                            constraint.active = YES;
-                            [self.view layoutIfNeeded];
+                        self.previewRatio = ratio;
+                        [self.view layoutIfNeeded];
                         }
                     }
                 }
@@ -21575,16 +21580,8 @@ static NSString *AMProjReplicaDiagnosticReport(void);
                     if (self.previewAspectConstraint) {
                         self.previewAspectConstraint.active = NO;
                     }
-                    UIView *box = [self.view viewWithTag:9001];
-                    UIView *contentBox = box.superview;
-                    if (box && contentBox) {
-                        NSLayoutConstraint *constraint =
-                            [box.heightAnchor constraintEqualToAnchor:contentBox.widthAnchor
-                                                           multiplier:ratio];
-                        constraint.priority = UILayoutPriorityDefaultHigh;
-                        self.previewAspectConstraint = constraint;
-                        constraint.active = YES;
-                        [self.view layoutIfNeeded];
+                    self.previewRatio = ratio;
+                    [self.view layoutIfNeeded];
                     }
                 }
                 if (loaded && seconds > 0 && !self.filmstripGenerated) {
