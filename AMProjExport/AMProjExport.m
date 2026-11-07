@@ -21948,24 +21948,17 @@ static NSURL *AMProjReplicaRecentAlbumVideoURL(NSTimeInterval maxAge) {
     return resolved;
 }
 
+static NSDate *AMProjReplicaFileModifiedDate(NSURL *URL) {
+    if (!URL) return nil;
+    NSDate *date = nil;
+    [URL getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
+    return date;
+}
+
 static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) {
     NSURL *resolved = nil;
     NSString *source = @"none";
     AMProjReplicaInstallPhotosCapture();
-    NSTimeInterval capturedAge = [NSDate date].timeIntervalSince1970 -
-        AMProjReplicaCapturedVideoAt;
-    if (AMProjReplicaCapturedVideoURL && capturedAge >= 0 &&
-        capturedAge <= AMProjReplicaVideoMaxAge) {
-        resolved = AMProjReplicaCapturedVideoURL;
-        source = @"photos_save_hook";
-    }
-    if (!resolved) {
-        NSURL *cached = AMProjReplicaExportCacheVideoURL();
-        if (cached) {
-            resolved = cached;
-            source = @"export_cache";
-        }
-    }
     for (NSString *key in @[@"videoURL", @"outputURL", @"savedURL", @"fileURL",
                             @"exportURL", @"movieURL", @"url"]) {
         @try {
@@ -22011,6 +22004,33 @@ static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) 
             }
         }
         free(ivars);
+    }
+    if (!resolved) {
+        // 关键：相册钩子只会记住某一次保存的文件，后续导出若没再走那个接口，
+        // 它会一直返回第一次的成片（用户反馈的"永远导出第一条"）。所以这里
+        // 同时看 AM 自己的导出目录，并取文件更新时间更晚的那个。
+        NSURL *cacheURL = AMProjReplicaExportCacheVideoURL();
+        NSURL *hookURL = AMProjReplicaCapturedVideoURL;
+        NSTimeInterval hookAge = [NSDate date].timeIntervalSince1970 -
+            AMProjReplicaCapturedVideoAt;
+        if (!AMProjReplicaCapturedVideoURL || hookAge < 0 ||
+            hookAge > AMProjReplicaVideoMaxAge) {
+            hookURL = nil;
+        }
+        NSDate *cacheDate = AMProjReplicaFileModifiedDate(cacheURL);
+        NSDate *hookDate = AMProjReplicaFileModifiedDate(hookURL);
+        if (cacheURL && hookURL) {
+            BOOL hookNewer = hookDate && cacheDate &&
+                [hookDate compare:cacheDate] == NSOrderedDescending;
+            resolved = hookNewer ? hookURL : cacheURL;
+            source = hookNewer ? @"photos_save_hook" : @"export_cache";
+        } else if (cacheURL) {
+            resolved = cacheURL;
+            source = @"export_cache";
+        } else if (hookURL) {
+            resolved = hookURL;
+            source = @"photos_save_hook";
+        }
     }
     if (!resolved) {
         resolved = AMProjReplicaRecentContainerVideoURL(AMProjReplicaVideoMaxAge);
