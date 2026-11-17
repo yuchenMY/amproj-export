@@ -463,6 +463,382 @@ static NSString *AMProjCrashSummaryLine(NSString *reportText) {
     return [NSString stringWithFormat:@"%@ · %@", kind, AMProjCrashBuildTag()];
 }
 
+#pragma mark - 提示卡片（自绘，不用系统弹窗）
+
+static UIColor *AMProjCrashColor(NSUInteger rgbaHex, CGFloat alpha) {
+    return [UIColor colorWithRed:((rgbaHex >> 16) & 0xFF) / 255.0
+                           green:((rgbaHex >> 8) & 0xFF) / 255.0
+                            blue:(rgbaHex & 0xFF) / 255.0
+                           alpha:alpha];
+}
+
+// 品牌色：中文段青绿 #39C5BB → 英文段天蓝 #66CCFF，和主页标题同一组。
+static UIColor *AMProjCrashBrandStart(void) { return AMProjCrashColor(0x39C5BB, 1.0); }
+static UIColor *AMProjCrashBrandEnd(void) { return AMProjCrashColor(0x66CCFF, 1.0); }
+
+static CAGradientLayer *AMProjCrashAttachGradient(UIView *view) {
+    CAGradientLayer *gradient = [CAGradientLayer layer];
+    gradient.colors = @[(id)AMProjCrashBrandStart().CGColor,
+                        (id)AMProjCrashBrandEnd().CGColor];
+    gradient.startPoint = CGPointMake(0.0, 0.5);
+    gradient.endPoint = CGPointMake(1.0, 0.5);
+    gradient.frame = view.bounds;
+    gradient.cornerRadius = view.layer.cornerRadius;
+    [view.layer insertSublayer:gradient atIndex:0];
+    return gradient;
+}
+
+@interface AMProjCrashPromptCard : UIViewController
+@property (nonatomic, copy) NSString *headline;
+@property (nonatomic, copy) NSString *meta;
+@property (nonatomic, copy) NSString *bodyText;
+@property (nonatomic, copy) NSString *primaryTitle;
+@property (nonatomic, copy) NSString *footnote;
+@property (nonatomic, copy) void (^primaryHandler)(void);
+@property (nonatomic, copy) void (^copyHandler)(void);
+@property (nonatomic, copy) void (^laterHandler)(void);
+- (void)dismissCard;
+- (void)showStateWithHeadline:(NSString *)headline meta:(NSString *)meta
+                     bodyText:(NSString *)body primaryTitle:(NSString *)primaryTitle
+                     footnote:(NSString *)footnote;
+@end
+
+static void AMProjCrashUploadLog(AMProjCrashPromptCard *card, NSString *summary);
+
+@implementation AMProjCrashPromptCard {
+    UIView *_card;
+    UIView *_iconBadge;
+    CAGradientLayer *_iconGradient;
+    UIImageView *_iconView;
+    UILabel *_headlineLabel;
+    UILabel *_metaLabel;
+    UILabel *_bodyLabel;
+    UILabel *_footnoteLabel;
+    UIButton *_primaryButton;
+    CAGradientLayer *_primaryGradient;
+    UIButton *_copyButton;
+    UIButton *_laterButton;
+    UILabel *_linkSeparator;
+    UIControl *_dimView;
+    BOOL _dismissing;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        // 必须在 present 之前设置，写进 viewDidLoad 等于没写（r104 踩过）。
+        self.modalPresentationStyle = UIModalPresentationOverFullScreen;
+        self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    }
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.clearColor;
+
+    _dimView = [[UIControl alloc] initWithFrame:self.view.bounds];
+    _dimView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.62];
+    _dimView.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+                                UIViewAutoresizingFlexibleHeight;
+    [_dimView addTarget:self action:@selector(noop:)
+       forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_dimView];
+
+    _card = [[UIView alloc] initWithFrame:CGRectZero];
+    _card.backgroundColor = AMProjCrashColor(0x171A21, 0.985);
+    _card.layer.cornerRadius = 26;
+    _card.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+    _card.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.08].CGColor;
+    _card.layer.shadowColor = UIColor.blackColor.CGColor;
+    _card.layer.shadowOpacity = 0.45;
+    _card.layer.shadowRadius = 28;
+    _card.layer.shadowOffset = CGSizeMake(0, 12);
+    [self.view addSubview:_card];
+
+    _iconBadge = [[UIView alloc] initWithFrame:CGRectZero];
+    _iconBadge.layer.cornerRadius = 17;
+    _iconBadge.layer.masksToBounds = YES;
+    [_card addSubview:_iconBadge];
+    _iconGradient = AMProjCrashAttachGradient(_iconBadge);
+
+    _iconView = [[UIImageView alloc] initWithFrame:CGRectZero];
+    _iconView.contentMode = UIViewContentModeCenter;
+    _iconView.tintColor = AMProjCrashColor(0x08131A, 1.0);
+    if (@available(iOS 13.0, *)) {
+        UIImageConfiguration *config = [UIImageSymbolConfiguration
+            configurationWithPointSize:22 weight:UIImageSymbolWeightBold];
+        _iconView.image = [UIImage systemImageNamed:@"exclamationmark"
+                                 withConfiguration:config];
+    }
+    [_iconBadge addSubview:_iconView];
+
+    _headlineLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _headlineLabel.textColor = UIColor.whiteColor;
+    _headlineLabel.font = [UIFont systemFontOfSize:21 weight:UIFontWeightBold];
+    _headlineLabel.numberOfLines = 1;
+    [_card addSubview:_headlineLabel];
+
+    _metaLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _metaLabel.textColor = AMProjCrashColor(0x8E96A3, 1.0);
+    _metaLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
+    _metaLabel.numberOfLines = 1;
+    [_card addSubview:_metaLabel];
+
+    _bodyLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _bodyLabel.textColor = AMProjCrashColor(0xB9C0CA, 1.0);
+    _bodyLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular];
+    _bodyLabel.numberOfLines = 0;
+    [_card addSubview:_bodyLabel];
+
+    _primaryButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    _primaryButton.layer.cornerRadius = 16;
+    _primaryButton.layer.masksToBounds = YES;
+    _primaryButton.titleLabel.font =
+        [UIFont systemFontOfSize:16.5 weight:UIFontWeightSemibold];
+    [_primaryButton setTitleColor:AMProjCrashColor(0x08131A, 1.0)
+                         forState:UIControlStateNormal];
+    [_primaryButton addTarget:self action:@selector(primaryTapped:)
+             forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:_primaryButton];
+    _primaryGradient = AMProjCrashAttachGradient(_primaryButton);
+
+    _copyButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    _copyButton.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
+    [_copyButton setTitle:@"复制日志" forState:UIControlStateNormal];
+    [_copyButton setTitleColor:AMProjCrashColor(0x9AA3AF, 1.0)
+                      forState:UIControlStateNormal];
+    [_copyButton addTarget:self action:@selector(copyTapped:)
+          forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:_copyButton];
+
+    _linkSeparator = [[UILabel alloc] initWithFrame:CGRectZero];
+    _linkSeparator.text = @"·";
+    _linkSeparator.textColor = AMProjCrashColor(0x5A6270, 1.0);
+    _linkSeparator.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
+    _linkSeparator.textAlignment = NSTextAlignmentCenter;
+    [_card addSubview:_linkSeparator];
+
+    _laterButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    _laterButton.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
+    [_laterButton setTitle:@"以后再说" forState:UIControlStateNormal];
+    [_laterButton setTitleColor:AMProjCrashColor(0x9AA3AF, 1.0)
+                       forState:UIControlStateNormal];
+    [_laterButton addTarget:self action:@selector(laterTapped:)
+           forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:_laterButton];
+
+    _footnoteLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _footnoteLabel.textColor = AMProjCrashColor(0x6E7681, 1.0);
+    _footnoteLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
+    _footnoteLabel.numberOfLines = 2;
+    _footnoteLabel.textAlignment = NSTextAlignmentCenter;
+    [_card addSubview:_footnoteLabel];
+
+    [self applyContent];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    _card.transform = CGAffineTransformMakeScale(0.94, 0.94);
+    _card.alpha = 0.0;
+    [UIView animateWithDuration:0.34 delay:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        self->_card.transform = CGAffineTransformIdentity;
+        self->_card.alpha = 1.0;
+    } completion:nil];
+}
+
+- (void)noop:(__unused id)sender {}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+
+    CGFloat padding = 22.0;
+    CGFloat cardWidth = MIN(CGRectGetWidth(self.view.bounds) - 44.0, 340.0);
+    CGFloat innerWidth = cardWidth - padding * 2;
+
+    CGSize bodySize = [_bodyLabel sizeThatFits:CGSizeMake(innerWidth, CGFLOAT_MAX)];
+    CGFloat iconSize = 54.0;
+    CGFloat primaryHeight = 52.0;
+    CGFloat height = padding + iconSize + 18.0 + 27.0 + 3.0 + 17.0 + 14.0
+        + ceil(bodySize.height) + 20.0 + primaryHeight + 14.0 + 24.0 + 14.0 + 26.0;
+
+    _card.frame = CGRectMake(0, 0, cardWidth, height);
+    _card.center = CGPointMake(CGRectGetMidX(self.view.bounds),
+                               CGRectGetMidY(self.view.bounds) - 8.0);
+
+    CGFloat y = padding;
+    _iconBadge.frame = CGRectMake(padding, y, iconSize, iconSize);
+    _iconGradient.frame = _iconBadge.bounds;
+    _iconView.frame = _iconBadge.bounds;
+    y = CGRectGetMaxY(_iconBadge.frame) + 18.0;
+
+    _headlineLabel.frame = CGRectMake(padding, y, innerWidth, 27.0);
+    y = CGRectGetMaxY(_headlineLabel.frame) + 3.0;
+
+    _metaLabel.frame = CGRectMake(padding, y, innerWidth, 17.0);
+    y = CGRectGetMaxY(_metaLabel.frame) + 14.0;
+
+    _bodyLabel.frame = CGRectMake(padding, y, innerWidth, ceil(bodySize.height));
+    y = CGRectGetMaxY(_bodyLabel.frame) + 20.0;
+
+    _primaryButton.frame = CGRectMake(padding, y, innerWidth, primaryHeight);
+    _primaryGradient.frame = _primaryButton.bounds;
+    y = CGRectGetMaxY(_primaryButton.frame) + 14.0;
+
+    CGFloat linkWidth = 62.0;
+    CGFloat separatorWidth = 18.0;
+    CGFloat totalWidth = linkWidth * 2 + separatorWidth;
+    CGFloat linkX = padding + (innerWidth - totalWidth) / 2.0;
+    _copyButton.frame = CGRectMake(linkX, y, linkWidth, 24.0);
+    _linkSeparator.frame = CGRectMake(CGRectGetMaxX(_copyButton.frame), y,
+                                      separatorWidth, 24.0);
+    _laterButton.frame = CGRectMake(CGRectGetMaxX(_linkSeparator.frame), y,
+                                    linkWidth, 24.0);
+    y = CGRectGetMaxY(_copyButton.frame) + 14.0;
+
+    _footnoteLabel.frame = CGRectMake(padding, y, innerWidth, 26.0);
+}
+
+- (NSAttributedString *)attributedBody:(NSString *)text {
+    NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
+    style.lineSpacing = 5.0;
+    return [[NSAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular],
+        NSForegroundColorAttributeName: AMProjCrashColor(0xB9C0CA, 1.0),
+        NSParagraphStyleAttributeName: style
+    }];
+}
+
+- (void)applyContent {
+    _headlineLabel.text = self.headline ?: @"";
+    _metaLabel.text = self.meta ?: @"";
+    _bodyLabel.attributedText = [self attributedBody:self.bodyText ?: @""];
+    [_primaryButton setTitle:self.primaryTitle ?: @"好" forState:UIControlStateNormal];
+    _footnoteLabel.text = self.footnote ?: @"";
+    _metaLabel.hidden = (self.meta.length == 0);
+    _footnoteLabel.hidden = (self.footnote.length == 0);
+    [self.view setNeedsLayout];
+}
+
+- (void)primaryTapped:(__unused id)sender {
+    void (^handler)(void) = self.primaryHandler;
+    if (handler) handler();
+}
+
+- (void)copyTapped:(__unused id)sender {
+    void (^handler)(void) = self.copyHandler;
+    if (handler) handler();
+}
+
+- (void)laterTapped:(__unused id)sender {
+    void (^handler)(void) = self.laterHandler;
+    if (handler) handler();
+    [self dismissCard];
+}
+
+- (void)dismissCard {
+    if (_dismissing) return;
+    _dismissing = YES;
+    [UIView animateWithDuration:0.2 animations:^{
+        self->_card.alpha = 0.0;
+        self->_card.transform = CGAffineTransformMakeScale(0.97, 0.97);
+        self->_dimView.alpha = 0.0;
+    } completion:^(__unused BOOL finished) {
+        [self dismissViewControllerAnimated:NO completion:nil];
+    }];
+}
+
+- (void)showStateWithHeadline:(NSString *)headline meta:(NSString *)meta
+                     bodyText:(NSString *)body primaryTitle:(NSString *)primaryTitle
+                     footnote:(NSString *)footnote {
+    self.headline = headline;
+    self.meta = meta;
+    self.bodyText = body;
+    self.primaryTitle = primaryTitle;
+    self.footnote = footnote;
+    [self applyContent];
+    [UIView transitionWithView:_card duration:0.18
+                       options:UIViewAnimationOptionTransitionCrossDissolve
+                    animations:^{
+        [self.view layoutIfNeeded];
+    } completion:nil];
+}
+
+@end
+
+static void AMProjCrashUploadLog(AMProjCrashPromptCard *card, NSString *summary) {
+    if (!card) return;
+    NSString *path = AMProjCrashReporterPendingReportPath();
+    if (!path) {
+        [card showStateWithHeadline:@"日志已经不在了"
+                               meta:@""
+                           bodyText:@"可能是系统清理了缓存，这次就不用发了。"
+                       primaryTitle:@"好"
+                           footnote:@""];
+        card.primaryHandler = ^{ [card dismissCard]; };
+        return;
+    }
+#if AMPROJ_CLOUD_SYNC
+    if (!AMCloudSyncHasLoggedInAccount()) {
+        [card showStateWithHeadline:@"需要先登录"
+                               meta:@"上传日志要走猫鹤账户"
+                           bodyText:@"登录之后回到这里，再点一次「上传日志」就可以了。"
+                       primaryTitle:@"去登录"
+                           footnote:@"不登录也能正常用 App，只是日志发不出去"];
+        card.primaryHandler = ^{
+            AMCloudSyncShowAccountLoginFrom(AMProjCrashTopViewController());
+            [card dismissCard];
+        };
+        return;
+    }
+    // 工单正文有 2000 字上限：只放摘要，全文走附件。
+    NSString *content = [NSString stringWithFormat:
+        @"用户在 App 内点击“上传日志”。\n%@\n日志见附件。", summary ?: @""];
+    [card showStateWithHeadline:@"正在上传…"
+                           meta:summary ?: @""
+                       bodyText:@"日志正在发到猫鹤服务器，几秒钟就好。"
+                   primaryTitle:@"请稍候"
+                       footnote:@""];
+    card.primaryHandler = nil;
+    __weak AMProjCrashPromptCard *weakCard = card;
+    AMCloudSubmitCrashTicket(@"猫鹤AM 崩溃日志", content, path,
+        ^(BOOL ok, NSString *messageText) {
+            AMProjCrashPromptCard *target = weakCard;
+            if (!target) return;
+            if (ok) {
+                AMProjCrashReporterDiscardPending();
+                [target showStateWithHeadline:@"已收到"
+                                         meta:@""
+                                     bodyText:messageText ?: @"日志已经到我们手上了。"
+                                 primaryTitle:@"好"
+                                     footnote:@"修好会随版本更新，谢谢"];
+                target.primaryHandler = ^{ [target dismissCard]; };
+            } else {
+                [target showStateWithHeadline:@"没传上去"
+                                         meta:@""
+                                     bodyText:messageText ?: @"网络不太好，稍后再试一次。"
+                                 primaryTitle:@"重试"
+                                     footnote:@"日志还在手机上，不会丢"];
+                __weak AMProjCrashPromptCard *retryCard = target;
+                target.primaryHandler = ^{
+                    AMProjCrashPromptCard *strong = retryCard;
+                    if (strong) AMProjCrashUploadLog(strong, summary);
+                };
+            }
+        });
+#else
+    [card showStateWithHeadline:@"这个版本不支持上传"
+                           meta:@""
+                       bodyText:@"可以先点「复制日志」，把内容发给猫鹤。"
+                   primaryTitle:@"好"
+                       footnote:@""];
+    card.primaryHandler = ^{ [card dismissCard]; };
+#endif
+}
+
 void AMProjCrashReporterPresentPromptIfNeeded(void) {
     if (gAMProjCrashPromptShown) return;
     if (!AMProjCrashReporterHasPendingReport()) return;
@@ -496,84 +872,38 @@ void AMProjCrashReporterPresentPromptIfNeeded(void) {
     NSString *summary = AMProjCrashSummaryLine(reportText);
     gAMProjCrashPromptShown = YES;
 
-    NSMutableString *message = [NSMutableString string];
-    [message appendFormat:@"上次使用猫鹤AM时闪退了（%@）。\n", summary];
-    [message appendString:@"日志已经记录在手机上。上传后我们能直接定位原因，修好会随版本更新。"];
-    [message appendString:@"\n\n上传内容：崩溃位置、iPhone 机型与系统版本、最近的操作记录，不含你的作品内容。"];
+    AMProjCrashPromptCard *card = [[AMProjCrashPromptCard alloc] init];
+    card.headline = @"上次闪退了";
+    card.meta = summary;
+    card.bodyText = @"日志已经记录在手机上。上传后我们能直接定位原因，修好会随版本更新。\n\n"
+                    @"只会发送崩溃位置、iPhone 机型和最近的操作记录，不含你的作品内容。";
+    card.primaryTitle = @"上传日志";
+    card.footnote = @"断网或没登录都不影响你继续用 App";
 
-    UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"上次闪退了"
-                         message:message
-                  preferredStyle:UIAlertControllerStyleAlert];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"上传日志"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *action) {
+    __weak AMProjCrashPromptCard *weakCard = card;
+    card.primaryHandler = ^{
         AMProjCrashNote(@"prompt: 用户选择上传日志");
-#if AMPROJ_CLOUD_SYNC
-        UIViewController *host = AMProjCrashTopViewController();
-        NSString *path = AMProjCrashReporterPendingReportPath();
-        if (!path) return;
-        if (!AMCloudSyncHasLoggedInAccount()) {
-            UIAlertController *login = [UIAlertController
-                alertControllerWithTitle:@"需要先登录"
-                                 message:@"上传日志要走猫鹤账户，登录后回到这里再点一次「上传日志」。"
-                          preferredStyle:UIAlertControllerStyleAlert];
-            [login addAction:[UIAlertAction actionWithTitle:@"去登录"
-                                                      style:UIAlertActionStyleDefault
-                                                    handler:^(__unused UIAlertAction *inner) {
-                AMCloudSyncShowAccountLoginFrom(AMProjCrashTopViewController() ?: host);
-            }]];
-            [login addAction:[UIAlertAction actionWithTitle:@"取消"
-                                                      style:UIAlertActionStyleCancel
-                                                    handler:nil]];
-            UIViewController *target = AMProjCrashTopViewController() ?: host;
-            if (target) [target presentViewController:login animated:YES completion:nil];
-            return;
-        }
-        // 工单正文有 2000 字上限：只放摘要，全文走附件。
-        NSString *content = [NSString stringWithFormat:
-            @"用户在 App 内点击“上传日志”。\n%@\n日志见附件。", summary];
-        AMCloudSubmitCrashTicket(@"猫鹤AM 崩溃日志", content, path,
-            ^(BOOL ok, NSString *messageText) {
-                UIAlertController *result = [UIAlertController
-                    alertControllerWithTitle:ok ? @"已上传" : @"上传失败"
-                                     message:messageText
-                              preferredStyle:UIAlertControllerStyleAlert];
-                [result addAction:[UIAlertAction actionWithTitle:@"好"
-                                                          style:UIAlertActionStyleDefault
-                                                        handler:nil]];
-                UIViewController *target = AMProjCrashTopViewController() ?: host;
-                if (target) [target presentViewController:result animated:YES completion:nil];
-                if (ok) AMProjCrashReporterDiscardPending();
-            });
-#else
-        (void)summary;
-#endif
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"复制日志"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *action) {
+        AMProjCrashUploadLog(weakCard, summary);
+    };
+    card.copyHandler = ^{
         UIPasteboard.generalPasteboard.string = reportText;
         AMProjCrashNote(@"prompt: 用户复制日志");
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"删除"
-                                              style:UIAlertActionStyleDestructive
-                                            handler:^(__unused UIAlertAction *action) {
-        AMProjCrashNote(@"prompt: 用户删除日志");
-        AMProjCrashReporterDiscardPending();
-    }]];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"以后再说"
-                                              style:UIAlertActionStyleCancel
-                                            handler:^(__unused UIAlertAction *action) {
+        AMProjCrashPromptCard *target = weakCard;
+        if (!target) return;
+        [target showStateWithHeadline:@"已复制"
+                                 meta:@""
+                             bodyText:@"日志全文已经在剪贴板，直接粘贴给猫鹤就行。"
+                         primaryTitle:@"好"
+                             footnote:@""];
+        target.primaryHandler = ^{ [target dismissCard]; };
+    };
+    card.laterHandler = ^{
         [NSUserDefaults.standardUserDefaults
             setDouble:([NSDate date].timeIntervalSince1970 + 24 * 60 * 60)
                forKey:@"amproj_crash_prompt_snooze_until"];
-    }]];
+        AMProjCrashNote(@"prompt: 用户选择以后再说");
+    };
 
-    [presenter presentViewController:alert animated:YES completion:nil];
+    [presenter presentViewController:card animated:YES completion:nil];
     AMProjCrashNote(@"prompt: presented (%@)", summary);
 }
