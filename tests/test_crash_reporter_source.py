@@ -122,19 +122,20 @@ class CrashTicketUploadTests(unittest.TestCase):
         for forbidden in ("cache", "offline", "bypass"):
             self.assertNotIn(forbidden, block)
 
-    def test_prompt_is_a_branded_card_not_a_system_alert(self):
-        prompt = REPORTER.split("AMProjCrashPromptCard : UIViewController", 1)[1]
-        for label in ("上传日志", "复制日志", "以后再说", "上次闪退了"):
-            self.assertIn(label, prompt)
-        self.assertIn("不含你的作品内容", prompt)
-        # 自绘卡片：品牌渐变 + 深色卡面；不允许再退回系统 UIAlertController。
-        self.assertIn("AMProjCrashBrandStart", REPORTER)
-        self.assertIn("CAGradientLayer", REPORTER)
-        self.assertIn("0x171A21", REPORTER)
+    def test_prompt_is_a_top_banner_plus_bottom_sheet(self):
+        sheet = REPORTER.split("AMProjCrashSheet : UIViewController", 1)[1]
+        for label in ("发送日志", "复制日志", "以后再说", "上次闪退了"):
+            self.assertIn(label, sheet)
+        self.assertIn("不含你的作品内容", sheet)
+        # 顶部细横幅（不挡操作）→ 点开才进抽屉；主按钮是黑色实心，不再用渐变。
+        banner = REPORTER.split("AMProjCrashBanner : UIView", 1)[1]
+        self.assertIn("上次闪退了", banner)
+        self.assertIn("发送", banner)
+        self.assertNotIn("CAGradientLayer", REPORTER)
         self.assertNotIn("UIAlertController", REPORTER)
 
     def test_card_modal_style_set_before_present(self):
-        init = REPORTER.split("- (instancetype)init {", 1)[1]
+        init = REPORTER.split("AMProjCrashSheet", 1)[1].split("- (instancetype)init {", 1)[1]
         init = init.split("- (void)viewDidLoad", 1)[0]
         self.assertIn("UIModalPresentationOverFullScreen", init)
         # r104 的教训：写进 viewDidLoad 等于没写。
