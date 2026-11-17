@@ -124,12 +124,12 @@ class CrashTicketUploadTests(unittest.TestCase):
 
     def test_prompt_is_a_top_banner_plus_bottom_sheet(self):
         sheet = REPORTER.split("AMProjCrashSheet : UIViewController", 1)[1]
-        for label in ("发送日志", "复制日志", "以后再说", "上次闪退了"):
+        for label in ("发送日志", "复制日志", "以后再说", "上次崩溃了"):
             self.assertIn(label, sheet)
         self.assertIn("不含你的作品内容", sheet)
         # 顶部细横幅（不挡操作）→ 点开才进抽屉；主按钮是黑色实心，不再用渐变。
         banner = REPORTER.split("AMProjCrashBanner : UIView", 1)[1]
-        self.assertIn("上次闪退了", banner)
+        self.assertIn("上次崩溃了", banner)
         self.assertIn("发送", banner)
         self.assertNotIn("CAGradientLayer", REPORTER)
         self.assertNotIn("UIAlertController", REPORTER)

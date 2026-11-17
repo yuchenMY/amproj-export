@@ -23341,7 +23341,7 @@ static void amproj_installCrackWelcomeSuppressors(void) {
 __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
-        // 崩溃日志最先装：之后任何一步崩了，下次启动都能看到「上次闪退了」。
+        // 崩溃日志最先装：之后任何一步崩了，下次启动都能看到「上次崩溃了」。
         amproj_installCrashReporter();
         // The repack's own crack module already auto-skips the intro flow
         // and its subscription step (handleIntroFlowHook* in the main

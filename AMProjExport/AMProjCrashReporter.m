@@ -2,7 +2,7 @@
 //  AMProjCrashReporter.m
 //  猫鹤 AM · 865
 //
-//  目的：用户闪退后，下一次启动能看到「上次闪退了」，并把日志一键上传成工单。
+//  目的：用户闪退后，下一次启动能看到「上次崩溃了」，并把日志一键上传成工单。
 //
 //  设计纪律（与 r72/r89/r121 三次闪退教训一致）：
 //  1. 信号处理器里只做 async-signal-safe 的事：write() + 预先渲染好的面包屑，
@@ -774,7 +774,7 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
         bang.tag = 9102;
 
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectZero];
-        title.text = @"上次闪退了";
+        title.text = @"上次崩溃了";
         title.textColor = AMProjCrashInk();
         title.font = AMProjCrashFont(13.5, UIFontWeightBold);
         title.tag = 9103;
@@ -953,7 +953,7 @@ static void AMProjCrashPresentSheet(NSString *reportText, NSString *summary) {
     if (!presenter || presenter.presentedViewController) return;
 
     AMProjCrashSheet *sheet = [[AMProjCrashSheet alloc] init];
-    sheet.headline = @"上次闪退了";
+    sheet.headline = @"上次崩溃了";
     sheet.meta = summary;
     sheet.bodyText = @"日志已经记录在手机上。发给我们就能定位原因，修好会随版本更新。\n\n"
                      @"只发送崩溃位置、机型和最近的操作，不含你的作品内容。";
