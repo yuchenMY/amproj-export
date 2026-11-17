@@ -29,6 +29,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <os/log.h>
+#import "AMProjCrashReporter.h"
 #import <zlib.h>
 #import <stdatomic.h>
 #import <string.h>
@@ -216,6 +217,39 @@ static void amproj_debugEvent(NSString *name, NSDictionary *fields) {
 static void amproj_logCriticalEvent(NSString *name, NSDictionary *fields) {
     NSLog(@"[AMProjExport] %@ %@", name ?: @"event", fields ?: @{});
     amproj_debugEvent(name, fields);
+}
+
+// 崩溃日志：安装信号/异常处理器 + 前后台哨兵，并在下一次启动时提示上传。
+// 只挂 NotificationCenter（不创建 UIApplication 实例），构造函数里调用安全。
+static void amproj_installCrashReporter(void) {
+    AMProjCrashReporterInstall();
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        @try {
+            NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+            [center addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                object:nil
+                                 queue:NSOperationQueue.mainQueue
+                            usingBlock:^(__unused NSNotification *note) {
+                AMProjCrashReporterMarkBackgrounded();
+            }];
+            [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                                object:nil
+                                 queue:NSOperationQueue.mainQueue
+                            usingBlock:^(__unused NSNotification *note) {
+                AMProjCrashReporterMarkForegrounded();
+                if (!AMProjCrashReporterHasPendingReport()) return;
+                // 等首页/项目页把窗口铺好再弹，避免被启动流程的 present 顶掉。
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                              (int64_t)(6 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    AMProjCrashReporterPresentPromptIfNeeded();
+                });
+            }];
+        } @catch (__unused NSException *exception) {
+            NSLog(@"[AMProjExport] crash reporter observers failed");
+        }
+    });
 }
 
 // The native import/export hooks below were reverse-engineered against the
@@ -18350,6 +18384,8 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
         amproj_forwardPresentation(self, _cmd, controller, animated, completion);
         return;
     }
+    // 崩溃面包屑：留下「崩之前最后几个页面」这条线。环形缓冲 4KB，代价可忽略。
+    AMProjCrashNote(@"present %@", NSStringFromClass(controller.class) ?: @"?");
     // The Blatant license module (Frameworks/AlightMotion.dylib) presents its
     // welcome and continue-entrance pages as regular controllers. Their
     // classes decrypt at runtime, so the image-name chain is the fingerprint,
@@ -23305,6 +23341,8 @@ static void amproj_installCrackWelcomeSuppressors(void) {
 __attribute__((constructor))
 static void AMProjExportInit(void) {
     @autoreleasepool {
+        // 崩溃日志最先装：之后任何一步崩了，下次启动都能看到「上次闪退了」。
+        amproj_installCrashReporter();
         // The repack's own crack module already auto-skips the intro flow
         // and its subscription step (handleIntroFlowHook* in the main
         // binary) - that is why the stock package never showed a wall.

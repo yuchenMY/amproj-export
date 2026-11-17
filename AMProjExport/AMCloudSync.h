@@ -29,6 +29,11 @@ FOUNDATION_EXPORT BOOL AMCloudSyncHasLoggedInAccount(void);
 /// 打开现有网页账户中心供用户登录，可从任意线程调用。
 FOUNDATION_EXPORT void AMCloudSyncShowAccountLoginFrom(
     UIViewController * _Nullable presenter);
+/// 把崩溃日志提交成工单（与 App 内正常提交工单同一条链路）。
+/// 需要已登录猫鹤账户；回调固定回主线程。
+FOUNDATION_EXPORT void AMCloudSubmitCrashTicket(
+    NSString *title, NSString *summary, NSString *logPath,
+    void (^ _Nullable completion)(BOOL ok, NSString * _Nullable message));
 /// 将已生成的 .amproj 交给 AutFeng Hub 云工程选择器，由用户选择新建或覆盖工程。
 FOUNDATION_EXPORT void AMCloudSyncBeginUploadFile(
     NSURL *fileURL, NSString *projectTitle, UIViewController *presenter);

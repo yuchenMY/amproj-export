@@ -128,7 +128,7 @@ static void AMCloudDiagnostic(NSString *name, NSDictionary *fields) {
             @"cloud.plugins.cleared", @"cloud.plugins.download_failed",
             @"cloud.plugins.install_failed", @"cloud.plugins.installed",
             @"cloud.plugins.session_activation_failed",
-            @"cloud.plugins.up_to_date"];
+            @"cloud.plugins.up_to_date", @"support.crash_uploaded"];
     });
     if (![cloudBreadcrumbEvents containsObject:name]) return;
     @try {
@@ -5541,6 +5541,142 @@ void AMCloudSyncShowAccountLoginFrom(UIViewController *presenter) {
     UIViewController *top = AMCloudTopController(presenter);
     if (!top) return;
     [[AMCloudManager shared] showAccountFrom:top];
+}
+
+// 崩溃日志 → 工单：与 App 里正常提交工单同一条链路
+// （POST /support/tickets + POST /support/tickets/{id}/attachments），
+// 只是正文由我们代为填写，附件是本地 crashreport。
+// 没登录就明确告诉用户去登录，不做任何离线兜底。
+void AMCloudSubmitCrashTicket(NSString *title, NSString *summary, NSString *logPath,
+                              void (^completion)(BOOL ok, NSString *message)) {
+    void (^finish)(BOOL, NSString *) = ^(BOOL ok, NSString *message) {
+        if (!completion) return;
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, message); });
+    };
+    NSString *token = AMCloudReadToken();
+    if (!token.length) {
+        finish(NO, @"还没有登录猫鹤账户。登录后再点一次「上传日志」就行。");
+        return;
+    }
+    NSString *deviceIdentifier = AMCloudDeviceIdentifier();
+    if (!deviceIdentifier.length) {
+        finish(NO, @"读取设备标识失败，请解锁设备后重试。");
+        return;
+    }
+    NSData *logData = logPath.length ? [NSData dataWithContentsOfFile:logPath] : nil;
+    if (!logData.length) {
+        finish(NO, @"日志文件读不到了，可能已被系统清理。");
+        return;
+    }
+
+    NSURLSessionConfiguration *configuration =
+        [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    configuration.timeoutIntervalForRequest = 30;
+    configuration.timeoutIntervalForResource = 90;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+
+    void (^addIdentity)(NSMutableURLRequest *) = ^(NSMutableURLRequest *request) {
+        [request setValue:@"ios" forHTTPHeaderField:@"X-AM-Platform"];
+        [request setValue:deviceIdentifier forHTTPHeaderField:@"X-AM-Device-ID"];
+        [request setValue:[@"Bearer " stringByAppendingString:token]
+       forHTTPHeaderField:@"Authorization"];
+    };
+
+    NSString *safeTitle = title.length ? title : @"猫鹤AM 崩溃日志";
+    if (safeTitle.length > 60) safeTitle = [safeTitle substringToIndex:60];
+    NSString *safeSummary = summary.length ? summary : @"App 内上传的崩溃日志";
+    if (safeSummary.length > 1500) safeSummary = [safeSummary substringToIndex:1500];
+
+    NSMutableURLRequest *ticketRequest = [NSMutableURLRequest requestWithURL:
+        [NSURL URLWithString:[AMCloudAPIBase
+            stringByAppendingString:@"/support/tickets"]]];
+    ticketRequest.HTTPMethod = @"POST";
+    addIdentity(ticketRequest);
+    NSError *encodeError = nil;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:@{
+        @"category": @"bug",
+        @"title": safeTitle,
+        @"content": safeSummary
+    } options:0 error:&encodeError];
+    if (!body) {
+        finish(NO, encodeError.localizedDescription ?: @"工单内容生成失败");
+        return;
+    }
+    ticketRequest.HTTPBody = body;
+    [ticketRequest setValue:@"application/json; charset=utf-8"
+         forHTTPHeaderField:@"Content-Type"];
+
+    [[session dataTaskWithRequest:ticketRequest
+                completionHandler:^(NSData *data, NSURLResponse *rawResponse,
+                                    NSError *networkError) {
+        if (networkError) {
+            finish(NO, networkError.localizedDescription ?: @"网络连接失败，稍后再试");
+            return;
+        }
+        NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
+            ? (NSHTTPURLResponse *)rawResponse : nil;
+        NSError *responseError = nil;
+        NSDictionary *payload = AMCloudEnvelope(data, response, &responseError);
+        if (!payload) {
+            if (response.statusCode == 401) AMCloudInvalidateTokenForRequest(ticketRequest);
+            finish(NO, responseError.localizedDescription ?: @"提交工单失败");
+            return;
+        }
+        NSDictionary *ticket = [payload[@"ticket"] isKindOfClass:NSDictionary.class]
+            ? payload[@"ticket"] : nil;
+        NSString *ticketID = nil;
+        id rawID = ticket[@"id"];
+        if ([rawID isKindOfClass:NSNumber.class]) {
+            ticketID = [(NSNumber *)rawID stringValue];
+        } else if ([rawID isKindOfClass:NSString.class]) {
+            ticketID = rawID;
+        }
+        if (!ticketID.length) {
+            finish(NO, @"工单已创建，但没有拿到工单号，请联系管理员");
+            return;
+        }
+
+        NSMutableURLRequest *attachRequest = [NSMutableURLRequest requestWithURL:
+            [NSURL URLWithString:[AMCloudAPIBase
+                stringByAppendingFormat:@"/support/tickets/%@/attachments", ticketID]]];
+        attachRequest.HTTPMethod = @"POST";
+        attachRequest.timeoutInterval = 60;
+        addIdentity(attachRequest);
+        NSString *filename = [NSString stringWithFormat:@"cat-crash-%lld.txt",
+                              (long long)[NSDate date].timeIntervalSince1970];
+        [attachRequest setValue:@"text/plain; charset=utf-8"
+             forHTTPHeaderField:@"Content-Type"];
+        [attachRequest setValue:filename forHTTPHeaderField:@"X-AM-Attach-Filename"];
+        [attachRequest setValue:[NSString stringWithFormat:@"%lu",
+                                 (unsigned long)logData.length]
+             forHTTPHeaderField:@"Content-Length"];
+
+        [[session uploadTaskWithRequest:attachRequest fromData:logData
+                      completionHandler:^(NSData *attachData, NSURLResponse *attachRaw,
+                                          NSError *attachError) {
+            if (attachError) {
+                finish(NO, [NSString stringWithFormat:
+                    @"工单已提交（#%@），但日志附件上传失败：%@",
+                    ticketID, attachError.localizedDescription ?: @"网络错误"]);
+                return;
+            }
+            NSHTTPURLResponse *attachResponse =
+                [attachRaw isKindOfClass:NSHTTPURLResponse.class]
+                    ? (NSHTTPURLResponse *)attachRaw : nil;
+            NSError *attachResponseError = nil;
+            NSDictionary *attachPayload =
+                AMCloudEnvelope(attachData, attachResponse, &attachResponseError);
+            if (!attachPayload) {
+                finish(NO, [NSString stringWithFormat:
+                    @"工单已提交（#%@），但日志附件被拒绝：%@",
+                    ticketID, attachResponseError.localizedDescription ?: @"服务端未接受"]);
+                return;
+            }
+            AMCloudDiagnostic(@"support.crash_uploaded", @{ @"ticket": ticketID });
+            finish(YES, [NSString stringWithFormat:
+                @"日志已上传，工单号 #%@。\n我们已经收到，修好会随版本更新。", ticketID]);
+        }] resume];
+    }] resume];
 }
 
 void AMCloudAuthorizeFeature(NSString *feature, UIViewController *presenter,
