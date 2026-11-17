@@ -466,6 +466,10 @@ static NSString *AMProjCrashSummaryLine(NSString *reportText) {
 void AMProjCrashReporterPresentPromptIfNeeded(void) {
     if (gAMProjCrashPromptShown) return;
     if (!AMProjCrashReporterHasPendingReport()) return;
+    // 「以后再说」= 24 小时内不再打扰；报告本身保留，下次仍可上传。
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSTimeInterval snoozeUntil = [defaults doubleForKey:@"amproj_crash_prompt_snooze_until"];
+    if (snoozeUntil > [NSDate date].timeIntervalSince1970) return;
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             AMProjCrashReporterPresentPromptIfNeeded();
@@ -564,7 +568,11 @@ void AMProjCrashReporterPresentPromptIfNeeded(void) {
 
     [alert addAction:[UIAlertAction actionWithTitle:@"以后再说"
                                               style:UIAlertActionStyleCancel
-                                            handler:nil]];
+                                            handler:^(__unused UIAlertAction *action) {
+        [NSUserDefaults.standardUserDefaults
+            setDouble:([NSDate date].timeIntervalSince1970 + 24 * 60 * 60)
+               forKey:@"amproj_crash_prompt_snooze_until"];
+    }]];
 
     [presenter presentViewController:alert animated:YES completion:nil];
     AMProjCrashNote(@"prompt: presented (%@)", summary);
