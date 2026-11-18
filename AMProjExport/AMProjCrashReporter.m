@@ -463,7 +463,7 @@ static NSString *AMProjCrashSummaryLine(NSString *reportText) {
     return [NSString stringWithFormat:@"%@ · %@", kind, AMProjCrashBuildTag()];
 }
 
-#pragma mark - 提示 UI：顶部横幅 + 底部抽屉（浅色，跟 App 首页一个语言）
+#pragma mark - 提示 UI：一行横幅 + 底部抽屉（浅色，克制版）
 
 static UIColor *AMProjCrashColor(NSUInteger rgbaHex, CGFloat alpha) {
     return [UIColor colorWithRed:((rgbaHex >> 16) & 0xFF) / 255.0
@@ -472,12 +472,13 @@ static UIColor *AMProjCrashColor(NSUInteger rgbaHex, CGFloat alpha) {
                            alpha:alpha];
 }
 
-// 首页那套浅色：白卡 + 近黑字 + 中灰说明；强调色只在必要时用一点点。
+// 首页那套浅色：白卡 + 近黑字 + 中灰说明。强调色只用在主按钮上，且是
+// App 里「上传」那颗胶囊的淡紫（#C9C4FF），不用渐变、不用高饱和绿。
 static UIColor *AMProjCrashInk(void) { return AMProjCrashColor(0x0B0F14, 1.0); }
 static UIColor *AMProjCrashBody(void) { return AMProjCrashColor(0x5B6472, 1.0); }
 static UIColor *AMProjCrashMute(void) { return AMProjCrashColor(0x9AA1AD, 1.0); }
 static UIColor *AMProjCrashHairline(void) { return AMProjCrashColor(0xE8EBF0, 1.0); }
-static UIColor *AMProjCrashCanvas(void) { return AMProjCrashColor(0xFFFFFF, 1.0); }
+static UIColor *AMProjCrashAccent(void) { return AMProjCrashColor(0xC9C4FF, 1.0); }
 
 static UIFont *AMProjCrashFont(CGFloat size, UIFontWeight weight) {
     return [UIFont systemFontOfSize:size weight:weight];
@@ -490,13 +491,15 @@ static UIFont *AMProjCrashFont(CGFloat size, UIFontWeight weight) {
 @property (nonatomic, copy) NSString *meta;
 @property (nonatomic, copy) NSString *bodyText;
 @property (nonatomic, copy) NSString *primaryTitle;
+@property (nonatomic, copy) NSString *secondaryTitle;
 @property (nonatomic, copy) void (^primaryHandler)(void);
+@property (nonatomic, copy) void (^secondaryHandler)(void);
 @property (nonatomic, copy) void (^copyHandler)(void);
-@property (nonatomic, copy) void (^laterHandler)(void);
 - (void)dismissSheet;
 - (void)showStateWithHeadline:(NSString *)headline meta:(NSString *)meta
-                     bodyText:(NSString *)body primaryTitle:(NSString *)primaryTitle
-                     showLinks:(BOOL)showLinks;
+                     bodyText:(NSString *)body
+                 primaryTitle:(NSString *)primaryTitle
+               secondaryTitle:(NSString *)secondaryTitle;
 @end
 
 static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
@@ -507,9 +510,7 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     UILabel *_metaLabel;
     UILabel *_bodyLabel;
     UIButton *_primaryButton;
-    UIButton *_copyButton;
-    UIButton *_laterButton;
-    UILabel *_linkSeparator;
+    UIButton *_secondaryButton;
     UIControl *_dimView;
     BOOL _dismissing;
 }
@@ -529,7 +530,7 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     self.view.backgroundColor = UIColor.clearColor;
 
     _dimView = [[UIControl alloc] initWithFrame:self.view.bounds];
-    _dimView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
+    _dimView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.32];
     _dimView.autoresizingMask = UIViewAutoresizingFlexibleWidth |
                                 UIViewAutoresizingFlexibleHeight;
     [_dimView addTarget:self action:@selector(noop:)
@@ -537,22 +538,20 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     [self.view addSubview:_dimView];
 
     _panel = [[UIView alloc] initWithFrame:CGRectZero];
-    _panel.backgroundColor = AMProjCrashCanvas();
-    _panel.layer.cornerRadius = 28;
+    _panel.backgroundColor = UIColor.whiteColor;
+    _panel.layer.cornerRadius = 24;
     _panel.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
-    _panel.layer.masksToBounds = NO;
     [self.view addSubview:_panel];
 
-    // 抓手
     UIView *grabber = [[UIView alloc] initWithFrame:CGRectZero];
-    grabber.backgroundColor = AMProjCrashColor(0xD1D5DB, 1.0);
-    grabber.layer.cornerRadius = 2.5;
+    grabber.backgroundColor = AMProjCrashColor(0xDDE1E7, 1.0);
+    grabber.layer.cornerRadius = 2.0;
     grabber.tag = 9001;
     [_panel addSubview:grabber];
 
     _headlineLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     _headlineLabel.textColor = AMProjCrashInk();
-    _headlineLabel.font = AMProjCrashFont(19, UIFontWeightBold);
+    _headlineLabel.font = AMProjCrashFont(20, UIFontWeightBold);
     _headlineLabel.numberOfLines = 1;
     [_panel addSubview:_headlineLabel];
 
@@ -568,37 +567,22 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     [_panel addSubview:_bodyLabel];
 
     _primaryButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    _primaryButton.backgroundColor = AMProjCrashInk();
-    _primaryButton.layer.cornerRadius = 14;
+    _primaryButton.backgroundColor = AMProjCrashAccent();
+    _primaryButton.layer.cornerRadius = 16;
     _primaryButton.layer.masksToBounds = YES;
     _primaryButton.titleLabel.font = AMProjCrashFont(16, UIFontWeightSemibold);
-    [_primaryButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [_primaryButton setTitleColor:AMProjCrashColor(0x1A1636, 1.0)
+                         forState:UIControlStateNormal];
     [_primaryButton addTarget:self action:@selector(primaryTapped:)
              forControlEvents:UIControlEventTouchUpInside];
     [_panel addSubview:_primaryButton];
 
-    _copyButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    _copyButton.titleLabel.font = AMProjCrashFont(13, UIFontWeightRegular);
-    [_copyButton setTitle:@"复制日志" forState:UIControlStateNormal];
-    [_copyButton setTitleColor:AMProjCrashMute() forState:UIControlStateNormal];
-    [_copyButton addTarget:self action:@selector(copyTapped:)
-          forControlEvents:UIControlEventTouchUpInside];
-    [_panel addSubview:_copyButton];
-
-    _linkSeparator = [[UILabel alloc] initWithFrame:CGRectZero];
-    _linkSeparator.text = @"·";
-    _linkSeparator.textColor = AMProjCrashMute();
-    _linkSeparator.font = AMProjCrashFont(13, UIFontWeightRegular);
-    _linkSeparator.textAlignment = NSTextAlignmentCenter;
-    [_panel addSubview:_linkSeparator];
-
-    _laterButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    _laterButton.titleLabel.font = AMProjCrashFont(13, UIFontWeightRegular);
-    [_laterButton setTitle:@"以后再说" forState:UIControlStateNormal];
-    [_laterButton setTitleColor:AMProjCrashMute() forState:UIControlStateNormal];
-    [_laterButton addTarget:self action:@selector(laterTapped:)
-           forControlEvents:UIControlEventTouchUpInside];
-    [_panel addSubview:_laterButton];
+    _secondaryButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    _secondaryButton.titleLabel.font = AMProjCrashFont(13.5, UIFontWeightRegular);
+    [_secondaryButton setTitleColor:AMProjCrashMute() forState:UIControlStateNormal];
+    [_secondaryButton addTarget:self action:@selector(secondaryTapped:)
+               forControlEvents:UIControlEventTouchUpInside];
+    [_panel addSubview:_secondaryButton];
 
     [self applyContent];
 }
@@ -607,48 +591,50 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     [super viewDidLayoutSubviews];
 
     CGFloat width = CGRectGetWidth(self.view.bounds);
-    CGFloat pad = 24.0;
+    CGFloat pad = 28.0;
     CGFloat inner = width - pad * 2;
 
-    // 面板高度跟着内容走：内容短就短，不留一大块空白。
     CGSize bodySize = [_bodyLabel sizeThatFits:CGSizeMake(inner, CGFLOAT_MAX)];
     CGFloat bodyHeight = ceil(bodySize.height);
-    CGFloat contentHeight = 32 + 26 + (_metaLabel.hidden ? 0 : 17) + 14
-        + bodyHeight + 24 + 50 + 12 + 20 + 16;
+    BOOL hasMeta = (_metaLabel.text.length > 0);
+    BOOL hasSecondary = (_secondaryButton.titleLabel.text.length > 0 &&
+                         !_secondaryButton.hidden);
+
+    CGFloat contentHeight = 26 + 26                       // 抓手留白 + 标题
+        + (hasMeta ? 6 + 16 : 0)                          // meta
+        + 18 + bodyHeight
+        + 28 + 52                                          // 主按钮
+        + (hasSecondary ? 12 + 20 : 0)
+        + 26;
     CGFloat panelHeight = contentHeight + self.view.safeAreaInsets.bottom;
 
     _panel.frame = CGRectMake(0, CGRectGetHeight(self.view.bounds) - panelHeight,
                               width, panelHeight);
     _panel.layer.shadowColor = UIColor.blackColor.CGColor;
-    _panel.layer.shadowOpacity = 0.12;
-    _panel.layer.shadowRadius = 24;
-    _panel.layer.shadowOffset = CGSizeMake(0, -8);
+    _panel.layer.shadowOpacity = 0.10;
+    _panel.layer.shadowRadius = 20;
+    _panel.layer.shadowOffset = CGSizeMake(0, -6);
 
     UIView *grabber = [_panel viewWithTag:9001];
-    grabber.frame = CGRectMake((width - 36) / 2.0, 10, 36, 5);
+    grabber.frame = CGRectMake((width - 32) / 2.0, 10, 32, 4);
 
-    CGFloat y = 32;
+    CGFloat y = 26;
     _headlineLabel.frame = CGRectMake(pad, y, inner, 26);
     y += 26;
-    if (!_metaLabel.hidden) {
-        _metaLabel.frame = CGRectMake(pad, y, inner, 17);
-        y += 17;
+    if (hasMeta) {
+        _metaLabel.frame = CGRectMake(pad, y + 6, inner, 16);
+        y += 6 + 16;
     }
-    y += 14;
+    y += 18;
     _bodyLabel.frame = CGRectMake(pad, y, inner, bodyHeight);
-    y += bodyHeight + 24;
+    y += bodyHeight + 28;
 
-    _primaryButton.frame = CGRectMake(pad, y, inner, 50);
-    y += 50 + 12;
+    _primaryButton.frame = CGRectMake(pad, y, inner, 52);
+    y += 52;
 
-    CGFloat linkWidth = 62;
-    CGFloat separatorWidth = 16;
-    CGFloat total = linkWidth * 2 + separatorWidth;
-    CGFloat linkX = (width - total) / 2.0;
-    _copyButton.frame = CGRectMake(linkX, y, linkWidth, 20);
-    _linkSeparator.frame = CGRectMake(linkX + linkWidth, y, separatorWidth, 20);
-    _laterButton.frame = CGRectMake(linkX + linkWidth + separatorWidth, y,
-                                    linkWidth, 20);
+    if (hasSecondary) {
+        _secondaryButton.frame = CGRectMake(0, y + 12, width, 20);
+    }
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -663,11 +649,11 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     } completion:nil];
 }
 
-- (void)noop:(__unused id)sender {}
+- (void)noop:(__unused id)sender { [self dismissSheet]; }
 
 - (NSAttributedString *)attributedBody:(NSString *)text {
     NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
-    style.lineSpacing = 6.0;
+    style.lineSpacing = 7.0;
     return [[NSAttributedString alloc] initWithString:text attributes:@{
         NSFontAttributeName: AMProjCrashFont(14, UIFontWeightRegular),
         NSForegroundColorAttributeName: AMProjCrashBody(),
@@ -680,7 +666,10 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     _metaLabel.text = self.meta ?: @"";
     _bodyLabel.attributedText = [self attributedBody:self.bodyText ?: @""];
     [_primaryButton setTitle:self.primaryTitle ?: @"好" forState:UIControlStateNormal];
+    [_secondaryButton setTitle:(self.secondaryTitle ?: @"")
+                      forState:UIControlStateNormal];
     _metaLabel.hidden = (self.meta.length == 0);
+    _secondaryButton.hidden = (self.secondaryTitle.length == 0);
     [self.view setNeedsLayout];
 }
 
@@ -689,15 +678,9 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     if (handler) handler();
 }
 
-- (void)copyTapped:(__unused id)sender {
-    void (^handler)(void) = self.copyHandler;
+- (void)secondaryTapped:(__unused id)sender {
+    void (^handler)(void) = self.secondaryHandler;
     if (handler) handler();
-}
-
-- (void)laterTapped:(__unused id)sender {
-    void (^handler)(void) = self.laterHandler;
-    if (handler) handler();
-    [self dismissSheet];
 }
 
 - (void)dismissSheet {
@@ -713,102 +696,71 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
 }
 
 - (void)showStateWithHeadline:(NSString *)headline meta:(NSString *)meta
-                     bodyText:(NSString *)body primaryTitle:(NSString *)primaryTitle
-                     showLinks:(BOOL)showLinks {
+                     bodyText:(NSString *)body
+                 primaryTitle:(NSString *)primaryTitle
+               secondaryTitle:(NSString *)secondaryTitle {
     self.headline = headline;
     self.meta = meta;
     self.bodyText = body;
     self.primaryTitle = primaryTitle;
+    self.secondaryTitle = secondaryTitle;
     [self applyContent];
-    _copyButton.hidden = !showLinks;
-    _linkSeparator.hidden = !showLinks;
-    _laterButton.hidden = NO;
-    [_laterButton setTitle:(showLinks ? @"以后再说" : @"关闭")
-                  forState:UIControlStateNormal];
-    [UIView animateWithDuration:0.15 animations:^{
+    [UIView animateWithDuration:0.18 animations:^{
         [self.view layoutIfNeeded];
     }];
 }
 
 @end
 
-#pragma mark - 顶部横幅
+#pragma mark - 一行横幅
 
 @interface AMProjCrashBanner : UIView
 @property (nonatomic, copy) void (^openHandler)(void);
-@property (nonatomic, copy) void (^closeHandler)(void);
 - (void)showInWindow:(UIWindow *)window;
 - (void)hide;
 @end
 
 @implementation AMProjCrashBanner {
-    UIButton *_sendButton;
-    UIButton *_closeButton;
+    UILabel *_titleLabel;
+    UILabel *_actionLabel;
+    UILabel *_chevronLabel;
     NSTimer *_autoHideTimer;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = AMProjCrashCanvas();
-        self.layer.cornerRadius = 16;
+        self.backgroundColor = UIColor.whiteColor;
+        self.layer.cornerRadius = 14;
         self.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
         self.layer.borderColor = AMProjCrashHairline().CGColor;
         self.layer.shadowColor = UIColor.blackColor.CGColor;
-        self.layer.shadowOpacity = 0.08;
-        self.layer.shadowRadius = 14;
-        self.layer.shadowOffset = CGSizeMake(0, 6);
+        self.layer.shadowOpacity = 0.07;
+        self.layer.shadowRadius = 12;
+        self.layer.shadowOffset = CGSizeMake(0, 5);
 
-        UIView *badge = [[UIView alloc] initWithFrame:CGRectZero];
-        badge.backgroundColor = AMProjCrashColor(0xF2F4F7, 1.0);
-        badge.layer.cornerRadius = 13;
-        badge.tag = 9101;
-        [self addSubview:badge];
+        _titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _titleLabel.text = @"上次崩溃了";
+        _titleLabel.textColor = AMProjCrashInk();
+        _titleLabel.font = AMProjCrashFont(13.5, UIFontWeightSemibold);
+        [self addSubview:_titleLabel];
 
-        UILabel *bang = [[UILabel alloc] initWithFrame:CGRectZero];
-        bang.text = @"!";
-        bang.textColor = AMProjCrashInk();
-        bang.font = AMProjCrashFont(13, UIFontWeightBold);
-        bang.textAlignment = NSTextAlignmentCenter;
-        [badge addSubview:bang];
-        bang.tag = 9102;
+        _actionLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _actionLabel.text = @"发送日志";
+        _actionLabel.textColor = AMProjCrashInk();
+        _actionLabel.font = AMProjCrashFont(13, UIFontWeightRegular);
+        _actionLabel.textAlignment = NSTextAlignmentRight;
+        [self addSubview:_actionLabel];
 
-        UILabel *title = [[UILabel alloc] initWithFrame:CGRectZero];
-        title.text = @"上次崩溃了";
-        title.textColor = AMProjCrashInk();
-        title.font = AMProjCrashFont(13.5, UIFontWeightBold);
-        title.tag = 9103;
-        [self addSubview:title];
+        _chevronLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _chevronLabel.text = @"›";
+        _chevronLabel.textColor = AMProjCrashMute();
+        _chevronLabel.font = AMProjCrashFont(16, UIFontWeightRegular);
+        _chevronLabel.textAlignment = NSTextAlignmentCenter;
+        [self addSubview:_chevronLabel];
 
-        UILabel *subtitle = [[UILabel alloc] initWithFrame:CGRectZero];
-        subtitle.text = @"点这里把日志发给我们";
-        subtitle.textColor = AMProjCrashMute();
-        subtitle.font = AMProjCrashFont(11.5, UIFontWeightRegular);
-        subtitle.tag = 9104;
-        [self addSubview:subtitle];
-
-        _sendButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        _sendButton.backgroundColor = AMProjCrashInk();
-        _sendButton.layer.cornerRadius = 15;
-        _sendButton.titleLabel.font = AMProjCrashFont(12, UIFontWeightSemibold);
-        [_sendButton setTitle:@"发送" forState:UIControlStateNormal];
-        [_sendButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        [_sendButton addTarget:self action:@selector(openTapped:)
-              forControlEvents:UIControlEventTouchUpInside];
-        _sendButton.tag = 9105;
-        [self addSubview:_sendButton];
-
-        _closeButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        [_closeButton setTitle:@"×" forState:UIControlStateNormal];
-        [_closeButton setTitleColor:AMProjCrashMute() forState:UIControlStateNormal];
-        _closeButton.titleLabel.font = AMProjCrashFont(13, UIFontWeightRegular);
-        [_closeButton addTarget:self action:@selector(closeTapped:)
-               forControlEvents:UIControlEventTouchUpInside];
-        _closeButton.tag = 9106;
-        [self addSubview:_closeButton];
-
-        UITapGestureRecognizer *tap =
-            [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openTapped:)];
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+            initWithTarget:self action:@selector(openTapped:)];
         [self addGestureRecognizer:tap];
     }
     return self;
@@ -816,42 +768,34 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGFloat h = CGRectGetHeight(self.bounds);
     CGFloat w = CGRectGetWidth(self.bounds);
+    CGFloat h = CGRectGetHeight(self.bounds);
+    CGFloat pad = 18;
 
-    CGFloat badgeSize = 26;
-    UIView *badge = [self viewWithTag:9101];
-    badge.frame = CGRectMake(16, (h - badgeSize) / 2.0, badgeSize, badgeSize);
-    [badge viewWithTag:9102].frame = badge.bounds;
-
-    CGFloat closeSize = 28;
-    _closeButton.frame = CGRectMake(w - 12 - closeSize, (h - closeSize) / 2.0,
-                                    closeSize, closeSize);
-
-    CGFloat pillWidth = 62;
-    CGFloat pillHeight = 30;
-    _sendButton.frame = CGRectMake(CGRectGetMinX(_closeButton.frame) - 8 - pillWidth,
-                                   (h - pillHeight) / 2.0, pillWidth, pillHeight);
-
-    CGFloat textX = CGRectGetMaxX(badge.frame) + 10;
-    CGFloat textWidth = CGRectGetMinX(_sendButton.frame) - 10 - textX;
-    [self viewWithTag:9103].frame = CGRectMake(textX, h / 2.0 - 19, textWidth, 19);
-    [self viewWithTag:9104].frame = CGRectMake(textX, h / 2.0 + 1, textWidth, 16);
+    CGFloat chevronWidth = 14;
+    CGFloat actionWidth = 62;
+    _chevronLabel.frame = CGRectMake(w - pad - chevronWidth, (h - 20) / 2.0,
+                                     chevronWidth, 20);
+    _actionLabel.frame = CGRectMake(CGRectGetMinX(_chevronLabel.frame) - actionWidth - 2,
+                                    (h - 18) / 2.0, actionWidth, 18);
+    CGFloat titleWidth = CGRectGetMinX(_actionLabel.frame) - 12 - pad;
+    _titleLabel.frame = CGRectMake(pad, (h - 18) / 2.0, titleWidth, 18);
 }
 
 - (void)showInWindow:(UIWindow *)window {
     if (!window) return;
     CGFloat width = CGRectGetWidth(window.bounds) - 32;
     CGFloat top = window.safeAreaInsets.top + 8;
-    self.frame = CGRectMake(16, top - 78, width, 64);
+    CGFloat height = 52;
+    self.frame = CGRectMake(16, top - height - 6, width, height);
     [window addSubview:self];
     [UIView animateWithDuration:0.3 delay:0
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
-        self.frame = CGRectMake(16, top, width, 64);
+        self.frame = CGRectMake(16, top, width, height);
     } completion:nil];
-    // 15 秒后自动收起（只是不挡视线，不写入 24 小时 snooze）。
-    _autoHideTimer = [NSTimer scheduledTimerWithTimeInterval:15.0
+    // 12 秒后自动收起：它只是个提示条，不该长期占据屏幕顶部。
+    _autoHideTimer = [NSTimer scheduledTimerWithTimeInterval:12.0
                                                       target:self
                                                     selector:@selector(autoHide:)
                                                     userInfo:nil
@@ -866,18 +810,12 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     if (handler) handler();
 }
 
-- (void)closeTapped:(__unused id)sender {
-    void (^handler)(void) = self.closeHandler;
-    [self hide];
-    if (handler) handler();
-}
-
 - (void)hide {
     [_autoHideTimer invalidate];
     _autoHideTimer = nil;
     [UIView animateWithDuration:0.22 animations:^{
         self.alpha = 0.0;
-        self.transform = CGAffineTransformMakeTranslation(0, -24);
+        self.transform = CGAffineTransformMakeTranslation(0, -20);
     } completion:^(__unused BOOL finished) {
         [self removeFromSuperview];
     }];
@@ -894,27 +832,28 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary) {
     NSString *path = AMProjCrashReporterPendingReportPath();
     if (!path) {
         [sheet showStateWithHeadline:@"日志已经不在了" meta:@""
-                            bodyText:@"可能是系统清理了缓存，这次就不用发了。"
-                        primaryTitle:@"好" showLinks:NO];
+                            bodyText:@"可能是系统清理了缓存，这次不用发了。"
+                        primaryTitle:@"好" secondaryTitle:nil];
         sheet.primaryHandler = ^{ [sheet dismissSheet]; };
         return;
     }
 #if AMPROJ_CLOUD_SYNC
     if (!AMCloudSyncHasLoggedInAccount()) {
         [sheet showStateWithHeadline:@"需要先登录" meta:@"上传日志要走猫鹤账户"
-                            bodyText:@"登录之后回到这里，再点一次「发送日志」就可以了。"
-                        primaryTitle:@"去登录" showLinks:NO];
+                            bodyText:@"登录后回到这里，再点一次「发送日志」就可以了。"
+                        primaryTitle:@"去登录" secondaryTitle:@"复制日志"];
         sheet.primaryHandler = ^{
             AMCloudSyncShowAccountLoginFrom(AMProjCrashTopViewController());
             [sheet dismissSheet];
         };
+        sheet.secondaryHandler = sheet.copyHandler;
         return;
     }
     NSString *content = [NSString stringWithFormat:
         @"用户在 App 内点击“发送日志”。\n%@\n日志见附件。", summary ?: @""];
     [sheet showStateWithHeadline:@"正在发送…" meta:summary ?: @""
                         bodyText:@"日志正在发到猫鹤服务器，几秒钟就好。"
-                    primaryTitle:@"请稍候" showLinks:NO];
+                    primaryTitle:@"请稍候" secondaryTitle:nil];
     sheet.primaryHandler = nil;
     __weak AMProjCrashSheet *weakSheet = sheet;
     AMCloudSubmitCrashTicket(@"猫鹤AM 崩溃日志", content, path,
@@ -925,23 +864,24 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary) {
                 AMProjCrashReporterDiscardPending();
                 [target showStateWithHeadline:@"已收到" meta:@""
                                     bodyText:messageText ?: @"日志已经到我们手上了。"
-                                primaryTitle:@"好" showLinks:NO];
+                                primaryTitle:@"好" secondaryTitle:nil];
                 target.primaryHandler = ^{ [target dismissSheet]; };
             } else {
                 [target showStateWithHeadline:@"没发出去" meta:@""
                                     bodyText:messageText ?: @"网络不太好，稍后再试一次。"
-                                primaryTitle:@"重试" showLinks:NO];
+                                primaryTitle:@"重试" secondaryTitle:@"复制日志"];
                 __weak AMProjCrashSheet *retrySheet = target;
                 target.primaryHandler = ^{
                     AMProjCrashSheet *strong = retrySheet;
                     if (strong) AMProjCrashUploadLog(strong, summary);
                 };
+                target.secondaryHandler = target.copyHandler;
             }
         });
 #else
     [sheet showStateWithHeadline:@"这个版本不支持上传" meta:@""
-                        bodyText:@"可以先点「复制日志」，把内容发给猫鹤。"
-                    primaryTitle:@"好" showLinks:NO];
+                        bodyText:@"可以把日志内容复制下来发给猫鹤。"
+                    primaryTitle:@"好" secondaryTitle:nil];
     sheet.primaryHandler = ^{ [sheet dismissSheet]; };
 #endif
 }
@@ -955,14 +895,22 @@ static void AMProjCrashPresentSheet(NSString *reportText, NSString *summary) {
     AMProjCrashSheet *sheet = [[AMProjCrashSheet alloc] init];
     sheet.headline = @"上次崩溃了";
     sheet.meta = summary;
-    sheet.bodyText = @"日志已经记录在手机上。发给我们就能定位原因，修好会随版本更新。\n\n"
-                     @"只发送崩溃位置、机型和最近的操作，不含你的作品内容。";
+    sheet.bodyText = @"崩溃时的状态已经记录下来了。发给我们，就能定位是哪一步出的问题。\n"
+                     @"只包含崩溃位置、机型和最近的操作，不含你的作品内容。";
     sheet.primaryTitle = @"发送日志";
+    sheet.secondaryTitle = @"以后再说";
 
     __weak AMProjCrashSheet *weakSheet = sheet;
     sheet.primaryHandler = ^{
         AMProjCrashNote(@"prompt: 用户选择发送日志");
         AMProjCrashUploadLog(weakSheet, summary);
+    };
+    sheet.secondaryHandler = ^{
+        [NSUserDefaults.standardUserDefaults
+            setDouble:([NSDate date].timeIntervalSince1970 + 24 * 60 * 60)
+               forKey:@"amproj_crash_prompt_snooze_until"];
+        AMProjCrashNote(@"prompt: 用户选择以后再说");
+        [weakSheet dismissSheet];
     };
     sheet.copyHandler = ^{
         UIPasteboard.generalPasteboard.string = reportText;
@@ -971,15 +919,10 @@ static void AMProjCrashPresentSheet(NSString *reportText, NSString *summary) {
         if (!target) return;
         [target showStateWithHeadline:@"已复制" meta:@""
                             bodyText:@"日志全文已经在剪贴板，直接粘贴给猫鹤就行。"
-                        primaryTitle:@"好" showLinks:NO];
+                        primaryTitle:@"好" secondaryTitle:nil];
         target.primaryHandler = ^{ [target dismissSheet]; };
     };
-    sheet.laterHandler = ^{
-        [NSUserDefaults.standardUserDefaults
-            setDouble:([NSDate date].timeIntervalSince1970 + 24 * 60 * 60)
-               forKey:@"amproj_crash_prompt_snooze_until"];
-        AMProjCrashNote(@"prompt: 用户选择以后再说");
-    };
+    (void)reportText;
 
     [presenter presentViewController:sheet animated:YES completion:nil];
 }
@@ -1002,7 +945,7 @@ static UIWindow *AMProjCrashKeyWindow(void) {
 void AMProjCrashReporterPresentPromptIfNeeded(void) {
     if (gAMProjCrashPromptShown) return;
     if (!AMProjCrashReporterHasPendingReport()) return;
-    // 「×」= 24 小时内不再打扰；报告本身保留，下次仍可发送。
+    // 横幅自己 12 秒后收起，不写 snooze；只有在抽屉里点「以后再说」才静默 24h。
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     NSTimeInterval snoozeUntil = [defaults doubleForKey:@"amproj_crash_prompt_snooze_until"];
     if (snoozeUntil > [NSDate date].timeIntervalSince1970) return;
@@ -1036,12 +979,6 @@ void AMProjCrashReporterPresentPromptIfNeeded(void) {
     banner.openHandler = ^{
         AMProjCrashNote(@"prompt: 打开详情");
         AMProjCrashPresentSheet(reportText, summary);
-    };
-    banner.closeHandler = ^{
-        [NSUserDefaults.standardUserDefaults
-            setDouble:([NSDate date].timeIntervalSince1970 + 24 * 60 * 60)
-               forKey:@"amproj_crash_prompt_snooze_until"];
-        AMProjCrashNote(@"prompt: 横幅关闭（24h snooze）");
     };
     gAMProjCrashBanner = banner;
     [banner showInWindow:window];
