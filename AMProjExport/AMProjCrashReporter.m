@@ -317,6 +317,15 @@ void AMProjCrashReporterMarkForegrounded(void) {
 
 #pragma mark - 安装
 
+// 演示/测试写入的报告带 kind=demo：下次启动直接删掉，不弹、不上传。
+static BOOL AMProjCrashReportIsDemo(NSString *path) {
+    if (!path.length) return NO;
+    NSString *text = [NSString stringWithContentsOfFile:path
+                                               encoding:NSUTF8StringEncoding
+                                                  error:NULL];
+    return [text containsString:@"kind=demo"];
+}
+
 void AMProjCrashReporterInstall(void) {
     if (gAMProjCrashInstalled) return;
     gAMProjCrashInstalled = YES;
@@ -358,12 +367,18 @@ void AMProjCrashReporterInstall(void) {
 
     if (previousWasRunning) {
         NSString *existing = AMProjCrashPathForName(AMProjCrashReportName);
-        BOOL hasBody = [NSData dataWithContentsOfFile:existing].length > 0;
-        if (!hasBody) {
-            // 信号处理器多半没跑起来（被 SIGKILL / watchdog 杀掉），
-            // 这里补一份「上一轮没正常结束」的最小报告。
-            AMProjCrashNote(@"session: 上一轮异常结束（无信号处理器报告）");
-            AMProjCrashRecordUncleanExit(@"unclean_exit");
+        if (AMProjCrashReportIsDemo(existing)) {
+            // 上一轮只是点了测试入口，不算崩溃。
+            [[NSFileManager defaultManager] removeItemAtPath:existing error:NULL];
+            NSLog(@"[AMProjExport] demo crash report cleared on launch");
+        } else {
+            BOOL hasBody = [NSData dataWithContentsOfFile:existing].length > 0;
+            if (!hasBody) {
+                // 信号处理器多半没跑起来（被 SIGKILL / watchdog 杀掉），
+                // 这里补一份「上一轮没正常结束」的最小报告。
+                AMProjCrashNote(@"session: 上一轮异常结束（无信号处理器报告）");
+                AMProjCrashRecordUncleanExit(@"unclean_exit");
+            }
         }
     }
 
@@ -457,6 +472,7 @@ static NSString *AMProjCrashSummaryLine(NSString *reportText) {
             if ([value isEqualToString:@"signal"]) kind = @"崩溃（信号）";
             else if ([value isEqualToString:@"exception"]) kind = @"崩溃（异常）";
             else if ([value isEqualToString:@"unclean_exit"]) kind = @"异常退出";
+            else if ([value isEqualToString:@"demo"]) kind = @"演示数据";
             break;
         }
     }
@@ -983,4 +999,85 @@ void AMProjCrashReporterPresentPromptIfNeeded(void) {
     gAMProjCrashBanner = banner;
     [banner showInWindow:window];
     AMProjCrashNote(@"prompt: banner shown (%@)", summary);
+}
+
+#pragma mark - 手动触发（给不会闪退的设备做验收用）
+
+// 手势 target：手势识别器只弱引用 target，必须有个常驻对象接住回调。
+@interface AMProjCrashTapProxy : NSObject
++ (instancetype)shared;
+- (void)handleTap:(UITapGestureRecognizer *)tap;
+@end
+
+@implementation AMProjCrashTapProxy
++ (instancetype)shared {
+    static AMProjCrashTapProxy *proxy = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        proxy = [[AMProjCrashTapProxy alloc] init];
+    });
+    return proxy;
+}
+- (void)handleTap:(__unused UITapGestureRecognizer *)tap {
+    AMProjCrashReporterPresentDemoPrompt();
+}
+@end
+
+// 写一份带 kind=demo 的假报告，然后立刻走真实提示流程：
+// 看到的就是用户崩溃后下次启动看到的那一套（横幅 → 抽屉 → 发送/复制/以后再说）。
+// 假报告不会在下次启动再弹（安装时会删掉），也不含任何真实崩溃信息。
+void AMProjCrashReporterPresentDemoPrompt(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMProjCrashReporterPresentDemoPrompt();
+        });
+        return;
+    }
+    @try {
+        NSMutableString *demo = [NSMutableString string];
+        [demo appendString:@"猫鹤AM 崩溃报告\n"];
+        [demo appendString:@"kind=demo\n"];
+        [demo appendFormat:@"time=%lld\n", (long long)time(NULL)];
+        [demo appendFormat:@"app=%@\n", AMProjCrashBuildTag()];
+        [demo appendFormat:@"dev=%@\n", AMProjCrashDeviceSummary()];
+        [demo appendString:@"note=这是测试入口生成的演示日志，不是真实崩溃。\n"];
+        [demo appendString:@"\n--- trail ---\n"];
+        [demo appendString:@"present HomepageTabBarView\n"];
+        [demo appendString:@"present ProjectsVC\n"];
+        [demo appendString:@"present EditorViewController\n"];
+        NSString *path = AMProjCrashPathForName(AMProjCrashReportName);
+        [demo writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    } @catch (__unused NSException *exception) {
+        return;
+    }
+    // 让「再来一次」总能弹：清掉 snooze 与本进程已弹过的标记。
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:@"amproj_crash_prompt_snooze_until"];
+    gAMProjCrashPromptShown = NO;
+    [gAMProjCrashBanner removeFromSuperview];
+    gAMProjCrashBanner = nil;
+    AMProjCrashNote(@"demo: 手动触发崩溃提示");
+    AMProjCrashReporterPresentPromptIfNeeded();
+}
+
+// 三指双击屏幕任意位置 = 手动触发上面那套提示。
+// 挂在 keyWindow 上，不拦截单指手势（cancelsTouchesInView = NO）。
+void AMProjCrashInstallDemoTrigger(void) {
+    static BOOL installed = NO;
+    if (installed) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMProjCrashInstallDemoTrigger();
+        });
+        return;
+    }
+    UIWindow *window = AMProjCrashKeyWindow();
+    if (!window) return;
+    installed = YES;
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+        initWithTarget:[AMProjCrashTapProxy shared] action:@selector(handleTap:)];
+    tap.numberOfTapsRequired = 2;
+    tap.numberOfTouchesRequired = 3;
+    tap.cancelsTouchesInView = NO;
+    [window addGestureRecognizer:tap];
+    NSLog(@"[AMProjExport] demo trigger installed (3-finger double tap)");
 }

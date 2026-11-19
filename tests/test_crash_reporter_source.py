@@ -122,6 +122,21 @@ class CrashTicketUploadTests(unittest.TestCase):
         for forbidden in ("cache", "offline", "bypass"):
             self.assertNotIn(forbidden, block)
 
+    def test_manual_demo_trigger_for_never_crashing_devices(self):
+        # 不会闪退的设备也要能验收：三指双击 → 写 kind=demo → 走真实提示流程。
+        self.assertIn("AMProjCrashReporterPresentDemoPrompt", REPORTER)
+        self.assertIn("AMProjCrashInstallDemoTrigger", REPORTER)
+        self.assertIn("numberOfTapsRequired = 2", REPORTER)
+        self.assertIn("numberOfTouchesRequired = 3", REPORTER)
+        self.assertIn("cancelsTouchesInView = NO", REPORTER)
+        # 演示报告不能在下次启动被当成真崩溃反复弹，也不能污染上传内容。
+        self.assertIn("kind=demo", REPORTER)
+        self.assertIn("AMProjCrashReportIsDemo", REPORTER)
+        self.assertIn("demo crash report cleared on launch", REPORTER)
+
+    def test_demo_trigger_is_wired_into_lifecycle(self):
+        self.assertIn("AMProjCrashInstallDemoTrigger()", EXPORT)
+
     def test_prompt_is_a_top_banner_plus_bottom_sheet(self):
         sheet = REPORTER.split("AMProjCrashSheet : UIViewController", 1)[1]
         for label in ("发送日志", "复制日志", "以后再说", "上次崩溃了"):

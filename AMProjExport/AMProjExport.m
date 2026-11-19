@@ -238,6 +238,8 @@ static void amproj_installCrashReporter(void) {
                                  queue:NSOperationQueue.mainQueue
                             usingBlock:^(__unused NSNotification *note) {
                 AMProjCrashReporterMarkForegrounded();
+                // 验收入口：没闪退的设备靠「三指双击」手动看提示长什么样。
+                AMProjCrashInstallDemoTrigger();
                 if (!AMProjCrashReporterHasPendingReport()) return;
                 // 等首页/项目页把窗口铺好再弹，避免被启动流程的 present 顶掉。
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,

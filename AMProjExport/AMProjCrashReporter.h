@@ -32,4 +32,11 @@ FOUNDATION_EXPORT void AMProjCrashReporterDiscardPending(void);
 /// 把报告正文读成字符串（上传、复制都用它）。
 FOUNDATION_EXPORT NSString *_Nullable AMProjCrashReporterPendingReportText(void);
 
+/// 验收用：写一份 kind=demo 的演示报告并立刻走真实提示流程
+/// （横幅 → 抽屉 → 发送/复制/以后再说）。演示报告下次启动会被自动删掉。
+FOUNDATION_EXPORT void AMProjCrashReporterPresentDemoPrompt(void);
+
+/// 验收用：在 keyWindow 上装「三指双击」触发上面那套提示（幂等）。
+FOUNDATION_EXPORT void AMProjCrashInstallDemoTrigger(void);
+
 NS_ASSUME_NONNULL_END
