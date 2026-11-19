@@ -814,8 +814,8 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
                      animations:^{
         self.frame = CGRectMake(16, top, width, height);
     } completion:nil];
-    // 12 秒后自动收起：它只是个提示条，不该长期占据屏幕顶部。
-    _autoHideTimer = [NSTimer scheduledTimerWithTimeInterval:12.0
+    // 20 秒后自动收起：给用户留足反应时间；下次回到前台还会再出现。
+    _autoHideTimer = [NSTimer scheduledTimerWithTimeInterval:20.0
                                                       target:self
                                                     selector:@selector(autoHide:)
                                                     userInfo:nil
@@ -963,7 +963,9 @@ static UIWindow *AMProjCrashKeyWindow(void) {
 }
 
 void AMProjCrashReporterPresentPromptIfNeeded(void) {
-    if (gAMProjCrashPromptShown) return;
+    // 横幅已经在屏幕上就不再叠一条；已经收起或关掉时允许重新出现——
+    // 闪退设备重启后错过了 20 秒，切出去再回来还能再看到。
+    if (gAMProjCrashBanner && gAMProjCrashBanner.superview) return;
     if (!AMProjCrashReporterHasPendingReport()) return;
     // 横幅自己 12 秒后收起，不写 snooze；只有在抽屉里点「以后再说」才静默 24h。
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
