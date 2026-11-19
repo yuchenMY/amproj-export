@@ -18380,6 +18380,63 @@ static BOOL AMProjIsCloudGateAlert(UIAlertController *alert) {
     return cloudShaped;
 }
 
+// AM 的法务同意弹窗（BSPLegal：隐私政策 / 服务条款）。
+// 865 里这个弹窗在拿不到服务端 lastAcceptedVersion 时每次启动都会再来一次，
+// 用户每次都要点「继续」。这里不改它的存储，而是在呈现层直接把「继续」的
+// 动作执行掉：等价于用户每次启动都点了继续，但弹窗不上屏。
+// 只匹配「隐私政策 + 继续/同意」这种组合，绝不碰付费墙、登录墙等其它弹窗。
+static BOOL amproj_isLegalConsentAlert(UIAlertController *alert) {
+    if (![alert isKindOfClass:UIAlertController.class]) return NO;
+    NSString *title = [alert.title isKindOfClass:NSString.class] ? alert.title : @"";
+    NSString *message = [alert.message isKindOfClass:NSString.class] ? alert.message : @"";
+    NSString *combined = [[title stringByAppendingString:@"\n"]
+        stringByAppendingString:message];
+    if (!combined.length) return NO;
+    BOOL mentionsPrivacy = [combined containsString:@"隐私政策"] ||
+        [combined containsString:@"隱私政策"] ||
+        [combined.lowercaseString containsString:@"privacy policy"] ||
+        [combined containsString:@"服务条款"];
+    if (!mentionsPrivacy) return NO;
+    // 法务弹窗最多两个按钮（继续 / 了解更多），按钮多的是业务弹窗。
+    if (alert.actions.count == 0 || alert.actions.count > 2) return NO;
+    return YES;
+}
+
+static UIAlertAction *amproj_legalContinueAction(UIAlertController *alert) {
+    NSArray<NSString *> *keywords = @[@"继续", @"繼續", @"同意", @"开始", @"知道了",
+                                      @"Continue", @"Agree", @"Accept"];
+    for (UIAlertAction *action in alert.actions) {
+        NSString *title = [action.title isKindOfClass:NSString.class] ? action.title : @"";
+        for (NSString *keyword in keywords) {
+            if ([title localizedCaseInsensitiveContainsString:keyword]) return action;
+        }
+    }
+    return alert.actions.firstObject;
+}
+
+// 返回 YES 表示已接管（调用方不要再呈现这个弹窗）。
+static BOOL amproj_autoAcceptLegalAlert(UIAlertController *alert) {
+    UIAlertAction *action = amproj_legalContinueAction(alert);
+    if (!action) return NO;
+    id handler = nil;
+    @try {
+        // UIAlertAction 的 handler 是私有 ivar；拿不到就降级回原生呈现。
+        handler = [action valueForKey:@"handler"];
+    } @catch (__unused NSException *exception) {
+        handler = nil;
+    }
+    if (!handler) return NO;
+    void (^block)(UIAlertAction *) = handler;
+    amproj_logCriticalEvent(@"legal.auto_accept", @{
+        @"action": action.title ?: @"",
+        @"title": alert.title ?: @""
+    });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        block(action);
+    });
+    return YES;
+}
+
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
     if (![NSThread isMainThread] || !controller || !orig_presentVC) {
@@ -18388,6 +18445,13 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     // 崩溃面包屑：留下「崩之前最后几个页面」这条线。环形缓冲 4KB，代价可忽略。
     AMProjCrashNote(@"present %@", NSStringFromClass(controller.class) ?: @"?");
+    // 法务同意弹窗：直接把「继续」执行掉，不把弹窗放上屏（每次启动都会来一次）。
+    if ([controller isKindOfClass:UIAlertController.class] &&
+        amproj_isLegalConsentAlert((UIAlertController *)controller) &&
+        amproj_autoAcceptLegalAlert((UIAlertController *)controller)) {
+        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+        return;
+    }
     // The Blatant license module (Frameworks/AlightMotion.dylib) presents its
     // welcome and continue-entrance pages as regular controllers. Their
     // classes decrypt at runtime, so the image-name chain is the fingerprint,
