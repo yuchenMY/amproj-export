@@ -1945,8 +1945,12 @@ static void AMCloudAttachProjectsInControllerTree(UIViewController *controller,
     [visited addObject:identity];
     // 865 的工程页类名不一定还叫 ProjectsVC：只要页面上有那条分段控件，
     // 就按工程页处理，否则云 tab 的整块替换永远不会被挂上去。
-    if (AMCloudIsProjectsControllerClass(controller.class) ||
-        AMCloudFindSegmentControl(controller.viewIfLoaded, 0) != nil) {
+    // 但页面上有模态（新建工程 CreateVC、效果选择器、系统面板…）时跳过：
+    // 用户看不见背后的贴片，而且这种"页面正在切换"的时刻去遍历视图树，
+    // 正是 r137 之前 SIGSEGV 的现场（多份 .ips 的栈顶都在这次挂载里）。
+    if (controller.presentedViewController == nil &&
+        (AMCloudIsProjectsControllerClass(controller.class) ||
+         AMCloudFindSegmentControl(controller.viewIfLoaded, 0) != nil)) {
         [[AMCloudManager shared] attachAccountEntryToController:controller];
     }
     for (UIViewController *child in controller.childViewControllers) {
@@ -3824,17 +3828,10 @@ static BOOL AMCloudOfficialCloudContentOnScreen(UIView *view, NSInteger depth) {
     } @catch (NSException *exception) {
         // 无 text 属性 → 忽略
     }
-    // SwiftUI 的 a11y 元素挂在宿主视图的 accessibilityElements 里
-    // （r87 面包屑 seg=0 text=0：子视图扫描全部落空的根因）。
-    @try {
-        NSArray *elements = view.accessibilityElements;
-        for (id element in elements ?: @[]) {
-            NSString *label = AMCloudAccessibilityLabelOf(element);
-            if (AMCloudCloudEmptyStateText(label)) return YES;
-        }
-    } @catch (NSException *exception) {
-        // a11y 读取失败 → 忽略
-    }
+    // r137：这里原来还会遍历 SwiftUI 暴露的无障碍元素数组。那个数组在宿主
+    // 视图上是现取现建的，页面切换中间读到正在重建的视图就是 SIGSEGV
+    // （.ips 栈顶在相邻的 a11y 扫描函数里）。label / identifier / text 这几个
+    // 单属性读取保留，数组枚举整段删除。
     NSString *name = NSStringFromClass(view.class) ?: @"";
     if (([name containsString:@"CloudProject"] ||
          [name containsString:@"CloudProjects"]) &&
@@ -3847,31 +3844,6 @@ static BOOL AMCloudOfficialCloudContentOnScreen(UIView *view, NSInteger depth) {
     return NO;
 }
 
-// 在视图及其 a11y 树里找带 Selected 态的"云端"胶囊（SwiftUI 分段选中态）。
-static void AMCloudScanAccessibilityForSelectedTab(UIView *view, NSString *cloudTitle,
-                                                   NSInteger depth, BOOL *outSelected) {
-    if (!view || depth > 10 || *outSelected) return;
-    @try {
-        NSArray *elements = view.accessibilityElements;
-        for (id element in elements ?: @[]) {
-            if (*outSelected) return;
-            NSString *label = AMCloudAccessibilityLabelOf(element);
-            if (label.length && cloudTitle.length &&
-                [label containsString:cloudTitle] &&
-                AMCloudAccessibilitySelected(element)) {
-                *outSelected = YES;
-                return;
-            }
-        }
-    } @catch (NSException *exception) {
-        return;
-    }
-    for (UIView *child in view.subviews) {
-        AMCloudScanAccessibilityForSelectedTab(child, cloudTitle, depth + 1, outSelected);
-        if (*outSelected) return;
-    }
-}
-
 // 865 的云端 tab 是 SwiftUI 胶囊，分段控件、空态文案、Selected trait 三条
 // 通道在真机上全部读不到（bannerlog: seg=0 text=0 signal=0）。所以不再猜状态，
 // 直接监听窗口上的点击：点到"云端"就显示我们的云空间列表，点到别的基础
@@ -3880,21 +3852,29 @@ static NSString *AMCloudLabelAtPoint(UIView *view, CGPoint point, NSInteger dept
     if (!view || depth > 24 || view.hidden || view.alpha < 0.05) return nil;
     NSString *best = nil;
     CGFloat bestArea = CGFLOAT_MAX;
-    for (id element in view.accessibilityElements ?: @[]) {
-        NSString *label = AMCloudAccessibilityLabelOf(element);
-        if (!label.length) continue;
-        CGRect frame = CGRectZero;
-        @try {
-            frame = [element accessibilityFrame];
-        } @catch (NSException *exception) {
-            continue;
+    // 只在用户真的点屏幕时走这里（不是定时器），并且整段包在 @try 里：
+    // 拿到的不是数组、或元素已被释放，都退化成"这一层没标签"，不崩。
+    @try {
+        id elements = view.accessibilityElements;
+        if (![elements isKindOfClass:NSArray.class]) elements = nil;
+        for (id element in (NSArray *)elements ?: @[]) {
+            NSString *label = AMCloudAccessibilityLabelOf(element);
+            if (!label.length) continue;
+            CGRect frame = CGRectZero;
+            @try {
+                frame = [element accessibilityFrame];
+            } @catch (NSException *exception) {
+                continue;
+            }
+            if (CGRectIsEmpty(frame) || !CGRectContainsPoint(frame, point)) continue;
+            CGFloat area = CGRectGetWidth(frame) * CGRectGetHeight(frame);
+            if (area < bestArea) {
+                bestArea = area;
+                best = label;
+            }
         }
-        if (CGRectIsEmpty(frame) || !CGRectContainsPoint(frame, point)) continue;
-        CGFloat area = CGRectGetWidth(frame) * CGRectGetHeight(frame);
-        if (area < bestArea) {
-            bestArea = area;
-            best = label;
-        }
+    } @catch (__unused NSException *exception) {
+        // 读取失败就当这层没有可读标签
     }
     if (view.isAccessibilityElement) {
         CGRect frame = view.accessibilityFrame;
@@ -4339,8 +4319,11 @@ static BOOL AMCloudBannerTickRunning = NO;
     // 官方云子页在屏（空态/云列表出现）→ 盖上自有备份页；否则藏起。
     // 官方云内容不在工程控制器子树里（r82 实测），从窗口根扫。
     UIView *scanRoot = controller.view.window ?: controller.view;
-    // 通道〇：a11y 树里"云端"胶囊带 Selected trait（SwiftUI 分段选中态，
-    // 框架无关；空态检测失败时的强信号）。
+    // 通道〇（a11y 树里找带 Selected trait 的"云端"胶囊）已在 r137 删除：
+    // 这条通道在所有真机日志里从未返回过 1，而它对每一层 SwiftUI 视图现取
+    // a11y 数组，在多份 .ips 里就是 SIGSEGV 的栈顶
+    // （a11y 扫描函数 → updateCloudBackupBannerVisibilityForController，
+    //  出现在新建工程 / 弹出页面时）。看不到收益、又能把 App 炸掉，直接删掉。
     BOOL a11yCloudSelected = NO;
     // 通道一：空态文本（UILabel / 无障碍 / KVC text）
     BOOL textSignal = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);
@@ -4370,22 +4353,6 @@ static BOOL AMCloudBannerTickRunning = NO;
     NSTimeInterval now = [NSDate date].timeIntervalSince1970;
     BOOL signalRecent = AMCloudSubtabSignalAt > 0 &&
         now - AMCloudSubtabSignalAt < 3.0;
-    // 通道〇实现：窗口 a11y 树里找"云端"胶囊（带 Selected trait）。
-    // 子标签标题取 AM 自家 cloud_subtab_title，读不到用中文兜底。
-    @try {
-        NSString *cloudTitle = AMCloudHomepageCloudTabTitle();
-        // 865 的本地化包里这个 key 有时取不到，取不到就退中文常量：
-        // 之前 a11y 通道因为 title 为空而永远匹配不上，云 tab 就一直判定
-        // 为"不在屏"。
-        if (!cloudTitle.length) cloudTitle = @"云端";
-        for (UIView *view in scanRoot.subviews) {
-            if (a11yCloudSelected) break;
-            AMCloudScanAccessibilityForSelectedTab(view, cloudTitle, 0,
-                &a11yCloudSelected);
-        }
-    } @catch (NSException *exception) {
-        a11yCloudSelected = NO;
-    }
     BOOL cloudOnScreen = textSignal || segSignal || signalRecent ||
         a11yCloudSelected;
     BOOL wasHidden = overlay.view.hidden;

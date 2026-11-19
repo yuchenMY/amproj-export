@@ -1698,22 +1698,24 @@ class StablePluginKeyR87Tests(unittest.TestCase):
 
 
 class A11yDetectionR88Tests(unittest.TestCase):
-    """r88：云端 tab 检测全面转向无障碍树——SwiftUI 画布里没有 UILabel 和
-    AMSegment 类名（r87 面包屑 seg=0 text=0 signal=0 实锤），但 Text/Button
-    都会暴露 a11y 元素：空态文案走 a11y label，选中胶囊走 Selected trait。"""
+    """r88 曾把云端 tab 检测押在无障碍树上；真机日志显示这条通道从未返回过 1，
+    而它在每秒一次的定时器里遍历 SwiftUI 的 a11y 数组，正是 r137 之前
+    多份 .ips 的 SIGSEGV 栈顶（工单 17 / 18）。r137 整条删除，只留下
+    文案 / 分段控件 / 埋点三条通道；点击路径的数组读取补了类型防护。"""
 
     def test_a11y_helpers_exist(self):
         self.assertIn("AMCloudAccessibilityLabelOf", CLOUD)
         self.assertIn("AMCloudAccessibilitySelected", CLOUD)
-        self.assertIn("UIAccessibilityTraitSelected", CLOUD)
 
-    def test_detector_walks_a11y_elements(self):
-        self.assertIn("view.accessibilityElements", CLOUD)
-        self.assertIn("AMCloudCloudEmptyStateText(label)", CLOUD)
+    def test_selected_pill_channel_is_removed(self):
+        self.assertNotIn("AMCloudScanAccessibilityForSelectedTab", CLOUD)
 
-    def test_selected_cloud_pill_channel(self):
-        self.assertIn("AMCloudScanAccessibilityForSelectedTab", CLOUD)
-        self.assertIn("AMCloudHomepageCloudTabTitle()", CLOUD)
+    def test_timer_path_no_longer_enumerates_a11y_arrays(self):
+        self.assertNotIn("AMCloudCloudEmptyStateText(label)", CLOUD)
+        # 点击路径仍会读，但必须先确认拿到的是数组。
+        self.assertIn("isKindOfClass:NSArray.class", CLOUD)
+
+    def test_other_channels_still_present(self):
         self.assertIn("BOOL a11yCloudSelected = NO;", CLOUD)
         self.assertIn("signalRecent ||", CLOUD)
 
