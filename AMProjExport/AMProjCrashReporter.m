@@ -365,13 +365,17 @@ void AMProjCrashReporterInstall(void) {
     } @catch (__unused NSException *exception) {
     }
 
+    // 测试入口写下的演示报告一律在新进程启动时清掉：
+    // 否则用户测完、把 App 划掉再开，会被当成真崩溃再弹一次。
+    NSString *demoPath = AMProjCrashPathForName(AMProjCrashReportName);
+    if (AMProjCrashReportIsDemo(demoPath)) {
+        [[NSFileManager defaultManager] removeItemAtPath:demoPath error:NULL];
+        NSLog(@"[AMProjExport] demo crash report cleared on launch");
+    }
+
     if (previousWasRunning) {
         NSString *existing = AMProjCrashPathForName(AMProjCrashReportName);
-        if (AMProjCrashReportIsDemo(existing)) {
-            // 上一轮只是点了测试入口，不算崩溃。
-            [[NSFileManager defaultManager] removeItemAtPath:existing error:NULL];
-            NSLog(@"[AMProjExport] demo crash report cleared on launch");
-        } else {
+        if (!AMProjCrashReportIsDemo(existing)) {
             BOOL hasBody = [NSData dataWithContentsOfFile:existing].length > 0;
             if (!hasBody) {
                 // 信号处理器多半没跑起来（被 SIGKILL / watchdog 杀掉），
