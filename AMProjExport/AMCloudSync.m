@@ -4432,29 +4432,47 @@ static BOOL AMCloudBannerTickRunning = NO;
         [overlay respondsToSelector:@selector(reload)]) {
         [(AMCloudLibraryViewController *)overlay reload];
     }
-    NSLog(@"[AMProjExport] banner visibility seg=%d sel=%ld ci=%ld text=%d signal=%d visible=%d",
-          segControl != nil, (long)segSelected, (long)segCloudIndex,
-          textSignal, signalRecent, cloudOnScreen);
-    @try {
-        NSString *crumb = [NSString stringWithFormat:
-            @"%.0f seg=%d sel=%ld ci=%ld text=%d signal=%d a11y=%d visible=%d\n",
-            [NSDate date].timeIntervalSince1970, segControl != nil,
-            (long)segSelected, (long)segCloudIndex, textSignal, signalRecent,
-            a11yCloudSelected, !overlay.view.hidden];
-        NSString *path = [NSSearchPathForDirectoriesInDomains(
-            NSCachesDirectory, NSUserDomainMask, YES).firstObject
-            stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
-        NSMutableData *logData = [[NSData dataWithContentsOfFile:path] mutableCopy]
-            ?: [NSMutableData data];
-        [logData appendData:[crumb dataUsingEncoding:NSUTF8StringEncoding]];
-        if (logData.length > 32 * 1024) {
-            logData = [[logData subdataWithRange:
-                NSMakeRange(logData.length - 24 * 1024, 24 * 1024)] mutableCopy];
+    // r138：这条也在巡检路径上，以前每次调用都 NSLog + 写 bannerlog。
+    // 现在同样只在状态变化或 15 秒一次时落一条。
+    {
+        NSString *signature = [NSString stringWithFormat:@"%d|%ld|%ld|%d|%d|%d",
+                               segControl != nil, (long)segSelected,
+                               (long)segCloudIndex, textSignal, signalRecent,
+                               cloudOnScreen];
+        static NSString *lastSignature = nil;
+        static NSTimeInterval lastWrite = 0;
+        NSTimeInterval stamp = [NSDate date].timeIntervalSince1970;
+        BOOL changed = ![signature isEqualToString:lastSignature];
+        if (changed || stamp - lastWrite >= 15.0) {
+            lastSignature = signature;
+            lastWrite = stamp;
+            NSLog(@"[AMProjExport] banner visibility seg=%d sel=%ld ci=%ld "
+                  "text=%d signal=%d visible=%d",
+                  segControl != nil, (long)segSelected, (long)segCloudIndex,
+                  textSignal, signalRecent, cloudOnScreen);
+            @try {
+                NSString *crumb = [NSString stringWithFormat:
+                    @"%.0f seg=%d sel=%ld ci=%ld text=%d signal=%d a11y=0 visible=%d\n",
+                    stamp, segControl != nil, (long)segSelected,
+                    (long)segCloudIndex, textSignal, signalRecent,
+                    !overlay.view.hidden];
+                NSString *logPath = [NSSearchPathForDirectoriesInDomains(
+                    NSCachesDirectory, NSUserDomainMask, YES).firstObject
+                    stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
+                NSMutableData *logData = [[NSData dataWithContentsOfFile:logPath]
+                    mutableCopy] ?: [NSMutableData data];
+                [logData appendData:[crumb dataUsingEncoding:NSUTF8StringEncoding]];
+                if (logData.length > 32 * 1024) {
+                    logData = [[logData subdataWithRange:
+                        NSMakeRange(logData.length - 24 * 1024, 24 * 1024)] mutableCopy];
+                }
+                [logData writeToFile:logPath atomically:NO];
+            } @catch (NSException *exception) {
+                // 面包屑失败不影响界面
+            }
         }
-        [logData writeToFile:path atomically:NO];
-    } @catch (NSException *exception) {
-        // 面包屑失败不影响界面
     }
+
     if (cloudOnScreen) {
         [controller.view bringSubviewToFront:overlay.view];
     }
