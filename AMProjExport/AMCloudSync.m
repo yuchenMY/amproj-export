@@ -2426,6 +2426,50 @@ extern NSNotificationName const AMCloudLibraryDidChangeNotification;
 // 挂过的会被记录，不会重复挂。
 static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
 
+// r138：编辑��（工作台）、新建工程这类页面上不需要云贴片，
+// 但每秒一次的巡检会做整窗截图（drawViewHierarchy）+ 两次全树遍历，
+// 正好和用户感觉到的"工作台很卡"对上。这里在巡检入口先做一次廉价判断：
+// 不是首页/工程页就整段跳过，并把贴片收起来。
+static BOOL AMCloudOverlayWorkAllowed(void) {
+    UIApplication *application = UIApplication.sharedApplication;
+    if (application.applicationState != UIApplicationStateActive) return NO;
+    UIWindow *window = AMCloudActiveWindow();
+    if (!window) return NO;
+    UIViewController *top = window.rootViewController;
+    NSUInteger guard = 0;
+    while (top.presentedViewController && guard++ < 8) {
+        top = top.presentedViewController;
+    }
+    if (!top) return NO;
+    NSMutableString *names = [NSMutableString string];
+    [names appendString:NSStringFromClass(top.class) ?: @""];
+    if ([top isKindOfClass:UINavigationController.class]) {
+        UIViewController *visible =
+            ((UINavigationController *)top).visibleViewController;
+        if (visible) [names appendFormat:@" %@", NSStringFromClass(visible.class) ?: @""];
+    }
+    if ([top isKindOfClass:UITabBarController.class]) {
+        UIViewController *selected = ((UITabBarController *)top).selectedViewController;
+        if (selected) [names appendFormat:@" %@", NSStringFromClass(selected.class) ?: @""];
+    }
+    for (NSString *keyword in @[@"Editor", @"Workbench", @"CreateVC", @"EffectPicker"]) {
+        if ([names containsString:keyword]) return NO;
+    }
+    return YES;
+}
+
+static void AMCloudHideWindowOverlayIfNeeded(void) {
+    UIWindow *window = AMCloudActiveWindow();
+    if (!window) return;
+    AMCloudLibraryViewController *overlay =
+        objc_getAssociatedObject(window, &AMCloudBannerViewKey);
+    if (!overlay) return;
+    UIView *overlayView = overlay.viewIfLoaded;
+    if (overlayView && !overlayView.hidden) {
+        overlayView.hidden = YES;
+    }
+}
+
 - (void)startCloudOverlayWatchdog {
     static BOOL running = NO;
     if (running) return;
@@ -2435,21 +2479,25 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
     tick = ^{
         AMCloudManager *manager = weakSelf;
         if (!manager) { running = NO; return; }
-        AMCloudAttachVisibleProjectsControllers();
-        [manager refreshWindowCloudOverlayVisibility];
-        static NSTimeInterval lastDump = 0;
-        NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-        if (now - lastDump > 5.0) {
-            lastDump = now;
-            AMCloudDumpViewTree();
+        NSTimeInterval interval = 2.0;
+        if (!AMCloudOverlayWorkAllowed()) {
+            // 编辑器里什么都别做：一次截图 + 两轮全树遍历就是掉帧的来源。
+            AMCloudHideWindowOverlayIfNeeded();
+        } else {
+            AMCloudAttachVisibleProjectsControllers();
+            [manager refreshWindowCloudOverlayVisibility];
+            // 贴片正在显示时保持 1 秒，切 tab 才有即时反馈；否则 2 秒足够。
+            AMCloudLibraryViewController *overlay =
+                objc_getAssociatedObject(AMCloudActiveWindow(), &AMCloudBannerViewKey);
+            if (overlay && !overlay.viewIfLoaded.hidden) interval = 1.0;
+            // 顺带保持"当前是不是云端 tab"的判定在跑（决定 overlay 显示）。
+            for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
+                if (!controller.viewIfLoaded.window) continue;
+                [manager updateCloudBackupBannerVisibilityForController:controller];
+            }
         }
-        // 顺带保持"当前是不是云端 tab"的判定在跑：这条判定直接决定 overlay
-        // 显不显示，而且它的面包屑是我们离线排障唯一的眼睛。
-        for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
-            if (!controller.viewIfLoaded.window) continue;
-            [manager updateCloudBackupBannerVisibilityForController:controller];
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(interval * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (tick) tick();
         });
@@ -4120,7 +4168,16 @@ static BOOL AMCloudWindowHasCloudContentView(UIView *view, CGSize windowSize,
             topConstraint.constant = desired;
         }
     }
-    NSInteger state = AMCloudDetectCloudPillSelected();
+    // r138：整窗 drawViewHierarchy 是这条链上最贵的一步（GPU 回读），
+    // 只在"贴片正显示（要知道什么时候收起）"或"刚点过 tab（3 秒内）"时截，
+    // 其它时候直接跳过，靠文案/结构两个便宜信号。
+    NSTimeInterval tickNow = [NSDate date].timeIntervalSince1970;
+    BOOL recentTap = AMCloudSubtabSignalAt > 0 &&
+        tickNow - AMCloudSubtabSignalAt < 3.0;
+    NSInteger state = -1;
+    if (!overlay.view.hidden || recentTap) {
+        state = AMCloudDetectCloudPillSelected();
+    }
     BOOL cloudContent = AMCloudWindowHasCloudContentView(window, window.bounds.size, 0);
     BOOL cloudText = AMCloudOfficialCloudContentOnScreen(window, 0);
     // 明确判成"别的 tab"（state==0）时以它为准；否则任一信号成立就显示。
@@ -4132,13 +4189,26 @@ static BOOL AMCloudWindowHasCloudContentView(UIView *view, CGSize windowSize,
             [overlay reload];
         }
     }
+    // r138：原来每次巡检都 NSLog + 追加写 bannerlog（每秒一次磁盘写 + 日志
+    // 刷屏，在编辑器里就是实打实的掉帧）。现在只在状态变化或每 15 秒记一条。
+    NSString *signature = [NSString stringWithFormat:@"%ld|%d|%d|%d",
+                           (long)state, cloudContent, cloudText, !overlay.view.hidden];
+    static NSString *lastSignature = nil;
+    static NSTimeInterval lastWrite = 0;
+    NSTimeInterval stamp = [NSDate date].timeIntervalSince1970;
+    BOOL changed = ![signature isEqualToString:lastSignature];
+    if (!changed && stamp - lastWrite < 15.0) return;
+    lastSignature = signature;
+    lastWrite = stamp;
+    NSLog(@"[AMProjExport] banner visibility pill=%ld class=%d text=%d shown=%d",
+          (long)state, cloudContent, cloudText, !overlay.view.hidden);
     @try {
         NSString *path = [NSSearchPathForDirectoriesInDomains(
             NSCachesDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
         NSString *line = [NSString stringWithFormat:
-            @"pill=%ld class=%d text=%d shown=%d\n",
-            (long)state, cloudContent, cloudText, !overlay.view.hidden];
+            @"%.0f pill=%ld class=%d text=%d shown=%d\n",
+            stamp, (long)state, cloudContent, cloudText, !overlay.view.hidden];
         NSMutableData *data = [[NSData dataWithContentsOfFile:path] mutableCopy]
             ?: [NSMutableData data];
         [data appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
