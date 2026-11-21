@@ -2383,6 +2383,10 @@ extern NSNotificationName const AMCloudLibraryDidChangeNotification;
     [NSNotificationCenter.defaultCenter
         addObserver:self selector:@selector(applicationDidBecomeActive:)
                name:UIApplicationDidBecomeActiveNotification object:nil];
+    // r150：进后台把云贴片（含 WKWebView）整个放掉，降低被系统回收的概率。
+    [NSNotificationCenter.defaultCenter
+        addObserver:self selector:@selector(applicationDidEnterBackground:)
+        name:UIApplicationDidEnterBackgroundNotification object:nil];
     if (!self.pluginSyncInstalled) {
         self.pluginSyncInstalled = YES;
         [NSNotificationCenter.defaultCenter
@@ -2435,27 +2439,33 @@ static BOOL AMCloudOverlayWorkAllowed(void) {
     if (application.applicationState != UIApplicationStateActive) return NO;
     UIWindow *window = AMCloudActiveWindow();
     if (!window) return NO;
-    UIViewController *top = window.rootViewController;
-    NSUInteger guard = 0;
-    while (top.presentedViewController && guard++ < 8) {
-        top = top.presentedViewController;
-    }
+    UIViewController *top = AMCloudTopController(nil);
     if (!top) return NO;
     NSMutableString *names = [NSMutableString string];
     [names appendString:NSStringFromClass(top.class) ?: @""];
     if ([top isKindOfClass:UINavigationController.class]) {
-        UIViewController *visible =
-            ((UINavigationController *)top).visibleViewController;
+        UIViewController *visible = ((UINavigationController *)top).visibleViewController;
         if (visible) [names appendFormat:@" %@", NSStringFromClass(visible.class) ?: @""];
+        top = visible ?: top;
     }
     if ([top isKindOfClass:UITabBarController.class]) {
         UIViewController *selected = ((UITabBarController *)top).selectedViewController;
         if (selected) [names appendFormat:@" %@", NSStringFromClass(selected.class) ?: @""];
     }
-    for (NSString *keyword in @[@"Editor", @"Workbench", @"CreateVC", @"EffectPicker"]) {
+    // 便宜的否决：编辑器 / 新建工程 / 效果面板 / 相册选择器里一律不工作。
+    for (NSString *keyword in @[@"Editor", @"Workbench", @"CreateVC", @"EffectPicker",
+                                @"DocumentPicker", @"PhotoPicker"]) {
         if ([names containsString:keyword]) return NO;
     }
-    return YES;
+    // 真正的判定：工程页才允许。目前最稳的判据就是"页面上有那条分段控件"。
+    if (AMCloudIsProjectsControllerClass(top.class)) return YES;
+    // 兜底：类名像工程/首页也放行，避免 865 换了类名后整块功能哑掉。
+    for (NSString *keyword in @[@"Projects", @"Homepage"]) {
+        if ([names containsString:keyword]) return YES;
+    }
+    UIView *view = top.viewIfLoaded;
+    if (!view) return NO;
+    return AMCloudFindSegmentControl(view, 0) != nil;
 }
 
 static void AMCloudHideWindowOverlayIfNeeded(void) {
@@ -2506,6 +2516,42 @@ static void AMCloudHideWindowOverlayIfNeeded(void) {
                    dispatch_get_main_queue(), ^{
         if (tick) tick();
     });
+}
+
+// r150：贴片里挂着一个 WKWebView。用户切出去之后它还在内存里占着，
+// 系统内存吃紧时整进程就被回收——表现就是"回来必须重新进"。
+// 进后台直接拆掉，回前台再按需重挂。
+static void AMCloudTeardownWindowOverlay(void) {
+    UIWindow *window = AMCloudActiveWindow();
+    if (!window) return;
+    AMCloudLibraryViewController *overlay =
+        objc_getAssociatedObject(window, &AMCloudBannerViewKey);
+    if (overlay) {
+        UIView *overlayView = overlay.viewIfLoaded;
+        [overlayView removeFromSuperview];
+        objc_setAssociatedObject(window, &AMCloudBannerViewKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(window, &AMCloudBannerTopKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        amproj_debugEvent(@"cloud.overlay.released_on_background", @{});
+    }
+    for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
+        UIView *view = controller.viewIfLoaded;
+        AMCloudLibraryViewController *banner =
+            objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
+        if (banner) {
+            [banner.viewIfLoaded removeFromSuperview];
+            objc_setAssociatedObject(controller, &AMCloudBannerViewKey, nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        (void)view;
+    }
+}
+
+- (void)applicationDidEnterBackground:(NSNotification *)notification {
+    (void)notification;
+    AMCloudTeardownWindowOverlay();
+    [self cancelPluginDownloadNotice];
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
