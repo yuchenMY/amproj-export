@@ -18846,6 +18846,23 @@ static BOOL amproj_controllerShowsLegalText(UIViewController *controller) {
     return amproj_legalTextInView(view, 0, &budget) != nil;
 }
 
+// r149：呈现前拦截时视图往往还没加载，viewIfLoaded 是 nil，导致"已知类名"也判不出来。
+// 这里在**已知是法务弹窗类**的情况下主动加载一次视图，再按文字确认。
+static BOOL amproj_controllerShowsLegalTextForced(UIViewController *controller) {
+    if (!controller) return NO;
+    @try {
+        UIView *view = controller.viewIfLoaded ?: controller.view;
+        if (!view) return NO;
+        NSUInteger budget = 600;
+        return amproj_legalTextInView(view, 0, &budget) != nil;
+    } @catch (NSException *exception) {
+        amproj_logCriticalEvent(@"legal.forced_scan_exception", @{
+            @"name": exception.name ?: @"NSException"
+        });
+        return NO;
+    }
+}
+
 static void amproj_attachLegalTapRecorder(UIViewController *controller) {
     static const void *kRecorderKey = &kRecorderKey;
     UIView *view = controller.viewIfLoaded;
@@ -18907,7 +18924,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             if (looksLegalByText || looksLegalByClass || knownClass) {
                 // 已知类也再确认一次文字，避免把这个类上的其它弹窗一起吞掉。
                 BOOL confirmed = looksLegalByText || looksLegalByClass ||
-                    amproj_controllerShowsLegalText(controller);
+                    amproj_controllerShowsLegalTextForced(controller);
                 if (confirmed) {
                     amproj_rememberLegalClassName(legalClassName);
                     if (looksLegalByText &&
