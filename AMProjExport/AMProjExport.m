@@ -809,8 +809,53 @@ static NSString *const AMProjUTI = @"com.alightcreative.motion.amproj";
 @property(nonatomic) NSInteger width;
 @property(nonatomic) NSInteger height;
 @property(nonatomic, strong) NSMutableOrderedSet<NSString *> *resourceReferences;
+@property(nonatomic, strong) NSMutableString *pendingCharacters;
 @property(nonatomic, strong) NSError *parseError;
 @end
+
+// 判断一个字符串值"像不像工程素材引用"。
+// r140：以前只认固定几个属性名（uri/source/src/fillImage/fillVideo/font/file），
+// 安卓二开版上出现"部分叠层消失"——凡是没命中这些键名的素材都不会被打包，
+// 图层引用就悬空了。现在改成按值判断：有素材扩展名、或带已知 scheme 的都算。
+static BOOL amproj_valueLooksLikeResource(NSString *value) {
+    if (![value isKindOfClass:NSString.class] || value.length == 0 ||
+        value.length > 4096) return NO;
+    NSString *trimmed = [value stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!trimmed.length) return NO;
+    if ([trimmed hasPrefix:@"file://"] || [trimmed hasPrefix:@"/"] ||
+        [trimmed hasPrefix:@"amproj:"] || [trimmed hasPrefix:@"am-internal:"]) {
+        return YES;
+    }
+    NSString *scheme = [NSURLComponents componentsWithString:trimmed].scheme.lowercaseString;
+    if ([scheme hasPrefix:@"phasset-"]) return YES;
+    if (amproj_importedFontFilename(trimmed).length) return YES;
+    static NSSet<NSString *> *resourceExtensions;
+    static dispatch_once_t extensionsOnce;
+    dispatch_once(&extensionsOnce, ^{
+        resourceExtensions = [NSSet setWithArray:@[
+            @"png", @"jpg", @"jpeg", @"webp", @"gif", @"heic", @"heif",
+            @"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"wav", @"aac", @"aiff",
+            @"ttf", @"otf", @"ttc", @"json"
+        ]];
+    });
+    NSString *extension = trimmed.pathExtension.lowercaseString;
+    if ([resourceExtensions containsObject:extension]) return YES;
+    return NO;
+}
+
+// 必须解析成功的引用（解析不到就说明包会缺件，直接失败）；
+// 其余"看起来像"的引用解析失败就跳过——它们可能只是文案里恰好带扩展名。
+static BOOL amproj_referenceIsRequired(NSString *reference) {
+    if (!reference.length) return NO;
+    if ([reference hasPrefix:@"am-internal:"] || [reference hasPrefix:@"amproj:"] ||
+        [reference hasPrefix:@"file://"] || [reference hasPrefix:@"/"]) {
+        return YES;
+    }
+    NSString *scheme = [NSURLComponents componentsWithString:reference].scheme.lowercaseString;
+    if ([scheme hasPrefix:@"phasset-"]) return YES;
+    return NO;
+}
 
 @implementation AMProjXMLProbe
 
@@ -852,32 +897,29 @@ static NSString *const AMProjUTI = @"com.alightcreative.motion.amproj";
     static NSSet<NSString *> *resourceKeys;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // 仅用于日志区分（哪些键名命中了），实际判定按值。
         resourceKeys = [NSSet setWithArray:@[
             @"uri", @"source", @"src", @"fillImage", @"fillVideo", @"font", @"file"
         ]];
     });
+    (void)resourceKeys;
+    self.pendingCharacters = [NSMutableString string];
     [attributes enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
+        (void)key;
         (void)stop;
-        if (![resourceKeys containsObject:key] || !value.length) return;
-        NSString *extension = value.pathExtension.lowercaseString;
-        static NSSet<NSString *> *resourceExtensions;
-        static dispatch_once_t extensionsOnce;
-        dispatch_once(&extensionsOnce, ^{
-            resourceExtensions = [NSSet setWithArray:@[
-                @"png", @"jpg", @"jpeg", @"webp", @"gif", @"heic",
-                @"mp4", @"mov", @"m4v", @"mp3", @"m4a", @"wav", @"aac",
-                @"ttf", @"otf"
-            ]];
-        });
-        NSString *scheme = [NSURLComponents componentsWithString:value].scheme.lowercaseString;
-        if ([value hasPrefix:@"file://"] || [value hasPrefix:@"/"] ||
-            [value hasPrefix:@"amproj:"] || [scheme hasPrefix:@"phasset-"] ||
-            amproj_importedFontFilename(value).length ||
-            [resourceExtensions containsObject:extension]) {
+        // r140：不再按属性名白名单过滤。素材可能挂在任何属性上
+        // （mask / fill / poster / lut / image / video / srcset …），
+        // 以前漏掉的素材在安卓端就是"图层部分消失"。
+        if (amproj_valueLooksLikeResource(value)) {
             [self.resourceReferences addObject:value];
         }
     }];
     self.depth++;
+}
+
+- (void)parser:(NSXMLParser *)parser foundCharacters:(NSString *)string {
+    (void)parser;
+    if (string.length) [self.pendingCharacters appendString:string];
 }
 
 - (void)parser:(NSXMLParser *)parser
@@ -888,6 +930,16 @@ static NSString *const AMProjUTI = @"com.alightcreative.motion.amproj";
     (void)elementName;
     (void)namespaceURI;
     (void)qualifiedName;
+    // 文本节点里也可能写着素材引用（<font>xxx.ttf</font> 这类），
+    // 以前完全没看 foundCharacters，这些素材就丢了。
+    if (self.pendingCharacters.length) {
+        NSString *text = [self.pendingCharacters stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (text.length && amproj_valueLooksLikeResource(text)) {
+            [self.resourceReferences addObject:text];
+        }
+        [self.pendingCharacters setString:@""];
+    }
     if (self.depth) self.depth--;
 }
 
@@ -2006,8 +2058,18 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
     NSMutableDictionary<NSString *, NSString *> *digestNames = [NSMutableDictionary dictionary];
     NSMutableString *rewritten = [XML mutableCopy];
     NSUInteger sequence = 0;
+    NSUInteger skippedOptional = 0;
+
+    // 长串先替换：如果 A 是 B 的子串（同一目录下 xxx.png 与 xxx.png.bak 这种），
+    // 先换短的会把长的改坏，图层引用就悬空了。
+    NSArray<NSString *> *references = [probe.resourceReferences.array
+        sortedArrayUsingComparator:^NSComparisonResult(NSString *left, NSString *right) {
+            if (left.length == right.length) return NSOrderedSame;
+            return left.length > right.length ? NSOrderedAscending : NSOrderedDescending;
+        }];
+
     NSMutableArray<NSString *> *internalReferences = [NSMutableArray array];
-    for (NSString *reference in probe.resourceReferences) {
+    for (NSString *reference in references) {
         NSString *scheme = [NSURLComponents componentsWithString:reference].scheme.lowercaseString;
         if ([scheme isEqualToString:@"am-internal"] ||
             amproj_importedFontFilename(reference).length) {
@@ -2017,21 +2079,33 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
     NSDictionary<NSString *, NSString *> *internalFailures = nil;
     NSDictionary<NSString *, NSURL *> *internalResources =
         amproj_resolveInternalResources(internalReferences, XMLURL, &internalFailures);
-    for (NSString *reference in probe.resourceReferences) {
+
+    for (NSString *reference in references) {
         NSURL *source = amproj_resolveResourceReference(reference, XMLURL, internalResources);
+        BOOL required = amproj_referenceIsRequired(reference);
         if (!source) {
             NSString *failure = internalFailures[reference];
-            if (error) *error = amproj_directError(22, failure.length ?
-                [NSString stringWithFormat:@"%@\n%@", failure, reference] :
-                [NSString stringWithFormat:@"Unable to resolve required resource: %@", reference]);
-            return nil;
+            if (required) {
+                if (error) *error = amproj_directError(22, failure.length ?
+                    [NSString stringWithFormat:@"%@\n%@", failure, reference] :
+                    [NSString stringWithFormat:@"Unable to resolve required resource: %@", reference]);
+                return nil;
+            }
+            // 值长得像素材、但解析不到（多半是文案里恰好带扩展名）：跳过，不打包也不改写。
+            skippedOptional++;
+            continue;
         }
         NSNumber *regular = nil;
         [source getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
         if (!regular.boolValue) {
-            if (error) *error = amproj_directError(22,
-                [NSString stringWithFormat:@"Required resource is missing: %@", source.lastPathComponent ?: reference]);
-            return nil;
+            if (required) {
+                if (error) *error = amproj_directError(22,
+                    [NSString stringWithFormat:@"Required resource is missing: %@",
+                     source.lastPathComponent ?: reference]);
+                return nil;
+            }
+            skippedOptional++;
+            continue;
         }
         NSString *sourceKey = source.path;
         NSString *archiveName = sourceNames[sourceKey];
@@ -2066,8 +2140,41 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
         NSString *escapedOriginal = amproj_escapeXML(reference, YES);
         NSString *escapedReplacement = amproj_escapeXML(
             [@"amproj:" stringByAppendingString:archiveName], YES);
-        [rewritten replaceOccurrencesOfString:escapedOriginal withString:escapedReplacement
-                                      options:0 range:NSMakeRange(0, rewritten.length)];
+        if (escapedOriginal.length) {
+            [rewritten replaceOccurrencesOfString:escapedOriginal withString:escapedReplacement
+                                          options:0 range:NSMakeRange(0, rewritten.length)];
+        }
+    }
+    if (skippedOptional) {
+        amproj_logCriticalEvent(@"direct.archive_skipped_soft_references", @{
+            @"count": @(skippedOptional)
+        });
+    }
+    // r140：改写完再做一次"缺件检查"。只要有必须解析的引用还留在 XML 里，
+    // 就说明这个包里必然有素材缺失（安卓端表现就是部分叠层消失）。
+    // 宁可让导出失败并说清楚，也不要交出一个悄悄缺图的包。
+    NSUInteger unresolved = 0;
+    for (NSString *needle in @[@"am-internal:///", @"file:///"]) {
+        NSUInteger location = 0;
+        while (location < rewritten.length) {
+            NSRange range = [rewritten rangeOfString:needle
+                                             options:0
+                                               range:NSMakeRange(location,
+                                                   rewritten.length - location)];
+            if (range.location == NSNotFound) break;
+            unresolved++;
+            location = NSMaxRange(range);
+        }
+    }
+    if (unresolved) {
+        amproj_logCriticalEvent(@"direct.archive_unresolved_references", @{
+            @"count": @(unresolved),
+            @"resources": @(resources.count)
+        });
+        if (error) *error = amproj_directError(24, [NSString stringWithFormat:
+            @"工程里有 %lu 个素材没能打包进 .amproj（会在其它设备上缺层）。"
+            @"请确认这些素材仍在本地后重试。", (unsigned long)unresolved]);
+        return nil;
     }
     NSData *rewrittenData = [rewritten dataUsingEncoding:NSUTF8StringEncoding];
     return @{@"xml": rewrittenData ?: xmlData, @"resources": resources, @"probe": probe};
