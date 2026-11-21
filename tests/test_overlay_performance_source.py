@@ -49,6 +49,12 @@ class OverlayPerformanceTests(unittest.TestCase):
         self.assertIn("if (!overlay.view.hidden || recentTap)", block)
         self.assertIn("AMCloudDetectCloudPillSelected()", block)
 
+    def test_low_frequency_loop_is_gated_too(self):
+        # r144：0.8 秒那条兜底轮询以前没有门禁，工程页被编辑器盖住时照样扫全树。
+        block = SOURCE.split("cloudBannerVisibilityTickLoop", 1)[1]
+        block = block.split("// 评估横幅可见性", 1)[0]
+        self.assertIn("AMCloudOverlayWorkAllowed()", block)
+
     def test_banner_log_is_throttled(self):
         block = SOURCE.split(
             "- (void)refreshWindowCloudOverlayVisibility {", 1

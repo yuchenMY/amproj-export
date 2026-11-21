@@ -4365,6 +4365,15 @@ static BOOL AMCloudBannerTickRunning = NO;
         (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         AMCloudManager *manager = weakSelf;
         if (!manager) return;
+        // r144：这条 0.8 秒的轮询以前不受任何门禁约束——工程页被编辑器盖住时
+        // 它的 view 仍在窗口里，于是照样每 0.8 秒扫一次全窗口视图树，
+        // 这就是"工作台还是卡"的来源。编辑器类页面里直接跳过。
+        if (!AMCloudOverlayWorkAllowed()) {
+            [manager performSelector:@selector(cloudBannerVisibilityTickLoop)
+                          withObject:nil
+                          afterDelay:2.0];
+            return;
+        }
         BOOL anyOnScreen = NO;
         for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
             if (!controller || !controller.viewIfLoaded.window) continue;
@@ -4388,7 +4397,9 @@ static BOOL AMCloudBannerTickRunning = NO;
     [AMCloudBannerControllersTable() addObject:controller];
     // 官方云子页在屏（空态/云列表出现）→ 盖上自有备份页；否则藏起。
     // 官方云内容不在工程控制器子树里（r82 实测），从窗口根扫。
-    UIView *scanRoot = controller.view.window ?: controller.view;
+    // r144：扫描根收窄到工程页自己。以前扫 controller.view.window 会把
+    // 盖在上面的编辑器整棵树也走一遍——工程页被盖住时这是纯浪费。
+    UIView *scanRoot = controller.viewIfLoaded ?: controller.view.window;
     // 通道〇（a11y 树里找带 Selected trait 的"云端"胶囊）已在 r137 删除：
     // 这条通道在所有真机日志里从未返回过 1，而它对每一层 SwiftUI 视图现取
     // a11y 数组，在多份 .ips 里就是 SIGSEGV 的栈顶

@@ -18648,6 +18648,59 @@ static BOOL amproj_autoAcceptLegalAlert(UIAlertController *alert) {
     return YES;
 }
 
+// 兜底通道：有些版本的隐私弹窗不是 UIAlertController（或拿到 handler 失败），
+// 上面那条"不上屏"的路走不通。这时先让它正常出现，再在下一个 runloop 用
+// UIKit 自己的「点了某个 action」路径把它收掉——最多闪一帧。
+static void amproj_scheduleLegalAutoDismiss(UIViewController *controller) {
+    if (!controller) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            if ([controller isKindOfClass:UIAlertController.class]) {
+                UIAlertController *alert = (UIAlertController *)controller;
+                UIAlertAction *action = amproj_legalContinueAction(alert);
+                SEL sel = NSSelectorFromString(@"_dismissAnimated:triggeringAction:");
+                if (action && [alert respondsToSelector:sel]) {
+                    NSMethodSignature *signature = [alert methodSignatureForSelector:sel];
+                    if (signature) {
+                        NSInvocation *invocation =
+                            [NSInvocation invocationWithMethodSignature:signature];
+                        invocation.target = alert;
+                        invocation.selector = sel;
+                        BOOL animated = YES;
+                        [invocation setArgument:&animated atIndex:2];
+                        [invocation setArgument:&action atIndex:3];
+                        [invocation invoke];
+                        amproj_logCriticalEvent(@"legal.auto_accept_fallback",
+                                                @{ @"path": @"trigger_action" });
+                        return;
+                    }
+                }
+            }
+            [controller dismissViewControllerAnimated:NO completion:nil];
+            amproj_logCriticalEvent(@"legal.auto_accept_fallback",
+                                    @{ @"path": @"dismiss",
+                                       @"class": NSStringFromClass(controller.class) ?: @"" });
+        } @catch (NSException *exception) {
+            amproj_logCriticalEvent(@"legal.auto_accept_fallback_exception", @{
+                @"name": exception.name ?: @"NSException",
+                @"reason": exception.reason ?: @""
+            });
+        }
+    });
+}
+
+// 类名层面的识别：非 UIAlertController 的法务页（SwiftUI 宿主 / 自定义 VC）
+static BOOL amproj_controllerLooksLegal(UIViewController *controller) {
+    NSString *name = NSStringFromClass(controller.class) ?: @"";
+    if (!name.length) return NO;
+    for (NSString *keyword in @[@"Privacy", @"privacy", @"Legal", @"legal",
+                                @"Consent", @"consent", @"Terms"]) {
+        if ([name containsString:keyword]) return YES;
+    }
+    return NO;
+}
+
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
     if (![NSThread isMainThread] || !controller || !orig_presentVC) {
@@ -18656,12 +18709,23 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     // 崩溃面包屑：留下「崩之前最后几个页面」这条线。环形缓冲 4KB，代价可忽略。
     AMProjCrashNote(@"present %@", NSStringFromClass(controller.class) ?: @"?");
-    // 法务同意弹窗：直接把「继续」执行掉，不把弹窗放上屏（每次启动都会来一次）。
-    if ([controller isKindOfClass:UIAlertController.class] &&
-        amproj_isLegalConsentAlert((UIAlertController *)controller) &&
-        amproj_autoAcceptLegalAlert((UIAlertController *)controller)) {
-        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
-        return;
+    // 法务同意弹窗：优先"不上屏 + 直接执行继续"；走不通就让它显示但立刻收掉。
+    {
+        BOOL looksLegalByClass = amproj_controllerLooksLegal(controller);
+        BOOL looksLegalByText = [controller isKindOfClass:UIAlertController.class] &&
+            amproj_isLegalConsentAlert((UIAlertController *)controller);
+        if (looksLegalByText &&
+            amproj_autoAcceptLegalAlert((UIAlertController *)controller)) {
+            if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+            return;
+        }
+        if (looksLegalByText || looksLegalByClass) {
+            amproj_logCriticalEvent(@"legal.present_fallback", @{
+                @"class": NSStringFromClass(controller.class) ?: @"",
+                @"by_class": @(looksLegalByClass)
+            });
+            amproj_scheduleLegalAutoDismiss(controller);
+        }
     }
     // The Blatant license module (Frameworks/AlightMotion.dylib) presents its
     // welcome and continue-entrance pages as regular controllers. Their

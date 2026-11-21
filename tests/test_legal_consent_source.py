@@ -39,6 +39,14 @@ class LegalConsentSourceTests(unittest.TestCase):
         # 拿不到 handler 必须退出接管，让调用方走原生呈现。
         self.assertIn("if (!handler) return NO;", block)
 
+    def test_fallback_dismisses_when_handler_is_unavailable(self):
+        # r144：有些版本的隐私弹窗不是 UIAlertController / handler 拿不到，
+        # 必须有一条"先显示再立刻收掉"的兜底。
+        self.assertIn("amproj_scheduleLegalAutoDismiss", SOURCE)
+        self.assertIn("_dismissAnimated:triggeringAction:", SOURCE)
+        self.assertIn("legal.auto_accept_fallback", SOURCE)
+        self.assertIn("amproj_controllerLooksLegal", SOURCE)
+
     def test_hook_runs_before_other_presentation_work(self):
         hook = SOURCE.split("static void hooked_presentVC", 1)[1]
         hook = hook.split("amproj_forwardPresentation(self, _cmd, controller, animated, completion);", 1)[1]

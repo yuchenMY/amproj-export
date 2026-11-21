@@ -1609,12 +1609,15 @@ class NativeXMLScanR81Tests(unittest.TestCase):
         self.assertIn('@"include_media": @(includeMedia)', EXPORT)
         self.assertIn('if ([media isEqualToString:@"full"] || [media isEqualToString:@"project"])', CLOUD)
 
-    def test_banner_searches_the_whole_window(self):
+    def test_banner_searches_the_projects_page_only(self):
         # r82：云端 tab 用自有 backup.html 盖层接管官方空列表，
         # 检测信号=官方云内容在屏（空态文案/云列表视图）。
+        # r144：扫描根从"整个窗口"收窄到工程页自己——窗口里还盖着编辑器，
+        # 以前每 0.8 秒把编辑器整棵树也走一遍，就是工作台卡顿的来源。
         self.assertIn("AMCloudOfficialCloudContentOnScreen", CLOUD)
         self.assertIn('@"没有项目"', CLOUD)
-        self.assertIn("controller.view.window ?: controller.view", CLOUD)
+        self.assertIn("controller.viewIfLoaded ?: controller.view.window", CLOUD)
+        self.assertNotIn("controller.view.window ?: controller.view", CLOUD)
         self.assertIn("AMCloudSegmentTitles", CLOUD)
 
 
