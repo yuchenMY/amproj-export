@@ -965,6 +965,84 @@ static BOOL amproj_referenceIsRequired(NSString *reference) {
 
 @end
 
+// 给用户看的失败原因：全中文 + 说清楚"下一步做什么"。
+// 英文原文只留在日志里（direct.failed 事件），弹窗一律走这个函数。
+static NSString *amproj_exportHintName(NSString *message) {
+    if (!message.length) return nil;
+    NSArray<NSString *> *lines = [message componentsSeparatedByString:@"\n"];
+    NSString *last = lines.lastObject ?: @"";
+    NSRange colon = [last rangeOfString:@": " options:NSBackwardsSearch];
+    NSString *candidate = colon.location != NSNotFound
+        ? [last substringFromIndex:NSMaxRange(colon)] : last;
+    candidate = candidate.lastPathComponent ?: candidate;
+    candidate = [candidate stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (candidate.length > 48) candidate = [candidate substringToIndex:48];
+    return candidate.length ? candidate : nil;
+}
+
+static NSString *amproj_userFacingExportMessage(NSError *error) {
+    if (!error) return @"导出没成功，请再试一次。";
+    NSString *raw = error.localizedDescription ?: @"";
+    NSString *hint = amproj_exportHintName(raw);
+    NSString *lower = raw.lowercaseString;
+    NSInteger code = error.code;
+
+    // 素材相关：22 解析不到 / 23 读不了 / 24 包里缺件
+    if (code == 22 || code == 23) {
+        if (hint.length) {
+            return [NSString stringWithFormat:
+                @"这个工程里有一个素材找不到了：%@\n\n"
+                @"常见原因是它被删掉、或者还留在别的 App（相册 / 文件）里，"
+                @"Alight Motion 拿不到。把这张图 / 这段视频重新导入这个工程，"
+                @"再导出一次就好了。", hint];
+        }
+        return @"这个工程里有素材找不到了（可能被删除或搬走了）。\n\n"
+               @"把缺的图片、视频重新导入工程后再导出一次就行。";
+    }
+    if (code == 24) {
+        return @"有素材没能一起打进包里，所以这次没有生成项目包。\n\n"
+               @"多半是那些图片 / 视频已经被删除或移动。把它们重新导入这个工程，"
+               @"再导出一次就可以了。";
+    }
+    if (code == 20 || code == 30 || code == 31) {
+        return @"工程文件读不出来，可能是保存时被打断了。\n\n"
+               @"回到编辑器再保存一次，然后重新导出。";
+    }
+    if (code == 21) {
+        return @"工程文件编码异常（不是 UTF-8），这次没法打包。\n\n"
+               @"如果工程里有中文名素材，试试重命名成英文后再导出。";
+    }
+    if (code == 42 || [error.domain.lowercaseString containsString:@"zip"]) {
+        if ([lower containsString:@"space"] || [lower containsString:@"容量"]) {
+            return @"手机存储空间不够了，写不下这个项目包。\n\n"
+                   @"清理一些照片 / 视频或卸载不用的 App，留出至少 1GB 再试。";
+        }
+        return @"写项目包的时候出错了（文件可能正在被其它 App 占用）。\n\n"
+               @"退出重进再导出一次；如果一直这样，重启手机后再试。";
+    }
+    if (code == 51) {
+        return @"没找到这个工程的保存文件。\n\n"
+               @"先在编辑器里点一次保存（右上角），再回到这里导出。";
+    }
+    if (code == 54) {
+        return @"当前界面没法弹出导出结果，请回到工程列表重新导出一���。";
+    }
+    if (code == 55) {
+        return @"导出卡住了（超过 9 分钟没有进展），已经自动取消。\n\n"
+               @"工程特别大时可以稍等一会儿再试；如果反复卡住，先保存并重启 App。";
+    }
+    if (code >= 52 && code <= 53) {
+        return @"导出过程中出了点意外，已经安全停下，工程没有受影响。\n\n"
+               @"再导出一次通常就好了。";
+    }
+    if ([lower containsString:@"space"] || [lower containsString:@"no space"]) {
+        return @"手机存储空间不够了。清理一些空间后再导出。";
+    }
+    return @"导出没成功，工程本身没有受影响。\n\n"
+           @"请再试一次；如果一直失败，把这张截图发给猫鹤。";
+}
+
 static NSError* amproj_directError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:AMProjDirectErrorDomain code:code
                            userInfo:@{NSLocalizedDescriptionKey: message ?: @"Unknown export error"}];
@@ -3393,8 +3471,9 @@ static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *er
             amproj_finishDirectFlow(@"failed");
             UIViewController *safePresenter = amproj_safeDirectPresenter(presenter);
             if (!safePresenter) return;
+            NSString *friendly = amproj_userFacingExportMessage(error);
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"无法生成 .amproj"
-                message:error.localizedDescription ?: @"项目数据验证失败。"
+                message:friendly
                 preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"重试" style:UIAlertActionStyleDefault
                 handler:^(__unused UIAlertAction *action) {
