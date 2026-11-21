@@ -2132,6 +2132,9 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
                     @"name": internalName
                 });
             }
+            // 同一个文件如果还被 file:// 之类引用着，走同一条命名，避免包里
+            // 出现两份同内容文件（manifest 对重复 SHA1 会直接拒绝）。
+            sourceNames[source.path] = internalName;
             continue;
         }
         NSString *sourceKey = source.path;
