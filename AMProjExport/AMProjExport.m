@@ -18742,6 +18742,95 @@ static BOOL amproj_controllerLooksLegal(UIViewController *controller) {
     return NO;
 }
 
+// ── r146：按"视图里的文字"识别法务弹窗 ──────────────────────────────
+// 真机上那个弹窗既不是 UIAlertController、类名里也没有 Privacy/Legal，
+// 文案匹配和类名匹配都会落空，所以再加一条：呈现后扫一遍视图里的文字。
+@interface AMProjLegalTapRecorder : NSObject
++ (instancetype)shared;
+- (void)handleTap:(UITapGestureRecognizer *)tap;
+@end
+
+@implementation AMProjLegalTapRecorder
++ (instancetype)shared {
+    static AMProjLegalTapRecorder *recorder = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ recorder = [[AMProjLegalTapRecorder alloc] init]; });
+    return recorder;
+}
+- (void)handleTap:(__unused UITapGestureRecognizer *)tap {
+    amproj_markLegalAccepted(@"user_tapped_privacy_notice");
+}
+@end
+
+static NSString *amproj_legalTextInView(UIView *view, NSInteger depth, NSUInteger *budget) {
+    if (!view || depth > 14 || (budget && *budget == 0)) return nil;
+    if (budget) (*budget)--;
+    NSString *ownText = nil;
+    if ([view isKindOfClass:UILabel.class]) ownText = ((UILabel *)view).text;
+    else if ([view isKindOfClass:UITextView.class]) ownText = ((UITextView *)view).text;
+    else if ([view respondsToSelector:@selector(accessibilityLabel)]) {
+        ownText = view.accessibilityLabel;
+    }
+    if (ownText.length) {
+        NSString *folded = ownText.lowercaseString;
+        if ([ownText containsString:@"隐私政策"] || [ownText containsString:@"隱私政策"] ||
+            [folded containsString:@"privacy policy"]) {
+            return ownText;
+        }
+    }
+    for (UIView *child in view.subviews) {
+        NSString *found = amproj_legalTextInView(child, depth + 1, budget);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static BOOL amproj_controllerShowsLegalText(UIViewController *controller) {
+    UIView *view = controller.viewIfLoaded;
+    if (!view) return NO;
+    NSUInteger budget = 400;
+    return amproj_legalTextInView(view, 0, &budget) != nil;
+}
+
+static void amproj_attachLegalTapRecorder(UIViewController *controller) {
+    static const void *kRecorderKey = &kRecorderKey;
+    UIView *view = controller.viewIfLoaded;
+    if (!view) return;
+    if (objc_getAssociatedObject(view, kRecorderKey)) return;
+    UITapGestureRecognizer *tap =
+        [[UITapGestureRecognizer alloc] initWithTarget:[AMProjLegalTapRecorder shared]
+                                                action:@selector(handleTap:)];
+    tap.cancelsTouchesInView = NO;
+    [view addGestureRecognizer:tap];
+    objc_setAssociatedObject(view, kRecorderKey, tap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void amproj_handleLegalController(UIViewController *controller,
+                                         BOOL byText, BOOL byClass) {
+    if (!controller) return;
+    if (amproj_legalAlreadyAccepted()) {
+        if (byText && [controller isKindOfClass:UIAlertController.class] &&
+            amproj_autoAcceptLegalAlert((UIAlertController *)controller)) {
+            amproj_logCriticalEvent(@"legal.auto_accept_after_first_time", @{
+                @"class": NSStringFromClass(controller.class) ?: @""
+            });
+            return;
+        }
+        amproj_scheduleLegalAutoDismiss(controller);
+        amproj_logCriticalEvent(@"legal.present_fallback", @{
+            @"class": NSStringFromClass(controller.class) ?: @"",
+            @"by_class": @(byClass)
+        });
+        return;
+    }
+    amproj_attachLegalTapRecorder(controller);
+    amproj_watchLegalConsentDismissal(controller);
+    amproj_logCriticalEvent(@"legal.first_time_presented", @{
+        @"class": NSStringFromClass(controller.class) ?: @"",
+        @"by": byText ? @"text" : @"class"
+    });
+}
+
 static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                              BOOL animated, void (^completion)(void)) {
     if (![NSThread isMainThread] || !controller || !orig_presentVC) {
@@ -18750,35 +18839,36 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     // 崩溃面包屑：留下「崩之前最后几个页面」这条线。环形缓冲 4KB，代价可忽略。
     AMProjCrashNote(@"present %@", NSStringFromClass(controller.class) ?: @"?");
-    // 法务同意弹窗：
-    //   ① 用户还没点过「继续」→ 原样放它出来（这是用户唯一需要点的一次）；
-    //   ② 用户已经点过 → 静默执行「继续」，不再打扰。
+    // 法务同意弹窗（三种识别：文案 / 类名 / 呈现后扫视图里的文字）。
+    //   ① 用户还没点过「继续」→ 原样放它出来，并记住"他点过"；
+    //   ② 已经点过 → 静默确认或立刻收掉，不再打扰。
     {
         BOOL looksLegalByClass = amproj_controllerLooksLegal(controller);
         BOOL looksLegalByText = [controller isKindOfClass:UIAlertController.class] &&
             amproj_isLegalConsentAlert((UIAlertController *)controller);
         if (looksLegalByText || looksLegalByClass) {
-            if (amproj_legalAlreadyAccepted()) {
-                if (looksLegalByText &&
-                    amproj_autoAcceptLegalAlert((UIAlertController *)controller)) {
-                    amproj_logCriticalEvent(@"legal.auto_accept_after_first_time", @{
-                        @"class": NSStringFromClass(controller.class) ?: @""
+            amproj_handleLegalController(controller, looksLegalByText, looksLegalByClass);
+        } else {
+            __weak UIViewController *weakCandidate = controller;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                UIViewController *candidate = weakCandidate;
+                if (!candidate) return;
+                if (!amproj_controllerShowsLegalText(candidate)) return;
+                if (amproj_legalAlreadyAccepted()) {
+                    [candidate dismissViewControllerAnimated:NO completion:nil];
+                    amproj_logCriticalEvent(@"legal.dismissed_after_first_time", @{
+                        @"class": NSStringFromClass(candidate.class) ?: @""
                     });
-                    if (completion) dispatch_async(dispatch_get_main_queue(), completion);
-                    return;
+                } else {
+                    amproj_attachLegalTapRecorder(candidate);
+                    amproj_watchLegalConsentDismissal(candidate);
+                    amproj_logCriticalEvent(@"legal.first_time_presented", @{
+                        @"class": NSStringFromClass(candidate.class) ?: @"",
+                        @"by": @"content"
+                    });
                 }
-                amproj_logCriticalEvent(@"legal.present_fallback", @{
-                    @"class": NSStringFromClass(controller.class) ?: @"",
-                    @"by_class": @(looksLegalByClass)
-                });
-                amproj_scheduleLegalAutoDismiss(controller);
-            } else {
-                // 第一次：正常显示，并在用户关掉它之后记住"已同意"。
-                amproj_logCriticalEvent(@"legal.first_time_presented", @{
-                    @"class": NSStringFromClass(controller.class) ?: @""
-                });
-                amproj_watchLegalConsentDismissal(controller);
-            }
+            });
         }
     }
     // The Blatant license module (Frameworks/AlightMotion.dylib) presents its

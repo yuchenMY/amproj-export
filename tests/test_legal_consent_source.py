@@ -47,9 +47,10 @@ class LegalConsentSourceTests(unittest.TestCase):
         self.assertIn("legal.first_time_presented", SOURCE)
         self.assertIn("legal.accepted_once", SOURCE)
         # 没点过之前绝不允许替用户放行：自动确认必须出现在 alreadyAccepted 分支里。
-        hook = SOURCE.split("static void hooked_presentVC", 1)[1]
-        gate = hook.index("if (amproj_legalAlreadyAccepted())")
-        auto = hook.index("amproj_autoAcceptLegalAlert((UIAlertController *)controller)")
+        handler = SOURCE.split("static void amproj_handleLegalController", 1)[1]
+        handler = handler.split("static void hooked_presentVC", 1)[0]
+        gate = handler.index("if (amproj_legalAlreadyAccepted())")
+        auto = handler.index("amproj_autoAcceptLegalAlert((UIAlertController *)controller)")
         self.assertLess(gate, auto)
 
     def test_fallback_dismisses_when_handler_is_unavailable(self):
