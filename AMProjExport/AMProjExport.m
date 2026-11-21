@@ -18850,25 +18850,34 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
             amproj_handleLegalController(controller, looksLegalByText, looksLegalByClass);
         } else {
             __weak UIViewController *weakCandidate = controller;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                UIViewController *candidate = weakCandidate;
-                if (!candidate) return;
-                if (!amproj_controllerShowsLegalText(candidate)) return;
-                if (amproj_legalAlreadyAccepted()) {
-                    [candidate dismissViewControllerAnimated:NO completion:nil];
-                    amproj_logCriticalEvent(@"legal.dismissed_after_first_time", @{
-                        @"class": NSStringFromClass(candidate.class) ?: @""
-                    });
-                } else {
-                    amproj_attachLegalTapRecorder(candidate);
-                    amproj_watchLegalConsentDismissal(candidate);
-                    amproj_logCriticalEvent(@"legal.first_time_presented", @{
-                        @"class": NSStringFromClass(candidate.class) ?: @"",
-                        @"by": @"content"
-                    });
-                }
-            });
+            // 视图可能是懒加载的（SwiftUI 宿主尤其如此），扫三次：
+            // 0.05s / 0.25s / 0.6s，命中一次就停。
+            for (NSNumber *delay in @[@0.05, @0.25, @0.6]) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+                    UIViewController *candidate = weakCandidate;
+                    if (!candidate) return;
+                    static const void *kHandledKey = &kHandledKey;
+                    if (objc_getAssociatedObject(candidate, kHandledKey)) return;
+                    if (!amproj_controllerShowsLegalText(candidate)) return;
+                    objc_setAssociatedObject(candidate, kHandledKey, @YES,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    if (amproj_legalAlreadyAccepted()) {
+                        [candidate dismissViewControllerAnimated:NO completion:nil];
+                        amproj_logCriticalEvent(@"legal.dismissed_after_first_time", @{
+                            @"class": NSStringFromClass(candidate.class) ?: @""
+                        });
+                    } else {
+                        amproj_attachLegalTapRecorder(candidate);
+                        amproj_watchLegalConsentDismissal(candidate);
+                        amproj_logCriticalEvent(@"legal.first_time_presented", @{
+                            @"class": NSStringFromClass(candidate.class) ?: @"",
+                            @"by": @"content"
+                        });
+                    }
+                });
+            }
         }
     }
     // The Blatant license module (Frameworks/AlightMotion.dylib) presents its
