@@ -2434,7 +2434,24 @@ static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
 // 但每秒一次的巡检会做整窗截图（drawViewHierarchy）+ 两次全树遍历，
 // 正好和用户感觉到的"工作台很卡"对上。这里在巡检入口先做一次廉价判断：
 // 不是首页/工程页就整段跳过，并把贴片收起来。
+// r153：A/B 开关。设备上存在 Library/AMProjExport.nocloud 时，
+// 云贴片相关的一切（挂载、巡检、点击监听）都不工作——用来判断
+// "编辑器卡顿"到底是我们的云 UI，还是 AM 自己渲染。
+static BOOL AMCloudUIKitDisabled(void) {
+    static BOOL disabled = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *library = [NSSearchPathForDirectoriesInDomains(
+            NSLibraryDirectory, NSUserDomainMask, YES) firstObject];
+        NSString *flag = [library stringByAppendingPathComponent:@"AMProjExport.nocloud"];
+        disabled = [[NSFileManager defaultManager] fileExistsAtPath:flag];
+        if (disabled) NSLog(@"[AMProjExport] cloud UI disabled by flag file");
+    });
+    return disabled;
+}
+
 static BOOL AMCloudOverlayWorkAllowed(void) {
+    if (AMCloudUIKitDisabled()) return NO;
     UIApplication *application = UIApplication.sharedApplication;
     if (application.applicationState != UIApplicationStateActive) return NO;
     UIWindow *window = AMCloudActiveWindow();
@@ -4203,7 +4220,9 @@ static BOOL AMCloudWindowHasCloudContentView(UIView *view, CGSize windowSize,
     if (!window) return;
     AMCloudLibraryViewController *overlay =
         objc_getAssociatedObject(window, &AMCloudBannerViewKey);
-    if (!overlay) { [self installWindowCloudOverlay]; return; }
+    // r153：没有贴片就直接返回。以前会在工程页一出现就创建（连带 WKWebView），
+    // 用户根本没点「云端」也要一直占着内存/GPU。现在只在点云端时懒创建。
+    if (!overlay) return;
     UIView *header = AMCloudSelectionHeaderView();
     NSLayoutConstraint *topConstraint =
         objc_getAssociatedObject(window, &AMCloudBannerTopKey);
@@ -4319,6 +4338,20 @@ static BOOL AMCloudWindowHasCloudContentView(UIView *view, CGSize windowSize,
 }
 
 - (void)setCloudLibraryVisible:(BOOL)visible {
+    // r153：窗口级贴片改成"点了才建、收起就拆"。
+    UIWindow *window = AMCloudActiveWindow();
+    if (visible) {
+        [self installWindowCloudOverlay];
+        AMCloudLibraryViewController *windowOverlay =
+            objc_getAssociatedObject(window, &AMCloudBannerViewKey);
+        if (windowOverlay) {
+            windowOverlay.view.hidden = NO;
+            [window bringSubviewToFront:windowOverlay.view];
+            [windowOverlay reload];
+        }
+    } else {
+        AMCloudTeardownWindowOverlay();
+    }
     for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
         AMCloudLibraryViewController *overlay =
             objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
