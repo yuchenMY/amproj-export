@@ -18690,6 +18690,47 @@ static void amproj_scheduleLegalAutoDismiss(UIViewController *controller) {
     });
 }
 
+// r145：隐私弹窗的正确语义——第一次正常弹，用户点过「继续」之后就永远不弹。
+// AM 自己在这台设备上没能把"已同意"持久化（每次进效果页都重弹），所以由我们
+// 自己记一个标记：只有"用户亲手关掉了那个弹窗"才置位，绝不在用户没点过的情况
+// 下擅自放行。
+static NSString *const kAMProjLegalAcceptedKey = @"amproj_legal_consent_accepted";
+
+static BOOL amproj_legalAlreadyAccepted(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kAMProjLegalAcceptedKey];
+}
+
+static void amproj_markLegalAccepted(NSString *reason) {
+    if (amproj_legalAlreadyAccepted()) return;
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kAMProjLegalAcceptedKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    amproj_logCriticalEvent(@"legal.accepted_once", @{ @"reason": reason ?: @"" });
+}
+
+// 放行这次弹窗，并盯着它：用户把它关掉（点了继续）之后才记"已同意"。
+// 只用公开属性轮询，不碰私有 ABI；最多盯 60 秒，之后不再管。
+static void amproj_watchLegalConsentDismissal(UIViewController *controller) {
+    if (!controller) return;
+    __weak UIViewController *weakController = controller;
+    __block NSInteger attempts = 0;
+    __block void (^poll)(void);
+    poll = ^{
+        UIViewController *alert = weakController;
+        if (!alert) return;
+        BOOL gone = (alert.presentingViewController == nil) || alert.isBeingDismissed;
+        if (gone) {
+            amproj_markLegalAccepted(@"user_dismissed_privacy_notice");
+            return;
+        }
+        if (++attempts < 60) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ if (poll) poll(); });
+        }
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ if (poll) poll(); });
+}
+
 // 类名层面的识别：非 UIAlertController 的法务页（SwiftUI 宿主 / 自定义 VC）
 static BOOL amproj_controllerLooksLegal(UIViewController *controller) {
     NSString *name = NSStringFromClass(controller.class) ?: @"";
@@ -18709,22 +18750,35 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     // 崩溃面包屑：留下「崩之前最后几个页面」这条线。环形缓冲 4KB，代价可忽略。
     AMProjCrashNote(@"present %@", NSStringFromClass(controller.class) ?: @"?");
-    // 法务同意弹窗：优先"不上屏 + 直接执行继续"；走不通就让它显示但立刻收掉。
+    // 法务同意弹窗：
+    //   ① 用户还没点过「继续」→ 原样放它出来（这是用户唯一需要点的一次）；
+    //   ② 用户已经点过 → 静默执行「继续」，不再打扰。
     {
         BOOL looksLegalByClass = amproj_controllerLooksLegal(controller);
         BOOL looksLegalByText = [controller isKindOfClass:UIAlertController.class] &&
             amproj_isLegalConsentAlert((UIAlertController *)controller);
-        if (looksLegalByText &&
-            amproj_autoAcceptLegalAlert((UIAlertController *)controller)) {
-            if (completion) dispatch_async(dispatch_get_main_queue(), completion);
-            return;
-        }
         if (looksLegalByText || looksLegalByClass) {
-            amproj_logCriticalEvent(@"legal.present_fallback", @{
-                @"class": NSStringFromClass(controller.class) ?: @"",
-                @"by_class": @(looksLegalByClass)
-            });
-            amproj_scheduleLegalAutoDismiss(controller);
+            if (amproj_legalAlreadyAccepted()) {
+                if (looksLegalByText &&
+                    amproj_autoAcceptLegalAlert((UIAlertController *)controller)) {
+                    amproj_logCriticalEvent(@"legal.auto_accept_after_first_time", @{
+                        @"class": NSStringFromClass(controller.class) ?: @""
+                    });
+                    if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+                    return;
+                }
+                amproj_logCriticalEvent(@"legal.present_fallback", @{
+                    @"class": NSStringFromClass(controller.class) ?: @"",
+                    @"by_class": @(looksLegalByClass)
+                });
+                amproj_scheduleLegalAutoDismiss(controller);
+            } else {
+                // 第一次：正常显示，并在用户关掉它之后记住"已同意"。
+                amproj_logCriticalEvent(@"legal.first_time_presented", @{
+                    @"class": NSStringFromClass(controller.class) ?: @""
+                });
+                amproj_watchLegalConsentDismissal(controller);
+            }
         }
     }
     // The Blatant license module (Frameworks/AlightMotion.dylib) presents its

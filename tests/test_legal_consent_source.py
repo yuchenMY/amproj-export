@@ -39,6 +39,19 @@ class LegalConsentSourceTests(unittest.TestCase):
         # 拿不到 handler 必须退出接管，让调用方走原生呈现。
         self.assertIn("if (!handler) return NO;", block)
 
+    def test_first_time_is_shown_then_never_again(self):
+        # r145：用户要的是"第一次正常弹一次、点过继续之后永远不弹"。
+        self.assertIn("kAMProjLegalAcceptedKey", SOURCE)
+        self.assertIn("amproj_legalAlreadyAccepted()", SOURCE)
+        self.assertIn("amproj_watchLegalConsentDismissal", SOURCE)
+        self.assertIn("legal.first_time_presented", SOURCE)
+        self.assertIn("legal.accepted_once", SOURCE)
+        # 没点过之前绝不允许替用户放行：自动确认必须出现在 alreadyAccepted 分支里。
+        hook = SOURCE.split("static void hooked_presentVC", 1)[1]
+        gate = hook.index("if (amproj_legalAlreadyAccepted())")
+        auto = hook.index("amproj_autoAcceptLegalAlert((UIAlertController *)controller)")
+        self.assertLess(gate, auto)
+
     def test_fallback_dismisses_when_handler_is_unavailable(self):
         # r144：有些版本的隐私弹窗不是 UIAlertController / handler 拿不到，
         # 必须有一条"先显示再立刻收掉"的兜底。
