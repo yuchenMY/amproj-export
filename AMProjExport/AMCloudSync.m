@@ -2533,7 +2533,7 @@ static void AMCloudTeardownWindowOverlay(void) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(window, &AMCloudBannerTopKey, nil,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        amproj_debugEvent(@"cloud.overlay.released_on_background", @{});
+        AMCloudDiagnostic(@"cloud.overlay.released_on_background", @{});
     }
     for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
         UIView *view = controller.viewIfLoaded;
