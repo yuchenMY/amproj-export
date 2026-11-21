@@ -2506,11 +2506,11 @@ static void AMCloudHideWindowOverlayIfNeeded(void) {
                 [manager updateCloudBackupBannerVisibilityForController:controller];
             }
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(interval * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (tick) tick();
-        });
+        // r152：不再自我续期。以前这里是每 1~2 秒一轮的常驻定时器，
+        // 在编辑器里就算被门禁跳过，也还有一次"判断该不该跳过"的成本，
+        // 而且门禁判错时直接扫全树。现在只在需要的时候手工触发一次。
+        (void)interval;
+        running = NO;
     };
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -4426,11 +4426,9 @@ static BOOL AMCloudBannerTickRunning = NO;
             anyOnScreen = YES;
             [manager updateCloudBackupBannerVisibilityForController:controller];
         }
-        if (anyOnScreen) {
-            [manager cloudBannerVisibilityTickLoop];
-        } else {
-            AMCloudBannerTickRunning = NO;
-        }
+        // r152：同样不再续期。切 tab 有点击监听兜底，不需要常驻轮询。
+        (void)anyOnScreen;
+        AMCloudBannerTickRunning = NO;
     });
 }
 
