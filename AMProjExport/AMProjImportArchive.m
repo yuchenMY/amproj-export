@@ -1213,11 +1213,18 @@ static NSString *AMProjImportXMLAttributeValue(NSString *tag,
 
 static NSString *AMProjImportMediaResourceName(NSString *rawURI) {
     NSString *uri = AMProjImportDecodeXMLReference(rawURI);
-    if (uri.length < 7 ||
-        ![[uri substringToIndex:7].lowercaseString isEqualToString:@"amproj:"]) {
-        return nil;
+    NSString *prefix = nil;
+    // r140：导出端改成引擎原生的 am-internal:/// 写法后，导入必须两种都认
+    // （amproj: 用于旧包，am-internal:/// 用于新包）。
+    if (uri.length >= 7 &&
+        [[uri substringToIndex:7].lowercaseString isEqualToString:@"amproj:"]) {
+        prefix = @"amproj:";
+    } else if (uri.length > 16 &&
+               [uri.lowercaseString hasPrefix:@"am-internal:///"]) {
+        prefix = @"am-internal:///";
     }
-    NSString *reference = [uri substringFromIndex:7];
+    if (!prefix) return nil;
+    NSString *reference = [uri substringFromIndex:prefix.length];
     BOOL ignoredDirectory = NO;
     NSError *ignoredError = nil;
     NSString *safeName = AMProjImportSafeName(reference, &ignoredDirectory,
@@ -1383,7 +1390,7 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
     if (!xml) return nil;
     NSError *regexError = nil;
     NSRegularExpression *regex = [NSRegularExpression
-        regularExpressionWithPattern:@"amproj:((?:&(?:amp|quot|apos|lt|gt);|[^\\\"'<>&])+)"
+        regularExpressionWithPattern:@"(?:amproj:|am-internal:///)((?:&(?:amp|quot|apos|lt|gt);|[^\\\"'<>&])+)"
                               options:0 error:&regexError];
     if (!regex) {
         AMProjImportFail(error, AMProjImportArchiveErrorInvalidXML,
@@ -1434,6 +1441,11 @@ static NSData *AMProjImportRewriteXML(NSData *xmlData,
                 operations, match.range, AMProjImportEscapeXMLValue(url.absoluteString));
             localRewrittenCount++;
         } else {
+            // r140：am-internal:/// 也可能是"本机素材库"的引用（真实工程包里
+            // 常见：媒体不在包里，引擎自己去内部库按哈希找）。这种找不到不算缺件，
+            // 原样留着交给引擎；只有 amproj: 引用找不到才算包里缺东西。
+            NSString *matched = [xml substringWithRange:match.range];
+            if ([matched.lowercaseString hasPrefix:@"am-internal:///"]) continue;
             NSString *decoded = AMProjImportDecodeXMLReference(reference);
             NSString *identity = decoded.precomposedStringWithCanonicalMapping.lowercaseString;
             if (identity.length) [missingReferences addObject:identity];

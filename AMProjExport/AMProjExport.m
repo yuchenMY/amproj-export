@@ -844,6 +844,21 @@ static BOOL amproj_valueLooksLikeResource(NSString *value) {
     return NO;
 }
 
+// AM 引擎自己的素材 URI 形如 am-internal:///<HASH>.<EXT>（真实工程包里的写法）。
+// 这类引用原样保留：文件按同名写进包里，URI 一个字符都不改，任何端点
+// （iOS / 安卓 / 二开版）都能按名字解析。
+static NSString *amproj_internalReferenceName(NSString *reference) {
+    if (![reference isKindOfClass:NSString.class] || reference.length <= 16) return nil;
+    if (![reference.lowercaseString hasPrefix:@"am-internal:///"]) return nil;
+    NSString *name = [reference substringFromIndex:@"am-internal:///".length];
+    if (!name.length || [name containsString:@"/"] || [name containsString:@"\\"] ||
+        [name containsString:@"?"] || [name containsString:@"#"] ||
+        [name hasPrefix:@"."]) {
+        return nil;
+    }
+    return name;
+}
+
 // 必须解析成功的引用（解析不到就说明包会缺件，直接失败）；
 // 其余"看起来像"的引用解析失败就跳过——它们可能只是文案里恰好带扩展名。
 static BOOL amproj_referenceIsRequired(NSString *reference) {
@@ -2107,6 +2122,18 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
             skippedOptional++;
             continue;
         }
+        NSString *internalName = amproj_internalReferenceName(reference);
+        if (internalName.length) {
+            // 原生 am-internal:/// 引用：按原名入包，不改写 URI。
+            if (!resources[internalName]) {
+                resources[internalName] = source;
+            } else if (![resources[internalName].path isEqualToString:source.path]) {
+                amproj_logCriticalEvent(@"direct.archive_name_collision", @{
+                    @"name": internalName
+                });
+            }
+            continue;
+        }
         NSString *sourceKey = source.path;
         NSString *archiveName = sourceNames[sourceKey];
         if (!archiveName) {
@@ -2120,8 +2147,10 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
             sourceDigests[sourceKey] = digest;
             archiveName = digestNames[digest];
             if (!archiveName) {
-                NSString *base = amproj_safeFilename(source.lastPathComponent, @"resource");
-                NSString *extension = source.pathExtension.lowercaseString;
+                // 非原生引用（file://、phasset-、相对路径）统一改写成引擎认识的
+                // am-internal:///<SHA1>.<EXT>：哈希用大写十六进制，扩展名沿用原文件。
+                NSString *base = digest.uppercaseString;
+                NSString *extension = source.pathExtension;
                 if (extension.length) base = [base stringByAppendingPathExtension:extension];
                 archiveName = base;
                 while (resources[archiveName]) {
@@ -2139,7 +2168,7 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
         }
         NSString *escapedOriginal = amproj_escapeXML(reference, YES);
         NSString *escapedReplacement = amproj_escapeXML(
-            [@"amproj:" stringByAppendingString:archiveName], YES);
+            [@"am-internal:///" stringByAppendingString:archiveName], YES);
         if (escapedOriginal.length) {
             [rewritten replaceOccurrencesOfString:escapedOriginal withString:escapedReplacement
                                           options:0 range:NSMakeRange(0, rewritten.length)];
@@ -2154,17 +2183,10 @@ static NSDictionary* amproj_collectResourcesAndRewriteXML(NSData *xmlData, NSURL
     // 就说明这个包里必然有素材缺失（安卓端表现就是部分叠层消失）。
     // 宁可让导出失败并说清楚，也不要交出一个悄悄缺图的包。
     NSUInteger unresolved = 0;
-    for (NSString *needle in @[@"am-internal:///", @"file:///"]) {
-        NSUInteger location = 0;
-        while (location < rewritten.length) {
-            NSRange range = [rewritten rangeOfString:needle
-                                             options:0
-                                               range:NSMakeRange(location,
-                                                   rewritten.length - location)];
-            if (range.location == NSNotFound) break;
-            unresolved++;
-            location = NSMaxRange(range);
-        }
+    AMProjXMLProbe *after = amproj_probeXML([rewritten dataUsingEncoding:NSUTF8StringEncoding]);
+    for (NSString *reference in after.resourceReferences) {
+        if (amproj_internalReferenceName(reference).length) continue;   // 已按原生写法落包
+        if (amproj_referenceIsRequired(reference)) unresolved++;
     }
     if (unresolved) {
         amproj_logCriticalEvent(@"direct.archive_unresolved_references", @{

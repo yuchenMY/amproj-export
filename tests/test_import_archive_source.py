@@ -45,7 +45,8 @@ class ImportArchiveSourceTests(unittest.TestCase):
     def test_xml_rewrite_and_atomic_publish_are_present(self):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn("amproj:", source)
-        self.assertIn('regularExpressionWithPattern:@"amproj:((?:&(?:amp|quot|apos|lt|gt);|[^\\\\\\\"\'<>&])+)"', source)
+        # r140：导出端改用引擎原生的 am-internal:///，导入两种 scheme 都要认。
+        self.assertIn("(?:amproj:|am-internal:///)", source)
         self.assertIn("AMProjImportEscapeXMLValue(url.absoluteString)", source)
         self.assertIn(".native-import.xml", source)
         self.assertIn("missing_reference_count", source)

@@ -57,10 +57,17 @@ class ProjectPackageCompletenessTests(unittest.TestCase):
 
     def test_unresolved_references_fail_the_export(self):
         block = self.collect_block
-        self.assertIn('@"am-internal:///"', block)
-        self.assertIn('@"file:///"', block)
+        self.assertIn("amproj_probeXML", block)
         self.assertIn("direct.archive_unresolved_references", block)
         self.assertIn("amproj_directError(24", block)
+
+    def test_export_writes_native_am_internal_names(self):
+        # 真实工程包里素材就是 am-internal:///<HASH>.<EXT>；写成别的 scheme
+        # 安卓端的引擎不认识，那些图层就会消失。
+        block = self.collect_block
+        self.assertIn('@"am-internal:///" stringByAppendingString:archiveName', block)
+        self.assertIn("amproj_internalReferenceName", block)
+        self.assertNotIn('@"amproj:" stringByAppendingString:archiveName', block)
 
     def test_xml_extension_is_not_treated_as_a_media_resource(self):
         # 资源条目不允许 .xml（ZIP writer 会拒绝），别把它拉进素材表。
