@@ -18696,15 +18696,69 @@ static void amproj_scheduleLegalAutoDismiss(UIViewController *controller) {
 // 下擅自放行。
 static NSString *const kAMProjLegalAcceptedKey = @"amproj_legal_consent_accepted";
 
+// r148：真机上 NSUserDefaults 的写入没有落盘（三次启动都还是"第一次"），
+// 所以改成写文件——Library 下的文件不受 prefs 域那套机制影响。
+static NSString *amproj_legalConsentFilePath(void) {
+    NSString *library = [NSSearchPathForDirectoriesInDomains(
+        NSLibraryDirectory, NSUserDomainMask, YES) firstObject];
+    return [library stringByAppendingPathComponent:@"AMProjExport.legalconsent"];
+}
+
+static NSString *amproj_legalClassesFilePath(void) {
+    NSString *library = [NSSearchPathForDirectoriesInDomains(
+        NSLibraryDirectory, NSUserDomainMask, YES) firstObject];
+    return [library stringByAppendingPathComponent:@"AMProjExport.legalclasses"];
+}
+
 static BOOL amproj_legalAlreadyAccepted(void) {
+    if ([[NSFileManager defaultManager] fileExistsAtPath:amproj_legalConsentFilePath()]) {
+        return YES;
+    }
     return [[NSUserDefaults standardUserDefaults] boolForKey:kAMProjLegalAcceptedKey];
 }
 
 static void amproj_markLegalAccepted(NSString *reason) {
     if (amproj_legalAlreadyAccepted()) return;
+    NSString *body = [NSString stringWithFormat:@"accepted %lld %@\n",
+                      (long long)time(NULL), reason ?: @""];
+    [[body dataUsingEncoding:NSUTF8StringEncoding]
+        writeToFile:amproj_legalConsentFilePath() atomically:YES];
     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kAMProjLegalAcceptedKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
     amproj_logCriticalEvent(@"legal.accepted_once", @{ @"reason": reason ?: @"" });
+}
+
+// 记住"法务弹窗是哪个类"。下次启动时靠它做呈现前拦截，避免先弹出来再关。
+static NSSet<NSString *> *amproj_legalClassNames(void) {
+    static NSSet<NSString *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *text = [NSString stringWithContentsOfFile:amproj_legalClassesFilePath()
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:NULL];
+        NSMutableSet<NSString *> *names = [NSMutableSet set];
+        for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+            NSString *trimmed = [line stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (trimmed.length) [names addObject:trimmed];
+        }
+        cache = [names copy];
+    });
+    return cache;
+}
+
+static void amproj_rememberLegalClassName(NSString *className) {
+    if (!className.length) return;
+    if ([amproj_legalClassNames() containsObject:className]) return;
+    NSMutableString *text = [NSMutableString string];
+    NSString *existing = [NSString stringWithContentsOfFile:amproj_legalClassesFilePath()
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:NULL];
+    if (existing.length) [text appendString:existing];
+    [text appendFormat:@"%@\n", className];
+    [[text dataUsingEncoding:NSUTF8StringEncoding]
+        writeToFile:amproj_legalClassesFilePath() atomically:YES];
+    amproj_logCriticalEvent(@"legal.class_remembered", @{ @"class": className });
 }
 
 // 放行这次弹窗，并盯着它：用户把它关掉（点了继续）之后才记"已同意"。
@@ -18839,14 +18893,41 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     // 崩溃面包屑：留下「崩之前最后几个页面」这条线。环形缓冲 4KB，代价可忽略。
     AMProjCrashNote(@"present %@", NSStringFromClass(controller.class) ?: @"?");
-    // 法务同意弹窗（三种识别：文案 / 类名 / 呈现后扫视图里的文字）。
-    //   ① 用户还没点过「继续」→ 原样放它出来，并记住"他点过"；
-    //   ② 已经点过 → 静默确认或立刻收掉，不再打扰。
+    // 法务同意弹窗：
+    //   ① 用户还没点过「继续」→ 原样放它出来，并记住"他点过"和它是哪个类；
+    //   ② 已经点过 → **呈现之前**就拦掉，一个像素都不上屏。
     {
+        NSString *legalClassName = NSStringFromClass(controller.class) ?: @"";
         BOOL looksLegalByClass = amproj_controllerLooksLegal(controller);
         BOOL looksLegalByText = [controller isKindOfClass:UIAlertController.class] &&
             amproj_isLegalConsentAlert((UIAlertController *)controller);
-        if (looksLegalByText || looksLegalByClass) {
+
+        if (amproj_legalAlreadyAccepted()) {
+            BOOL knownClass = [amproj_legalClassNames() containsObject:legalClassName];
+            if (looksLegalByText || looksLegalByClass || knownClass) {
+                // 已知类也再确认一次文字，避免把这个类上的其它弹窗一起吞掉。
+                BOOL confirmed = looksLegalByText || looksLegalByClass ||
+                    amproj_controllerShowsLegalText(controller);
+                if (confirmed) {
+                    amproj_rememberLegalClassName(legalClassName);
+                    if (looksLegalByText &&
+                        amproj_autoAcceptLegalAlert((UIAlertController *)controller)) {
+                        amproj_logCriticalEvent(@"legal.auto_accept_after_first_time", @{
+                            @"class": legalClassName
+                        });
+                        if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+                        return;
+                    }
+                    // 不是标准 alert、拿不到按钮：干脆不放上屏。
+                    amproj_logCriticalEvent(@"legal.blocked_before_present", @{
+                        @"class": legalClassName
+                    });
+                    if (completion) dispatch_async(dispatch_get_main_queue(), completion);
+                    return;
+                }
+            }
+        } else if (looksLegalByText || looksLegalByClass) {
+            amproj_rememberLegalClassName(legalClassName);
             amproj_handleLegalController(controller, looksLegalByText, looksLegalByClass);
         } else {
             __weak UIViewController *weakCandidate = controller;
@@ -18863,6 +18944,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                     if (!amproj_controllerShowsLegalText(candidate)) return;
                     objc_setAssociatedObject(candidate, kHandledKey, @YES,
                                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    amproj_rememberLegalClassName(NSStringFromClass(candidate.class) ?: @"");
                     if (amproj_legalAlreadyAccepted()) {
                         [candidate dismissViewControllerAnimated:NO completion:nil];
                         amproj_logCriticalEvent(@"legal.dismissed_after_first_time", @{

@@ -69,5 +69,22 @@ class LegalConsentSourceTests(unittest.TestCase):
                         hook.index("AMProjStartSelfCloudUpload"))
 
 
+    def test_consent_flag_is_file_based(self):
+        # r148：真机上 NSUserDefaults 不落盘，标记改写成 Library 下的文件。
+        self.assertIn("AMProjExport.legalconsent", SOURCE)
+        self.assertIn("amproj_legalConsentFilePath", SOURCE)
+        self.assertIn("AMProjExport.legalclasses", SOURCE)
+        self.assertIn("amproj_rememberLegalClassName", SOURCE)
+
+    def test_already_accepted_blocks_before_presentation(self):
+        # 要求：点过之后一个像素都不上屏 —— 必须在 present 之前 return。
+        hook = SOURCE.split("static void hooked_presentVC", 1)[1]
+        hook = hook.split("amproj_forwardPresentation", 1)[1]
+        blocked = hook.index("legal.blocked_before_present")
+        first_present = hook.index("orig_presentVC(self, _cmd, controller")
+        self.assertLess(blocked, first_present)
+
+
+
 if __name__ == "__main__":
     unittest.main()
