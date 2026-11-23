@@ -2445,7 +2445,13 @@ static BOOL AMCloudUIKitDisabled(void) {
             NSLibraryDirectory, NSUserDomainMask, YES) firstObject];
         NSString *flag = [library stringByAppendingPathComponent:@"AMProjExport.nocloud"];
         disabled = [[NSFileManager defaultManager] fileExistsAtPath:flag];
-        if (disabled) NSLog(@"[AMProjExport] cloud UI disabled by flag file");
+        // 也支持打包时在 Info.plist 里关掉（给 A/B 对照包用）：
+        // AMProjCloudUIEnabled = false 时云 UI 整体不工作。
+        id plistFlag = NSBundle.mainBundle.infoDictionary[@"AMProjCloudUIEnabled"];
+        if ([plistFlag isKindOfClass:NSNumber.class] && ![plistFlag boolValue]) {
+            disabled = YES;
+        }
+        if (disabled) NSLog(@"[AMProjExport] cloud UI disabled by flag");
     });
     return disabled;
 }
