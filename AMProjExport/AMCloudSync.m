@@ -4294,6 +4294,9 @@ static BOOL AMCloudWindowHasCloudContentView(UIView *view, CGSize windowSize,
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
         initWithTarget:self action:@selector(handleCloudTabTap:)];
     tap.cancelsTouchesInView = NO;
+    // r154：不要因为等这个手势的识别结果而拖住其它触摸/滚动。
+    tap.delaysTouchesBegan = NO;
+    tap.delaysTouchesEnded = NO;
     tap.delegate = (id<UIGestureRecognizerDelegate>)self;
     [window addGestureRecognizer:tap];
     installed = YES;
@@ -4310,32 +4313,50 @@ static BOOL AMCloudWindowHasCloudContentView(UIView *view, CGSize windowSize,
     UIView *host = recognizer.view;
     if (!host) return;
     CGPoint point = [recognizer locationInView:host];
-    NSString *label = AMCloudLabelAtPoint(host, point, 0);
-    if (!label.length) return;
-    NSString *folded = label.lowercaseString;
-    BOOL isCloud = [label containsString:@"云端"] || [label containsString:@"雲端"] ||
-        [folded containsString:@"cloud"];
-    BOOL isOtherTab = [label containsString:@"项目"] || [label containsString:@"您的模板"] ||
-        [label containsString:@"元素"] || [label containsString:@"模板"];
+    // r154：以前每次点击都会遍历整窗无障碍树找"云端"文字——点一下就扫一棵树，
+    // 滚动/点选都会发涩。现在只做命中测试：点在顶部 tab 条里才处理，按 x 比例判档。
+    UIView *hit = [host hitTest:point withEvent:nil];
+    UIView *tabBar = nil;
+    for (UIView *view = hit; view; view = view.superview) {
+        NSString *name = NSStringFromClass(view.class) ?: @"";
+        if ([name containsString:@"SelectionHeaderView"] ||
+            [name containsString:@"HomepageTabBarView"] ||
+            [name containsString:@"Segment"]) {
+            tabBar = view;
+            break;
+        }
+        if (view == host) break;
+    }
+    if (!tabBar) return;
+    CGFloat width = CGRectGetWidth(tabBar.bounds);
+    if (width <= 1.0) return;
+    CGFloat x = [recognizer locationInView:tabBar].x;
+    CGFloat fraction = x / width;
+    // 865 首页顶部四档：项目 / 您的模板 / 元素 / 云端，云端在最右。
+    BOOL isCloud = fraction > 0.70;
     if (isCloud) {
         [self setCloudLibraryVisible:YES];
-    } else if (isOtherTab) {
+    } else {
         [self setCloudLibraryVisible:NO];
     }
     @try {
         NSString *path = [NSSearchPathForDirectoriesInDomains(
             NSCachesDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
-        NSString *line = [NSString stringWithFormat:@"tap label=%@ cloud=%d other=%d\n",
-                          label, isCloud, isOtherTab];
+        NSString *line = [NSString stringWithFormat:
+            @"tapBar frac=%.2f cloud=%d\n", fraction, isCloud];
         NSMutableData *data = [[NSData dataWithContentsOfFile:path] mutableCopy]
             ?: [NSMutableData data];
         [data appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        if (data.length > 32 * 1024) {
+            data = [[data subdataWithRange:NSMakeRange(data.length - 24 * 1024, 24 * 1024)] mutableCopy];
+        }
         [data writeToFile:path atomically:NO];
     } @catch (NSException *exception) {
         // 面包屑失败不影响主流程
     }
 }
+
 
 - (void)setCloudLibraryVisible:(BOOL)visible {
     // r153：窗口级贴片改成"点了才建、收起就拆"。
