@@ -3,6 +3,7 @@
 #import "AMDebugTransport.h"
 #import "AMEditorCustomization.h"
 #import "AMProjV865ProjectFlow.h"
+#import "AMCloudTabPolicy.h"
 #if AMPROJ_BETA_DIAGNOSTICS
 #import "AMProjBetaDiagnostics.h"
 #import "AMProjPerformancePolicy.h"
@@ -1562,6 +1563,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)resetAccountContent;
 @end
 
+@class AMCloudLibraryViewController;
+static UIWindow *AMCloudActiveWindow(void);
+
 @interface AMCloudManager : NSObject
 @property(nonatomic, strong) AMCloudClient *client;
 @property(nonatomic, copy) AMCloudImportHandler importHandler;
@@ -1596,6 +1600,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @property(nonatomic, copy) NSString *accountAvatarURL;
 @property(nonatomic, copy) NSString *accountAvatarRequestID;
 @property(nonatomic) BOOL accountAvatarRefreshInFlight;
+@property(nonatomic, strong) AMCloudLibraryViewController *embeddedLibrary;
+@property(nonatomic, weak) UIView *embeddedHeader;
+@property(nonatomic) NSUInteger cloudSelectionGeneration;
 + (instancetype)shared;
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
@@ -1606,6 +1613,8 @@ extern BOOL AMProjStartSelfCloudUploadWithMedia(BOOL includeMedia);
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller;
 - (void)installCloudTabTapWatcher;
 - (void)setCloudLibraryVisible:(BOOL)visible;
+- (void)refreshWindowCloudOverlayVisibility;
+- (void)cloudSegmentSelectionDidChange;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
 - (void)refreshAccountAvatar;
@@ -1823,7 +1832,6 @@ static BOOL AMCloudClassIsNSObjectDerived(Class cls) {
 // 靠它先把盖层亮出来（3 秒窗口），空态随后接棒。
 
 static void *AMCloudSubtabOriginalIMPKey = &AMCloudSubtabOriginalIMPKey;
-static NSTimeInterval AMCloudSubtabSignalAt = 0;
 
 static IMP AMCloudOriginalSubtabOpened(Class cls) {
     for (Class current = cls; current; current = class_getSuperclass(current)) {
@@ -1836,8 +1844,7 @@ static IMP AMCloudOriginalSubtabOpened(Class cls) {
 static void AMCloudSubtabOpenedHook(id self, SEL _cmd) {
     IMP original = AMCloudOriginalSubtabOpened(object_getClass(self));
     if (original) ((void (*)(id, SEL))original)(self, _cmd);
-    AMCloudSubtabSignalAt = [NSDate date].timeIntervalSince1970;
-    NSLog(@"[AMProjExport] cloud subtab signal fired");
+    [[AMCloudManager shared] cloudSegmentSelectionDidChange];
 }
 
 static void AMCloudInstallSubtabObserverHooks(void) {
@@ -2450,11 +2457,6 @@ extern NSNotificationName const AMCloudLibraryDidChangeNotification;
     self.asyncImportHandler = importHandler;
 }
 
-// r99：云 tab 的整块替换不再赌"类名/生命周期钩子"。每秒扫一次窗口里的
-// 控制器树，只要页面上出现工程页（带分段控件）就确保 overlay 挂上；已经
-// 挂过的会被记录，不会重复挂。
-static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void);
-
 // r138：编辑��（工作台）、新建工程这类页面上不需要云贴片，
 // 但每秒一次的巡检会做整窗截图（drawViewHierarchy）+ 两次全树遍历，
 // 正好和用户感觉到的"工作台很卡"对上。这里在巡检入口先做一次廉价判断：
@@ -2517,83 +2519,21 @@ static BOOL AMCloudOverlayWorkAllowed(void) {
 }
 
 static void AMCloudHideWindowOverlayIfNeeded(void) {
-    UIWindow *window = AMCloudActiveWindow();
-    if (!window) return;
-    AMCloudLibraryViewController *overlay =
-        objc_getAssociatedObject(window, &AMCloudBannerViewKey);
-    if (!overlay) return;
-    UIView *overlayView = overlay.viewIfLoaded;
-    if (overlayView && !overlayView.hidden) {
-        overlayView.hidden = YES;
-    }
+    [[AMCloudManager shared] setCloudLibraryVisible:NO];
 }
 
 - (void)startCloudOverlayWatchdog {
-    static BOOL running = NO;
-    if (running) return;
-    running = YES;
-    __weak typeof(self) weakSelf = self;
-    __block void (^tick)(void);
-    tick = ^{
-        AMCloudManager *manager = weakSelf;
-        if (!manager) { running = NO; return; }
-        NSTimeInterval interval = 2.0;
-        if (!AMCloudOverlayWorkAllowed()) {
-            // 编辑器里什么都别做：一次截图 + 两轮全树遍历就是掉帧的来源。
-            AMCloudHideWindowOverlayIfNeeded();
-        } else {
-            AMCloudAttachVisibleProjectsControllers();
-            [manager refreshWindowCloudOverlayVisibility];
-            // 贴片正在显示时保持 1 秒，切 tab 才有即时反馈；否则 2 秒足够。
-            AMCloudLibraryViewController *overlay =
-                objc_getAssociatedObject(AMCloudActiveWindow(), &AMCloudBannerViewKey);
-            if (overlay && !overlay.viewIfLoaded.hidden) interval = 1.0;
-            // 顺带保持"当前是不是云端 tab"的判定在跑（决定 overlay 显示）。
-            for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
-                if (!controller.viewIfLoaded.window) continue;
-                [manager updateCloudBackupBannerVisibilityForController:controller];
-            }
-        }
-        // r152：不再自我续期。以前这里是每 1~2 秒一轮的常驻定时器，
-        // 在编辑器里就算被门禁跳过，也还有一次"判断该不该跳过"的成本，
-        // 而且门禁判错时直接扫全树。现在只在需要的时候手工触发一次。
-        (void)interval;
-        running = NO;
-    };
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (tick) tick();
+    // 只在返回前台时核对一次，不保留常驻轮询。
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!AMCloudOverlayWorkAllowed()) AMCloudHideWindowOverlayIfNeeded();
+        else [self refreshWindowCloudOverlayVisibility];
     });
 }
 
-// r150：贴片里挂着一个 WKWebView。用户切出去之后它还在内存里占着，
-// 系统内存吃紧时整进程就被回收——表现就是"回来必须重新进"。
-// 进后台直接拆掉，回前台再按需重挂。
 static void AMCloudTeardownWindowOverlay(void) {
-    UIWindow *window = AMCloudActiveWindow();
-    if (!window) return;
-    AMCloudLibraryViewController *overlay =
-        objc_getAssociatedObject(window, &AMCloudBannerViewKey);
-    if (overlay) {
-        UIView *overlayView = overlay.viewIfLoaded;
-        [overlayView removeFromSuperview];
-        objc_setAssociatedObject(window, &AMCloudBannerViewKey, nil,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(window, &AMCloudBannerTopKey, nil,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        AMCloudDiagnostic(@"cloud.overlay.released_on_background", @{});
-    }
-    for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
-        UIView *view = controller.viewIfLoaded;
-        AMCloudLibraryViewController *banner =
-            objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
-        if (banner) {
-            [banner.viewIfLoaded removeFromSuperview];
-            objc_setAssociatedObject(controller, &AMCloudBannerViewKey, nil,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        (void)view;
-    }
+    AMCloudManager *manager = [AMCloudManager shared];
+    manager.cloudSelectionGeneration++;
+    [manager setCloudLibraryVisible:NO];
 }
 
 - (void)applicationDidEnterBackground:(NSNotification *)notification {
@@ -3744,10 +3684,6 @@ static void AMCloudTeardownWindowOverlay(void) {
 // showCloudBackupManager: 打开完全自有的云端备份管理器（自有界面 + 自有服务器数据，
 // 不依赖 AM 官方的任何在线服务；AM 官方服务下线也不影响云工程功能）。
 static char AMCloudBannerViewKey;
-static char AMCloudBannerTopKey;
-static char AMCloudBannerLabelKey;
-static char AMCloudBannerBarKey;
-static char AMCloudBannerFetchedKey;
 
 // "云端"子标签的本地化标题：与登录墙文案同在 AlightMotion_Homepage.bundle
 // 的 Localizable_cloud 表，读不到时用中文兜底。
@@ -3888,16 +3824,6 @@ static NSInteger AMCloudCloudSegmentIndex(UIView *control) {
     return -1;
 }
 
-// 横幅所在工程页的弱引用表：分段索引变化时逐个刷新可见性。
-static NSHashTable<UIViewController *> *AMCloudBannerControllersTable(void) {
-    static NSHashTable<UIViewController *> *table;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        table = [NSHashTable weakObjectsHashTable];
-    });
-    return table;
-}
-
 // 云储存水位卡（p4 样式）：白底圆角卡，标题"云储存"+右侧已用/总量灰字，
 // 下方细进度条随配额平滑填充。只在"云端"子标签页显示：分段控件索引变化
 // 由 setSelectedIndex: 观察 hook 通知，横幅挂载与每次切换都会重新评估。
@@ -3986,130 +3912,20 @@ static BOOL AMCloudOfficialCloudContentOnScreen(UIView *view, NSInteger depth) {
     return NO;
 }
 
-// 865 的云端 tab 是 SwiftUI 胶囊，分段控件、空态文案、Selected trait 三条
-// 通道在真机上全部读不到（bannerlog: seg=0 text=0 signal=0）。所以不再猜状态，
-// 直接监听窗口上的点击：点到"云端"就显示我们的云空间列表，点到别的基础
-// tab 就收起。a11y 标签和 frame 是 SwiftUI 唯一稳定暴露的东西。
-static NSString *AMCloudLabelAtPoint(UIView *view, CGPoint point, NSInteger depth) {
-    if (!view || depth > 24 || view.hidden || view.alpha < 0.05) return nil;
-    NSString *best = nil;
-    CGFloat bestArea = CGFLOAT_MAX;
-    // 只在用户真的点屏幕时走这里（不是定时器），并且整段包在 @try 里：
-    // 拿到的不是数组、或元素已被释放，都退化成"这一层没标签"，不崩。
-    @try {
-        id elements = view.accessibilityElements;
-        if (![elements isKindOfClass:NSArray.class]) elements = nil;
-        for (id element in (NSArray *)elements ?: @[]) {
-            NSString *label = AMCloudAccessibilityLabelOf(element);
-            if (!label.length) continue;
-            CGRect frame = CGRectZero;
-            @try {
-                frame = [element accessibilityFrame];
-            } @catch (NSException *exception) {
-                continue;
-            }
-            if (CGRectIsEmpty(frame) || !CGRectContainsPoint(frame, point)) continue;
-            CGFloat area = CGRectGetWidth(frame) * CGRectGetHeight(frame);
-            if (area < bestArea) {
-                bestArea = area;
-                best = label;
-            }
-        }
-    } @catch (__unused NSException *exception) {
-        // 读取失败就当这层没有可读标签
-    }
-    if (view.isAccessibilityElement) {
-        CGRect frame = view.accessibilityFrame;
-        if (!CGRectIsEmpty(frame) && CGRectContainsPoint(frame, point)) {
-            CGFloat area = CGRectGetWidth(frame) * CGRectGetHeight(frame);
-            if (area < bestArea) {
-                bestArea = area;
-                best = AMCloudAccessibilityLabelOf(view);
-            }
-        }
-    }
-    for (UIView *child in view.subviews) {
-        NSString *label = AMCloudLabelAtPoint(child, point, depth + 1);
-        if (!label.length) continue;
-        CGRect frame = child.accessibilityFrame;
-        CGFloat area = CGRectGetWidth(frame) * CGRectGetHeight(frame);
-        if (!CGSizeEqualToSize(frame.size, CGSizeZero) && area < bestArea) {
-            bestArea = area;
-            best = label;
-        } else if (!best.length) {
-            best = label;
-        }
-    }
-    return best;
-}
-
-// 探针：把当前窗口的控制器/视图类名+尺寸落到文件，用来确认 865 的云端
-// 页面到底由什么类承载（a11y 和文字都读不到，只能靠结构）。
-// iOS 26 上 UIApplication.keyWindow 返回 nil（早就废弃），之前探针和
-// 点击监听都因为这个提前 return，等于一直没装上。这里按场景找真正的前台窗口。
+// 865 子标签由 SwiftUI 承载，点击只触发核对，实际选中状态决定是否嵌入。
 static UIWindow *AMCloudActiveWindow(void) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        if (scene.activationState != UISceneActivationStateForegroundActive) continue;
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        for (UIWindow *window in windowScene.windows) {
-            if (window.isKeyWindow) return window;
-        }
-        for (UIWindow *window in windowScene.windows) {
-            if (!window.hidden && window.alpha > 0.01) return window;
+        if (![scene isKindOfClass:UIWindowScene.class] ||
+            scene.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.isKeyWindow && window.windowLevel == UIWindowLevelNormal) return window;
         }
     }
-    for (UIWindow *window in UIApplication.sharedApplication.windows) {
-        if (window.isKeyWindow) return window;
-    }
-    return UIApplication.sharedApplication.windows.firstObject;
+    return nil;
 }
 
-static void AMCloudDumpNode(UIView *view, NSInteger depth, NSMutableString *out) {
-    if (!view || depth > 12) return;
-    CGRect frame = view.frame;
-    if (CGRectGetWidth(frame) * CGRectGetHeight(frame) < 400) return;
-    // 注意：第一个 %@ 必须是对象。以前传的是 C 字符串 "  "，运行时把它
-    // 当对象调 respondsToSelector → EXC_BREAKPOINT 闪退（r118 的崩溃）。
-    NSString *indent = depth > 0 ? @"  " : @"";
-    [out appendFormat:@"%@%@ (%.0f,%.0f,%.0fx%.0f)\n",
-        indent, NSStringFromClass(view.class) ?: @"?",
-        frame.origin.x, frame.origin.y,
-        CGRectGetWidth(frame), CGRectGetHeight(frame)];
-    for (UIView *child in view.subviews) {
-        AMCloudDumpNode(child, depth + 1, out);
-    }
-}
-
-static void AMCloudDumpViewTree(void) {
-    UIWindow *window = AMCloudActiveWindow();
-    if (!window) return;
-    NSMutableString *out = [NSMutableString string];
-    [out appendFormat:@"--- %@\n", [NSDate date]];
-    UIViewController *controller = window.rootViewController;
-    while (controller) {
-        [out appendFormat:@"VC %@ presented=%@\n", NSStringFromClass(controller.class),
-            controller.presentedViewController
-                ? NSStringFromClass(controller.presentedViewController.class) : @"-"];
-        UIViewController *next = controller.presentedViewController;
-        if (!next && [controller isKindOfClass:UINavigationController.class]) {
-            next = ((UINavigationController *)controller).topViewController;
-        }
-        controller = next;
-    }
-    AMCloudDumpNode(window, 0, out);
-    if (out.length > 12000) out = [[out substringToIndex:12000] mutableCopy];
-    NSString *path = [NSSearchPathForDirectoriesInDomains(
-        NSCachesDirectory, NSUserDomainMask, YES).firstObject
-        stringByAppendingPathComponent:@"AMProjExport.viewtree"];
-    [out writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
-}
-
-// 865 的项目页是 SwiftUI（Homepage.SelectionHeaderView / TabBarView），
-// 分段控件、文字、无障碍全部读不到。唯一稳定的信息是"选中的胶囊是深色"，
-// 所以直接截那一行判色：深色块的中心偏右 = 云端被选中。
 static UIView *AMCloudFindViewWithClassName(UIView *view, NSString *needle, NSInteger depth) {
-    if (!view || depth > 24) return nil;
+    if (!view || depth > 24 || view.hidden || view.alpha < 0.05) return nil;
     if ([NSStringFromClass(view.class) containsString:needle]) return view;
     for (UIView *child in view.subviews) {
         UIView *match = AMCloudFindViewWithClassName(child, needle, depth + 1);
@@ -4118,220 +3934,129 @@ static UIView *AMCloudFindViewWithClassName(UIView *view, NSString *needle, NSIn
     return nil;
 }
 
+// 必须是前台真实可点的子标签。主导航、离屏缓存页和模态背后的页面均不能命中。
 static UIView *AMCloudSelectionHeaderView(void) {
     UIWindow *window = AMCloudActiveWindow();
-    return window ? AMCloudFindViewWithClassName(window, @"SelectionHeaderView", 0) : nil;
+    if (!window) return nil;
+    UIView *header = AMCloudFindViewWithClassName(window, @"SelectionHeaderView", 0);
+    if (!header || header.window != window) return nil;
+    CGRect frame = [header convertRect:header.bounds toView:window];
+    if (CGRectGetWidth(frame) < 80 || CGRectGetHeight(frame) < 20 ||
+        !CGRectContainsRect(window.bounds, frame)) return nil;
+    CGPoint point = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
+    UIView *hit = [window hitTest:point withEvent:nil];
+    return hit && (hit == header || [hit isDescendantOfView:header]) ? header : nil;
 }
 
-// 返回 -1 表示没截到（不做判断），0 表示别的 tab，1 表示云端。
-static NSInteger AMCloudDetectCloudPillSelected(void) {
-    UIView *header = AMCloudSelectionHeaderView();
-    UIWindow *window = AMCloudActiveWindow();
-    if (!header || !window) return -1;
-    CGRect rect = [header convertRect:header.bounds toView:window];
-    if (CGRectGetWidth(rect) < 50 || CGRectGetHeight(rect) < 30) return -1;
-
+// 只截取子标签自身，不做整窗回读、不遍历 SwiftUI 无障碍树；仅由页面/点击事件调用。
+static NSInteger AMCloudDetectCloudPillSelected(UIView *header) {
+    if (!header) return -1;
+    CGSize size = header.bounds.size;
+    if (size.width < 80 || size.height < 20 || size.width > 1500 || size.height > 300)
+        return -1;
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
-    format.scale = 1.0;   // 判色不需要 3 倍，省 CPU
+    format.scale = 1;
+    format.opaque = YES;
     UIGraphicsImageRenderer *renderer =
-        [[UIGraphicsImageRenderer alloc] initWithSize:rect.size format:format];
+        [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
     UIImage *snapshot = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        // SwiftUI 的 layer renderInContext 截出来是黑的，必须走 drawViewHierarchy
-        [window drawViewHierarchyInRect:CGRectMake(-rect.origin.x, -rect.origin.y,
-                                                   CGRectGetWidth(window.bounds),
-                                                   CGRectGetHeight(window.bounds))
-                     afterScreenUpdates:NO];
+        [UIColor.whiteColor setFill];
+        UIRectFill((CGRect){CGPointZero, size});
+        [header drawViewHierarchyInRect:(CGRect){CGPointZero, size} afterScreenUpdates:NO];
         (void)context;
     }];
-    CGImageRef cgImage = snapshot.CGImage;
-    if (!cgImage) return -1;
-    size_t width = CGImageGetWidth(cgImage);
-    size_t height = CGImageGetHeight(cgImage);
-    if (!width || !height) return -1;
-    size_t bytesPerRow = width * 4;
-    uint8_t *pixels = calloc(bytesPerRow * height, 1);
+    CGImageRef image = snapshot.CGImage;
+    if (!image) return -1;
+    size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image);
+    size_t stride = width * 4;
+    uint8_t *pixels = calloc(height, stride);
     if (!pixels) return -1;
     CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-    CGContextRef context = CGBitmapContextCreate(pixels, width, height, 8, bytesPerRow,
+    CGContextRef context = CGBitmapContextCreate(pixels, width, height, 8, stride,
         space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(space);
-    if (!context) { free(pixels); return -1; }
-    CGContextDrawImage(context, CGRectMake(0, 0, width, height), cgImage);
-    CGContextRelease(context);
-
-    // 逐列统计下半部分的深色像素（选中的胶囊是深底白字）
-    size_t top = height / 2;
-    NSUInteger columnThreshold = MAX(2, (height - top) / 6);
-    NSInteger rightmostEnd = -1;
-    NSInteger runStart = -1;
-    for (size_t x = 0; x < width; x++) {
-        NSUInteger dark = 0;
-        for (size_t y = top; y < height; y++) {
-            uint8_t *pixel = pixels + y * bytesPerRow + x * 4;
-            if ((NSUInteger)pixel[0] + pixel[1] + pixel[2] < 330) dark += 1;
-        }
-        BOOL isDarkColumn = dark > columnThreshold;
-        if (isDarkColumn && runStart < 0) runStart = (NSInteger)x;
-        if (!isDarkColumn && runStart >= 0) {
-            rightmostEnd = (NSInteger)x;   // 只关心最后一个连续段的结束
-            runStart = -1;
-        }
+    NSInteger state = -1;
+    if (context) {
+        CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+        CGContextRelease(context);
+        state = AMCloudSelectedPillRGBA(pixels, width, height, stride);
     }
-    if (runStart >= 0) rightmostEnd = (NSInteger)width;
     free(pixels);
-    if (rightmostEnd < 0) return -1;
-    double ratio = (double)rightmostEnd / (double)width;
-    // 云端是最右那个胶囊：它的右边缘应该落在画面右侧 1/3 处
-    return ratio > 0.66 ? 1 : 0;
+    return state;
 }
 
-// 把云空间列表直接挂到窗口内容区（底部 tab 栏以上），不依赖任何控制器类名。
-- (void)installWindowCloudOverlay {
-    UIWindow *window = AMCloudActiveWindow();
-    if (!window) return;
-    AMCloudLibraryViewController *overlay =
-        objc_getAssociatedObject(window, &AMCloudBannerViewKey);
-    if (overlay) return;
-    UIViewController *host = window.rootViewController;
-    if (!host) return;
-    overlay = [AMCloudLibraryViewController new];
-    overlay.manager = self;
-    // 不做 childViewController 容器：之前既 addChild 又把 view 加到 window，
-    // UIKit 认为"控制器不在该 view 的父链上"，直接抛异常 SIGABRT。
-    UIView *hostView = host.view ?: window;
-    UIView *overlayView = overlay.view;
-    overlayView.translatesAutoresizingMaskIntoConstraints = NO;
-    overlayView.hidden = YES;
-    overlayView.backgroundColor = UIColor.systemBackgroundColor;
-    [hostView addSubview:overlayView];
-    CGFloat tabBarHeight = 114.0;
-    UIView *tabBar = AMCloudFindViewWithClassName(window, @"HomepageTabBarView", 0);
-    if (tabBar && tabBar.bounds.size.height > 40) {
-        tabBarHeight = tabBar.bounds.size.height;
+// 找包含子标签及下方内容区的最近控制器，不把云列表挂到整窗或首页根控制器。
+static UIViewController *AMCloudContentHostForHeader(UIView *header) {
+    for (UIResponder *responder = header.nextResponder; responder;
+         responder = responder.nextResponder) {
+        if (![responder isKindOfClass:UIViewController.class]) continue;
+        UIViewController *controller = (UIViewController *)responder;
+        UIView *view = controller.viewIfLoaded;
+        if (!view || view == view.window || ![header isDescendantOfView:view]) continue;
+        CGRect frame = [header convertRect:header.bounds toView:view];
+        if (CGRectGetHeight(view.bounds) - CGRectGetMaxY(frame) < 160) continue;
+        if ([controller isKindOfClass:UINavigationController.class] ||
+            [controller isKindOfClass:UITabBarController.class]) return nil;
+        return controller;
     }
-    // 顶部从 tab 条下方开始，别盖住"项目/您的模板/元素/云端"那排胶囊，
-    // 否则显示后就切不回去了。
-    NSLayoutConstraint *topConstraint =
-        [overlayView.topAnchor constraintEqualToAnchor:hostView.topAnchor constant:120];
-    objc_setAssociatedObject(window, &AMCloudBannerTopKey, topConstraint,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [NSLayoutConstraint activateConstraints:@[
-        [overlayView.leadingAnchor constraintEqualToAnchor:hostView.leadingAnchor],
-        [overlayView.trailingAnchor constraintEqualToAnchor:hostView.trailingAnchor],
-        topConstraint,
-        [overlayView.bottomAnchor constraintEqualToAnchor:hostView.bottomAnchor
-                                                  constant:-tabBarHeight],
-    ]];
-    objc_setAssociatedObject(window, &AMCloudBannerViewKey, overlay,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    NSLog(@"[AMProjExport] window cloud overlay installed");
-}
-
-// 第三个信号：窗口里有没有"占了大半屏、类名带 Cloud"的视图（AM 的云页面
-// 容器类名历代都带 Cloud）。三个信号任意一个成立就认为是云端 tab。
-static BOOL AMCloudWindowHasCloudContentView(UIView *view, CGSize windowSize,
-                                            NSInteger depth) {
-    if (!view || depth > 26 || view.hidden || view.alpha < 0.05) return NO;
-    NSString *name = NSStringFromClass(view.class) ?: @"";
-    if ([name rangeOfString:@"Cloud" options:NSCaseInsensitiveSearch].location != NSNotFound &&
-        ![name hasPrefix:@"AMCloudLibrary"] && ![name hasPrefix:@"AMCloudAccount"] &&
-        ![name hasPrefix:@"AMCloudBanner"]) {
-        CGFloat area = CGRectGetWidth(view.bounds) * CGRectGetHeight(view.bounds);
-        CGFloat windowArea = windowSize.width * windowSize.height;
-        if (windowArea > 0 && area / windowArea > 0.25) return YES;
-    }
-    for (UIView *child in view.subviews) {
-        if (AMCloudWindowHasCloudContentView(child, windowSize, depth + 1)) return YES;
-    }
-    return NO;
+    return nil;
 }
 
 - (void)refreshWindowCloudOverlayVisibility {
-    UIWindow *window = AMCloudActiveWindow();
-    if (!window) return;
-    AMCloudLibraryViewController *overlay =
-        objc_getAssociatedObject(window, &AMCloudBannerViewKey);
-    // r153：没有贴片就直接返回。以前会在工程页一出现就创建（连带 WKWebView），
-    // 用户根本没点「云端」也要一直占着内存/GPU。现在只在点云端时懒创建。
-    if (!overlay) return;
+    if (AMCloudUIKitDisabled()) { [self setCloudLibraryVisible:NO]; return; }
     UIView *header = AMCloudSelectionHeaderView();
-    NSLayoutConstraint *topConstraint =
-        objc_getAssociatedObject(window, &AMCloudBannerTopKey);
-    if (header && topConstraint) {
-        CGRect frame = [header convertRect:header.bounds toView:overlay.view.superview];
-        CGFloat desired = CGRectGetMaxY(frame) + 8;
-        if (desired > 0 && fabs(topConstraint.constant - desired) > 0.5) {
-            topConstraint.constant = desired;
-        }
+    NSInteger state = AMCloudDetectCloudPillSelected(header);
+    if (!header || state != 1) {
+        [self setCloudLibraryVisible:NO];
+        return;
     }
-    // r138：整窗 drawViewHierarchy 是这条链上最贵的一步（GPU 回读），
-    // 只在"贴片正显示（要知道什么时候收起）"或"刚点过 tab（3 秒内）"时截，
-    // 其它时候直接跳过，靠文案/结构两个便宜信号。
-    NSTimeInterval tickNow = [NSDate date].timeIntervalSince1970;
-    BOOL recentTap = AMCloudSubtabSignalAt > 0 &&
-        tickNow - AMCloudSubtabSignalAt < 3.0;
-    NSInteger state = -1;
-    if (!overlay.view.hidden || recentTap) {
-        state = AMCloudDetectCloudPillSelected();
+    if (self.embeddedLibrary && self.embeddedHeader == header) return;
+    [self setCloudLibraryVisible:NO];
+    UIViewController *host = AMCloudContentHostForHeader(header);
+    if (!host) return;
+    AMCloudLibraryViewController *library = [AMCloudLibraryViewController new];
+    library.manager = self;
+    // Homepage 使用自己的浅色外观，不跟随系统深色把嵌入区变成黑底。
+    library.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    [host addChildViewController:library];
+    UIView *view = library.view;
+    view.translatesAutoresizingMaskIntoConstraints = NO;
+    view.clipsToBounds = YES;
+    [host.view addSubview:view];
+    NSLayoutYAxisAnchor *bottom = host.view.safeAreaLayoutGuide.bottomAnchor;
+    UIView *tabBar = AMCloudFindViewWithClassName(header.window, @"HomepageTabBarView", 0);
+    if (tabBar && [tabBar isDescendantOfView:host.view]) {
+        CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:host.view];
+        CGRect headerFrame = [header convertRect:header.bounds toView:host.view];
+        if (CGRectGetMinY(tabFrame) > CGRectGetMaxY(headerFrame)) bottom = tabBar.topAnchor;
     }
-    BOOL cloudContent = AMCloudWindowHasCloudContentView(window, window.bounds.size, 0);
-    BOOL cloudText = AMCloudOfficialCloudContentOnScreen(window, 0);
-    // 明确判成"别的 tab"（state==0）时以它为准；否则任一信号成立就显示。
-    BOOL show = (state == 1) || (state < 0 && (cloudContent || cloudText));
-    if (overlay.view.hidden == show) {
-        overlay.view.hidden = !show;
-        if (show) {
-            [window bringSubviewToFront:overlay.view];
-            [overlay reload];
-        }
-    }
-    // r138：原来每次巡检都 NSLog + 追加写 bannerlog（每秒一次磁盘写 + 日志
-    // 刷屏，在编辑器里就是实打实的掉帧）。现在只在状态变化或每 15 秒记一条。
-    NSString *signature = [NSString stringWithFormat:@"%ld|%d|%d|%d",
-                           (long)state, cloudContent, cloudText, !overlay.view.hidden];
-    static NSString *lastSignature = nil;
-    static NSTimeInterval lastWrite = 0;
-    NSTimeInterval stamp = [NSDate date].timeIntervalSince1970;
-    BOOL changed = ![signature isEqualToString:lastSignature];
-    if (!changed && stamp - lastWrite < 15.0) return;
-    lastSignature = signature;
-    lastWrite = stamp;
-    NSLog(@"[AMProjExport] banner visibility pill=%ld class=%d text=%d shown=%d",
-          (long)state, cloudContent, cloudText, !overlay.view.hidden);
-    @try {
-        NSString *path = [NSSearchPathForDirectoriesInDomains(
-            NSCachesDirectory, NSUserDomainMask, YES).firstObject
-            stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
-        NSString *line = [NSString stringWithFormat:
-            @"%.0f pill=%ld class=%d text=%d shown=%d\n",
-            stamp, (long)state, cloudContent, cloudText, !overlay.view.hidden];
-        NSMutableData *data = [[NSData dataWithContentsOfFile:path] mutableCopy]
-            ?: [NSMutableData data];
-        [data appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        if (data.length > 32 * 1024) {
-            data = [[data subdataWithRange:NSMakeRange(data.length - 24 * 1024, 24 * 1024)] mutableCopy];
-        }
-        [data writeToFile:path atomically:NO];
-    } @catch (NSException *exception) {
-        // 面包屑失败不影响主流程
-    }
+    [NSLayoutConstraint activateConstraints:@[
+        [view.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:8],
+        [view.leadingAnchor constraintEqualToAnchor:host.view.leadingAnchor],
+        [view.trailingAnchor constraintEqualToAnchor:host.view.trailingAnchor],
+        [view.bottomAnchor constraintEqualToAnchor:bottom],
+    ]];
+    [library didMoveToParentViewController:host];
+    self.embeddedLibrary = library;
+    self.embeddedHeader = header;
+    NSLog(@"[AMProjExport] cloud tab embedded host=%@ header=%@ frame=%@",
+          NSStringFromClass(host.class), NSStringFromClass(header.class),
+          NSStringFromCGRect([header convertRect:header.bounds toView:host.view]));
 }
 
 - (void)installCloudTabTapWatcher {
-    static BOOL installed = NO;
-    if (installed) return;
+    if (AMCloudUIKitDisabled()) return;
     UIWindow *window = AMCloudActiveWindow();
-    if (!window) return;
+    if (!window || objc_getAssociatedObject(window, &AMCloudBannerViewKey)) return;
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
         initWithTarget:self action:@selector(handleCloudTabTap:)];
     tap.cancelsTouchesInView = NO;
-    // r154：不要因为等这个手势的识别结果而拖住其它触摸/滚动。
     tap.delaysTouchesBegan = NO;
     tap.delaysTouchesEnded = NO;
     tap.delegate = (id<UIGestureRecognizerDelegate>)self;
     [window addGestureRecognizer:tap];
-    installed = YES;
-    NSLog(@"[AMProjExport] cloud tab tap watcher installed");
+    objc_setAssociatedObject(window, &AMCloudBannerViewKey, tap,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
@@ -4341,281 +4066,70 @@ static BOOL AMCloudWindowHasCloudContentView(UIView *view, CGSize windowSize,
 }
 
 - (void)handleCloudTabTap:(UITapGestureRecognizer *)recognizer {
-    UIView *host = recognizer.view;
-    if (!host) return;
-    CGPoint point = [recognizer locationInView:host];
-    // r154：以前每次点击都会遍历整窗无障碍树找"云端"文字——点一下就扫一棵树，
-    // 滚动/点选都会发涩。现在只做命中测试：点在顶部 tab 条里才处理，按 x 比例判档。
-    UIView *hit = [host hitTest:point withEvent:nil];
-    UIView *tabBar = nil;
-    for (UIView *view = hit; view; view = view.superview) {
-        NSString *name = NSStringFromClass(view.class) ?: @"";
-        if ([name containsString:@"SelectionHeaderView"] ||
-            [name containsString:@"HomepageTabBarView"] ||
-            [name containsString:@"Segment"]) {
-            tabBar = view;
+    if (AMCloudUIKitDisabled()) return;
+    UIWindow *window = AMCloudActiveWindow();
+    if (recognizer.view != window) return;
+    CGPoint point = [recognizer locationInView:window];
+    UIView *hit = [window hitTest:point withEvent:nil];
+    BOOL mainTab = NO;
+    for (UIView *view = hit; view && view != window; view = view.superview) {
+        if ([NSStringFromClass(view.class) containsString:@"HomepageTabBarView"]) {
+            mainTab = YES;
             break;
         }
-        if (view == host) break;
     }
-    if (!tabBar) return;
-    CGFloat width = CGRectGetWidth(tabBar.bounds);
-    if (width <= 1.0) return;
-    CGFloat x = [recognizer locationInView:tabBar].x;
-    CGFloat fraction = x / width;
-    // 865 首页顶部四档：项目 / 您的模板 / 元素 / 云端，云端在最右。
-    BOOL isCloud = fraction > 0.70;
-    if (isCloud) {
-        [self setCloudLibraryVisible:YES];
-    } else {
-        [self setCloudLibraryVisible:NO];
-    }
-    @try {
-        NSString *path = [NSSearchPathForDirectoriesInDomains(
-            NSCachesDirectory, NSUserDomainMask, YES).firstObject
-            stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
-        NSString *line = [NSString stringWithFormat:
-            @"tapBar frac=%.2f cloud=%d\n", fraction, isCloud];
-        NSMutableData *data = [[NSData dataWithContentsOfFile:path] mutableCopy]
-            ?: [NSMutableData data];
-        [data appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        if (data.length > 32 * 1024) {
-            data = [[data subdataWithRange:NSMakeRange(data.length - 24 * 1024, 24 * 1024)] mutableCopy];
-        }
-        [data writeToFile:path atomically:NO];
-    } @catch (NSException *exception) {
-        // 面包屑失败不影响主流程
+    UIView *header = AMCloudSelectionHeaderView();
+    BOOL subTab = header && CGRectContainsPoint(
+        [header convertRect:header.bounds toView:window], point);
+    if (!mainTab && !subTab) return;
+    // 先卸下旧内容，再等原生导航/SwiftUI 更新。主导航永远不能直接打开云空间。
+    [self setCloudLibraryVisible:NO];
+    NSUInteger generation = ++self.cloudSelectionGeneration;
+    for (NSNumber *delay in @[@0.12, @0.4]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (generation != self.cloudSelectionGeneration) return;
+            [self refreshWindowCloudOverlayVisibility];
+        });
     }
 }
 
-
 - (void)setCloudLibraryVisible:(BOOL)visible {
-    // r153：窗口级贴片改成"点了才建、收起就拆"。
-    UIWindow *window = AMCloudActiveWindow();
-    if (visible) {
-        [self installWindowCloudOverlay];
-        AMCloudLibraryViewController *windowOverlay =
-            objc_getAssociatedObject(window, &AMCloudBannerViewKey);
-        if (windowOverlay) {
-            windowOverlay.view.hidden = NO;
-            [window bringSubviewToFront:windowOverlay.view];
-            [windowOverlay reload];
-        }
-    } else {
-        AMCloudTeardownWindowOverlay();
-    }
-    for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
-        AMCloudLibraryViewController *overlay =
-            objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
-        if (!overlay) continue;
-        overlay.view.hidden = !visible;
-        if (visible) {
-            [controller.view bringSubviewToFront:overlay.view];
-            [overlay reload];
-        }
-    }
+    if (visible) { [self refreshWindowCloudOverlayVisibility]; return; }
+    AMCloudLibraryViewController *library = self.embeddedLibrary;
+    self.embeddedLibrary = nil;
+    self.embeddedHeader = nil;
+    if (!library) return;
+    [library willMoveToParentViewController:nil];
+    [library.viewIfLoaded removeFromSuperview];
+    [library removeFromParentViewController];
 }
 
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller {
-    if (!controller.viewIfLoaded) return;
-    if (!AMCloudIsProjectsControllerClass(controller.class) &&
-        !AMCloudFindSegmentControl(controller.view, 0)) return;
-    AMCloudLibraryViewController *overlay =
-        objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
-    if (!overlay) {
-        // 云 tab 的内容换成我们自己的原生云空间列表（不再套网页）
-        overlay = [AMCloudLibraryViewController new];
-        overlay.manager = self;
-        [controller addChildViewController:overlay];
-        overlay.view.translatesAutoresizingMaskIntoConstraints = NO;
-        overlay.view.hidden = YES;
-        overlay.view.backgroundColor = UIColor.clearColor;
-        [controller.view addSubview:overlay.view];
-        [overlay didMoveToParentViewController:controller];
-        NSLayoutConstraint *topConstraint =
-            [overlay.view.topAnchor constraintEqualToAnchor:controller.view.topAnchor
-                                                   constant:174];
-        [NSLayoutConstraint activateConstraints:@[
-            [overlay.view.leadingAnchor constraintEqualToAnchor:
-                controller.view.safeAreaLayoutGuide.leadingAnchor],
-            [overlay.view.trailingAnchor constraintEqualToAnchor:
-                controller.view.safeAreaLayoutGuide.trailingAnchor],
-            topConstraint,
-            [overlay.view.bottomAnchor constraintEqualToAnchor:
-                controller.view.safeAreaLayoutGuide.bottomAnchor],
-        ]];
-        objc_setAssociatedObject(controller, &AMCloudBannerTopKey, topConstraint,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(controller, &AMCloudBannerViewKey, overlay,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        NSLog(@"[AMProjExport] cloud tab overlay attached to %@",
-              NSStringFromClass(controller.class));
-        dispatch_async(dispatch_get_main_queue(), ^{
-            AMCloudManager *manager = [AMCloudManager shared];
-            [manager updateCloudBackupBannerVisibilityForController:controller];
-            [manager cloudBannerVisibilityTick];
-        });
-    }
-    [controller.view bringSubviewToFront:overlay.view];
-    [self updateCloudBackupBannerVisibilityForController:controller];
+    if (!controller.viewIfLoaded.window) return;
+    [self refreshWindowCloudOverlayVisibility];
 }
 
 - (void)cloudBackupBannerTapped:(id)sender {
-    UIViewController *presenter = AMCloudTopController(nil) ?: self.lastProjectsController;
-    if (!presenter) return;
-    if (!AMCloudReadToken().length) {
-        [self showAccountFrom:presenter];
-        return;
-    }
-    [self presentCloudBackupManagerFrom:presenter];
+    [self showCloudBackupManager:sender];
 }
 
-// 分段索引变化（任一分段控件的 setSelectedIndex: 被调用）→ 刷新所有工程页横幅。
 - (void)cloudSegmentSelectionDidChange {
     dispatch_async(dispatch_get_main_queue(), ^{
-        for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
-            if (!controller) continue;
-            [self updateCloudBackupBannerVisibilityForController:controller];
-        }
+        [self refreshWindowCloudOverlayVisibility];
     });
 }
 
-// 低频周期复查（0.8 秒）：setSelectedIndex: 观察器挂不上时的兜底通道。
-// 只在有工程页挂在窗口上时自续；全部离场后自然停摆，下次挂横幅时重启。
-static BOOL AMCloudBannerTickRunning = NO;
-
 - (void)cloudBannerVisibilityTick {
-    if (AMCloudBannerTickRunning) return;
-    AMCloudBannerTickRunning = YES;
-    [self cloudBannerVisibilityTickLoop];
+    [self cloudSegmentSelectionDidChange];
 }
 
 - (void)cloudBannerVisibilityTickLoop {
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-        (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        AMCloudManager *manager = weakSelf;
-        if (!manager) return;
-        // r144：这条 0.8 秒的轮询以前不受任何门禁约束——工程页被编辑器盖住时
-        // 它的 view 仍在窗口里，于是照样每 0.8 秒扫一次全窗口视图树，
-        // 这就是"工作台还是卡"的来源。编辑器类页面里直接跳过。
-        if (!AMCloudOverlayWorkAllowed()) {
-            [manager performSelector:@selector(cloudBannerVisibilityTickLoop)
-                          withObject:nil
-                          afterDelay:2.0];
-            return;
-        }
-        BOOL anyOnScreen = NO;
-        for (UIViewController *controller in [AMCloudBannerControllersTable() copy]) {
-            if (!controller || !controller.viewIfLoaded.window) continue;
-            anyOnScreen = YES;
-            [manager updateCloudBackupBannerVisibilityForController:controller];
-        }
-        // r152：同样不再续期。切 tab 有点击监听兜底，不需要常驻轮询。
-        (void)anyOnScreen;
-        AMCloudBannerTickRunning = NO;
-    });
+    // 保留旧调用入口，不启动轮询。
 }
 
-
-// 评估横幅可见性：只有选中"云端"档才显示。分段信息读不到时降级为常显。
 - (void)updateCloudBackupBannerVisibilityForController:(UIViewController *)controller {
-    AMCloudLibraryViewController *overlay =
-        objc_getAssociatedObject(controller, &AMCloudBannerViewKey);
-    if (!overlay) return;
-    [AMCloudBannerControllersTable() addObject:controller];
-    // 官方云子页在屏（空态/云列表出现）→ 盖上自有备份页；否则藏起。
-    // 官方云内容不在工程控制器子树里（r82 实测），从窗口根扫。
-    // r144：扫描根收窄到工程页自己。以前扫 controller.view.window 会把
-    // 盖在上面的编辑器整棵树也走一遍——工程页被盖住时这是纯浪费。
-    UIView *scanRoot = controller.viewIfLoaded ?: controller.view.window;
-    // 通道〇（a11y 树里找带 Selected trait 的"云端"胶囊）已在 r137 删除：
-    // 这条通道在所有真机日志里从未返回过 1，而它对每一层 SwiftUI 视图现取
-    // a11y 数组，在多份 .ips 里就是 SIGSEGV 的栈顶
-    // （a11y 扫描函数 → updateCloudBackupBannerVisibilityForController，
-    //  出现在新建工程 / 弹出页面时）。看不到收益、又能把 App 炸掉，直接删掉。
-    BOOL a11yCloudSelected = NO;
-    // 通道一：空态文本（UILabel / 无障碍 / KVC text）
-    BOOL textSignal = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);
-    // 通道二：分段控件选中"云端"（窗口级查找，云端为最后一档）
-    UIView *segControl = AMCloudFindSegmentControl(scanRoot, 0);
-    NSInteger segSelected = segControl ? AMCloudSegmentSelectedIndex(segControl) : -1;
-    NSInteger segCloudIndex = segControl ? AMCloudCloudSegmentIndex(segControl) : -1;
-    // 云 tab 的内容区起点跟着官方分段控件走：贴片以前写死 174pt，落点全队
-    // 不对（有时盖住标题栏，有时浮在半空）。这里按控件的真实位置动态对齐。
-    if (segControl) {
-        NSLayoutConstraint *topConstraint =
-            objc_getAssociatedObject(controller, &AMCloudBannerTopKey);
-        @try {
-            CGRect frame = [segControl convertRect:segControl.bounds toView:controller.view];
-            CGFloat desired = CGRectGetMaxY(frame) + 8;
-            if (topConstraint && desired > 0 &&
-                fabs(topConstraint.constant - desired) > 0.5) {
-                topConstraint.constant = desired;
-            }
-        } @catch (NSException *exception) {
-            // 坐标转换失败就保持原值
-        }
-    }
-    BOOL segSignal = segControl && segSelected >= 0 && segCloudIndex >= 0 &&
-        segSelected == segCloudIndex;
-    // 通道三：cloudSubtabOpened 埋点 3 秒窗口
-    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-    BOOL signalRecent = AMCloudSubtabSignalAt > 0 &&
-        now - AMCloudSubtabSignalAt < 3.0;
-    BOOL cloudOnScreen = textSignal || segSignal || signalRecent ||
-        a11yCloudSelected;
-    BOOL wasHidden = overlay.view.hidden;
-    overlay.view.hidden = !cloudOnScreen;
-    // 每次切回云端 tab 都刷一次（上传完立刻切回来能看到新工程）
-    if (wasHidden && cloudOnScreen &&
-        [overlay respondsToSelector:@selector(reload)]) {
-        [(AMCloudLibraryViewController *)overlay reload];
-    }
-    // r138：这条也在巡检路径上，以前每次调用都 NSLog + 写 bannerlog。
-    // 现在同样只在状态变化或 15 秒一次时落一条。
-    {
-        NSString *signature = [NSString stringWithFormat:@"%d|%ld|%ld|%d|%d|%d",
-                               segControl != nil, (long)segSelected,
-                               (long)segCloudIndex, textSignal, signalRecent,
-                               cloudOnScreen];
-        static NSString *lastSignature = nil;
-        static NSTimeInterval lastWrite = 0;
-        NSTimeInterval stamp = [NSDate date].timeIntervalSince1970;
-        BOOL changed = ![signature isEqualToString:lastSignature];
-        if (changed || stamp - lastWrite >= 15.0) {
-            lastSignature = signature;
-            lastWrite = stamp;
-            NSLog(@"[AMProjExport] banner visibility seg=%d sel=%ld ci=%ld "
-                  "text=%d signal=%d visible=%d",
-                  segControl != nil, (long)segSelected, (long)segCloudIndex,
-                  textSignal, signalRecent, cloudOnScreen);
-            @try {
-                NSString *crumb = [NSString stringWithFormat:
-                    @"%.0f seg=%d sel=%ld ci=%ld text=%d signal=%d a11y=0 visible=%d\n",
-                    stamp, segControl != nil, (long)segSelected,
-                    (long)segCloudIndex, textSignal, signalRecent,
-                    !overlay.view.hidden];
-                NSString *logPath = [NSSearchPathForDirectoriesInDomains(
-                    NSCachesDirectory, NSUserDomainMask, YES).firstObject
-                    stringByAppendingPathComponent:@"AMProjExport.bannerlog"];
-                NSMutableData *logData = [[NSData dataWithContentsOfFile:logPath]
-                    mutableCopy] ?: [NSMutableData data];
-                [logData appendData:[crumb dataUsingEncoding:NSUTF8StringEncoding]];
-                if (logData.length > 32 * 1024) {
-                    logData = [[logData subdataWithRange:
-                        NSMakeRange(logData.length - 24 * 1024, 24 * 1024)] mutableCopy];
-                }
-                [logData writeToFile:logPath atomically:NO];
-            } @catch (NSException *exception) {
-                // 面包屑失败不影响界面
-            }
-        }
-    }
-
-    if (cloudOnScreen) {
-        [controller.view bringSubviewToFront:overlay.view];
-    }
+    if (controller.viewIfLoaded.window) [self refreshWindowCloudOverlayVisibility];
 }
 
 - (void)showCloudBackupManager:(id)sender {
@@ -6172,7 +5686,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.view.backgroundColor = [UIColor colorWithWhite:0.965 alpha:1];
     self.projects = @[];
     self.usage = @{};
     [self buildHeader];
@@ -6186,7 +5700,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 - (void)buildHeader {
     UIView *card = [UIView new];
     card.translatesAutoresizingMaskIntoConstraints = NO;
-    card.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    card.backgroundColor = UIColor.whiteColor;
     card.layer.cornerRadius = 14;
     [self.view addSubview:card];
 
@@ -6271,7 +5785,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     table.rowHeight = 68;
     table.separatorInset = UIEdgeInsetsMake(0, 76, 0, 0);
     table.tableFooterView = [UIView new];
-    table.backgroundColor = UIColor.systemBackgroundColor;
+    table.backgroundColor = UIColor.clearColor;
     [self.view addSubview:table];
     self.tableView = table;
 

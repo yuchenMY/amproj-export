@@ -42,25 +42,25 @@ class OverlayPerformanceTests(unittest.TestCase):
     def test_view_tree_dump_is_not_in_the_periodic_path(self):
         self.assertNotIn("AMCloudDumpViewTree();", self.tick_block)
 
-    def test_screenshot_only_when_visible_or_recent_tap(self):
+    def test_screenshot_is_restricted_to_header(self):
         block = SOURCE.split(
-            "- (void)refreshWindowCloudOverlayVisibility {", 1
-        )[1].split("- (void)installCloudTabTapWatcher", 1)[0]
-        self.assertIn("if (!overlay.view.hidden || recentTap)", block)
-        self.assertIn("AMCloudDetectCloudPillSelected()", block)
+            "static NSInteger AMCloudDetectCloudPillSelected(UIView *header) {", 1
+        )[1].split("static UIViewController *AMCloudContentHostForHeader", 1)[0]
+        self.assertIn("[header drawViewHierarchyInRect:", block)
+        self.assertNotIn("[window drawViewHierarchy", block)
 
     def test_low_frequency_loop_is_gated_too(self):
         # r144：0.8 秒那条兜底轮询以前没有门禁，工程页被编辑器盖住时照样扫全树。
-        block = SOURCE.split("cloudBannerVisibilityTickLoop", 1)[1]
-        block = block.split("// 评估横幅可见性", 1)[0]
-        self.assertIn("AMCloudOverlayWorkAllowed()", block)
+        block = SOURCE.split("- (void)cloudBannerVisibilityTickLoop {", 1)[1]
+        block = block.split("\n}", 1)[0]
+        self.assertNotIn("dispatch_after", block)
 
-    def test_banner_log_is_throttled(self):
+    def test_state_checks_do_not_append_log_files(self):
         block = SOURCE.split(
             "- (void)refreshWindowCloudOverlayVisibility {", 1
         )[1].split("- (void)installCloudTabTapWatcher", 1)[0]
-        self.assertIn("lastSignature", block)
-        self.assertIn("< 15.0", block)
+        self.assertNotIn("writeToFile", block)
+        self.assertNotIn("dataWithContentsOfFile", block)
 
 
 if __name__ == "__main__":

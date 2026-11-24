@@ -52,13 +52,12 @@ class CloudOverlayCrashTests(unittest.TestCase):
         )[1].split("static void AMCloudAttachVisibleProjectsControllers", 1)[0]
         self.assertIn("controller.presentedViewController == nil", block)
 
-    def test_watchdog_is_still_the_only_periodic_caller(self):
-        # 保留其它三条通道（文案 / 分段控件 / 埋点窗口），只拿掉 a11y。
-        block = SOURCE.split(
-            "- (void)updateCloudBackupBannerVisibilityForController:", 1
-        )[1].split("- (void)showCloudBackupManager:", 1)[0]
-        for channel in ("textSignal", "segSignal", "signalRecent"):
-            self.assertIn(channel, block)
+    def test_unknown_selection_fails_closed_without_fallback_signals(self):
+        block = SOURCE.split("- (void)refreshWindowCloudOverlayVisibility {", 1)[1]
+        block = block.split("- (void)installCloudTabTapWatcher", 1)[0]
+        self.assertIn("if (!header || state != 1)", block)
+        self.assertNotIn("AMCloudOfficialCloudContentOnScreen", block)
+        self.assertNotIn("accessibility", block)
 
 
 if __name__ == "__main__":

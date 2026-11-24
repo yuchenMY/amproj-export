@@ -19,6 +19,7 @@ LDLIBS = -framework Foundation -framework UIKit -framework QuartzCore \
 all: AMProjExport.dylib AMProjExportDebug.dylib AMHomeUI.dylib AMProjExportBeta.dylib
 
 AMProjExport.dylib: AMProjExport.m AMProjArchiveWriter.h AMProjZIPWriter.m AMProjZIPWriter.h AMProjImportArchive.m AMProjImportArchive.h AMProjNativeImportBridge.m AMProjNativeImportBridge.h AMProjNativeImportBridge.S AMProjStabilityContract.S AMProjV865ProjectFlow.m AMProjV865ProjectFlow.h AMDebugTransport.m AMDebugTransport.h AMCloudSync.m AMCloudSync.h AMCloudPlugins.m AMCloudPlugins.h AMEditorCustomization.m AMEditorCustomization.h AMProjCrashReporter.m AMProjCrashReporter.h
+AMProjExport.dylib: AMCloudTabPolicy.h
 	$(CC) $(CFLAGS) -DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862) -DAMPROJ_TELEMETRY=1 -DAMPROJ_CLOUD_SYNC=1 -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMProjV865ProjectFlow.m AMDebugTransport.m AMCloudSync.m AMCloudPlugins.m AMEditorCustomization.m AMProjCrashReporter.m $(LDLIBS) -framework Security -framework WebKit -install_name @rpath/AMProjExport.dylib
 	@ls -la $@
 

@@ -1449,7 +1449,7 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         # r115：云 tab 的内容从网页换成了原生云空间列表
         self.assertIn("AMCloudLibraryViewController", CLOUD)
         self.assertIn("loadProjects", CLOUD)
-        self.assertIn("cloud tab overlay attached", CLOUD)
+        self.assertIn("cloud tab embedded host=", CLOUD)
 
     def test_banner_shows_only_on_cloud_subtab(self):
         # 分段控件监听：AMSegmentedControl setSelectedIndex: 纯观察 hook。
@@ -1459,9 +1459,9 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         self.assertIn("cloudSegmentSelectionDidChange", CLOUD)
         # 云端档位识别用 AM 自家 cloud_subtab_title 文案；读不到分段信息则降级常显
         self.assertIn('@"cloud_subtab_title"', CLOUD)
-        # r82：可见性由"官方云子页内容在屏"驱动（空态/云列表出现才盖）。
-        self.assertIn("BOOL textSignal = AMCloudOfficialCloudContentOnScreen(scanRoot, 0);", CLOUD)
-        self.assertIn("BOOL segSignal = segControl && segSelected >= 0", CLOUD)
+        # 未确认真实子标签选中态时，不能因为文案或临时埋点直接显示。
+        self.assertIn("NSInteger state = AMCloudDetectCloudPillSelected(header);", CLOUD)
+        self.assertIn("if (!header || state != 1)", CLOUD)
 
     def test_segment_observer_keeps_original_implementation(self):
         # 只观察不改行为：原 IMP 必须被保留并在 hook 里原样调用。
@@ -1513,8 +1513,7 @@ class ExportFlowR79Tests(unittest.TestCase):
 
     def test_banner_visibility_logs_runtime_state(self):
         # r78 降级路径（控件没找到/索引读不到）必须留有运行时证据。
-        self.assertIn("banner visibility seg=%d sel=%ld ci=%ld", CLOUD)
-        self.assertIn("AMProjExport.bannerlog", CLOUD)
+        self.assertIn("cloud tab embedded host=%@ header=%@ frame=%@", CLOUD)
         self.assertIn("segment observer install matched=%d", CLOUD)
 
 
@@ -1570,8 +1569,8 @@ class ExportDeadTapR80Tests(unittest.TestCase):
         self.assertIn("AMCloudViewLooksLikeSegmentControl", CLOUD)
         self.assertIn('NSSelectorFromString(@"setSelectedIndex:")', CLOUD)
         self.assertIn("cloudBannerVisibilityTickLoop", CLOUD)
-        self.assertIn("AMCloudBannerTickRunning", CLOUD)
-        self.assertIn("AMProjExport.bannerlog", CLOUD)
+        self.assertNotIn("AMCloudBannerTickRunning", CLOUD)
+        self.assertIn("generation != self.cloudSelectionGeneration", CLOUD)
 
 
 class NativeXMLScanR81Tests(unittest.TestCase):
@@ -1616,8 +1615,9 @@ class NativeXMLScanR81Tests(unittest.TestCase):
         # 以前每 0.8 秒把编辑器整棵树也走一遍，就是工作台卡顿的来源。
         self.assertIn("AMCloudOfficialCloudContentOnScreen", CLOUD)
         self.assertIn('@"没有项目"', CLOUD)
-        self.assertIn("controller.viewIfLoaded ?: controller.view.window", CLOUD)
-        self.assertNotIn("controller.view.window ?: controller.view", CLOUD)
+        self.assertIn("AMCloudContentHostForHeader(header)", CLOUD)
+        self.assertIn("constraintEqualToAnchor:header.bottomAnchor", CLOUD)
+        self.assertNotIn("[window addSubview:overlayView]", CLOUD)
         self.assertIn("AMCloudSegmentTitles", CLOUD)
 
 
@@ -1667,7 +1667,8 @@ class ThumbPickerR84Tests(unittest.TestCase):
     def test_cloud_subtab_signal_observer(self):
         self.assertIn("AMCloudInstallSubtabObserverHooks", CLOUD)
         self.assertIn('NSSelectorFromString(@"cloudSubtabOpened")', CLOUD)
-        self.assertIn("now - AMCloudSubtabSignalAt < 3.0", CLOUD)
+        self.assertNotIn("AMCloudSubtabSignalAt", CLOUD)
+        self.assertIn("[[AMCloudManager shared] cloudSegmentSelectionDidChange];", CLOUD)
 
 
 class SwiftClassSafetyR86Tests(unittest.TestCase):
@@ -1719,8 +1720,8 @@ class A11yDetectionR88Tests(unittest.TestCase):
         self.assertIn("isKindOfClass:NSArray.class", CLOUD)
 
     def test_other_channels_still_present(self):
-        self.assertIn("BOOL a11yCloudSelected = NO;", CLOUD)
-        self.assertIn("signalRecent ||", CLOUD)
+        self.assertNotIn("signalRecent ||", CLOUD)
+        self.assertIn("AMCloudSelectedPillRGBA", CLOUD)
 
 
 class RuntimeReactivationR89Tests(unittest.TestCase):
