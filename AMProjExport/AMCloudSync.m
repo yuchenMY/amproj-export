@@ -3992,6 +3992,9 @@ static NSInteger AMCloudDetectCloudPillSelected(UIView *header) {
 
 // 找包含子标签及下方内容区的最近控制器，不把云列表挂到整窗或首页根控制器。
 static UIViewController *AMCloudContentHostForHeader(UIView *header) {
+    NSString *headerName = NSStringFromClass(header.class) ?: @"";
+    if (![headerName containsString:@"Homepage"] ||
+        ![headerName containsString:@"SelectionHeaderView"]) return nil;
     for (UIResponder *responder = header.nextResponder; responder;
          responder = responder.nextResponder) {
         if (![responder isKindOfClass:UIViewController.class]) continue;
@@ -4004,6 +4007,11 @@ static UIViewController *AMCloudContentHostForHeader(UIView *header) {
         // 不能把首页根控制器或其他复用 SelectionHeader 的页面当成项目页。
         if ([controller isKindOfClass:UINavigationController.class] ||
             [controller isKindOfClass:UITabBarController.class]) return nil;
+        // 865 的原生项目页使用 NodeHostingController；仍须由上方真实
+        // Homepage 子标签及明确选中状态证明路由，不能只凭宿主类名打开。
+        if (AMProjV865ProjectFlowIsRuntimeSupported() &&
+            [NSStringFromClass(controller.class) containsString:@"NodeHostingController"])
+            return controller;
     }
     return nil;
 }

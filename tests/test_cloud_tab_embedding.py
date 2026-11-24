@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -49,8 +50,24 @@ class CloudTabEmbeddingTests(unittest.TestCase):
         block = SOURCE.split("static UIViewController *AMCloudContentHostForHeader", 1)[1]
         block = block.split("- (void)refreshWindowCloudOverlayVisibility", 1)[0]
         self.assertIn("if (AMCloudIsProjectsControllerClass(controller.class)) return controller;", block)
-        self.assertNotIn("return controller;\n", block.replace(
-            "if (AMCloudIsProjectsControllerClass(controller.class)) return controller;\n", ""))
+        self.assertIn("AMProjV865ProjectFlowIsRuntimeSupported()", block)
+        self.assertIn('containsString:@"NodeHostingController"', block)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires native Objective-C/Foundation")
+    def test_actual_production_host_selection_with_swiftui_and_negative_owners(self):
+        marker = "static UIViewController *AMCloudContentHostForHeader(UIView *header) {"
+        implementation = marker + SOURCE.split(marker, 1)[1].split(
+            "- (void)refreshWindowCloudOverlayVisibility", 1)[0]
+        fixture = (ROOT / "tests/cloud_tab_containment_smoke.m").read_text(encoding="utf-8")
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_CLOUD_HOST", implementation)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "containment.m"
+            binary = Path(temporary) / "containment"
+            source.write_text(fixture, encoding="utf-8")
+            subprocess.run(["clang", "-fobjc-arc", "-framework", "Foundation", str(source),
+                "-o", str(binary)], check=True, capture_output=True, timeout=30)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=10)
+            self.assertIn("CLOUD_CONTAINMENT_PASS", result.stdout)
 
     def test_teardown_pairs_child_lifecycle_and_invalidates_pending_taps(self):
         block = SOURCE.split("- (void)setCloudLibraryVisible:(BOOL)visible {", 1)[1]
