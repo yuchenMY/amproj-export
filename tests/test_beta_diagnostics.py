@@ -52,6 +52,36 @@ class PerformanceReportTests(unittest.TestCase):
         ]))
         self.assertEqual(result["peak_memory_mib"], 0)
 
+    def test_capture_and_cpu_are_unknown_in_old_reports(self):
+        result = summarize(self.report([]))
+        self.assertIsNone(result["initial_screen_captured"])
+        self.assertIsNone(result["peak_main_cpu_percent"])
+
+    def test_new_sampling_preserves_evidence_without_counting_stall_twice(self):
+        report = self.report([
+            {"t_ms": 300, "event": "main_queue.stalled", "fields": {"pending_ms": 300}},
+            {"t_ms": 400, "event": "main_queue.recovered", "fields": {"delay_ms": 400}},
+            {"t_ms": 1000, "event": "performance.sample", "fields": {
+                "main_cpu_percent": 90, "process_cpu_percent": 220}},
+            {"t_ms": 2000, "event": "performance.sample", "fields": {
+                "main_cpu_percent": -1, "process_cpu_percent": -1}},
+            {"t_ms": 1100, "event": "screen.capture_changed", "fields": {"captured": True}},
+            {"t_ms": 1200, "event": "main_thread.sample", "fields": {
+                "reason": "display_delivery_gap", "pause_ms": 0.2, "frames": [{
+                    "resolved": True, "image": "fixture.dylib", "uuid": "fixture",
+                    "image_offset": 4096, "symbol": "work", "symbol_offset": 4}]}},
+        ])
+        report["environment"] = {"screen_captured": False}
+        report["diagnostics_revision"] = 2
+        result = summarize(report)
+        self.assertEqual(result["completed_main_queue_delays_over_250ms"], 1)
+        self.assertEqual(result["peak_main_cpu_percent"], 90)
+        self.assertEqual(result["peak_process_cpu_percent"], 220)
+        self.assertIs(result["initial_screen_captured"], False)
+        self.assertIs(result["screen_capture_changes"][0]["captured"], True)
+        self.assertEqual(result["sampled_code_locations"][0]["image_offset"], 4096)
+        self.assertEqual(result["thread_samples"][0]["pause_ms"], 0.2)
+
 
 class PerformancePolicyHostTests(unittest.TestCase):
     def test_actual_c_policy_at_deadline_and_stall_boundaries(self):

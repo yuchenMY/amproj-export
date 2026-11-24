@@ -8,6 +8,14 @@
 #define AMPROJ_PERF_MAX_EVENTS 1024
 #define AMPROJ_PERF_MAX_BYTES (512u * 1024u)
 #define AMPROJ_PERF_STALL_SECONDS 0.250
+#define AMPROJ_PERF_MAX_PROBES 32
+
+static inline double AMProjPerfCPUPercent(double before, double after, double seconds) {
+    return seconds > 0 && before >= 0 && after >= before ? (after - before) * 100 / seconds : -1;
+}
+static inline bool AMProjPerfProbeDue(unsigned count, double last, double now, bool urgent) {
+    return count < AMPROJ_PERF_MAX_PROBES && now >= last && now - last >= (urgent ? 1.0 : 5.0);
+}
 
 static inline bool AMProjPerfExpired(double started, double now) {
     return now >= started && now - started >= AMPROJ_PERF_MAX_SECONDS;

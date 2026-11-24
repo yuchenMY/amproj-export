@@ -1,6 +1,7 @@
 // 猫鹤 AM · Beta 卡顿诊断。按需采集，不读取文字、素材、截图或令牌。
 #import "AMProjBetaDiagnostics.h"
 #import "AMProjPerformancePolicy.h"
+#import "AMProjThreadProbe.h"
 #import "AMCloudSync.h"
 #import <QuartzCore/QuartzCore.h>
 #import <mach/mach.h>
@@ -18,6 +19,7 @@
 
 static NSString *const AMPerfChanged = @"AMProjBetaDiagnosticsChanged";
 static atomic_bool AMPerfRecording = false;
+static NSString *const AMPerfPaths[] = {@"native.editor_layout", @"plugin.editor_customization", @"plugin.cloud_attach", @"ui.send_event"};
 static CFTimeInterval AMPerfNow(void) { return CACurrentMediaTime(); }
 static uint64_t AMPerfMicros(void) { return (uint64_t)(AMPerfNow() * 1000000.0); }
 static UIColor *AMPerfTeal(void) { return [UIColor colorWithRed:0.224 green:0.773 blue:0.733 alpha:1]; }
@@ -37,6 +39,14 @@ static NSString *AMPerfShort(NSString *value) {
     atomic_uint_fast64_t pingAt;
     atomic_uint_fast64_t frames;
     atomic_uint_fast64_t maxFrameGap;
+    atomic_uint_fast64_t deliveredAt;
+    atomic_uint_fast64_t runLoopActivity;
+    atomic_uint_fast64_t runLoopAt;
+    atomic_bool screenCaptured;
+    atomic_bool lowPower;
+    atomic_uint_fast64_t pathCalls[4];
+    atomic_uint_fast64_t pathTotal[4];
+    atomic_uint_fast64_t pathMax[4];
 }
 @property(nonatomic) CFTimeInterval started;
 @property(nonatomic) CFTimeInterval stopped;
@@ -45,6 +55,14 @@ static NSString *AMPerfShort(NSString *value) {
 @property(nonatomic) NSInteger hudSecond;
 @property(nonatomic) CFTimeInterval lastSample;
 @property(nonatomic) CFTimeInterval lastSave;
+@property(nonatomic) CFTimeInterval lastProbe;
+@property(nonatomic) CFTimeInterval lastCPU;
+@property(nonatomic) double mainCPU;
+@property(nonatomic) double processCPU;
+@property(nonatomic) AMProjProbeStats cpuStats;
+@property(nonatomic) AMProjThreadProbe *threadProbe;
+@property(nonatomic) NSUInteger probes;
+@property(nonatomic) BOOL probeDisabled;
 @property(nonatomic) BOOL stalled;
 @property(nonatomic) BOOL finished;
 @property(nonatomic) NSUInteger sequence;
@@ -59,11 +77,26 @@ static NSString *AMPerfShort(NSString *value) {
     if ((self = [super init])) {
         atomic_init(&active, true); atomic_init(&pingAt, 0);
         atomic_init(&frames, 0); atomic_init(&maxFrameGap, 0);
+        atomic_init(&deliveredAt, 0); atomic_init(&runLoopActivity, 0);
+        atomic_init(&runLoopAt, 0); atomic_init(&screenCaptured, false);
+        atomic_init(&lowPower, false);
+        for (unsigned i = 0; i < 4; i++) {
+            atomic_init(&pathCalls[i], 0); atomic_init(&pathTotal[i], 0); atomic_init(&pathMax[i], 0);
+        }
         _events = [NSMutableArray array];
     }
     return self;
 }
+- (void)dealloc { AMProjThreadProbeDestroy(_threadProbe); }
 @end
+
+static void AMPerfRunLoop(CFRunLoopObserverRef observer, CFRunLoopActivity activity, void *context) {
+    (void)observer;
+    AMPerfSession *session = (__bridge AMPerfSession *)context;
+    if (!atomic_load(&session->active)) return;
+    atomic_store(&session->runLoopActivity, activity);
+    atomic_store(&session->runLoopAt, AMPerfMicros());
+}
 
 @interface AMPerfHUDWindow : UIWindow
 @end
@@ -107,6 +140,7 @@ static NSString *AMPerfShort(NSString *value) {
 @property(nonatomic, strong) dispatch_queue_t queue;
 @property(atomic, strong) AMPerfSession *session;
 @property(nonatomic, strong) CADisplayLink *displayLink;
+@property(nonatomic) CFRunLoopObserverRef runLoopObserver;
 @property(nonatomic, strong) AMPerfHUDWindow *hud;
 @property(nonatomic, strong) UIButton *hudButton;
 @property(nonatomic, strong) NSData *pending;
@@ -224,7 +258,8 @@ static void AMPerfRemoveEventHook(void) {
     NSDictionary *payload = @{@"schema": @1, @"kind": @"performance", @"capture_id": session.captureID,
         @"environment": session.environment, @"duration_ms": @(AMProjPerfElapsed(session.started, session.stopped ?: AMPerfNow()) * 1000),
         @"finish_reason": reason, @"events_dropped": @(session.dropped), @"events": events,
-        @"measurement_notes": @"Display-link delivery and main-queue response; not GPU render FPS or CPU stack samples. Project contents are not inspected."};
+        @"diagnostics_revision": @2,
+        @"measurement_notes": @"Display-link delivery is not GPU render FPS. CPU percent is per core (process may exceed 100). Main-thread frame-pointer samples are bounded, partial and not an exact cause. Screen capture includes recording, mirroring and AirPlay. No project contents or raw stack bytes."};
     NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
     return data.length <= AMPROJ_PERF_MAX_BYTES ? data : nil;
 }
@@ -238,6 +273,15 @@ static void AMPerfRemoveEventHook(void) {
     self.ticketID = nil; self.message = nil;
     AMPerfSession *session = [AMPerfSession new];
     session.started = AMPerfNow(); session.captureID = NSUUID.UUID.UUIDString;
+    session.threadProbe = AMProjThreadProbeCreate();
+    session.lastProbe = session.started;
+    session.lastCPU = session.started;
+    session.mainCPU = -1; session.processCPU = -1;
+    AMProjProbeStats initialCPU;
+    AMProjThreadProbeStats(session.threadProbe, &initialCPU); session.cpuStats = initialCPU;
+    atomic_store(&session->deliveredAt, AMPerfMicros());
+    atomic_store(&session->screenCaptured, UIScreen.mainScreen.isCaptured);
+    atomic_store(&session->lowPower, NSProcessInfo.processInfo.lowPowerModeEnabled);
     struct utsname machine; memset(&machine, 0, sizeof(machine)); uname(&machine);
     session.environment = @{
         @"machine": [NSString stringWithUTF8String:machine.machine] ?: @"unknown",
@@ -247,15 +291,22 @@ static void AMPerfRemoveEventHook(void) {
         @"plugin_build": @AMPROJ_DIAGNOSTIC_BUILD_ID,
         @"screen_max_hz": @(UIScreen.mainScreen.maximumFramesPerSecond),
         @"low_power": @(NSProcessInfo.processInfo.lowPowerModeEnabled),
+        @"screen_captured": @(atomic_load(&session->screenCaptured)),
+        @"thread_probe_available": @(session.threadProbe != NULL),
         @"project_metadata": @"not_collected"};
     self.session = session; atomic_store(&AMPerfRecording, true);
     AMPerfInstallEventHook();
     self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(frame:)];
     [self.displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    CFRunLoopObserverContext context = {0, (__bridge void *)session, NULL, NULL, NULL};
+    self.runLoopObserver = CFRunLoopObserverCreate(NULL, kCFRunLoopAllActivities, true, 0, AMPerfRunLoop, &context);
+    if (self.runLoopObserver) CFRunLoopAddObserver(CFRunLoopGetMain(), self.runLoopObserver, kCFRunLoopCommonModes);
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     [center addObserver:self selector:@selector(background:) name:UIApplicationDidEnterBackgroundNotification object:nil];
     [center addObserver:self selector:@selector(keyboard:) name:UIKeyboardWillShowNotification object:nil];
     [center addObserver:self selector:@selector(keyboard:) name:UIKeyboardWillHideNotification object:nil];
+    [center addObserver:self selector:@selector(captureChanged:) name:UIScreenCapturedDidChangeNotification object:nil];
+    [center addObserver:self selector:@selector(powerChanged:) name:NSProcessInfoPowerStateDidChangeNotification object:nil];
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self.queue);
     session.timer = timer;
     __weak typeof(self) weakSelf = self;
@@ -269,6 +320,7 @@ static void AMPerfRemoveEventHook(void) {
     AMPerfSession *session = self.session;
     if (!session || !atomic_load(&session->active)) return;
     atomic_fetch_add(&session->frames, 1);
+    atomic_store(&session->deliveredAt, AMPerfMicros());
     if (session.previousFrame > 0 && link.timestamp >= session.previousFrame) {
         uint64_t delta = (uint64_t)((link.timestamp - session.previousFrame) * 1000000);
         uint64_t previous = atomic_load(&session->maxFrameGap);
@@ -302,19 +354,78 @@ static void AMPerfRemoveEventHook(void) {
         session.stalled = YES;
         [self addEvent:@"main_queue.stalled" fields:@{@"pending_ms": @((now - (double)requested / 1000000.0) * 1000)} to:session at:now];
     }
+    uint64_t delivered = atomic_load(&session->deliveredAt);
+    double deliveryAge = delivered ? MAX(0, now - (double)delivered / 1000000) * 1000 : 0;
     if (now - session.lastSample >= 1) {
         session.lastSample = now;
+        AMProjProbeStats currentCPU;
+        AMProjThreadProbeStats(session.threadProbe, &currentCPU);
+        AMProjProbeStats previousCPU = session.cpuStats;
+        double interval = now - session.lastCPU;
+        session.mainCPU = previousCPU.main_valid && currentCPU.main_valid ?
+            AMProjPerfCPUPercent(previousCPU.main_seconds, currentCPU.main_seconds, interval) : -1;
+        session.processCPU = previousCPU.process_valid && currentCPU.process_valid ?
+            AMProjPerfCPUPercent(previousCPU.process_seconds, currentCPU.process_seconds, interval) : -1;
+        session.cpuStats = currentCPU; session.lastCPU = now;
         task_vm_info_data_t memory;
         mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
         kern_return_t status = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&memory, &count);
+        NSMutableDictionary *costs = [NSMutableDictionary dictionary];
+        for (unsigned i = 0; i < 4; i++) {
+            costs[AMPerfPaths[i]] = @{@"calls": @(atomic_exchange(&session->pathCalls[i], 0)),
+                @"total_ms": @((double)atomic_exchange(&session->pathTotal[i], 0) / 1000),
+                @"max_ms": @((double)atomic_exchange(&session->pathMax[i], 0) / 1000)};
+        }
         [self addEvent:@"performance.sample" fields:@{
             @"display_link_frames": @(atomic_exchange(&session->frames, 0)),
             @"display_link_max_gap_ms": @((double)atomic_exchange(&session->maxFrameGap, 0) / 1000.0),
             @"memory_bytes": @(status == KERN_SUCCESS ? memory.phys_footprint : 0),
             @"memory_available": @(status == KERN_SUCCESS),
             @"thermal_state": @(NSProcessInfo.processInfo.thermalState),
+            @"sample_interval_ms": @(interval * 1000),
+            @"main_cpu_percent": @(session.mainCPU),
+            @"process_cpu_percent": @(session.processCPU),
+            @"main_thread_run_state": @(currentCPU.main_valid ? currentCPU.main_run_state : 0),
+            @"display_link_delivery_age_ms": @(deliveryAge),
+            @"screen_captured": @(atomic_load(&session->screenCaptured)),
+            @"low_power": @(atomic_load(&session->lowPower)),
+            @"path_costs": costs,
             @"main_queue_pending_ms": @(requested ? (now - (double)requested / 1000000.0) * 1000 : 0)
         } to:session at:now];
+    }
+    double pending = requested ? MAX(0, now - (double)requested / 1000000) * 1000 : 0;
+    NSString *reason = pending >= 150 ? @"main_queue_delay" :
+        (deliveryAge >= 200 ? @"display_delivery_gap" :
+         (session.mainCPU >= 60 || session.processCPU >= 120 ? @"high_cpu" : @"baseline"));
+    if (session.threadProbe && !session.probeDisabled &&
+        AMProjPerfProbeDue((unsigned)session.probes, session.lastProbe, now, ![reason isEqual:@"baseline"])) {
+        session.lastProbe = now; session.probes++;
+        AMProjProbeSample probe;
+        uint64_t phase = atomic_load(&session->runLoopActivity);
+        uint64_t phaseAt = atomic_load(&session->runLoopAt);
+        AMProjThreadProbeCapture(session.threadProbe, &probe);
+        NSMutableArray *frames = [NSMutableArray array];
+        for (int i = 0; i < probe.frame_count; i++) {
+            AMProjProbeFrame *frame = &probe.frames[i];
+            [frames addObject:@{@"image": [NSString stringWithUTF8String:frame->image] ?: @"",
+                @"uuid": [NSString stringWithUTF8String:frame->uuid] ?: @"",
+                @"image_offset": @(frame->image_offset), @"symbol_offset": @(frame->symbol_offset),
+                @"symbol": [NSString stringWithUTF8String:frame->symbol] ?: @"",
+                @"resolved": @(frame->resolved)}];
+        }
+        [self addEvent:@"main_thread.sample" fields:@{@"reason": reason, @"frames": frames,
+            @"status": @(probe.status), @"resume_status": @(probe.resume_status),
+            @"pause_ms": @(probe.pause_ms), @"probe_elapsed_ms": @(probe.elapsed_ms),
+            @"run_loop_activity": @(phase), @"run_loop_activity_age_ms": @(phaseAt ? MAX(0, now - (double)phaseAt / 1000000) * 1000 : 0),
+            @"main_queue_pending_ms": @(pending), @"display_link_delivery_age_ms": @(deliveryAge),
+            @"main_cpu_percent": @(session.mainCPU), @"process_cpu_percent": @(session.processCPU),
+            @"cpu_sample_age_ms": @(MAX(0, now - session.lastCPU) * 1000),
+            @"main_thread_run_state": @(session.cpuStats.main_valid ? session.cpuStats.main_run_state : 0),
+            @"screen_captured": @(atomic_load(&session->screenCaptured))} to:session at:now];
+        if (probe.status != KERN_SUCCESS || probe.resume_status != KERN_SUCCESS || !probe.frame_count || probe.pause_ms > 5 || probe.elapsed_ms > 50) {
+            session.probeDisabled = YES;
+            [self addEvent:@"main_thread.probe_disabled" fields:@{@"reason": @"probe_failed_or_exceeded_budget"} to:session at:AMPerfNow()];
+        }
     }
     if (now - session.lastSave >= 2) {
         session.lastSave = now;
@@ -344,6 +455,10 @@ static void AMPerfRemoveEventHook(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (self.session != session) return;
             [self.displayLink invalidate]; self.displayLink = nil;
+            if (self.runLoopObserver) {
+                CFRunLoopRemoveObserver(CFRunLoopGetMain(), self.runLoopObserver, kCFRunLoopCommonModes);
+                CFRelease(self.runLoopObserver); self.runLoopObserver = NULL;
+            }
             AMPerfRemoveEventHook();
             [NSNotificationCenter.defaultCenter removeObserver:self];
             self.pending = data; self.saved = saved; self.session = nil;
@@ -375,6 +490,22 @@ static void AMPerfRemoveEventHook(void) {
 }
 - (void)keyboard:(NSNotification *)notification {
     AMProjBetaDiagnosticsNote(@"input.keyboard", [notification.name isEqual:UIKeyboardWillShowNotification] ? @"show" : @"hide");
+}
+- (void)captureChanged:(NSNotification *)notification {
+    (void)notification;
+    AMPerfSession *session = self.session;
+    if (!session || !atomic_load(&session->active)) return;
+    BOOL captured = UIScreen.mainScreen.isCaptured;
+    atomic_store(&session->screenCaptured, captured);
+    [self append:@"screen.capture_changed" fields:@{@"captured": @(captured)} session:session];
+}
+- (void)powerChanged:(NSNotification *)notification {
+    (void)notification;
+    AMPerfSession *session = self.session;
+    if (!session || !atomic_load(&session->active)) return;
+    BOOL lowPower = NSProcessInfo.processInfo.lowPowerModeEnabled;
+    atomic_store(&session->lowPower, lowPower);
+    [self append:@"power.changed" fields:@{@"low_power": @(lowPower)} session:session];
 }
 - (void)background:(NSNotification *)notification {
     (void)notification;
@@ -519,7 +650,7 @@ static UILabel *AMPerfLabel(CGFloat size, UIFontWeight weight) {
             initWithTitle:@"重新诊断" style:UIBarButtonItemStylePlain target:self action:@selector(discardAndStart)];
     } else {
         self.headline.text = @"记录一次卡顿";
-        self.body.text = recorder.message ?: @"开始后进入工程，正常操作并复现卡顿。\n\n最长 60 秒，到时自动停止，等待你确认上传。\n不采集文字与素材内容。切入后台会停止并保存已有记录。";
+        self.body.text = recorder.message ?: @"开始后进入工程，正常操作并复现卡顿。\n\n最长 60 秒，到时自动停止，等待你确认上传。\n记录性能、卡顿时的代码位置和屏幕捕获状态，不采集文字与素材内容。切入后台会停止并保存已有记录。";
         [self.primary setTitle:@"开始诊断" forState:UIControlStateNormal];
         [self.secondary setTitle:@"返回" forState:UIControlStateNormal];
     }
@@ -611,7 +742,17 @@ CFTimeInterval AMProjBetaDiagnosticsBeginSpan(void) {
 void AMProjBetaDiagnosticsEndSpan(NSString *name, CFTimeInterval start) {
     if (!start || !atomic_load(&AMPerfRecording) || !NSThread.isMainThread) return;
     double elapsed = (AMPerfNow() - start) * 1000;
-    if (elapsed < 4) return;
     AMPerfRecorder *recorder = AMPerfRecorder.shared;
+    AMPerfSession *session = recorder.session;
+    if (!session || !atomic_load(&session->active)) return;
+    for (unsigned i = 0; i < 4; i++) {
+        if (![name isEqualToString:AMPerfPaths[i]]) continue;
+        uint64_t micros = (uint64_t)(MAX(0, elapsed) * 1000);
+        atomic_fetch_add(&session->pathCalls[i], 1); atomic_fetch_add(&session->pathTotal[i], micros);
+        uint64_t previous = atomic_load(&session->pathMax[i]);
+        while (micros > previous && !atomic_compare_exchange_weak(&session->pathMax[i], &previous, micros)) {}
+        break;
+    }
+    if (elapsed < 4) return;
     [recorder append:@"plugin.slow_span" fields:@{@"name": AMPerfShort(name), @"elapsed_ms": @(elapsed)} session:recorder.session];
 }

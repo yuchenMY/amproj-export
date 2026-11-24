@@ -88,11 +88,13 @@ jobs:
           beta_symbols = subprocess.check_output(["nm", "-gU", str(beta)], text=True)
           assert "_AMProjBetaDiagnosticsPresent" in beta_symbols
           assert "_AMCloudSubmitPerformanceTicket" in beta_symbols
+          assert "_AMProjThreadProbeCapture" in beta_symbols
           release_symbols = subprocess.check_output(
               ["nm", "-gU", "AMProjExport/AMProjExport.dylib"], text=True
           )
           assert "_AMProjBetaDiagnostics" not in release_symbols
           assert "_AMCloudSubmitPerformanceTicket" not in release_symbols
+          assert "_AMProjThreadProbe" not in release_symbols
           assert b"AMProjExport.performance.json" not in Path(
               "AMProjExport/AMProjExport.dylib"
           ).read_bytes()
@@ -122,6 +124,17 @@ jobs:
               ["otool", "-D", str(home_ui_path)], text=True
           )
           print(f"verified AMHomeUI.dylib: arm64 MH_DYLIB, {home_ui_info['ncmds']} load commands")
+          PY
+
+      - name: Exercise native main-thread sampling and failed-state recovery
+        run: |
+          clang -O2 -fno-omit-frame-pointer -Wall -Wextra -Werror \
+            -DAMPROJ_PROBE_TESTING=1 AMProjExport/AMProjThreadProbe.c \
+            tests/thread_probe_smoke.c -o "$RUNNER_TEMP/thread-probe-smoke"
+          python3 - "$RUNNER_TEMP/thread-probe-smoke" <<'PY'
+          import subprocess
+          import sys
+          subprocess.run([sys.argv[1]], check=True, timeout=30)
           PY
 
       - name: Test streaming project archive writer
