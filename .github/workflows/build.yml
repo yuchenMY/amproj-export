@@ -20,6 +20,7 @@ on:
       - 'package_editor_button_ipa.py'
       - 'package_official_builtin_effects_ipa.py'
       - 'home_ui_contract.py'
+      - 'performance_report.py'
       - 'tests/**'
       - '.github/workflows/build.yml'
   workflow_dispatch:
@@ -82,6 +83,19 @@ jobs:
           verify_cloud_stability_contract(
               Path("AMProjExport/AMProjExport.dylib").read_bytes()
           )
+          beta = Path("AMProjExport/AMProjExportBeta.dylib")
+          verify_dylib_architecture(beta)
+          beta_symbols = subprocess.check_output(["nm", "-gU", str(beta)], text=True)
+          assert "_AMProjBetaDiagnosticsPresent" in beta_symbols
+          assert "_AMCloudSubmitPerformanceTicket" in beta_symbols
+          release_symbols = subprocess.check_output(
+              ["nm", "-gU", "AMProjExport/AMProjExport.dylib"], text=True
+          )
+          assert "_AMProjBetaDiagnostics" not in release_symbols
+          assert "_AMCloudSubmitPerformanceTicket" not in release_symbols
+          assert b"AMProjExport.performance.json" not in Path(
+              "AMProjExport/AMProjExport.dylib"
+          ).read_bytes()
           cloud_dependencies = subprocess.check_output(
               ["otool", "-L", "AMProjExport/AMProjExport.dylib"], text=True
           )
@@ -160,6 +174,7 @@ jobs:
           artifact_paths = (
               Path("AMProjExport/AMProjExport.dylib"),
               Path("AMProjExport/AMProjExportDebug.dylib"),
+              Path("AMProjExport/AMProjExportBeta.dylib"),
               Path("AMProjExport/AMHomeUI.dylib"),
           )
           metadata = {
@@ -189,9 +204,11 @@ jobs:
             build-metadata.json
             AMProjExport/AMProjExport.dylib
             AMProjExport/AMProjExportDebug.dylib
+            AMProjExport/AMProjExportBeta.dylib
             AMProjExport/AMHomeUI.dylib
 
       - name: Publish Cloud release asset
+        if: github.ref_name == 'codex/feature-autfeng-cloud-project-export'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

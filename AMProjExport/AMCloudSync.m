@@ -3,6 +3,10 @@
 #import "AMDebugTransport.h"
 #import "AMEditorCustomization.h"
 #import "AMProjV865ProjectFlow.h"
+#if AMPROJ_BETA_DIAGNOSTICS
+#import "AMProjBetaDiagnostics.h"
+#import "AMProjPerformancePolicy.h"
+#endif
 
 #import <CommonCrypto/CommonDigest.h>
 #import <QuartzCore/QuartzCore.h>
@@ -1970,6 +1974,9 @@ static void AMCloudAttachProjectsInControllerTree(UIViewController *controller,
 }
 
 static void AMCloudAttachVisibleProjectsControllers(void) {
+#if AMPROJ_BETA_DIAGNOSTICS
+    CFTimeInterval diagnosticsStarted = AMProjBetaDiagnosticsBeginSpan();
+#endif
     NSMutableSet<NSValue *> *visited = [NSMutableSet set];
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class] ||
@@ -1980,6 +1987,9 @@ static void AMCloudAttachVisibleProjectsControllers(void) {
             }
         }
     }
+#if AMPROJ_BETA_DIAGNOSTICS
+    AMProjBetaDiagnosticsEndSpan(@"plugin.cloud_attach", diagnosticsStarted);
+#endif
 }
 
 // 云 tab 里直接显示备份网页时，网页那套"站点外壳"（大标题、渐变配额卡、
@@ -2118,6 +2128,13 @@ static NSString *AMCloudBackupTabStyleScript(void) {
              injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
           forMainFrameOnly:YES]];
     }
+#if AMPROJ_BETA_DIAGNOSTICS
+    if (AMProjBetaDiagnosticsAvailable()) {
+        [content addUserScript:[[WKUserScript alloc]
+            initWithSource:AMProjBetaDiagnosticsAccountScript()
+             injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES]];
+    }
+#endif
     [content addScriptMessageHandler:
         [AMCloudWeakScriptMessageHandler handlerWithTarget:self] name:@"amAccount"];
     WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
@@ -2186,6 +2203,14 @@ static NSString *AMCloudBackupTabStyleScript(void) {
         return;
     }
     NSDictionary *body = message.body;
+#if AMPROJ_BETA_DIAGNOSTICS
+    if ([body[@"type"] isEqualToString:@"diagnostics"] &&
+        [self.webView.URL.path isEqualToString:@"/me.html"] &&
+        AMProjBetaDiagnosticsAvailable()) {
+        AMProjBetaDiagnosticsPresent(self);
+        return;
+    }
+#endif
     if ([body[@"type"] isEqualToString:@"profile"]) {
         NSDictionary *profile = [body[@"user"] isKindOfClass:NSDictionary.class]
             ? body[@"user"] : nil;
@@ -5848,6 +5873,83 @@ void AMCloudSubmitCrashTicket(NSString *title, NSString *summary, NSString *logP
         }] resume];
     }] resume];
 }
+
+#if AMPROJ_BETA_DIAGNOSTICS
+void AMCloudSubmitPerformanceTicket(NSString *captureID, NSData *report,
+    void (^completion)(BOOL ok, NSString *ticketID, NSString *message)) {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AMCloudSubmitPerformanceTicket(captureID, report, completion);
+        });
+        return;
+    }
+    void (^finish)(BOOL, NSString *, NSString *) = ^(BOOL ok, NSString *ticket, NSString *message) {
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, ticket, message); });
+    };
+    NSString *ownerToken = AMCloudReadToken();
+    if (!ownerToken.length) { finish(NO, nil, @"请先登录账户，再回到卡顿诊断上传。"); return; }
+    if (![[NSUUID alloc] initWithUUIDString:captureID] || !report.length ||
+        report.length > AMPROJ_PERF_MAX_BYTES) {
+        finish(NO, nil, @"诊断日志无效或过大，请重新诊断。"); return;
+    }
+    // 仅驻留内存、仅绑定当前令牌的上传回执。账号改变后绝不复用旧工单。
+    static NSMutableDictionary<NSString *, NSDictionary *> *receipts;
+    if (!receipts) receipts = [NSMutableDictionary dictionary];
+    NSDictionary *receipt = receipts[captureID];
+    NSString *existingID = [receipt[@"owner"] isEqual:ownerToken] ? receipt[@"ticket"] : nil;
+    AMCloudClient *client = AMCloudManager.shared.client;
+    void (^attach)(NSString *) = ^(NSString *ticketID) {
+        if (![AMCloudReadToken() isEqual:ownerToken]) {
+            finish(NO, nil, @"登录账号已变化，请使用当前账号重新上传。"); return;
+        }
+        NSCharacterSet *notDigits = NSCharacterSet.decimalDigitCharacterSet.invertedSet;
+        if (!ticketID.length || ticketID.length > 24 ||
+            [ticketID rangeOfCharacterFromSet:notDigits].location != NSNotFound) {
+            finish(NO, nil, @"服务端未返回有效工单号。"); return;
+        }
+        if (receipts.count >= 8 && !receipts[captureID]) [receipts removeAllObjects];
+        receipts[captureID] = @{@"owner": ownerToken, @"ticket": ticketID};
+        NSError *requestError = nil;
+        NSMutableURLRequest *request = [client requestMethod:@"POST"
+            path:[NSString stringWithFormat:@"/support/tickets/%@/attachments", ticketID]
+            body:nil authenticated:YES error:&requestError];
+        if (!request) { finish(NO, ticketID, requestError.localizedDescription); return; }
+        request.timeoutInterval = 60;
+        [request setValue:@"text/plain; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
+        [request setValue:[NSString stringWithFormat:@"cat-performance-%@.txt", captureID]
+            forHTTPHeaderField:@"X-AM-Attach-Filename"];
+        [[client.session uploadTaskWithRequest:request fromData:report
+            completionHandler:^(NSData *data, NSURLResponse *raw, NSError *networkError) {
+            NSHTTPURLResponse *response = [raw isKindOfClass:NSHTTPURLResponse.class] ? (id)raw : nil;
+            NSError *error = networkError;
+            NSDictionary *payload = error ? nil : AMCloudEnvelope(data, response, &error);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (![AMCloudReadToken() isEqual:ownerToken]) {
+                    finish(NO, nil, @"登录账号已变化；本机日志已保留。"); return;
+                }
+                if (response.statusCode == 401) AMCloudInvalidateTokenForRequest(request);
+                if (!payload) {
+                    finish(NO, ticketID, [NSString stringWithFormat:@"工单 #%@ 已创建，附件未上传成功：%@。可重试。",
+                        ticketID, error.localizedDescription ?: @"网络错误"]); return;
+                }
+                [receipts removeObjectForKey:captureID];
+                finish(YES, ticketID, @"日志已上传。");
+            });
+        }] resume];
+    };
+    if (existingID.length) { attach(existingID); return; }
+    [client performMethod:@"POST" path:@"/support/tickets"
+        body:@{@"category": @"bug", @"title": @"猫鹤AM Beta 卡顿诊断",
+            @"content": [NSString stringWithFormat:@"用户主动采集并确认上传。采集编号：%@。设备、性能与脱敏操作记录见附件。", captureID]}
+        authenticated:YES completion:^(id data, NSError *error) {
+            if (error) { finish(NO, nil, error.localizedDescription); return; }
+            id ticket = [data[@"ticket"] isKindOfClass:NSDictionary.class] ? data[@"ticket"][@"id"] : nil;
+            NSString *ticketID = [ticket isKindOfClass:NSNumber.class] ? [ticket stringValue] :
+                ([ticket isKindOfClass:NSString.class] ? ticket : nil);
+            attach(ticketID);
+        }];
+}
+#endif
 
 void AMCloudAuthorizeFeature(NSString *feature, UIViewController *presenter,
                              AMCloudAuthorizationCompletion completion) {

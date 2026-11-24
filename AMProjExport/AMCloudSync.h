@@ -34,6 +34,13 @@ FOUNDATION_EXPORT void AMCloudSyncShowAccountLoginFrom(
 FOUNDATION_EXPORT void AMCloudSubmitCrashTicket(
     NSString *title, NSString *summary, NSString *logPath,
     void (^ _Nullable completion)(BOOL ok, NSString * _Nullable message));
+#if AMPROJ_BETA_DIAGNOSTICS
+/// 上传用户确认过的性能日志，复用工单 API；回调在主线程，返回真实工单号。
+/// 同一采集在当前登录会话内重试时复用已创建工单，不把令牌写入日志。
+FOUNDATION_EXPORT void AMCloudSubmitPerformanceTicket(
+    NSString *captureID, NSData *report,
+    void (^completion)(BOOL ok, NSString * _Nullable ticketID, NSString * _Nullable message));
+#endif
 /// 将已生成的 .amproj 交给 AutFeng Hub 云工程选择器，由用户选择新建或覆盖工程。
 FOUNDATION_EXPORT void AMCloudSyncBeginUploadFile(
     NSURL *fileURL, NSString *projectTitle, UIViewController *presenter);

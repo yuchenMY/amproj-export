@@ -1,5 +1,8 @@
 #import "AMEditorCustomization.h"
 #import "AMCloudSync.h"
+#if AMPROJ_BETA_DIAGNOSTICS
+#import "AMProjBetaDiagnostics.h"
+#endif
 
 #import <UIKit/UIKit.h>
 #import <math.h>
@@ -336,10 +339,20 @@ static void AMEditorCustomizeProjectEditController(id controller) {
 }
 
 static void AMEditorProjectEditLayout(id self, SEL selector) {
+#if AMPROJ_BETA_DIAGNOSTICS
+    CFTimeInterval nativeStarted = AMProjBetaDiagnosticsBeginSpan();
+#endif
     if (AMEditorOriginalProjectEditLayout) {
         AMEditorOriginalProjectEditLayout(self, selector);
     }
+#if AMPROJ_BETA_DIAGNOSTICS
+    AMProjBetaDiagnosticsEndSpan(@"native.editor_layout", nativeStarted);
+    CFTimeInterval customizeStarted = AMProjBetaDiagnosticsBeginSpan();
+#endif
     AMEditorCustomizeProjectEditController(self);
+#if AMPROJ_BETA_DIAGNOSTICS
+    AMProjBetaDiagnosticsEndSpan(@"plugin.editor_customization", customizeStarted);
+#endif
 }
 
 static Class AMEditorProjectEditClass(void) {

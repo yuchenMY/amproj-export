@@ -30,6 +30,9 @@
 #import <objc/message.h>
 #import <os/log.h>
 #import "AMProjCrashReporter.h"
+#if AMPROJ_BETA_DIAGNOSTICS
+#import "AMProjBetaDiagnostics.h"
+#endif
 #import <zlib.h>
 #import <stdatomic.h>
 #import <string.h>
@@ -17913,6 +17916,9 @@ static void hooked_shareNCOnTapExport(id self, SEL _cmd, id sender) {
 static void hooked_navigationPush(id self, SEL _cmd,
                                   UIViewController *viewController,
                                   BOOL animated) {
+#if AMPROJ_BETA_DIAGNOSTICS
+    AMProjBetaDiagnosticsNote(@"page.push", NSStringFromClass(viewController.class) ?: @"?");
+#endif
 #if AMPROJ_CLOUD_SYNC
     UIViewController *accountReplacement = nil;
     if ([self isKindOfClass:UINavigationController.class]) {
@@ -18910,6 +18916,9 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
     }
     // 崩溃面包屑：留下「崩之前最后几个页面」这条线。环形缓冲 4KB，代价可忽略。
     AMProjCrashNote(@"present %@", NSStringFromClass(controller.class) ?: @"?");
+#if AMPROJ_BETA_DIAGNOSTICS
+    AMProjBetaDiagnosticsNote(@"page.present", NSStringFromClass(controller.class) ?: @"?");
+#endif
     // 法务同意弹窗：
     //   ① 用户还没点过「继续」→ 原样放它出来，并记住"他点过"和它是哪个类；
     //   ② 已经点过 → **呈现之前**就拦掉，一个像素都不上屏。

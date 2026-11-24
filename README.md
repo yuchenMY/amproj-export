@@ -1,5 +1,33 @@
 # AMProjExport
 
+## Beta 卡顿诊断
+
+`make` 另产出 `AMProjExportBeta.dylib`，仅此目标定义
+`AMPROJ_BETA_DIAGNOSTICS=1` 并编入诊断模块。正式、离线和 Debug 目标不包含诊断
+入口或采集实现；CI 检查正式版中没有诊断符号及日志文件名。Beta 库仍使用
+`@rpath/AMProjExport.dylib` 安装名，865 打包时将它作为 cloud 参数交给现有迁移脚本，
+包内仍为 `Frameworks/AMProjExport.dylib`，不额外加载第二份项目库。
+
+Beta 账户页底部在「反馈与工单」下方增加「测试与诊断」。用户主动开始后正常进入工程，
+通过顶部小条结束，或在 60 秒后自动停止。切入后台也停止，并以有限后台任务保存。
+记录包括脱敏触摸位置和控件类名、页面呈现/入栈、主队列回执延迟、display-link
+交付间隔、内存和热状态，以及超过 4ms 的已标记插件路径。display-link 数据不等于
+工程实际渲染 FPS；本版不采集线程堆栈、文字内容、素材、截图、令牌或私有工程元数据。
+
+采集任务结束即停止计时器与显示回调，并撤销自己仍持有的触摸 hook；其他模块后来接管
+hook 链时只保留关闭的转发路径。事件最多 1024 条，JSON 最多 512KiB，采集中每 2 秒
+后台保存一次至 `Library/Caches/AMProjExport.performance.json`。系统强制终止时可能丢失
+最后一个快照之后的事件；重启后可从同一诊断入口上传已保存记录。
+
+日志只在用户确认后上传为「猫鹤AM Beta 卡顿诊断」工单，附件名为
+`cat-performance-<采集UUID>.txt`。成功后展示真实工单号并删除本地待上传文件；
+失败保留日志。当前登录会话内重试复用已创建工单，账号改变后不复用旧回执。
+后台在现有「反馈与工单」按编号下载附件即可，无需新增服务端接口或修改线上用户页。
+
+下载后可运行 `python performance_report.py <附件.txt>` 汇总主线程停顿、慢路径和内存峰值。
+构建身份默认取当前 Git 短 SHA 加 `-beta`，可用 `DIAGNOSTIC_BUILD_ID` 显式指定。
+正式发布仍使用 `AMProjExport.dylib`；诊断测试分支的 CI 不执行正式发布步骤。
+
 当前发布基线是 Alight Motion iOS **6.2.58 (Build 865)**。所有当前包体只允许注入
 `AMProjExport.dylib`；`AMProjExportCloud.dylib` 是 6.2.55 (Build 862) 的历史名称，
 不得再放入 865 包体。`AMHomeUI.dylib` 始终作为独立库保留，不合并进项目导入导出库。

@@ -458,7 +458,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
                 "ret",
             ],
         )
-        self.assertEqual(MAKEFILE.count("AMProjStabilityContract.S"), 6)
+        for target in ("AMProjExport.dylib", "AMProjExportOffline.dylib",
+                       "AMProjExportDebug.dylib", "AMProjExportBeta.dylib"):
+            recipe = MAKEFILE.split(target + ":", 1)[1].split("\n\n", 1)[0].split("\n", 1)[1]
+            self.assertIn("AMProjStabilityContract.S", recipe, target)
 
     def test_v44_project_package_uses_exact_6255_controller_boundary(self):
         self.assertIn("selectedExportOptID", SOURCE)
@@ -1738,7 +1741,10 @@ class NativeImportRouteSourceTests(unittest.TestCase):
         self.assertIn(".cfi_startproc", BRIDGE_ASSEMBLY)
         self.assertIn(".cfi_endproc", BRIDGE_ASSEMBLY)
         self.assertIn("AMProjNativeImportBridge.S", MAKEFILE)
-        self.assertEqual(MAKEFILE.count("AMProjNativeImportBridge.S"), 6)
+        for target in ("AMProjExport.dylib", "AMProjExportOffline.dylib",
+                       "AMProjExportDebug.dylib", "AMProjExportBeta.dylib"):
+            recipe = MAKEFILE.split(target + ":", 1)[1].split("\n\n", 1)[0].split("\n", 1)[1]
+            self.assertIn("AMProjNativeImportBridge.S", recipe, target)
         self.assertIn('"_AMProjBridgeNSURLToSwiftURL"', WORKFLOW)
         self.assertIn('"_AMProjCallNativeLocalImportContinuation"', WORKFLOW)
         self.assertNotIn('"_AMProjCallNativePackageImportBody"', WORKFLOW)

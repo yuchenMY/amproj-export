@@ -17,7 +17,10 @@ class ImportArchiveSourceTests(unittest.TestCase):
         self.assertIn("AMProjNormalizeProjectArchive", header)
         self.assertIn("AMProjExtractPluginArchive", header)
         makefile = MAKEFILE.read_text(encoding="utf-8")
-        self.assertEqual(makefile.count("AMProjZIPWriter.m AMProjImportArchive.m"), 3)
+        for target in ("AMProjExport.dylib", "AMProjExportOffline.dylib",
+                       "AMProjExportDebug.dylib", "AMProjExportBeta.dylib"):
+            recipe = makefile.split(target + ":", 1)[1].split("\n\n", 1)[0].split("\n", 1)[1]
+            self.assertIn("AMProjZIPWriter.m AMProjImportArchive.m", recipe, target)
         self.assertIn("AMProjExport.dylib", makefile)
         self.assertIn("AMProjExportOffline.dylib", makefile)
         self.assertNotIn("AMProjExportCloud.dylib", makefile)
