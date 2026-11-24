@@ -4031,7 +4031,7 @@ static UIViewController *AMCloudContentHostForHeader(UIView *header) {
     [host.view addSubview:view];
     NSLayoutYAxisAnchor *bottom = host.view.safeAreaLayoutGuide.bottomAnchor;
     UIView *tabBar = AMCloudFindViewWithClassName(header.window, @"HomepageTabBarView", 0);
-    if (tabBar && [tabBar isDescendantOfView:host.view]) {
+    if (tabBar && tabBar.window == host.view.window) {
         CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:host.view];
         CGRect headerFrame = [header convertRect:header.bounds toView:host.view];
         if (CGRectGetMinY(tabFrame) > CGRectGetMaxY(headerFrame)) bottom = tabBar.topAnchor;
