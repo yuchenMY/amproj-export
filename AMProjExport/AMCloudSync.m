@@ -1565,6 +1565,17 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 
 @class AMCloudLibraryViewController;
 static UIWindow *AMCloudActiveWindow(void);
+#if AMPROJ_BETA_DIAGNOSTICS
+static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger selected);
+static BOOL AMCloudProbeSavingHeaderSnapshot = NO;
+static BOOL AMCloudProbeSnapshotWritten = NO;
+static BOOL AMCloudLayoutProbeEnabled(void) {
+    NSString *library = NSSearchPathForDirectoriesInDomains(
+        NSLibraryDirectory, NSUserDomainMask, YES).firstObject;
+    return [[NSFileManager defaultManager] fileExistsAtPath:
+        [library stringByAppendingPathComponent:@"AMProjExport.cloudprobe"]];
+}
+#endif
 
 @interface AMCloudManager : NSObject
 @property(nonatomic, strong) AMCloudClient *client;
@@ -2448,6 +2459,8 @@ extern NSNotificationName const AMCloudLibraryDidChangeNotification;
                        dispatch_get_main_queue(), ^{
             AMCloudInstallProjectsHooks();
             AMCloudAttachVisibleProjectsControllers();
+            [self installCloudTabTapWatcher];
+            [self refreshWindowCloudOverlayVisibility];
         });
     }
 }
@@ -3987,6 +4000,14 @@ static NSInteger AMCloudDetectCloudPillSelected(UIView *header) {
         state = AMCloudSelectedPillRGBA(pixels, width, height, stride);
     }
     free(pixels);
+#if AMPROJ_BETA_DIAGNOSTICS
+    if (AMCloudProbeSavingHeaderSnapshot) {
+        NSString *path = [NSSearchPathForDirectoriesInDomains(
+            NSCachesDirectory, NSUserDomainMask, YES).firstObject
+            stringByAppendingPathComponent:@"AMProjExport.cloud-header.png"];
+        AMCloudProbeSnapshotWritten = [UIImagePNGRepresentation(snapshot) writeToFile:path atomically:YES];
+    }
+#endif
     return state;
 }
 
@@ -4016,10 +4037,136 @@ static UIViewController *AMCloudContentHostForHeader(UIView *header) {
     return nil;
 }
 
+#if AMPROJ_BETA_DIAGNOSTICS
+static NSDictionary *AMCloudProbeView(UIView *view, UIWindow *window) {
+    if (!view) return @{};
+    return @{
+        @"class": NSStringFromClass(view.class) ?: @"",
+        @"frame": NSStringFromCGRect([view convertRect:view.bounds toView:window]),
+        @"bounds": NSStringFromCGRect(view.bounds),
+        @"hidden": @(view.hidden), @"alpha": @(view.alpha),
+        @"interactive": @(view.userInteractionEnabled),
+        @"in_window": @(view.window == window),
+        @"owner": [view.nextResponder isKindOfClass:UIViewController.class]
+            ? NSStringFromClass(view.nextResponder.class) : @""
+    };
+}
+
+static UIView *AMCloudProbeTree(UIView *view, UIWindow *window, NSUInteger depth,
+                              NSMutableArray *nodes) {
+    if (!view || depth > 20 || nodes.count >= 180) return nil;
+    NSMutableDictionary *node = [AMCloudProbeView(view, window) mutableCopy];
+    node[@"depth"] = @(depth);
+    [nodes addObject:node];
+    if (view.hidden || view.alpha < 0.01) return nil;
+    UIView *found = [NSStringFromClass(view.class) containsString:@"SelectionHeaderView"]
+        ? view : nil;
+    for (UIView *child in view.subviews) {
+        UIView *candidate = AMCloudProbeTree(child, window, depth + 1, nodes);
+        if (!found) found = candidate;
+        if (nodes.count >= 180) break;
+    }
+    return found;
+}
+
+// 仅本机显式 flag 启用，最多采集 12 次；不读取文字/工程/账户内容，不上传。
+static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger selected) {
+    static NSUInteger captures = 0;
+    static CFTimeInterval lastCapture = 0;
+    static BOOL capturing = NO;
+    if (!NSThread.isMainThread || capturing || captures >= 12) return;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - lastCapture < 0.35 || !AMCloudLayoutProbeEnabled() ||
+        UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
+    NSString *topName = NSStringFromClass(AMCloudTopController(nil).class) ?: @"";
+    for (NSString *excluded in @[@"Editor", @"EditVC", @"Workbench", @"CreateVC",
+                                 @"EffectPicker", @"DocumentPicker", @"PhotoPicker",
+                                 @"AMCloudAccount", @"AMPerfController"]) {
+        if ([topName containsString:excluded]) return;
+    }
+    captures++; lastCapture = now;
+    capturing = YES;
+    @try {
+    UIWindow *window = AMCloudActiveWindow();
+    NSMutableArray *windows = [NSMutableArray array];
+    UIWindow *inspectionWindow = window;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] ||
+            scene.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
+            [windows addObject:@{@"class": NSStringFromClass(candidate.class),
+                @"key": @(candidate.isKeyWindow), @"level": @(candidate.windowLevel),
+                @"hidden": @(candidate.hidden), @"frame": NSStringFromCGRect(candidate.frame),
+                @"root": NSStringFromClass(candidate.rootViewController.class) ?: @""}];
+            if (!window && (candidate.isKeyWindow ||
+                (!inspectionWindow && !candidate.hidden && candidate.alpha > 0.01)))
+                inspectionWindow = candidate;
+        }
+    }
+    NSMutableArray *nodes = [NSMutableArray array];
+    UIView *raw = AMCloudProbeTree(inspectionWindow, inspectionWindow, 0, nodes);
+    if (header) raw = header;
+    NSInteger rawSelected = -1;
+    AMCloudProbeSnapshotWritten = NO;
+    NSString *rawName = NSStringFromClass(raw.class) ?: @"";
+    if ([rawName containsString:@"Homepage"] && [rawName containsString:@"SelectionHeaderView"]) {
+        AMCloudProbeSavingHeaderSnapshot = YES;
+        @try { rawSelected = AMCloudDetectCloudPillSelected(raw); }
+        @finally { AMCloudProbeSavingHeaderSnapshot = NO; }
+    }
+    UIViewController *host = header ? AMCloudContentHostForHeader(header) : nil;
+    NSMutableArray *chain = [NSMutableArray array];
+    for (UIResponder *r = raw.nextResponder; r && chain.count < 30; r = r.nextResponder) {
+        NSMutableDictionary *entry = [@{@"class": NSStringFromClass(r.class) ?: @""} mutableCopy];
+        if ([r isKindOfClass:UIViewController.class]) {
+            UIView *v = ((UIViewController *)r).viewIfLoaded;
+            entry[@"view"] = AMCloudProbeView(v, inspectionWindow);
+            entry[@"contains_header"] = @([raw isDescendantOfView:v]);
+        }
+        [chain addObject:entry];
+    }
+    NSMutableArray *hits = [NSMutableArray array];
+    if (raw) {
+        CGRect frame = [raw convertRect:raw.bounds toView:inspectionWindow];
+        for (NSNumber *fraction in @[@0.2, @0.5, @0.8]) {
+            CGPoint p = CGPointMake(CGRectGetMinX(frame) + CGRectGetWidth(frame) *
+                fraction.doubleValue, CGRectGetMidY(frame));
+            UIView *hit = [inspectionWindow hitTest:p withEvent:nil];
+            [hits addObject:@{@"fraction": fraction,
+                @"class": NSStringFromClass(hit.class) ?: @"",
+                @"within_header": @(hit == raw || [hit isDescendantOfView:raw])}];
+        }
+    }
+    NSDictionary *record = @{
+        @"build": @AMPROJ_DIAGNOSTIC_BUILD_ID, @"phase": phase ?: @"",
+        @"capture": @(captures), @"active": @(UIApplication.sharedApplication.applicationState),
+        @"disabled": @(AMCloudUIKitDisabled()),
+        @"watcher": @(objc_getAssociatedObject(window, &AMCloudBannerViewKey) != nil),
+        @"window": AMCloudProbeView(window, window), @"scene_windows": windows,
+        @"inspection_window": AMCloudProbeView(inspectionWindow, inspectionWindow),
+        @"top": topName, @"raw_header": AMCloudProbeView(raw, inspectionWindow),
+        @"header_valid": @(header != nil), @"selected": @(selected),
+        @"raw_selected": @(rawSelected),
+        @"snapshot_written": @(AMCloudProbeSnapshotWritten),
+        @"host": host ? NSStringFromClass(host.class) : @"",
+        @"hits": hits, @"responders": chain, @"views": nodes
+    };
+    NSString *path = [NSSearchPathForDirectoriesInDomains(
+        NSCachesDirectory, NSUserDomainMask, YES).firstObject
+        stringByAppendingPathComponent:@"AMProjExport.cloud-layout.json"];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:record options:NSJSONWritingPrettyPrinted error:nil];
+    if (data.length <= 128 * 1024) [data writeToFile:path atomically:YES];
+    } @finally { capturing = NO; AMCloudProbeSavingHeaderSnapshot = NO; }
+}
+#endif
+
 - (void)refreshWindowCloudOverlayVisibility {
     if (AMCloudUIKitDisabled()) { [self setCloudLibraryVisible:NO]; return; }
     UIView *header = AMCloudSelectionHeaderView();
     NSInteger state = AMCloudDetectCloudPillSelected(header);
+#if AMPROJ_BETA_DIAGNOSTICS
+    AMCloudCaptureLayoutProbe(@"reconcile", header, state);
+#endif
     if (!header || state != 1) {
         [self setCloudLibraryVisible:NO];
         return;
@@ -4096,6 +4243,9 @@ static UIViewController *AMCloudContentHostForHeader(UIView *header) {
     BOOL subTab = header && CGRectContainsPoint(
         [header convertRect:header.bounds toView:window], point);
     if (!mainTab && !subTab) return;
+#if AMPROJ_BETA_DIAGNOSTICS
+    AMCloudCaptureLayoutProbe(@"tab_tap", header, -2);
+#endif
     // 先卸下旧内容，再等原生导航/SwiftUI 更新。主导航永远不能直接打开云空间。
     [self setCloudLibraryVisible:NO];
     NSUInteger generation = ++self.cloudSelectionGeneration;
