@@ -45,6 +45,13 @@ class CloudTabEmbeddingTests(unittest.TestCase):
         self.assertNotIn("rootViewController", block)
         self.assertNotIn("constant:120", block)
 
+    def test_host_requires_project_ownership_not_just_generic_header(self):
+        block = SOURCE.split("static UIViewController *AMCloudContentHostForHeader", 1)[1]
+        block = block.split("- (void)refreshWindowCloudOverlayVisibility", 1)[0]
+        self.assertIn("if (AMCloudIsProjectsControllerClass(controller.class)) return controller;", block)
+        self.assertNotIn("return controller;\n", block.replace(
+            "if (AMCloudIsProjectsControllerClass(controller.class)) return controller;\n", ""))
+
     def test_teardown_pairs_child_lifecycle_and_invalidates_pending_taps(self):
         block = SOURCE.split("- (void)setCloudLibraryVisible:(BOOL)visible {", 1)[1]
         block = block.split("- (void)attachCloudBackupBannerToController", 1)[0]

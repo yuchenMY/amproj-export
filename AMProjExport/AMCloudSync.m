@@ -3939,13 +3939,18 @@ static UIView *AMCloudSelectionHeaderView(void) {
     UIWindow *window = AMCloudActiveWindow();
     if (!window) return nil;
     UIView *header = AMCloudFindViewWithClassName(window, @"SelectionHeaderView", 0);
-    if (!header || header.window != window) return nil;
+    if (!header || header.window != window ||
+        ![NSStringFromClass(header.class) containsString:@"Homepage"]) return nil;
     CGRect frame = [header convertRect:header.bounds toView:window];
     if (CGRectGetWidth(frame) < 80 || CGRectGetHeight(frame) < 20 ||
         !CGRectContainsRect(window.bounds, frame)) return nil;
-    CGPoint point = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
-    UIView *hit = [window hitTest:point withEvent:nil];
-    return hit && (hit == header || [hit isDescendantOfView:header]) ? header : nil;
+    for (NSNumber *fraction in @[@0.2, @0.5, @0.8]) {
+        CGPoint point = CGPointMake(CGRectGetMinX(frame) +
+            CGRectGetWidth(frame) * fraction.doubleValue, CGRectGetMidY(frame));
+        UIView *hit = [window hitTest:point withEvent:nil];
+        if (hit && (hit == header || [hit isDescendantOfView:header])) return header;
+    }
+    return nil;
 }
 
 // 只截取子标签自身，不做整窗回读、不遍历 SwiftUI 无障碍树；仅由页面/点击事件调用。
@@ -3995,9 +4000,10 @@ static UIViewController *AMCloudContentHostForHeader(UIView *header) {
         if (!view || view == view.window || ![header isDescendantOfView:view]) continue;
         CGRect frame = [header convertRect:header.bounds toView:view];
         if (CGRectGetHeight(view.bounds) - CGRectGetMaxY(frame) < 160) continue;
+        if (AMCloudIsProjectsControllerClass(controller.class)) return controller;
+        // 不能把首页根控制器或其他复用 SelectionHeader 的页面当成项目页。
         if ([controller isKindOfClass:UINavigationController.class] ||
             [controller isKindOfClass:UITabBarController.class]) return nil;
-        return controller;
     }
     return nil;
 }
@@ -4115,8 +4121,10 @@ static UIViewController *AMCloudContentHostForHeader(UIView *header) {
 }
 
 - (void)cloudSegmentSelectionDidChange {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self refreshWindowCloudOverlayVisibility];
+    NSUInteger generation = self.cloudSelectionGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (generation == self.cloudSelectionGeneration)
+            [self refreshWindowCloudOverlayVisibility];
     });
 }
 

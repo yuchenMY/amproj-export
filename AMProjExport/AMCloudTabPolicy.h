@@ -1,3 +1,4 @@
+// 猫鹤 AM · 云端子标签选中背景识别。
 #ifndef AM_CLOUD_TAB_POLICY_H
 #define AM_CLOUD_TAB_POLICY_H
 
