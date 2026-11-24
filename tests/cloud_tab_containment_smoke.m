@@ -1,8 +1,10 @@
-// 猫鹤 AM · 执行生产宿主选择函数的响应链回归。
+// 猫鹤 AM · 执行生产项目容器、标签点击与有界探针回归。
 #import <Foundation/Foundation.h>
 #include <assert.h>
 #include <stdio.h>
 typedef NSRect CGRect;
+typedef NSPoint CGPoint;
+#define CGRectContainsPoint(rect, point) NSPointInRect(point, rect)
 #define CGRectGetHeight NSHeight
 #define CGRectGetMaxY NSMaxY
 #define NSStringFromCGRect NSStringFromRect
@@ -40,8 +42,8 @@ typedef NSRect CGRect;
 @end
 @interface UIWindow : UIView @end
 @implementation UIWindow @end
-@interface HomepageSelectionHeaderView : UIView @end
-@implementation HomepageSelectionHeaderView @end
+@interface HomepageProjectListView : UIView @end
+@implementation HomepageProjectListView @end
 @interface OtherSelectionHeaderView : UIView @end
 @implementation OtherSelectionHeaderView @end
 @interface UIViewController : UIResponder
@@ -68,42 +70,39 @@ int main(void) {
     @autoreleasepool {
         UIView *content = [UIView new];
         content.bounds = NSMakeRect(0, 0, 390, 800);
-        HomepageSelectionHeaderView *header = [HomepageSelectionHeaderView new];
-        header.bounds = NSMakeRect(0, 0, 390, 48);
-        header.frame = NSMakeRect(0, 220, 390, 48);
+        HomepageProjectListView *header = [HomepageProjectListView new];
+        header.bounds = NSMakeRect(0, 0, 390, 727);
+        header.frame = NSMakeRect(0, 103, 390, 727);
         header.superview = content;
-        for (Class cls in @[ProjectsVC.class, NodeHostingController.class]) {
-            UIViewController *owner = [cls new]; owner.viewIfLoaded = content;
-            header.nextResponder = owner;
-            assert(AMCloudContentHostForHeader(header) == owner);
-        }
-        NodeHostingController *node = [NodeHostingController new]; node.viewIfLoaded = content;
-        header.nextResponder = node;
+        assert(AMCloudProjectContainerEligible(header));
         supported865 = NO;
-        assert(AMCloudContentHostForHeader(header) == nil);
+        assert(!AMCloudProjectContainerEligible(header));
         supported865 = YES;
         OtherSelectionHeaderView *other = [OtherSelectionHeaderView new];
-        other.superview = content; other.nextResponder = node;
-        assert(AMCloudContentHostForHeader(other) == nil);
-        header.superview = nil;
-        assert(AMCloudContentHostForHeader(header) == nil);
-        header.superview = content;
-        content.bounds = NSMakeRect(0, 0, 390, 400);
-        assert(AMCloudContentHostForHeader(header) == nil);
-        content.bounds = NSMakeRect(0, 0, 390, 800);
-        for (Class cls in @[UIViewController.class, UINavigationController.class,
-                             UITabBarController.class]) {
-            UIViewController *owner = [cls new]; owner.viewIfLoaded = content;
-            header.nextResponder = owner;
-            assert(AMCloudContentHostForHeader(header) == nil);
-        }
+        other.superview = content;
+        assert(!AMCloudProjectContainerEligible(other));
+        header.bounds = NSMakeRect(0, 0, 390, 200);
+        assert(!AMCloudProjectContainerEligible(header));
+        header.bounds = NSMakeRect(0, 0, 390, 727);
+        assert(AMCloudProjectContainerEligible(header));
+        assert(!AMCloudProjectContainerEligible(nil));
+        CGRect row = NSMakeRect(0, 224, 390, 48);
+        CGPoint tap = NSMakePoint(310, 240);
+        UIView *library = [UIView new], *button = [UIView new];
+        library.superview = header; button.superview = library;
+        assert(AMCloudIsNativeSubTabTap(header, header, library, row, tap));
+        assert(!AMCloudIsNativeSubTabTap(header, button, library, row, tap));
+        assert(!AMCloudIsNativeSubTabTap(header, library, library, row, tap));
+        assert(!AMCloudIsNativeSubTabTap(header, other, library, row, tap));
+        assert(!AMCloudIsNativeSubTabTap(header, header, library, row, NSMakePoint(310, 300)));
+        assert(!AMCloudIsNativeSubTabTap(header, nil, library, row, tap));
         puts("CLOUD_CONTAINMENT_PASS");
 #ifdef AMPROJ_PROBE_TREE_TEST
         UIWindow *window = [UIWindow new];
         window.window = window;
         NSMutableArray *children = [NSMutableArray array];
         for (int i = 0; i < 250; i++) [children addObject:[UIView new]];
-        HomepageSelectionHeaderView *candidate = [HomepageSelectionHeaderView new];
+        HomepageProjectListView *candidate = [HomepageProjectListView new];
         children[0] = candidate;
         window.subviews = children;
         NSMutableArray *nodes = [NSMutableArray array];

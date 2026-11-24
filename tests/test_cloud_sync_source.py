@@ -1447,7 +1447,7 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         self.assertNotIn('titleLabel.text = @"云储存";', CLOUD)
         self.assertIn("AMCloudOfficialCloudContentOnScreen", CLOUD)
         # r115：云 tab 的内容从网页换成了原生云空间列表
-        self.assertIn("AMCloudLibraryViewController", CLOUD)
+        self.assertIn("AMCloudLibraryView", CLOUD)
         self.assertIn("loadProjects", CLOUD)
         self.assertIn("cloud tab embedded host=", CLOUD)
 
@@ -1460,7 +1460,7 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         # 云端档位识别用 AM 自家 cloud_subtab_title 文案；读不到分段信息则降级常显
         self.assertIn('@"cloud_subtab_title"', CLOUD)
         # 未确认真实子标签选中态时，不能因为文案或临时埋点直接显示。
-        self.assertIn("NSInteger state = AMCloudDetectCloudPillSelected(header);", CLOUD)
+        self.assertIn("NSInteger state = AMCloudDetectCloudPillSelected(header, &tabFrame);", CLOUD)
         self.assertIn("if (!header || state != 1)", CLOUD)
 
     def test_segment_observer_keeps_original_implementation(self):
@@ -1615,8 +1615,8 @@ class NativeXMLScanR81Tests(unittest.TestCase):
         # 以前每 0.8 秒把编辑器整棵树也走一遍，就是工作台卡顿的来源。
         self.assertIn("AMCloudOfficialCloudContentOnScreen", CLOUD)
         self.assertIn('@"没有项目"', CLOUD)
-        self.assertIn("AMCloudContentHostForHeader(header)", CLOUD)
-        self.assertIn("constraintEqualToAnchor:header.bottomAnchor", CLOUD)
+        self.assertIn("AMCloudProjectContainerEligible(header)", CLOUD)
+        self.assertIn("constraintEqualToAnchor:header.topAnchor constant:CGRectGetMaxY(self.cloudSubTabFrame) + 8", CLOUD)
         self.assertNotIn("[window addSubview:overlayView]", CLOUD)
         self.assertIn("AMCloudSegmentTitles", CLOUD)
 
@@ -1721,7 +1721,7 @@ class A11yDetectionR88Tests(unittest.TestCase):
 
     def test_other_channels_still_present(self):
         self.assertNotIn("signalRecent ||", CLOUD)
-        self.assertIn("AMCloudSelectedPillRGBA", CLOUD)
+        self.assertIn("AMCloudSelectedPillBoundsRGBA", CLOUD)
 
 
 class RuntimeReactivationR89Tests(unittest.TestCase):

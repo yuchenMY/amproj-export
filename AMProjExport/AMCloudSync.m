@@ -1563,8 +1563,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)resetAccountContent;
 @end
 
-@class AMCloudLibraryViewController;
+@class AMCloudLibraryView;
 static UIWindow *AMCloudActiveWindow(void);
+static UIView *AMCloudProjectsView(void);
 #if AMPROJ_BETA_DIAGNOSTICS
 static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger selected);
 static BOOL AMCloudProbeSavingHeaderSnapshot = NO;
@@ -1611,8 +1612,10 @@ static BOOL AMCloudLayoutProbeEnabled(void) {
 @property(nonatomic, copy) NSString *accountAvatarURL;
 @property(nonatomic, copy) NSString *accountAvatarRequestID;
 @property(nonatomic) BOOL accountAvatarRefreshInFlight;
-@property(nonatomic, strong) AMCloudLibraryViewController *embeddedLibrary;
+@property(nonatomic, strong) AMCloudLibraryView *embeddedLibrary;
 @property(nonatomic, weak) UIView *embeddedHeader;
+@property(nonatomic) CGRect cloudSubTabFrame;
+@property(nonatomic, weak) UIView *cloudSubTabHost;
 @property(nonatomic) NSUInteger cloudSelectionGeneration;
 + (instancetype)shared;
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
@@ -2385,7 +2388,7 @@ static NSString *AMCloudBackupTabStyleScript(void) {
 
 @end
 
-@interface AMCloudLibraryViewController : UIViewController
+@interface AMCloudLibraryView : UIView
 @property(nonatomic, weak) AMCloudManager *manager;
 - (void)reload;
 @end
@@ -2520,6 +2523,7 @@ static BOOL AMCloudOverlayWorkAllowed(void) {
                                 @"DocumentPicker", @"PhotoPicker"]) {
         if ([names containsString:keyword]) return NO;
     }
+    if (AMCloudProjectsView()) return YES;
     // 真正的判定：工程页才允许。目前最稳的判据就是"页面上有那条分段控件"。
     if (AMCloudIsProjectsControllerClass(top.class)) return YES;
     // 兜底：类名像工程/首页也放行，避免 865 换了类名后整块功能哑掉。
@@ -3941,21 +3945,28 @@ static UIWindow *AMCloudActiveWindow(void) {
     return nil;
 }
 
-static UIView *AMCloudFindViewWithClassName(UIView *view, NSString *needle, NSInteger depth) {
-    if (!view || depth > 24 || view.hidden || view.alpha < 0.05) return nil;
+static UIView *AMCloudFindViewWithClassNameBudget(UIView *view, NSString *needle,
+                                                NSInteger depth, NSUInteger *remaining) {
+    if (!view || !*remaining || depth > 24 || view.hidden || view.alpha < 0.05) return nil;
+    (*remaining)--;
     if ([NSStringFromClass(view.class) containsString:needle]) return view;
     for (UIView *child in view.subviews) {
-        UIView *match = AMCloudFindViewWithClassName(child, needle, depth + 1);
+        UIView *match = AMCloudFindViewWithClassNameBudget(child, needle, depth + 1, remaining);
         if (match) return match;
     }
     return nil;
 }
 
+static UIView *AMCloudFindViewWithClassName(UIView *view, NSString *needle, NSInteger depth) {
+    NSUInteger remaining = 180;
+    return AMCloudFindViewWithClassNameBudget(view, needle, depth, &remaining);
+}
+
 // 必须是前台真实可点的子标签。主导航、离屏缓存页和模态背后的页面均不能命中。
-static UIView *AMCloudSelectionHeaderView(void) {
+static UIView *AMCloudProjectsView(void) {
     UIWindow *window = AMCloudActiveWindow();
     if (!window) return nil;
-    UIView *header = AMCloudFindViewWithClassName(window, @"SelectionHeaderView", 0);
+    UIView *header = AMCloudFindViewWithClassName(window, @"Homepage15ProjectListView_", 0);
     if (!header || header.window != window ||
         ![NSStringFromClass(header.class) containsString:@"Homepage"]) return nil;
     CGRect frame = [header convertRect:header.bounds toView:window];
@@ -3970,11 +3981,15 @@ static UIView *AMCloudSelectionHeaderView(void) {
     return nil;
 }
 
-// 只截取子标签自身，不做整窗回读、不遍历 SwiftUI 无障碍树；仅由页面/点击事件调用。
-static NSInteger AMCloudDetectCloudPillSelected(UIView *header) {
+// 只回读项目容器上部，不做整窗回读、不遍历 SwiftUI 无障碍树；仅由页面/点击事件调用。
+static NSInteger AMCloudDetectCloudPillSelected(UIView *header, CGRect *tabFrame) {
     if (!header) return -1;
     CGSize size = header.bounds.size;
-    if (size.width < 80 || size.height < 20 || size.width > 1500 || size.height > 300)
+    size.height = MIN(280, floor(size.height * 0.45));
+    AMCloudManager *manager = AMCloudManager.shared;
+    if (manager.embeddedHeader == header && manager.embeddedLibrary)
+        size.height = MIN(size.height, CGRectGetMaxY(manager.cloudSubTabFrame) + 4);
+    if (size.width < 80 || size.height < 20 || size.width > 1500)
         return -1;
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
     format.scale = 1;
@@ -3984,7 +3999,8 @@ static NSInteger AMCloudDetectCloudPillSelected(UIView *header) {
     UIImage *snapshot = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
         [UIColor.whiteColor setFill];
         UIRectFill((CGRect){CGPointZero, size});
-        [header drawViewHierarchyInRect:(CGRect){CGPointZero, size} afterScreenUpdates:NO];
+        // 裁剪项目容器上部；保持原尺寸，不能把整个工程列表压缩进截图。
+        [header drawViewHierarchyInRect:header.bounds afterScreenUpdates:NO];
         (void)context;
     }];
     CGImageRef image = snapshot.CGImage;
@@ -3998,47 +4014,49 @@ static NSInteger AMCloudDetectCloudPillSelected(UIView *header) {
         space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(space);
     NSInteger state = -1;
+    CGRect detectedRow = CGRectZero;
     if (context) {
         CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
         CGContextRelease(context);
-        state = AMCloudSelectedPillRGBA(pixels, width, height, stride);
+        size_t top = 0, bottom = 0;
+        state = AMCloudSelectedPillBoundsRGBA(pixels, width, height, stride, &top, &bottom);
+        if (state >= 0) detectedRow = CGRectMake(0, top, width, bottom - top);
+        if (tabFrame) *tabFrame = detectedRow;
     }
     free(pixels);
 #if AMPROJ_BETA_DIAGNOSTICS
-    if (AMCloudProbeSavingHeaderSnapshot) {
+    if (AMCloudProbeSavingHeaderSnapshot && state >= 0) {
+        // PNG 只保留已确认的标签行，不能把工程名称或上传卡片写入探针文件。
+        CGImageRef cropped = !CGRectIsEmpty(detectedRow)
+            ? CGImageCreateWithImageInRect(image, detectedRow) : NULL;
         NSString *path = [NSSearchPathForDirectoriesInDomains(
             NSCachesDirectory, NSUserDomainMask, YES).firstObject
             stringByAppendingPathComponent:@"AMProjExport.cloud-header.png"];
-        AMCloudProbeSnapshotWritten = [UIImagePNGRepresentation(snapshot) writeToFile:path atomically:YES];
+        if (cropped) {
+            AMCloudProbeSnapshotWritten = [UIImagePNGRepresentation([UIImage imageWithCGImage:cropped])
+                writeToFile:path atomically:YES];
+            CGImageRelease(cropped);
+        }
     }
 #endif
     return state;
 }
 
-// 找包含子标签及下方内容区的最近控制器，不把云列表挂到整窗或首页根控制器。
-static UIViewController *AMCloudContentHostForHeader(UIView *header) {
+// 只在当前支持的原生项目视图内嵌入普通 UIView，不改动宿主控制器层级。
+static BOOL AMCloudProjectContainerEligible(UIView *header) {
     NSString *headerName = NSStringFromClass(header.class) ?: @"";
     if (![headerName containsString:@"Homepage"] ||
-        ![headerName containsString:@"SelectionHeaderView"]) return nil;
-    for (UIResponder *responder = header.nextResponder; responder;
-         responder = responder.nextResponder) {
-        if (![responder isKindOfClass:UIViewController.class]) continue;
-        UIViewController *controller = (UIViewController *)responder;
-        UIView *view = controller.viewIfLoaded;
-        if (!view || view == view.window || ![header isDescendantOfView:view]) continue;
-        CGRect frame = [header convertRect:header.bounds toView:view];
-        if (CGRectGetHeight(view.bounds) - CGRectGetMaxY(frame) < 160) continue;
-        if (AMCloudIsProjectsControllerClass(controller.class)) return controller;
-        // 不能把首页根控制器或其他复用 SelectionHeader 的页面当成项目页。
-        if ([controller isKindOfClass:UINavigationController.class] ||
-            [controller isKindOfClass:UITabBarController.class]) return nil;
-        // 865 的原生项目页使用 NodeHostingController；仍须由上方真实
-        // Homepage 子标签及明确选中状态证明路由，不能只凭宿主类名打开。
-        if (AMProjV865ProjectFlowIsRuntimeSupported() &&
-            [NSStringFromClass(controller.class) containsString:@"NodeHostingController"])
-            return controller;
-    }
-    return nil;
+        ![headerName containsString:@"ProjectListView"] ||
+        !AMProjV865ProjectFlowIsRuntimeSupported()) return NO;
+    return CGRectGetHeight(header.bounds) >= 320;
+}
+
+static BOOL AMCloudIsNativeSubTabTap(UIView *projects, UIView *hit, UIView *library,
+                                     CGRect rowInWindow, CGPoint point) {
+    if (!projects || !hit || (library &&
+        (hit == library || [hit isDescendantOfView:library]))) return NO;
+    return (hit == projects || [hit isDescendantOfView:projects]) &&
+        CGRectContainsPoint(rowInWindow, point);
 }
 
 #if AMPROJ_BETA_DIAGNOSTICS
@@ -4063,7 +4081,7 @@ static UIView *AMCloudProbeTree(UIView *view, UIWindow *window, NSUInteger depth
     node[@"depth"] = @(depth);
     [nodes addObject:node];
     if (view.hidden || view.alpha < 0.01) return nil;
-    UIView *found = [NSStringFromClass(view.class) containsString:@"SelectionHeaderView"]
+    UIView *found = [NSStringFromClass(view.class) containsString:@"ProjectListView"]
         ? view : nil;
     for (UIView *child in view.subviews) {
         UIView *candidate = AMCloudProbeTree(child, window, depth + 1, nodes);
@@ -4113,12 +4131,11 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
     NSInteger rawSelected = -1;
     AMCloudProbeSnapshotWritten = NO;
     NSString *rawName = NSStringFromClass(raw.class) ?: @"";
-    if ([rawName containsString:@"Homepage"] && [rawName containsString:@"SelectionHeaderView"]) {
+    if ([rawName containsString:@"Homepage"] && [rawName containsString:@"ProjectListView"]) {
         AMCloudProbeSavingHeaderSnapshot = YES;
-        @try { rawSelected = AMCloudDetectCloudPillSelected(raw); }
+        @try { rawSelected = AMCloudDetectCloudPillSelected(raw, NULL); }
         @finally { AMCloudProbeSavingHeaderSnapshot = NO; }
     }
-    UIViewController *host = header ? AMCloudContentHostForHeader(header) : nil;
     NSMutableArray *chain = [NSMutableArray array];
     for (UIResponder *r = raw.nextResponder; r && chain.count < 30; r = r.nextResponder) {
         NSMutableDictionary *entry = [@{@"class": NSStringFromClass(r.class) ?: @""} mutableCopy];
@@ -4152,7 +4169,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
         @"header_valid": @(header != nil), @"selected": @(selected),
         @"raw_selected": @(rawSelected),
         @"snapshot_written": @(AMCloudProbeSnapshotWritten),
-        @"host": host ? NSStringFromClass(host.class) : @"",
+        @"host": AMCloudProjectContainerEligible(header) ? NSStringFromClass(header.class) : @"",
         @"hits": hits, @"responders": chain, @"views": nodes
     };
     NSString *path = [NSSearchPathForDirectoriesInDomains(
@@ -4166,8 +4183,11 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 
 - (void)refreshWindowCloudOverlayVisibility {
     if (AMCloudUIKitDisabled()) { [self setCloudLibraryVisible:NO]; return; }
-    UIView *header = AMCloudSelectionHeaderView();
-    NSInteger state = AMCloudDetectCloudPillSelected(header);
+    UIView *header = AMCloudProjectsView();
+    CGRect tabFrame = CGRectZero;
+    NSInteger state = AMCloudDetectCloudPillSelected(header, &tabFrame);
+    self.cloudSubTabFrame = tabFrame;
+    self.cloudSubTabHost = header;
 #if AMPROJ_BETA_DIAGNOSTICS
     AMCloudCaptureLayoutProbe(@"reconcile", header, state);
 #endif
@@ -4177,36 +4197,34 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
     }
     if (self.embeddedLibrary && self.embeddedHeader == header) return;
     [self setCloudLibraryVisible:NO];
-    UIViewController *host = AMCloudContentHostForHeader(header);
-    if (!host) return;
-    AMCloudLibraryViewController *library = [AMCloudLibraryViewController new];
+    if (!AMCloudProjectContainerEligible(header)) return;
+    AMCloudLibraryView *library = [[AMCloudLibraryView alloc] initWithFrame:CGRectZero];
     library.manager = self;
     // Homepage 使用自己的浅色外观，不跟随系统深色把嵌入区变成黑底。
     library.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
-    [host addChildViewController:library];
-    UIView *view = library.view;
+    UIView *view = library;
     view.translatesAutoresizingMaskIntoConstraints = NO;
     view.clipsToBounds = YES;
-    [host.view addSubview:view];
-    NSLayoutYAxisAnchor *bottom = host.view.safeAreaLayoutGuide.bottomAnchor;
+    [header addSubview:view];
+    NSLayoutYAxisAnchor *bottom = header.bottomAnchor;
     UIView *tabBar = AMCloudFindViewWithClassName(header.window, @"HomepageTabBarView", 0);
-    if (tabBar && tabBar.window == host.view.window) {
-        CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:host.view];
-        CGRect headerFrame = [header convertRect:header.bounds toView:host.view];
+    if (tabBar && tabBar.window == header.window) {
+        CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:header];
+        CGRect headerFrame = self.cloudSubTabFrame;
         if (CGRectGetMinY(tabFrame) > CGRectGetMaxY(headerFrame)) bottom = tabBar.topAnchor;
     }
     [NSLayoutConstraint activateConstraints:@[
-        [view.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:8],
-        [view.leadingAnchor constraintEqualToAnchor:host.view.leadingAnchor],
-        [view.trailingAnchor constraintEqualToAnchor:host.view.trailingAnchor],
+        [view.topAnchor constraintEqualToAnchor:header.topAnchor constant:CGRectGetMaxY(self.cloudSubTabFrame) + 8],
+        [view.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
+        [view.trailingAnchor constraintEqualToAnchor:header.trailingAnchor],
         [view.bottomAnchor constraintEqualToAnchor:bottom],
     ]];
-    [library didMoveToParentViewController:host];
     self.embeddedLibrary = library;
     self.embeddedHeader = header;
+    [library reload];
     NSLog(@"[AMProjExport] cloud tab embedded host=%@ header=%@ frame=%@",
-          NSStringFromClass(host.class), NSStringFromClass(header.class),
-          NSStringFromCGRect([header convertRect:header.bounds toView:host.view]));
+          NSStringFromClass(header.class), NSStringFromClass(header.class),
+          NSStringFromCGRect(self.cloudSubTabFrame));
 }
 
 - (void)installCloudTabTapWatcher {
@@ -4243,9 +4261,13 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
             break;
         }
     }
-    UIView *header = AMCloudSelectionHeaderView();
-    BOOL subTab = header && CGRectContainsPoint(
-        [header convertRect:header.bounds toView:window], point);
+    UIView *header = AMCloudProjectsView();
+    // 已识别后只监听原生标签行，自家云列表的上传/下载/账户操作不能触发卸载。
+    CGRect candidate = self.cloudSubTabHost == header && !CGRectIsEmpty(self.cloudSubTabFrame)
+        ? self.cloudSubTabFrame : CGRectMake(0, 0, CGRectGetWidth(header.bounds),
+            MIN(280, floor(CGRectGetHeight(header.bounds) * 0.45)));
+    BOOL subTab = AMCloudIsNativeSubTabTap(header, hit, self.embeddedLibrary,
+        [header convertRect:candidate toView:window], point);
     if (!mainTab && !subTab) return;
 #if AMPROJ_BETA_DIAGNOSTICS
     AMCloudCaptureLayoutProbe(@"tab_tap", header, -2);
@@ -4264,13 +4286,11 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 
 - (void)setCloudLibraryVisible:(BOOL)visible {
     if (visible) { [self refreshWindowCloudOverlayVisibility]; return; }
-    AMCloudLibraryViewController *library = self.embeddedLibrary;
+    AMCloudLibraryView *library = self.embeddedLibrary;
     self.embeddedLibrary = nil;
     self.embeddedHeader = nil;
     if (!library) return;
-    [library willMoveToParentViewController:nil];
-    [library.viewIfLoaded removeFromSuperview];
-    [library removeFromParentViewController];
+    [library removeFromSuperview];
 }
 
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller {
@@ -5839,7 +5859,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     }];
 }
 
-@interface AMCloudLibraryViewController () <UITableViewDataSource, UITableViewDelegate>
+@interface AMCloudLibraryView () <UITableViewDataSource, UITableViewDelegate>
 @property(nonatomic, strong) UITableView *tableView;
 @property(nonatomic, strong) UIRefreshControl *refreshControl;
 @property(nonatomic, strong) NSArray<NSDictionary *> *projects;
@@ -5852,11 +5872,11 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 @property(nonatomic) BOOL loading;
 @end
 
-@implementation AMCloudLibraryViewController
+@implementation AMCloudLibraryView
 
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithWhite:0.965 alpha:1];
+- (instancetype)initWithFrame:(CGRect)frame {
+    if (!(self = [super initWithFrame:frame])) return nil;
+    self.backgroundColor = [UIColor colorWithWhite:0.965 alpha:1];
     self.projects = @[];
     self.usage = @{};
     [self buildHeader];
@@ -5864,7 +5884,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     [[NSNotificationCenter defaultCenter] addObserver:self
         selector:@selector(handleLibraryDidChange:)
             name:AMCloudLibraryDidChangeNotification object:nil];
-    [self reload];
+    return self;
 }
 
 - (void)buildHeader {
@@ -5872,7 +5892,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     card.translatesAutoresizingMaskIntoConstraints = NO;
     card.backgroundColor = UIColor.whiteColor;
     card.layer.cornerRadius = 14;
-    [self.view addSubview:card];
+    [self addSubview:card];
 
     UILabel *caption = [UILabel new];
     caption.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5914,10 +5934,10 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 
     for (UIView *view in @[caption, value, track, caption2, upload]) [card addSubview:view];
     [NSLayoutConstraint activateConstraints:@[
-        [card.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor
+        [card.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor
                                        constant:12],
-        [card.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [card.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [card.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
+        [card.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
         [card.heightAnchor constraintEqualToConstant:112],
 
         [caption.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
@@ -5956,7 +5976,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     table.separatorInset = UIEdgeInsetsMake(0, 76, 0, 0);
     table.tableFooterView = [UIView new];
     table.backgroundColor = UIColor.clearColor;
-    [self.view addSubview:table];
+    [self addSubview:table];
     self.tableView = table;
 
     UILabel *state = [UILabel new];
@@ -5966,7 +5986,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     state.font = [UIFont systemFontOfSize:15];
     state.textColor = UIColor.secondaryLabelColor;
     state.text = @"还没有备份工程\n点右上角「上传备份」上传一个";
-    [self.view addSubview:state];
+    [self addSubview:state];
     self.stateLabel = state;
 
     UIRefreshControl *refresh = [UIRefreshControl new];
@@ -5975,21 +5995,20 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     self.refreshControl = refresh;
 
     [NSLayoutConstraint activateConstraints:@[
-        [table.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor
+        [table.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor
                                         constant:136],
-        [table.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [table.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [table.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [state.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [state.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [state.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor
+        [table.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [table.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [table.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+        [state.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+        [state.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [state.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor
                                                         constant:24],
     ]];
 }
 
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [self reload];
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (void)handleLibraryDidChange:(NSNotification *)notification {
@@ -6044,8 +6063,8 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
         AMCloudByteText(quota > used ? quota - used : 0),
         (unsigned long)self.projects.count];
     CGFloat ratio = quota > 0 ? MIN(1.0, (double)used / (double)quota) : 0;
-    [self.view layoutIfNeeded];
-    CGFloat trackWidth = MAX(0, CGRectGetWidth(self.view.bounds) - 64);
+    [self layoutIfNeeded];
+    CGFloat trackWidth = MAX(0, CGRectGetWidth(self.bounds) - 64);
     self.quotaBarFillWidth.constant = trackWidth * ratio;
     self.tableView.hidden = NO;
     self.stateLabel.hidden = self.projects.count > 0;
@@ -6059,7 +6078,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
             message:@"请回到项目页再试一次" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"好"
             style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
+        [AMCloudTopController(nil) presentViewController:alert animated:YES completion:nil];
     }
 }
 
@@ -6107,7 +6126,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if ((NSUInteger)indexPath.row >= self.projects.count) return;
     [self.manager downloadAndImportProject:self.projects[(NSUInteger)indexPath.row]
-                                 presenter:self];
+                                 presenter:AMCloudTopController(nil)];
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
@@ -6120,7 +6139,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
         handler:^(__unused UIContextualAction *action, __unused UIView *view,
                   void (^completion)(BOOL)) {
         completion(YES);
-        [weakSelf.manager showActionsForProject:project presenter:weakSelf];
+        [weakSelf.manager showActionsForProject:project presenter:AMCloudTopController(nil)];
     }];
     more.backgroundColor = [UIColor colorWithWhite:0.55 alpha:1];
     UIContextualAction *remove = [UIContextualAction contextualActionWithStyle:
@@ -6128,7 +6147,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
         handler:^(__unused UIContextualAction *action, __unused UIView *view,
                   void (^completion)(BOOL)) {
         completion(YES);
-        [weakSelf.manager showActionsForProject:project presenter:weakSelf];
+        [weakSelf.manager showActionsForProject:project presenter:AMCloudTopController(nil)];
     }];
     return [UISwipeActionsConfiguration configurationWithActions:@[remove, more]];
 }

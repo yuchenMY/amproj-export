@@ -39,25 +39,27 @@ class CloudTabEmbeddingTests(unittest.TestCase):
     def test_child_is_inside_project_content_and_uses_native_header_boundary(self):
         block = SOURCE.split("- (void)refreshWindowCloudOverlayVisibility {", 1)[1]
         block = block.split("- (void)installCloudTabTapWatcher", 1)[0]
-        self.assertIn("[host addChildViewController:library]", block)
-        self.assertIn("[host.view addSubview:view]", block)
-        self.assertIn("constraintEqualToAnchor:header.bottomAnchor", block)
+        self.assertNotIn("addChildViewController", block)
+        self.assertIn("[header addSubview:view]", block)
+        self.assertIn("constraintEqualToAnchor:header.topAnchor constant:CGRectGetMaxY(self.cloudSubTabFrame) + 8", block)
+        self.assertIn("bottom = header.bottomAnchor", block)
         self.assertIn("UIUserInterfaceStyleLight", block)
         self.assertNotIn("rootViewController", block)
         self.assertNotIn("constant:120", block)
 
-    def test_host_requires_project_ownership_not_just_generic_header(self):
-        block = SOURCE.split("static UIViewController *AMCloudContentHostForHeader", 1)[1]
+    def test_component_requires_real_project_container_and_supported_runtime(self):
+        block = SOURCE.split("static BOOL AMCloudProjectContainerEligible", 1)[1]
         block = block.split("- (void)refreshWindowCloudOverlayVisibility", 1)[0]
-        self.assertIn("if (AMCloudIsProjectsControllerClass(controller.class)) return controller;", block)
         self.assertIn("AMProjV865ProjectFlowIsRuntimeSupported()", block)
-        self.assertIn('containsString:@"NodeHostingController"', block)
+        self.assertIn('containsString:@"ProjectListView"', block)
+        self.assertIn("CGRectGetHeight(header.bounds) >= 320", block)
+        self.assertIn("@interface AMCloudLibraryView : UIView", SOURCE)
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires native Objective-C/Foundation")
-    def test_actual_production_host_selection_with_swiftui_and_negative_owners(self):
-        marker = "static UIViewController *AMCloudContentHostForHeader(UIView *header) {"
+    def test_actual_project_container_and_native_tap_routing(self):
+        marker = "static BOOL AMCloudProjectContainerEligible(UIView *header) {"
         implementation = marker + SOURCE.split(marker, 1)[1].split(
-            "- (void)refreshWindowCloudOverlayVisibility", 1)[0]
+            "#if AMPROJ_BETA_DIAGNOSTICS", 1)[0]
         fixture = (ROOT / "tests/cloud_tab_containment_smoke.m").read_text(encoding="utf-8")
         fixture = fixture.replace("// AMPROJ_PRODUCTION_CLOUD_HOST", implementation)
         with tempfile.TemporaryDirectory() as temporary:
@@ -69,17 +71,37 @@ class CloudTabEmbeddingTests(unittest.TestCase):
             result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=10)
             self.assertIn("CLOUD_CONTAINMENT_PASS", result.stdout)
 
-    def test_teardown_pairs_child_lifecycle_and_invalidates_pending_taps(self):
+    def test_component_teardown_and_pending_tap_invalidation(self):
         block = SOURCE.split("- (void)setCloudLibraryVisible:(BOOL)visible {", 1)[1]
         block = block.split("- (void)attachCloudBackupBannerToController", 1)[0]
-        for call in ("willMoveToParentViewController:nil", "removeFromSuperview",
-                     "removeFromParentViewController"):
-            self.assertIn(call, block)
+        self.assertIn("[library removeFromSuperview]", block)
+        self.assertIn("self.embeddedLibrary = nil", block)
+        self.assertNotIn("removeFromParentViewController", block)
         self.assertIn("manager.cloudSelectionGeneration++;", SOURCE)
+        component = SOURCE.split("@implementation AMCloudLibraryView", 1)[1]
+        self.assertNotIn("self.view", component)
+        self.assertIn("presenter:AMCloudTopController(nil)", component)
+        self.assertIn("removeObserver:self", component)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires native CoreGraphics")
+    def test_actual_image_readback_preserves_top_origin_for_content_boundary(self):
+        implementation = "size_t width = CGImageGetWidth(image)" + SOURCE.split(
+            "size_t width = CGImageGetWidth(image)", 1)[1].split("free(pixels);", 1)[0] + "free(pixels);"
+        fixture = (ROOT / "tests/cloud_tab_image_geometry_smoke.m").read_text(encoding="utf-8")
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_IMAGE_READBACK", implementation)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "geometry.m"
+            binary = Path(temporary) / "geometry"
+            source.write_text(fixture, encoding="utf-8")
+            subprocess.run(["clang", "-fobjc-arc", "-I", str(ROOT / "AMProjExport"),
+                "-framework", "Foundation", "-framework", "CoreGraphics", str(source),
+                "-o", str(binary)], check=True, capture_output=True, timeout=30)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=10)
+            self.assertIn("CLOUD_IMAGE_GEOMETRY_PASS", result.stdout)
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires native Objective-C/Foundation")
     def test_actual_probe_walk_has_node_depth_and_hidden_subtree_limits(self):
-        host_marker = "static UIViewController *AMCloudContentHostForHeader(UIView *header) {"
+        host_marker = "static BOOL AMCloudProjectContainerEligible(UIView *header) {"
         host = host_marker + SOURCE.split(host_marker, 1)[1].split(
             "#if AMPROJ_BETA_DIAGNOSTICS", 1)[0]
         tree_marker = "static NSDictionary *AMCloudProbeView(UIView *view, UIWindow *window) {"
