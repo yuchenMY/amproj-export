@@ -128,6 +128,7 @@ jobs:
 
       - name: Exercise native main-thread sampling and failed-state recovery
         run: |
+          uname -m
           clang -O2 -fno-omit-frame-pointer -Wall -Wextra -Werror \
             -DAMPROJ_PROBE_TESTING=1 AMProjExport/AMProjThreadProbe.c \
             tests/thread_probe_smoke.c -o "$RUNNER_TEMP/thread-probe-smoke"

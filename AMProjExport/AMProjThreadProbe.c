@@ -3,13 +3,14 @@
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
-#include <mach/mach_vm.h>
+#include <mach/vm_map.h>
 #include <mach-o/loader.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+_Static_assert(sizeof(vm_address_t) >= sizeof(uintptr_t), "Thread probe requires pointer-width VM addresses");
 #if defined(__arm64__)
 #include <mach/arm/thread_status.h>
 #elif defined(__x86_64__)
@@ -24,7 +25,7 @@ struct AMProjThreadProbe {
     kern_return_t (*suspend_thread)(thread_t);
     kern_return_t (*resume_thread)(thread_t);
     kern_return_t (*get_state)(thread_t, thread_state_flavor_t, thread_state_t, mach_msg_type_number_t *);
-    kern_return_t (*read_memory)(vm_map_read_t, mach_vm_address_t, mach_vm_size_t, mach_vm_address_t, mach_vm_size_t *);
+    kern_return_t (*read_memory)(vm_map_read_t, vm_address_t, vm_size_t, vm_address_t, vm_size_t *);
 };
 
 static uintptr_t AMProbeCodePointer(uintptr_t value) {
@@ -52,7 +53,7 @@ AMProjThreadProbe *AMProjThreadProbeCreate(void) {
     probe->suspend_thread = dlsym(RTLD_DEFAULT, "thread_suspend");
     probe->resume_thread = dlsym(RTLD_DEFAULT, "thread_resume");
     probe->get_state = dlsym(RTLD_DEFAULT, "thread_get_state");
-    probe->read_memory = dlsym(RTLD_DEFAULT, "mach_vm_read_overwrite");
+    probe->read_memory = dlsym(RTLD_DEFAULT, "vm_read_overwrite");
     if (!probe->suspend_thread || !probe->resume_thread || !probe->get_state || !probe->read_memory) {
         AMProjThreadProbeDestroy(probe); return NULL;
     }
@@ -65,8 +66,9 @@ void AMProjThreadProbeDestroy(AMProjThreadProbe *probe) {
 }
 
 static bool AMProbeRead(uintptr_t address, void *output, size_t size) {
-    mach_vm_size_t copied = 0;
-    return mach_vm_read_overwrite(mach_task_self(), address, size, (mach_vm_address_t)output, &copied) == KERN_SUCCESS && copied == size;
+    vm_size_t copied = 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)address, (vm_size_t)size,
+        (vm_address_t)output, &copied) == KERN_SUCCESS && copied == size;
 }
 static void AMProbeReadString(const char *source, char *output, size_t capacity) {
     if (!source || !capacity) return;
@@ -158,9 +160,9 @@ void AMProjThreadProbeCapture(AMProjThreadProbe *probe, AMProjProbeSample *sampl
 #endif
     if (sample->status != KERN_SUCCESS) return;
     uintptr_t warmSource = 0, warmTarget = 0;
-    mach_vm_size_t warmCopied = 0;
-    sample->status = probe->read_memory(mach_task_self(), (mach_vm_address_t)&warmSource,
-        sizeof(warmSource), (mach_vm_address_t)&warmTarget, &warmCopied);
+    vm_size_t warmCopied = 0;
+    sample->status = probe->read_memory(mach_task_self(), (vm_address_t)&warmSource,
+        sizeof(warmSource), (vm_address_t)&warmTarget, &warmCopied);
     if (sample->status != KERN_SUCCESS || warmCopied != sizeof(warmSource)) return;
     if ((mach_absolute_time() - started) * probe->tick_ns > 50000000) {
         sample->status = KERN_ABORTED; return;
@@ -185,8 +187,8 @@ void AMProjThreadProbeCapture(AMProjThreadProbe *probe, AMProjProbeSample *sampl
            fp <= probe->stack_high - 2 * sizeof(uintptr_t) && !(fp & (sizeof(uintptr_t) - 1))) {
         if ((mach_absolute_time() - pauseStarted) * probe->tick_ns > 1000000) break;
         uintptr_t record[2];
-        mach_vm_size_t copied = 0;
-        if (probe->read_memory(mach_task_self(), fp, sizeof(record), (mach_vm_address_t)record, &copied) != KERN_SUCCESS ||
+        vm_size_t copied = 0;
+        if (probe->read_memory(mach_task_self(), (vm_address_t)fp, sizeof(record), (vm_address_t)record, &copied) != KERN_SUCCESS ||
             copied != sizeof(record)) break;
         uintptr_t caller = AMProbeCodePointer(record[1]);
         if (caller && (!used || caller != addresses[used - 1])) addresses[used++] = caller;
