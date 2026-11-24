@@ -136,6 +136,9 @@ jobs:
           import sys
           subprocess.run([sys.argv[1]], check=True, timeout=30)
           PY
+          clang -fobjc-arc -framework Foundation tests/performance_report_smoke.m \
+            -o "$RUNNER_TEMP/performance-report-smoke"
+          "$RUNNER_TEMP/performance-report-smoke"
 
       - name: Test streaming project archive writer
         run: |

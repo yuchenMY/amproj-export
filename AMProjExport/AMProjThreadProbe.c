@@ -15,9 +15,6 @@
 #elif defined(__x86_64__)
 #include <mach/i386/thread_status.h>
 #endif
-#if __has_feature(ptrauth_calls)
-#include <ptrauth.h>
-#endif
 
 struct AMProjThreadProbe {
     thread_t main_thread;
@@ -31,8 +28,11 @@ struct AMProjThreadProbe {
 };
 
 static uintptr_t AMProbeCodePointer(uintptr_t value) {
-#if __has_feature(ptrauth_calls)
-    return (uintptr_t)ptrauth_strip((void *)value, ptrauth_key_return_address);
+#if defined(__arm64__)
+    // 普通 arm64 slice 也可能读到系统 arm64e 栈。XPACLRI 在不支持 PAC 的硬件上为 HINT。
+    register uintptr_t link __asm__("x30") = value;
+    __asm__ volatile("hint #7" : "+r"(link));
+    return link;
 #else
     return value;
 #endif
@@ -84,12 +84,16 @@ static void AMProbeReadString(const char *source, char *output, size_t capacity)
 }
 
 #if AMPROJ_PROBE_TESTING
+static unsigned AMProbeTestStateCalls;
 static kern_return_t AMProbeFailState(thread_t thread, thread_state_flavor_t flavor,
                                      thread_state_t state, mach_msg_type_number_t *count) {
-    (void)thread; (void)flavor; (void)state; (void)count;
+    if (++AMProbeTestStateCalls == 1) return thread_get_state(thread, flavor, state, count);
     return KERN_FAILURE;
 }
-void AMProjThreadProbeTestFailState(AMProjThreadProbe *probe) { probe->get_state = AMProbeFailState; }
+void AMProjThreadProbeTestFailState(AMProjThreadProbe *probe) {
+    AMProbeTestStateCalls = 0; probe->get_state = AMProbeFailState;
+}
+uintptr_t AMProjThreadProbeTestStripCode(uintptr_t address) { return AMProbeCodePointer(address); }
 #endif
 static void AMProbeResolve(uintptr_t address, AMProjProbeFrame *frame) {
     Dl_info info;
@@ -144,6 +148,24 @@ void AMProjThreadProbeCapture(AMProjThreadProbe *probe, AMProjProbeSample *sampl
     sample->status = KERN_NOT_SUPPORTED;
     return;
 #endif
+    // 在实际采样线程预热 MIG 消息、reply-port 和内存读取路径；失败不暂停主线程。
+#if defined(__arm64__)
+    sample->status = probe->get_state(probe->main_thread, ARM_THREAD_STATE64, (thread_state_t)&state, &count);
+    count = ARM_THREAD_STATE64_COUNT;
+#elif defined(__x86_64__)
+    sample->status = probe->get_state(probe->main_thread, x86_THREAD_STATE64, (thread_state_t)&state, &count);
+    count = x86_THREAD_STATE64_COUNT;
+#endif
+    if (sample->status != KERN_SUCCESS) return;
+    uintptr_t warmSource = 0, warmTarget = 0;
+    mach_vm_size_t warmCopied = 0;
+    sample->status = probe->read_memory(mach_task_self(), (mach_vm_address_t)&warmSource,
+        sizeof(warmSource), (mach_vm_address_t)&warmTarget, &warmCopied);
+    if (sample->status != KERN_SUCCESS || warmCopied != sizeof(warmSource)) return;
+    if ((mach_absolute_time() - started) * probe->tick_ns > 50000000) {
+        sample->status = KERN_ABORTED; return;
+    }
+    uint64_t pauseStarted = mach_absolute_time();
     sample->status = probe->suspend_thread(probe->main_thread);
     if (sample->status != KERN_SUCCESS) return;
     // 暂停区：无分配、ObjC、日志、dyld、锁或符号解析；所有路径汇合到 resume。
@@ -161,7 +183,7 @@ void AMProjThreadProbeCapture(AMProjThreadProbe *probe, AMProjProbeSample *sampl
     if (lr && used < AMPROJ_PROBE_FRAMES) addresses[used++] = AMProbeCodePointer(lr);
     while (used < AMPROJ_PROBE_FRAMES && fp >= sp && fp >= probe->stack_low &&
            fp <= probe->stack_high - 2 * sizeof(uintptr_t) && !(fp & (sizeof(uintptr_t) - 1))) {
-        if ((mach_absolute_time() - started) * probe->tick_ns > 1000000) break;
+        if ((mach_absolute_time() - pauseStarted) * probe->tick_ns > 1000000) break;
         uintptr_t record[2];
         mach_vm_size_t copied = 0;
         if (probe->read_memory(mach_task_self(), fp, sizeof(record), (mach_vm_address_t)record, &copied) != KERN_SUCCESS ||
@@ -172,7 +194,11 @@ void AMProjThreadProbeCapture(AMProjThreadProbe *probe, AMProjProbeSample *sampl
         fp = record[0];
     }
     sample->resume_status = probe->resume_thread(probe->main_thread);
-    sample->pause_ms = (mach_absolute_time() - started) * probe->tick_ns / 1000000;
+    sample->pause_ms = (mach_absolute_time() - pauseStarted) * probe->tick_ns / 1000000;
+    if (sample->resume_status != KERN_SUCCESS) {
+        sample->elapsed_ms = (mach_absolute_time() - started) * probe->tick_ns / 1000000;
+        return;
+    }
     // 主线程恢复后才解析代码位置；不保存寄存器和原始栈内容。
     sample->frame_count = used;
     for (int i = 0; i < used; i++) AMProbeResolve(addresses[i], &sample->frames[i]);

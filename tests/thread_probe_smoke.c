@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 extern void AMProjThreadProbeTestFailState(AMProjThreadProbe *probe);
+extern uintptr_t AMProjThreadProbeTestStripCode(uintptr_t address);
 static atomic_bool done = false;
 static atomic_uint ticks = 0;
 
@@ -44,6 +45,15 @@ static void *capture(void *context) {
 }
 
 int main(void) {
+#if defined(__arm64__)
+    uintptr_t original = (uintptr_t)&main;
+    register uintptr_t signedLink __asm__("x30") = original;
+    // PACIASP/XPACLRI 均在 HINT 空间；支持 PAC 时验证真实带签名地址，否则验证原值。
+    __asm__ volatile("hint #25" : "+r"(signedLink));
+    assert(AMProjThreadProbeTestStripCode(signedLink) == original);
+#else
+    assert(AMProjThreadProbeTestStripCode((uintptr_t)&main) == (uintptr_t)&main);
+#endif
     AMProjThreadProbe *probe = AMProjThreadProbeCreate();
     assert(probe);
     AMProjProbeSample rejected;

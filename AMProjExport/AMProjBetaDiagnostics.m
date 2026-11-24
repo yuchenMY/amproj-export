@@ -2,6 +2,7 @@
 #import "AMProjBetaDiagnostics.h"
 #import "AMProjPerformancePolicy.h"
 #import "AMProjThreadProbe.h"
+#import "AMProjPerformanceReport.h"
 #import "AMCloudSync.h"
 #import <QuartzCore/QuartzCore.h>
 #import <mach/mach.h>
@@ -89,6 +90,16 @@ static NSString *AMPerfShort(NSString *value) {
 }
 - (void)dealloc { AMProjThreadProbeDestroy(_threadProbe); }
 @end
+
+static NSDictionary *AMPerfTakePathCosts(AMPerfSession *session) {
+    NSMutableDictionary *costs = [NSMutableDictionary dictionary];
+    for (unsigned i = 0; i < 4; i++) {
+        costs[AMPerfPaths[i]] = @{@"calls": @(atomic_exchange(&session->pathCalls[i], 0)),
+            @"total_ms": @((double)atomic_exchange(&session->pathTotal[i], 0) / 1000),
+            @"max_ms": @((double)atomic_exchange(&session->pathMax[i], 0) / 1000)};
+    }
+    return costs;
+}
 
 static void AMPerfRunLoop(CFRunLoopObserverRef observer, CFRunLoopActivity activity, void *context) {
     (void)observer;
@@ -260,8 +271,7 @@ static void AMPerfRemoveEventHook(void) {
         @"finish_reason": reason, @"events_dropped": @(session.dropped), @"events": events,
         @"diagnostics_revision": @2,
         @"measurement_notes": @"Display-link delivery is not GPU render FPS. CPU percent is per core (process may exceed 100). Main-thread frame-pointer samples are bounded, partial and not an exact cause. Screen capture includes recording, mirroring and AirPlay. No project contents or raw stack bytes."};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-    return data.length <= AMPROJ_PERF_MAX_BYTES ? data : nil;
+    return AMProjPerformanceEncode(payload);
 }
 - (BOOL)persist:(NSData *)data {
     if (!data.length) return NO;
@@ -370,12 +380,6 @@ static void AMPerfRemoveEventHook(void) {
         task_vm_info_data_t memory;
         mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
         kern_return_t status = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&memory, &count);
-        NSMutableDictionary *costs = [NSMutableDictionary dictionary];
-        for (unsigned i = 0; i < 4; i++) {
-            costs[AMPerfPaths[i]] = @{@"calls": @(atomic_exchange(&session->pathCalls[i], 0)),
-                @"total_ms": @((double)atomic_exchange(&session->pathTotal[i], 0) / 1000),
-                @"max_ms": @((double)atomic_exchange(&session->pathMax[i], 0) / 1000)};
-        }
         [self addEvent:@"performance.sample" fields:@{
             @"display_link_frames": @(atomic_exchange(&session->frames, 0)),
             @"display_link_max_gap_ms": @((double)atomic_exchange(&session->maxFrameGap, 0) / 1000.0),
@@ -389,7 +393,7 @@ static void AMPerfRemoveEventHook(void) {
             @"display_link_delivery_age_ms": @(deliveryAge),
             @"screen_captured": @(atomic_load(&session->screenCaptured)),
             @"low_power": @(atomic_load(&session->lowPower)),
-            @"path_costs": costs,
+            @"path_costs": AMPerfTakePathCosts(session),
             @"main_queue_pending_ms": @(requested ? (now - (double)requested / 1000000.0) * 1000 : 0)
         } to:session at:now];
     }
@@ -443,6 +447,9 @@ static void AMPerfRemoveEventHook(void) {
         session.stopped = stopped;
         uint64_t ping = atomic_load(&session->pingAt);
         [self addEvent:@"capture.stopped" fields:@{@"reason": reason ?: @"user",
+            @"path_costs": AMPerfTakePathCosts(session),
+            @"screen_captured": @(atomic_load(&session->screenCaptured)),
+            @"low_power": @(atomic_load(&session->lowPower)),
             @"main_queue_pending_ms": @(ping ? MAX(0, (stopped - (double)ping / 1000000) * 1000) : 0),
             @"display_link_frames_remaining": @(atomic_exchange(&session->frames, 0)),
             @"display_link_max_gap_ms": @((double)atomic_exchange(&session->maxFrameGap, 0) / 1000)}

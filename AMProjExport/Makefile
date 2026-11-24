@@ -48,7 +48,7 @@ AMHomeUI.dylib: AMHomeUI.m AMHomeUI.h
 AMProjThreadProbe.o: AMProjThreadProbe.c AMProjThreadProbe.h
 	$(CC) $(filter-out -dynamiclib -fobjc-arc,$(CFLAGS)) -Wall -Wextra -Werror -c AMProjThreadProbe.c -o $@
 
-AMProjExportBeta.dylib: AMProjExport.dylib AMProjBetaDiagnostics.m AMProjBetaDiagnostics.h AMProjPerformancePolicy.h AMProjThreadProbe.o
+AMProjExportBeta.dylib: AMProjExport.dylib AMProjBetaDiagnostics.m AMProjBetaDiagnostics.h AMProjPerformancePolicy.h AMProjPerformanceReport.h AMProjThreadProbe.o
 	$(CC) $(CFLAGS) -DAMPROJ_ENABLE_LEGACY_862=$(LEGACY_862) -DAMPROJ_TELEMETRY=1 -DAMPROJ_CLOUD_SYNC=1 -DAMPROJ_BETA_DIAGNOSTICS=1 -DAMPROJ_DIAGNOSTIC_BUILD_ID='"$(DIAGNOSTIC_BUILD_ID)"' -o $@ AMProjExport.m AMProjZIPWriter.m AMProjImportArchive.m AMProjNativeImportBridge.m AMProjNativeImportBridge.S AMProjStabilityContract.S AMProjV865ProjectFlow.m AMDebugTransport.m AMCloudSync.m AMCloudPlugins.m AMEditorCustomization.m AMProjCrashReporter.m AMProjBetaDiagnostics.m AMProjThreadProbe.o $(LDLIBS) -framework Security -framework WebKit -install_name @rpath/AMProjExport.dylib
 	@ls -la $@
 
