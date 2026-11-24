@@ -2557,6 +2557,10 @@ static void AMCloudTeardownWindowOverlay(void) {
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
     (void)notification;
+#if AMPROJ_BETA_DIAGNOSTICS
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC),
+        dispatch_get_main_queue(), ^{ AMCloudCaptureLayoutProbe(@"foreground", nil, -2); });
+#endif
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
     [self startCloudOverlayWatchdog];
