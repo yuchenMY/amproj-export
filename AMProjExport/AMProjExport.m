@@ -15730,35 +15730,8 @@ static void amproj_IPAFireAppendViewText(UIView *view,
         NSString *text = ((UITextField *)view).text;
         if (text.length) [output appendFormat:@"%@\n", text];
     }
-    if ([view.accessibilityLabel isKindOfClass:NSString.class] &&
-        view.accessibilityLabel.length) {
-        [output appendFormat:@"%@\n", view.accessibilityLabel];
-    }
-    if ([view.accessibilityValue isKindOfClass:NSString.class] &&
-        view.accessibilityValue.length) {
-        [output appendFormat:@"%@\n", view.accessibilityValue];
-    }
-
-    // SwiftUI may expose its labels as UIAccessibilityElement instances
-    // without creating UILabel subviews. Read only bounded accessibility text
-    // and keep the same subtree depth/size limits as the visual walk.
-    for (id element in amproj_accessibilityChildren(view)) {
-        if (!element || [element isKindOfClass:UIView.class]) continue;
-        for (NSString *selectorName in @[
-            NSStringFromSelector(@selector(accessibilityLabel)),
-            NSStringFromSelector(@selector(accessibilityValue)),
-            NSStringFromSelector(@selector(accessibilityHint))
-        ]) {
-            SEL selector = NSSelectorFromString(selectorName);
-            if (![element respondsToSelector:selector]) continue;
-            id value = ((id (*)(id, SEL))objc_msgSend)(element, selector);
-            if ([value isKindOfClass:NSString.class] && [value length]) {
-                [output appendFormat:@"%@\n", value];
-            }
-            if (output.length >= 131072) break;
-        }
-        if (output.length >= 131072) break;
-    }
+    // #24 的主线程采样命中这里触发的 SwiftUI/AX 图计算。
+    // 欢迎浮层只读取原生可见控件文字；不能为匹配标记主动构建辅助功能树。
 
     for (UIView *subview in view.subviews) {
         amproj_IPAFireAppendViewText(subview, output, depth + 1);
@@ -15776,6 +15749,8 @@ static BOOL amproj_IPAFireViewContainsMarker(UIView *view, NSUInteger depth) {
 
 static UIView *amproj_IPAFireFindOverlayView(UIView *view, NSUInteger depth) {
     if (!view || depth > 36) return nil;
+    // 无标记是常态。先只遍历一次整棵树，避免对每个子树重复收集文字。
+    if (depth == 0 && !amproj_IPAFireViewContainsMarker(view, 0)) return nil;
     // Prefer the smallest matching subtree so a welcome overlay attached to
     // the app's normal root view can be removed without hiding the app itself.
     for (UIView *subview in view.subviews.reverseObjectEnumerator) {
@@ -16083,9 +16058,9 @@ static BOOL amproj_isIPAFireWelcome(UIViewController *controller) {
              [content.lowercaseString containsString:@"instant certificates"]);
     }
 
-    NSString *identity = [NSString stringWithFormat:@"%@ %@ %@ %@",
+    NSString *identity = [NSString stringWithFormat:@"%@ %@ %@",
         NSStringFromClass(controller.class) ?: @"", controller.title ?: @"",
-        controller.restorationIdentifier ?: @"", controller.accessibilityLabel ?: @""];
+        controller.restorationIdentifier ?: @""];
     if (amproj_IPAFireTextMatches(identity)) return YES;
     @try {
         // `viewIfLoaded` avoids forcing arbitrary AM controllers to construct
@@ -16112,6 +16087,14 @@ static void amproj_dismissIPAFireWelcomeIfPresented(
 
 static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
     if (!amproj_runtimeIsBuild865() || !NSThread.isMainThread) return;
+    // 窗口显示/隐藏可能同步再次触发窗口 hook，禁止同一轮扫描重入。
+    static BOOL scanning = NO;
+    if (scanning) return;
+    scanning = YES;
+#if AMPROJ_BETA_DIAGNOSTICS
+    CFTimeInterval scanStarted = AMProjBetaDiagnosticsBeginSpan();
+#endif
+    @try {
 
     NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
     if (@available(iOS 13.0, *)) {
@@ -16139,6 +16122,8 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
 
     for (UIWindow *window in windows) {
         if (window.hidden || window.alpha <= 0.01) continue;
+        // 普通应用窗口由呈现入口和已识别类的 hook 处理，不在窗口事件里扫描作品界面。
+        if (window.windowLevel <= UIWindowLevelNormal) continue;
 
         // The Blatant license overlay is fingerprinted by its classes before
         // any text walk: its controllers and views decrypt at runtime and may
@@ -16225,6 +16210,8 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
             continue;
         }
 
+        // 上面的整窗遍历已经证明没有文字标记时，不重复扫描所有子树。
+        if (!hasWindowFingerprint) continue;
         UIView *rootView = window.rootViewController.viewIfLoaded;
         UIView *overlay = amproj_IPAFireFindOverlayView(rootView, 0);
         if (window != keyWindow && window.windowLevel > UIWindowLevelNormal &&
@@ -16242,6 +16229,12 @@ static void amproj_suppressIPAFireWelcomeWindows(NSString *source) {
             amproj_IPAFireHideRootViewTemporarily(rootView, source);
         }
     }
+    } @finally {
+        scanning = NO;
+#if AMPROJ_BETA_DIAGNOSTICS
+        AMProjBetaDiagnosticsEndSpan(@"plugin.welcome_scan", scanStarted);
+#endif
+    }
 }
 
 static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source) {
@@ -16249,6 +16242,10 @@ static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source) {
     if (!amproj_runtimeIsBuild865()) return;
     NSString *sourceSnapshot = [source copy] ?: @"startup";
     dispatch_async(dispatch_get_main_queue(), ^{
+        // 合并窗口通知和 makeKeyAndVisible 产生的同一批延迟探测，不扩增成多批全局扫描。
+        static BOOL pending = NO;
+        if (pending) return;
+        pending = YES;
         amproj_suppressIPAFireWelcomeWindows(sourceSnapshot);
         // With the intro flow seeded away and the gate handled by the class
         // hooks, these passes are a cheap safety net; the early ones stay
@@ -16258,6 +16255,7 @@ static void amproj_scheduleIPAFireWelcomeSuppression(NSString *source) {
                                           (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 amproj_suppressIPAFireWelcomeWindows(sourceSnapshot);
+                if (delay.doubleValue == 5.0) pending = NO;
             });
         }
     });

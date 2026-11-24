@@ -20,7 +20,8 @@
 
 static NSString *const AMPerfChanged = @"AMProjBetaDiagnosticsChanged";
 static atomic_bool AMPerfRecording = false;
-static NSString *const AMPerfPaths[] = {@"native.editor_layout", @"plugin.editor_customization", @"plugin.cloud_attach", @"ui.send_event"};
+static NSString *const AMPerfPaths[] = {@"native.editor_layout", @"plugin.editor_customization", @"plugin.cloud_attach", @"ui.send_event", @"plugin.welcome_scan"};
+#define AMPERF_PATH_COUNT (sizeof(AMPerfPaths) / sizeof(AMPerfPaths[0]))
 static CFTimeInterval AMPerfNow(void) { return CACurrentMediaTime(); }
 static uint64_t AMPerfMicros(void) { return (uint64_t)(AMPerfNow() * 1000000.0); }
 static UIColor *AMPerfTeal(void) { return [UIColor colorWithRed:0.224 green:0.773 blue:0.733 alpha:1]; }
@@ -45,9 +46,9 @@ static NSString *AMPerfShort(NSString *value) {
     atomic_uint_fast64_t runLoopAt;
     atomic_bool screenCaptured;
     atomic_bool lowPower;
-    atomic_uint_fast64_t pathCalls[4];
-    atomic_uint_fast64_t pathTotal[4];
-    atomic_uint_fast64_t pathMax[4];
+    atomic_uint_fast64_t pathCalls[AMPERF_PATH_COUNT];
+    atomic_uint_fast64_t pathTotal[AMPERF_PATH_COUNT];
+    atomic_uint_fast64_t pathMax[AMPERF_PATH_COUNT];
 }
 @property(nonatomic) CFTimeInterval started;
 @property(nonatomic) CFTimeInterval stopped;
@@ -81,7 +82,7 @@ static NSString *AMPerfShort(NSString *value) {
         atomic_init(&deliveredAt, 0); atomic_init(&runLoopActivity, 0);
         atomic_init(&runLoopAt, 0); atomic_init(&screenCaptured, false);
         atomic_init(&lowPower, false);
-        for (unsigned i = 0; i < 4; i++) {
+        for (unsigned i = 0; i < AMPERF_PATH_COUNT; i++) {
             atomic_init(&pathCalls[i], 0); atomic_init(&pathTotal[i], 0); atomic_init(&pathMax[i], 0);
         }
         _events = [NSMutableArray array];
@@ -93,7 +94,7 @@ static NSString *AMPerfShort(NSString *value) {
 
 static NSDictionary *AMPerfTakePathCosts(AMPerfSession *session) {
     NSMutableDictionary *costs = [NSMutableDictionary dictionary];
-    for (unsigned i = 0; i < 4; i++) {
+    for (unsigned i = 0; i < AMPERF_PATH_COUNT; i++) {
         costs[AMPerfPaths[i]] = @{@"calls": @(atomic_exchange(&session->pathCalls[i], 0)),
             @"total_ms": @((double)atomic_exchange(&session->pathTotal[i], 0) / 1000),
             @"max_ms": @((double)atomic_exchange(&session->pathMax[i], 0) / 1000)};
@@ -752,7 +753,7 @@ void AMProjBetaDiagnosticsEndSpan(NSString *name, CFTimeInterval start) {
     AMPerfRecorder *recorder = AMPerfRecorder.shared;
     AMPerfSession *session = recorder.session;
     if (!session || !atomic_load(&session->active)) return;
-    for (unsigned i = 0; i < 4; i++) {
+    for (unsigned i = 0; i < AMPERF_PATH_COUNT; i++) {
         if (![name isEqualToString:AMPerfPaths[i]]) continue;
         uint64_t micros = (uint64_t)(MAX(0, elapsed) * 1000);
         atomic_fetch_add(&session->pathCalls[i], 1); atomic_fetch_add(&session->pathTotal[i], micros);
