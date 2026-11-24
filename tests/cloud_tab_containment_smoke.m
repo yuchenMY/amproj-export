@@ -5,6 +5,7 @@
 typedef NSRect CGRect;
 #define CGRectGetHeight NSHeight
 #define CGRectGetMaxY NSMaxY
+#define NSStringFromCGRect NSStringFromRect
 @interface UIResponder : NSObject
 @property(nonatomic, weak) UIResponder *nextResponder;
 @end
@@ -16,10 +17,18 @@ typedef NSRect CGRect;
 @property(nonatomic) CGRect frame;
 @property(nonatomic, weak) UIView *superview;
 @property(nonatomic, weak) UIWindow *window;
+@property(nonatomic) BOOL hidden;
+@property(nonatomic) double alpha;
+@property(nonatomic) BOOL userInteractionEnabled;
+@property(nonatomic, strong) NSArray<UIView *> *subviews;
 - (BOOL)isDescendantOfView:(UIView *)view;
 - (CGRect)convertRect:(CGRect)rect toView:(UIView *)view;
 @end
 @implementation UIView
+- (instancetype)init {
+    if ((self = [super init])) { _alpha = 1; _subviews = @[]; }
+    return self;
+}
 - (BOOL)isDescendantOfView:(UIView *)view {
     for (UIView *current = self; current; current = current.superview)
         if (current == view) return YES;
@@ -53,6 +62,7 @@ static BOOL AMCloudIsProjectsControllerClass(Class cls) {
     return [NSStringFromClass(cls) hasSuffix:@"ProjectsVC"];
 }
 // AMPROJ_PRODUCTION_CLOUD_HOST
+// AMPROJ_PRODUCTION_PROBE_TREE
 
 int main(void) {
     @autoreleasepool {
@@ -88,5 +98,34 @@ int main(void) {
             assert(AMCloudContentHostForHeader(header) == nil);
         }
         puts("CLOUD_CONTAINMENT_PASS");
+#ifdef AMPROJ_PROBE_TREE_TEST
+        UIWindow *window = [UIWindow new];
+        window.window = window;
+        NSMutableArray *children = [NSMutableArray array];
+        for (int i = 0; i < 250; i++) [children addObject:[UIView new]];
+        HomepageSelectionHeaderView *candidate = [HomepageSelectionHeaderView new];
+        children[0] = candidate;
+        window.subviews = children;
+        NSMutableArray *nodes = [NSMutableArray array];
+        assert(AMCloudProbeTree(window, window, 0, nodes) == candidate);
+        assert(nodes.count == 180);
+        children[0] = [UIView new]; children[249] = candidate;
+        [nodes removeAllObjects];
+        assert(AMCloudProbeTree(window, window, 0, nodes) == nil);
+        assert(nodes.count == 180);
+        UIView *hidden = [UIView new]; hidden.hidden = YES;
+        hidden.subviews = @[candidate]; window.subviews = @[hidden];
+        [nodes removeAllObjects];
+        assert(AMCloudProbeTree(window, window, 0, nodes) == nil);
+        assert(nodes.count == 2);
+        UIView *root = [UIView new], *current = root;
+        for (int i = 0; i < 30; i++) {
+            UIView *child = [UIView new]; current.subviews = @[child]; current = child;
+        }
+        [nodes removeAllObjects];
+        assert(AMCloudProbeTree(root, window, 0, nodes) == nil);
+        assert(nodes.count == 21);
+        puts("CLOUD_PROBE_BUDGET_PASS");
+#endif
     }
 }

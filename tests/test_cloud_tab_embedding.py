@@ -77,6 +77,27 @@ class CloudTabEmbeddingTests(unittest.TestCase):
             self.assertIn(call, block)
         self.assertIn("manager.cloudSelectionGeneration++;", SOURCE)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Requires native Objective-C/Foundation")
+    def test_actual_probe_walk_has_node_depth_and_hidden_subtree_limits(self):
+        host_marker = "static UIViewController *AMCloudContentHostForHeader(UIView *header) {"
+        host = host_marker + SOURCE.split(host_marker, 1)[1].split(
+            "#if AMPROJ_BETA_DIAGNOSTICS", 1)[0]
+        tree_marker = "static NSDictionary *AMCloudProbeView(UIView *view, UIWindow *window) {"
+        tree = tree_marker + SOURCE.split(tree_marker, 1)[1].split(
+            "// 仅本机显式 flag", 1)[0]
+        fixture = (ROOT / "tests/cloud_tab_containment_smoke.m").read_text(encoding="utf-8")
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_CLOUD_HOST", host)
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_PROBE_TREE", tree)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "probe.m"
+            binary = Path(temporary) / "probe"
+            source.write_text(fixture, encoding="utf-8")
+            subprocess.run(["clang", "-fobjc-arc", "-DAMPROJ_PROBE_TREE_TEST=1", "-framework",
+                "Foundation", str(source), "-o", str(binary)], check=True,
+                capture_output=True, timeout=30)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=10)
+            self.assertIn("CLOUD_PROBE_BUDGET_PASS", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
