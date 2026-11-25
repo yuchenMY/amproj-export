@@ -6101,7 +6101,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     self.selectionStyle = UITableViewCellSelectionStyleNone;
     UIView *surface = [UIView new];
     surface.backgroundColor = UIColor.whiteColor;
-    surface.layer.cornerRadius = 16;
+    surface.layer.cornerRadius = 18;
     surface.clipsToBounds = YES;
     self.surface = surface;
     surface.translatesAutoresizingMaskIntoConstraints = NO;
@@ -6148,7 +6148,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
         [surface.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
         [surface.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
         [surface.heightAnchor constraintGreaterThanOrEqualToConstant:86],
-        [self.iconBackground.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor constant:14],
+        [self.iconBackground.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor constant:16],
         [self.iconBackground.centerYAnchor constraintEqualToAnchor:surface.centerYAnchor],
         [self.iconBackground.widthAnchor constraintEqualToConstant:38],
         [self.iconBackground.heightAnchor constraintEqualToConstant:44],
@@ -6160,12 +6160,12 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
         [text.topAnchor constraintEqualToAnchor:surface.topAnchor constant:14],
         [text.bottomAnchor constraintEqualToAnchor:surface.bottomAnchor constant:-14],
         [text.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-10],
-        [chevron.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-14],
+        [chevron.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-16],
         [chevron.centerYAnchor constraintEqualToAnchor:surface.centerYAnchor],
         [chevron.widthAnchor constraintEqualToConstant:7],
         [chevron.heightAnchor constraintEqualToConstant:12],
         [self.divider.leadingAnchor constraintEqualToAnchor:text.leadingAnchor],
-        [self.divider.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor],
+        [self.divider.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-16],
         [self.divider.bottomAnchor constraintEqualToAnchor:surface.bottomAnchor],
         [self.divider.heightAnchor constraintEqualToConstant:0.5],
     ]];
@@ -6180,6 +6180,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 @property(nonatomic, strong) UIRefreshControl *refreshControl;
 @property(nonatomic, strong) NSArray<NSDictionary *> *projects;
 @property(nonatomic, strong) NSDictionary *usage;
+@property(nonatomic, strong) UIView *quotaSurface;
 @property(nonatomic, strong) UILabel *quotaValueLabel;
 @property(nonatomic, strong) UILabel *quotaCaptionLabel;
 @property(nonatomic, strong) UIView *quotaBarFill;
@@ -6209,26 +6210,30 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 - (void)buildHeader {
     UIView *card = [UIView new];
     card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.backgroundColor = UIColor.whiteColor;
+    card.layer.cornerRadius = 18;
+    card.clipsToBounds = YES;
+    self.quotaSurface = card;
     [self addSubview:card];
 
     UILabel *caption = [UILabel new];
     caption.translatesAutoresizingMaskIntoConstraints = NO;
     caption.text = @"云空间";
-    caption.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    caption.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
     caption.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
 
     UILabel *value = [UILabel new];
     value.translatesAutoresizingMaskIntoConstraints = NO;
-    value.font = [UIFont systemFontOfSize:13];
+    value.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     value.adjustsFontSizeToFitWidth = YES;
     value.minimumScaleFactor = 0.75;
-    value.textColor = UIColor.secondaryLabelColor;
+    value.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
     value.text = @"--";
     self.quotaValueLabel = value;
 
     UIView *track = [UIView new];
     track.translatesAutoresizingMaskIntoConstraints = NO;
-    track.backgroundColor = [UIColor colorWithWhite:0.90 alpha:1];
+    track.backgroundColor = [UIColor colorWithWhite:0.93 alpha:1];
     track.layer.cornerRadius = 2;
     track.clipsToBounds = YES;
 
@@ -6242,53 +6247,57 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     caption2.translatesAutoresizingMaskIntoConstraints = NO;
     caption2.font = [UIFont systemFontOfSize:11];
     caption2.textColor = UIColor.secondaryLabelColor;
-    caption2.textAlignment = NSTextAlignmentRight;
     self.quotaCaptionLabel = caption2;
+
+    UILabel *count = [UILabel new];
+    count.translatesAutoresizingMaskIntoConstraints = NO;
+    count.font = [UIFont systemFontOfSize:11];
+    count.textColor = UIColor.secondaryLabelColor;
+    [count setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                          forAxis:UILayoutConstraintAxisHorizontal];
+    self.backupCountLabel = count;
 
     UIButton *upload = [UIButton buttonWithType:UIButtonTypeSystem];
     upload.translatesAutoresizingMaskIntoConstraints = NO;
-    [upload setTitle:@"＋ 上传备份" forState:UIControlStateNormal];
-    upload.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    upload.backgroundColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
-    upload.layer.cornerRadius = 12;
-    [upload setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [upload setTitle:@" 上传备份" forState:UIControlStateNormal];
+    [upload setImage:[UIImage systemImageNamed:@"square.and.arrow.up"
+        withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:14
+            weight:UIImageSymbolWeightRegular]] forState:UIControlStateNormal];
+    upload.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    upload.tintColor = AMCloudBrandColor();
+    [upload setTitleColor:AMCloudBrandColor() forState:UIControlStateNormal];
+    upload.accessibilityLabel = @"上传备份";
     [upload addTarget:self action:@selector(onUpload) forControlEvents:UIControlEventTouchUpInside];
 
-    UIImageView *cloud = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"icloud"]];
-    cloud.translatesAutoresizingMaskIntoConstraints = NO;
-    cloud.contentMode = UIViewContentModeScaleAspectFit;
-    cloud.tintColor = AMCloudBrandColor();
-    for (UIView *view in @[caption, value, track, caption2, upload, cloud]) [card addSubview:view];
+    for (UIView *view in @[caption, value, track, caption2, upload, count]) [card addSubview:view];
     [NSLayoutConstraint activateConstraints:@[
         [card.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor
                                        constant:12],
         [card.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
         [card.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
-        [card.heightAnchor constraintEqualToConstant:84],
+        [card.heightAnchor constraintEqualToConstant:104],
 
-        [caption.topAnchor constraintEqualToAnchor:card.topAnchor constant:8],
-        [cloud.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:4],
-        [cloud.centerYAnchor constraintEqualToAnchor:caption.centerYAnchor],
-        [cloud.widthAnchor constraintEqualToConstant:18],
-        [cloud.heightAnchor constraintEqualToConstant:18],
-        [caption.leadingAnchor constraintEqualToAnchor:cloud.trailingAnchor constant:7],
-        [upload.topAnchor constraintEqualToAnchor:card.topAnchor constant:2],
+        [caption.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
+        [caption.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [upload.topAnchor constraintEqualToAnchor:card.topAnchor],
         [upload.heightAnchor constraintEqualToConstant:44],
         [upload.widthAnchor constraintEqualToConstant:94],
-        [upload.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-4],
+        [upload.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-10],
 
-        [value.topAnchor constraintEqualToAnchor:card.topAnchor constant:35],
-        [value.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:4],
-        [value.trailingAnchor constraintLessThanOrEqualToAnchor:upload.leadingAnchor constant:-8],
+        [value.topAnchor constraintEqualToAnchor:card.topAnchor constant:40],
+        [value.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [value.trailingAnchor constraintLessThanOrEqualToAnchor:card.trailingAnchor constant:-16],
 
-        [track.topAnchor constraintEqualToAnchor:card.topAnchor constant:76],
-        [track.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:4],
-        [track.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-4],
-        [track.heightAnchor constraintEqualToConstant:3],
+        [track.topAnchor constraintEqualToAnchor:card.topAnchor constant:66],
+        [track.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [track.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
+        [track.heightAnchor constraintEqualToConstant:4],
 
-        [caption2.topAnchor constraintEqualToAnchor:card.topAnchor constant:55],
-        [caption2.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:4],
-        [caption2.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-4],
+        [caption2.topAnchor constraintEqualToAnchor:card.topAnchor constant:78],
+        [caption2.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [caption2.trailingAnchor constraintLessThanOrEqualToAnchor:count.leadingAnchor constant:-8],
+        [count.centerYAnchor constraintEqualToAnchor:caption2.centerYAnchor],
+        [count.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
     ]];
     self.quotaBarFillWidth = [self.quotaBarFill.widthAnchor constraintEqualToConstant:0];
     self.quotaBarFillWidth.active = YES;
@@ -6300,18 +6309,6 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 }
 
 - (void)buildTable {
-    UILabel *heading = [UILabel new];
-    heading.text = @"云端备份";
-    heading.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    heading.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
-    UILabel *count = [UILabel new];
-    count.font = [UIFont systemFontOfSize:12];
-    count.textColor = UIColor.secondaryLabelColor;
-    self.backupCountLabel = count;
-    for (UILabel *label in @[heading, count]) {
-        label.translatesAutoresizingMaskIntoConstraints = NO;
-        [self addSubview:label];
-    }
     UITableView *table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     table.translatesAutoresizingMaskIntoConstraints = NO;
     table.dataSource = self;
@@ -6342,14 +6339,10 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 
     [NSLayoutConstraint activateConstraints:@[
         [table.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor
-                                        constant:140],
+                                        constant:116],
         [table.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
         [table.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
         [table.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
-        [heading.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor constant:112],
-        [heading.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:20],
-        [count.centerYAnchor constraintEqualToAnchor:heading.centerYAnchor],
-        [count.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-20],
         [state.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
         [state.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
         [state.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor
@@ -6419,6 +6412,9 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     long long quota = [self.usage[@"quotaBytes"] longLongValue];
     self.backupCountLabel.text = [NSString stringWithFormat:@"%lu 个备份",
         (unsigned long)self.projects.count];
+    // 有工程时与列表连成同一面板；空态保留容量区的完整圆角。
+    self.quotaSurface.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner |
+        ((quota <= 0 || !self.projects.count) ? kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner : 0);
     if (quota <= 0) {
         self.backupCountLabel.text = @"";
         self.quotaValueLabel.text = @"未开通";
@@ -6435,7 +6431,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     self.quotaCaptionLabel.text = [NSString stringWithFormat:@"可用 %@",
         AMCloudByteText(quota > used ? quota - used : 0)];
     CGFloat ratio = quota > 0 ? MIN(1.0, (double)used / (double)quota) : 0;
-    CGFloat trackWidth = MAX(0, CGRectGetWidth(self.bounds) - 40);
+    CGFloat trackWidth = MAX(0, CGRectGetWidth(self.bounds) - 64);
     self.quotaBarFillWidth.constant = trackWidth * ratio;
     self.tableView.hidden = NO;
     self.stateLabel.text = @"还没有备份工程\n点右上角「上传备份」上传一个";
@@ -6447,7 +6443,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     // 预取时视图尚未挂载；进度条应在拿到真实宽度后更新。
     long long quota = [self.usage[@"quotaBytes"] longLongValue];
     CGFloat ratio = quota > 0 ? MIN(1.0, (double)[self.usage[@"usedBytes"] longLongValue] / quota) : 0;
-    CGFloat width = MAX(0, CGRectGetWidth(self.bounds) - 40) * ratio;
+    CGFloat width = MAX(0, CGRectGetWidth(self.bounds) - 64) * ratio;
     if (fabs(self.quotaBarFillWidth.constant - width) > 0.5)
         self.quotaBarFillWidth.constant = width;
 }
@@ -6493,16 +6489,12 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     NSString *format = AMCloudProjectFormat(version);
     BOOL XML = [format isEqualToString:@"XML"];
     NSString *kind = XML ? @"仅工程" : [format isEqualToString:@"AMPROJ"] ? @"项目包" : @"备份";
-    UIColor *tint = XML ? AMCloudBrandColor()
-        : [UIColor colorWithRed:0.38 green:0.40 blue:0.49 alpha:1];
-    cell.iconBackground.backgroundColor = [tint colorWithAlphaComponent:0.08];
+    UIColor *tint = [UIColor colorWithRed:0.50 green:0.51 blue:0.56 alpha:1];
+    cell.iconBackground.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     cell.fileIcon.tintColor = tint;
     cell.fileIcon.image = [UIImage systemImageNamed:@"doc.text"];
-    BOOL first = indexPath.row == 0;
     BOOL last = (NSUInteger)indexPath.row + 1 == self.projects.count;
-    cell.surface.layer.maskedCorners =
-        (first ? kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner : 0) |
-        (last ? kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner : 0);
+    cell.surface.layer.maskedCorners = last ? kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner : 0;
     cell.divider.hidden = last;
     cell.kindLabel.text = version
         ? [NSString stringWithFormat:@"%@ · %@", format, AMCloudByteText(size)]
