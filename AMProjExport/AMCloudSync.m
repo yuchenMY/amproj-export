@@ -1640,6 +1640,8 @@ extern BOOL AMProjStartSelfCloudUploadWithMedia(BOOL includeMedia);
 - (void)mountCloudSubview:(UIView *)view inProjectsView:(UIView *)header row:(CGRect)row;
 - (AMCloudLibraryView *)prepareCloudLibrary;
 - (void)showPreparedCloudLibraryInProjectsView:(UIView *)header row:(CGRect)row;
+- (void)repairKnownCloudTabForGeneration:(NSUInteger)generation;
+- (void)scheduleCloudTabReconciliationForGeneration:(NSUInteger)generation verifiedCloudTap:(BOOL)verifiedCloudTap;
 - (void)cloudSegmentSelectionDidChange;
 - (void)showAccountEntry:(id)sender;
 - (void)showAccountFrom:(UIViewController *)presenter;
@@ -4090,6 +4092,21 @@ static BOOL AMCloudIsNativeSubTabTap(UIView *projects, UIView *hit, UIView *libr
         CGRectContainsPoint(rowInWindow, point);
 }
 
+// 从命中视图向上找路由，编辑器和列表内操作不触发整窗子树搜索。
+static UIView *AMCloudProjectAncestorForTap(UIView *hit, UIWindow *window, BOOL *mainTab) {
+    if (mainTab) *mainTab = NO;
+    if (!window || hit.window != window) return nil;
+    NSUInteger depth = 0;
+    for (UIView *view = hit; view && view != window && depth++ < 32; view = view.superview) {
+        if ([NSStringFromClass(view.class) containsString:@"HomepageTabBarView"]) {
+            if (mainTab) *mainTab = YES;
+            return nil;
+        }
+        if (AMCloudProjectContainerEligible(view)) return view;
+    }
+    return nil;
+}
+
 #if AMPROJ_BETA_DIAGNOSTICS
 static NSDictionary *AMCloudProbeView(UIView *view, UIWindow *window) {
     if (!view) return @{};
@@ -4214,6 +4231,10 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 
 - (void)refreshWindowCloudOverlayVisibility {
     if (AMCloudUIKitDisabled()) { [self setCloudLibraryVisible:NO]; return; }
+    if (self.cloudTapTargetKnown) {
+        [self repairKnownCloudTabForGeneration:self.cloudSelectionGeneration];
+        return;
+    }
     UIView *header = AMCloudProjectsView();
     CGRect tabFrame = CGRectZero;
     CGRect pillFrame = CGRectZero;
@@ -4267,7 +4288,6 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
     self.embeddedLibrary = library;
     self.embeddedHeader = header;
     [library refreshForPresentation];
-    [header layoutIfNeeded];
     NSLog(@"[AMProjExport] cloud tab embedded host=%@ header=%@ frame=%@",
           NSStringFromClass(header.class), NSStringFromClass(header.class),
           NSStringFromCGRect(self.cloudSubTabFrame));
@@ -4322,23 +4342,15 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
     CGPoint point = [recognizer locationInView:window];
     UIView *hit = [window hitTest:point withEvent:nil];
     BOOL mainTab = NO;
-    for (UIView *view = hit; view && view != window; view = view.superview) {
-        if ([NSStringFromClass(view.class) containsString:@"HomepageTabBarView"]) {
-            mainTab = YES;
-            break;
-        }
-    }
-    UIView *header = AMCloudProjectsView();
+    UIView *header = AMCloudProjectAncestorForTap(hit, window, &mainTab);
+    if (!mainTab && !header) return;
     // 已识别后只监听原生标签行，自家云列表的上传/下载/账户操作不能触发卸载。
-    CGRect candidate = self.cloudSubTabHost == header && !CGRectIsEmpty(self.cloudSubTabFrame)
+    CGRect candidate = header && self.cloudSubTabHost == header && !CGRectIsEmpty(self.cloudSubTabFrame)
         ? self.cloudSubTabFrame : CGRectMake(0, 0, CGRectGetWidth(header.bounds),
             MIN(280, floor(CGRectGetHeight(header.bounds) * 0.45)));
-    BOOL subTab = AMCloudIsNativeSubTabTap(header, hit, self.embeddedLibrary,
-        [header convertRect:candidate toView:window], point);
+    CGRect rowInWindow = header ? [header convertRect:candidate toView:window] : CGRectZero;
+    BOOL subTab = AMCloudIsNativeSubTabTap(header, hit, self.embeddedLibrary, rowInWindow, point);
     if (!mainTab && !subTab) return;
-#if AMPROJ_BETA_DIAGNOSTICS
-    AMCloudCaptureLayoutProbe(@"tab_tap", header, -2);
-#endif
     BOOL knownPill = subTab && self.cloudPillHost == header &&
         CGRectEqualToRect(self.cloudPillHostBounds, header.bounds) && !CGRectIsEmpty(self.cloudPillFrame);
     self.cloudTapTargetKnown = mainTab || knownPill;
@@ -4355,14 +4367,45 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
         [self showPreparedCloudLibraryInProjectsView:header row:verifiedRow];
     }
     NSUInteger generation = ++self.cloudSelectionGeneration;
-    for (NSNumber *delay in @[@0, @0.08, @0.2, @0.42]) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-            (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (generation != self.cloudSelectionGeneration) return;
-            if (delay.doubleValue >= 0.42) self.cloudTapTargetKnown = NO;
-            [self refreshWindowCloudOverlayVisibility];
+#if AMPROJ_BETA_DIAGNOSTICS
+    if (!knownPill) AMCloudCaptureLayoutProbe(@"tab_tap", header, -2);
+#endif
+    [self scheduleCloudTabReconciliationForGeneration:generation
+        verifiedCloudTap:(knownPill && self.cloudTapTargetIsCloud)];
+}
+
+- (void)repairKnownCloudTabForGeneration:(NSUInteger)generation {
+    if (generation != self.cloudSelectionGeneration) return;
+    if (!self.cloudTapTargetKnown || !self.cloudTapTargetIsCloud || AMCloudUIKitDisabled()) {
+        [self setCloudLibraryVisible:NO];
+        return;
+    }
+    UIView *header = AMCloudProjectsView();
+    if (!header || header != self.cloudPillHost || !CGRectEqualToRect(header.bounds, self.cloudPillHostBounds)) {
+        [self setCloudLibraryVisible:NO];
+        return;
+    }
+    CGRect row = AMCloudRowForVerifiedPill(header, self.cloudPillFrame);
+    [self showPreparedCloudLibraryInProjectsView:header row:row];
+}
+
+- (void)scheduleCloudTabReconciliationForGeneration:(NSUInteger)generation verifiedCloudTap:(BOOL)verifiedCloudTap {
+    // 精确云端按钮只修复挂载；其他点击保留一次确认，覆盖原生未切换的留白点击。
+    if (verifiedCloudTap) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self repairKnownCloudTabForGeneration:generation];
         });
     }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 420 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (generation != self.cloudSelectionGeneration) return;
+        if (verifiedCloudTap) {
+            [self repairKnownCloudTabForGeneration:generation];
+            self.cloudTapTargetKnown = NO;
+        } else {
+            self.cloudTapTargetKnown = NO;
+            [self refreshWindowCloudOverlayVisibility];
+        }
+    });
 }
 
 - (void)setCloudLibraryVisible:(BOOL)visible {

@@ -97,12 +97,44 @@ class CloudTabEmbeddingTests(unittest.TestCase):
         self.assertIn("!CGRectIsEmpty(manager.cloudSubTabFrame)", SOURCE)
         self.assertIn("if (!CGRectIsEmpty(tabFrame) || self.cloudSubTabHost != header)", block)
         self.assertIn("self.embeddedLibrary.superview == header", block)
-        self.assertLess(tap.index("showPreparedCloudLibraryInProjectsView"), tap.index("dispatch_after"))
+        self.assertLess(tap.index("showPreparedCloudLibraryInProjectsView"), tap.index("scheduleCloudTabReconciliationForGeneration:generation"))
         self.assertIn("self.cloudTapTargetKnown = mainTab || knownPill", tap)
         self.assertIn("CGRectEqualToRect(self.cloudPillHostBounds, header.bounds)", tap)
         logout = SOURCE.split("- (void)pluginTokenChanged:", 1)[1].split("- (NSURL *)accountAvatarCacheURL", 1)[0]
         self.assertIn("self.cachedLibrary = nil", logout)
         self.assertIn("self.cloudSelectionGeneration++", logout)
+
+    def test_known_route_does_not_render_or_force_native_root_layout(self):
+        refresh = SOURCE.split("- (void)refreshWindowCloudOverlayVisibility {", 1)[1].split(
+            "- (AMCloudLibraryView *)prepareCloudLibrary", 1)[0]
+        self.assertLess(refresh.index("if (self.cloudTapTargetKnown)"), refresh.index("AMCloudDetectCloudPillSelected"))
+        repair = SOURCE.split("- (void)repairKnownCloudTabForGeneration:(NSUInteger)generation {", 1)[1].split(
+            "- (void)scheduleCloudTabReconciliation", 1)[0]
+        self.assertNotIn("AMCloudDetectCloudPillSelected", repair)
+        self.assertNotIn("AMCloudCaptureLayoutProbe", repair)
+        mount = SOURCE.split("- (void)showPreparedCloudLibraryInProjectsView:(UIView *)header row:(CGRect)row {", 1)[1].split(
+            "- (void)mountCloudSubview", 1)[0]
+        self.assertNotIn("layoutIfNeeded", mount)
+        tap = SOURCE.split("- (void)handleCloudTabTap:(UITapGestureRecognizer *)recognizer {", 1)[1].split(
+            "- (void)repairKnownCloudTabForGeneration:", 1)[0]
+        self.assertIn("AMCloudProjectAncestorForTap", tap)
+        self.assertNotIn("AMCloudProjectsView()", tap)
+        self.assertNotIn("@0.08", tap)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires native Objective-C/Foundation")
+    def test_actual_reconciliation_scheduler_limits_pixel_checks_and_cancels_old_taps(self):
+        marker = "- (void)scheduleCloudTabReconciliationForGeneration:(NSUInteger)generation verifiedCloudTap:(BOOL)verifiedCloudTap {"
+        implementation = marker + SOURCE.split(marker, 1)[1].split("- (void)setCloudLibraryVisible:", 1)[0]
+        fixture = (ROOT / "tests/cloud_tab_schedule_smoke.m").read_text(encoding="utf-8")
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_TAP_SCHEDULE", implementation)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "schedule.m"
+            binary = Path(temporary) / "schedule"
+            source.write_text(fixture, encoding="utf-8")
+            subprocess.run(["clang", "-fobjc-arc", "-I", str(ROOT / "AMProjExport"), "-framework", "Foundation", str(source),
+                "-o", str(binary)], check=True, capture_output=True, timeout=30)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=10)
+            self.assertIn("CLOUD_TAP_SCHEDULE_PASS", result.stdout)
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires native CoreGraphics")
     def test_actual_image_readback_preserves_top_origin_for_content_boundary(self):

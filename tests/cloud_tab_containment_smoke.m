@@ -52,6 +52,8 @@ typedef NSPoint CGPoint;
 @implementation HomepageProjectListView @end
 @interface OtherSelectionHeaderView : UIView @end
 @implementation OtherSelectionHeaderView @end
+@interface HomepageTabBarView : UIView @end
+@implementation HomepageTabBarView @end
 @interface UIViewController : UIResponder
 @property(nonatomic, strong) UIView *viewIfLoaded;
 @end
@@ -106,6 +108,18 @@ int main(void) {
         assert(!AMCloudIsNativeSubTabTap(header, other, library, row, tap));
         assert(!AMCloudIsNativeSubTabTap(header, header, library, row, NSMakePoint(310, 300)));
         assert(!AMCloudIsNativeSubTabTap(header, nil, library, row, tap));
+        UIWindow *tapWindow = [UIWindow new];
+        button.window = tapWindow; header.window = tapWindow;
+        BOOL mainTab = YES;
+        assert(AMCloudProjectAncestorForTap(button, tapWindow, &mainTab) == header && !mainTab);
+        HomepageTabBarView *navigation = [HomepageTabBarView new];
+        UIView *navButton = [UIView new]; navButton.superview = navigation;
+        navButton.window = tapWindow;
+        assert(AMCloudProjectAncestorForTap(navButton, tapWindow, &mainTab) == nil && mainTab);
+        UIView *editor = [UIView new]; editor.superview = content;
+        editor.window = tapWindow;
+        assert(AMCloudProjectAncestorForTap(editor, tapWindow, &mainTab) == nil && !mainTab);
+        assert(AMCloudProjectAncestorForTap(button, [UIWindow new], &mainTab) == nil && !mainTab);
         puts("CLOUD_CONTAINMENT_PASS");
 #ifdef AMPROJ_PROBE_TREE_TEST
         UIWindow *window = [UIWindow new];
