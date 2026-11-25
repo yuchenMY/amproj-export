@@ -88,7 +88,7 @@ int main(void) {
         assert(view.projects.count == 1 && view.tableView.updates == 1);
         [view layoutSubviews]; assert(view.quotaBarFillWidth.constant == 0);
         view.bounds = NSMakeRect(0, 0, 390, 450); [view layoutSubviews];
-        assert(fabs(view.quotaBarFillWidth.constant - 81.5) < 0.01);
+        assert(fabs(view.quotaBarFillWidth.constant - 87.5) < 0.01);
         assert(manager.client.requests == 1);
         now = 129; [view refreshForPresentation]; assert(manager.client.requests == 1);
         now = 130; [view refreshForPresentation]; assert(manager.client.requests == 2);
