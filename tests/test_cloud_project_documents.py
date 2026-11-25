@@ -27,6 +27,12 @@ class CloudProjectDocumentTests(unittest.TestCase):
         self.assertIn("amproj_beginDirectCloudUpload(request, documentURL);\n                return;", block)
         self.assertNotIn("resources = @{}", block)
 
+    def test_backup_format_uses_filename_without_guessing_package_completeness(self):
+        block = function(CLOUD, "static NSString *AMCloudProjectFormat(")
+        self.assertIn('version[@"filename"]', block)
+        self.assertNotIn("sizeBytes", block)
+        self.assertNotIn("完整", block)
+
     def test_legacy_conversion_requires_verified_cloud_only_archive(self):
         block = function(EXPORT, "static void amproj_prepareCopiedArchive(")
         conversion = block.index("amproj_isLegacyCloudXMLBackup(sourceSnapshot,")
@@ -69,6 +75,7 @@ class CloudProjectDocumentTests(unittest.TestCase):
             function(CLOUD, "static BOOL AMCloudShouldRetryProjectDownload("),
             function(CLOUD, "static BOOL AMCloudProjectDownloadDirectoryIsDirectChild("),
             function(CLOUD, "static BOOL AMCloudValidateProjectDownloadContext("),
+            function(CLOUD, "static NSString *AMCloudProjectFormat("),
         ]
         fixture = (ROOT / "tests/cloud_project_documents_smoke.m").read_text(encoding="utf-8")
         fixture = fixture.replace("// AMPROJ_PRODUCTION_DOCUMENT_FUNCTIONS", "\n".join(functions))

@@ -1,0 +1,22 @@
+--- a/object_storage.go
++++ b/object_storage.go
+@@ -190,6 +190,7 @@ func newObjectStorage(cfg ObjectStorageConfig) *objectStorage {
+ 		_ = cfg.normalize()
+ 	}
+ 	transport := http.DefaultTransport.(*http.Transport).Clone()
++	transport.ResponseHeaderTimeout = time.Duration(cfg.RequestTimeoutSeconds) * time.Second
+ 	transport.DialContext = (&net.Dialer{
+ 		Timeout:   time.Duration(cfg.ConnectTimeoutSeconds) * time.Second,
+ 		KeepAlive: 30 * time.Second,
+@@ -517,7 +518,10 @@ func (s *objectStorage) openRemote(ctx context.Context, key string) (*storedObject, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	resp, err := s.client.Do(req)
++	// 流式下载沿用大文件传输预算；响应头仍受短超时控制，调用方取消继续有效。
++	client := *s.client
++	client.Timeout = time.Duration(s.cfg.UploadTimeoutSeconds) * time.Second
++	resp, err := client.Do(req)
+ 	if err != nil {
+ 		return nil, err
+ 	}

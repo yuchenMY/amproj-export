@@ -18,6 +18,10 @@ static void rectangle(int left, int top, int width, int height, uint8_t color) {
 static int selected(void) { return AMCloudSelectedPillRGBA(image, 390, 60, 390 * 4); }
 
 int main(int argc, char **argv) {
+    assert(AMCloudKeepMountedForOwnedAlert(1, 1, 1));
+    assert(!AMCloudKeepMountedForOwnedAlert(0, 1, 1));
+    assert(!AMCloudKeepMountedForOwnedAlert(1, 0, 1));
+    assert(!AMCloudKeepMountedForOwnedAlert(1, 1, 0));
     if (argc == 2) {
         FILE *file = fopen(argv[1], "rb");
         assert(file);

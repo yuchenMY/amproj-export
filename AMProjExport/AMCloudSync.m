@@ -1684,6 +1684,8 @@ static BOOL AMCloudLayoutProbeEnabled(void) {
 @property(nonatomic) BOOL cloudTapTargetKnown;
 @property(nonatomic) BOOL cloudTapTargetIsCloud;
 @property(nonatomic) NSUInteger cloudSelectionGeneration;
+@property(nonatomic, weak) UIAlertController *cloudLibraryAlert;
+@property(nonatomic) NSUInteger cloudLibraryAlertSelectionGeneration;
 + (instancetype)shared;
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
@@ -1720,6 +1722,8 @@ extern BOOL AMProjStartSelfCloudUploadWithMedia(BOOL includeMedia);
                      completion:(dispatch_block_t)completion
                     cancellation:(dispatch_block_t)cancellation;
 - (UIAlertController *)busyAlert:(NSString *)title presenter:(UIViewController *)presenter;
+- (void)rememberCloudLibraryAlert:(UIAlertController *)alert;
+- (BOOL)keepsLibraryBehindOwnedAlert;
 - (void)showCredentialsFrom:(UIViewController *)presenter registerAccount:(BOOL)registerAccount
                   completion:(dispatch_block_t)completion;
 - (void)chooseUploadTarget:(NSArray *)projects fileURL:(NSURL *)fileURL
@@ -4289,6 +4293,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 
 - (void)refreshWindowCloudOverlayVisibility {
     if (AMCloudUIKitDisabled()) { [self setCloudLibraryVisible:NO]; return; }
+    if ([self keepsLibraryBehindOwnedAlert]) return;
     if (self.cloudTapTargetKnown) {
         [self repairKnownCloudTabForGeneration:self.cloudSelectionGeneration];
         return;
@@ -4434,6 +4439,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 
 - (void)repairKnownCloudTabForGeneration:(NSUInteger)generation {
     if (generation != self.cloudSelectionGeneration) return;
+    if ([self keepsLibraryBehindOwnedAlert]) return;
     if (!self.cloudTapTargetKnown || !self.cloudTapTargetIsCloud || AMCloudUIKitDisabled()) {
         [self setCloudLibraryVisible:NO];
         return;
@@ -4531,6 +4537,23 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
     [top presentViewController:navigation animated:YES completion:nil];
 }
 
+- (void)rememberCloudLibraryAlert:(UIAlertController *)alert {
+    if (!self.embeddedLibrary || self.embeddedLibrary.superview != self.embeddedHeader) return;
+    self.cloudLibraryAlert = alert;
+    self.cloudLibraryAlertSelectionGeneration = self.cloudSelectionGeneration;
+}
+
+- (BOOL)keepsLibraryBehindOwnedAlert {
+    UIView *header = self.embeddedHeader;
+    UIWindow *window = AMCloudActiveWindow();
+    BOOL mounted = self.embeddedLibrary && self.embeddedLibrary.superview == header &&
+        header.window == window && window != nil;
+    UIAlertController *alert = self.cloudLibraryAlert;
+    BOOL visible = alert.presentingViewController && alert.viewIfLoaded.window == window;
+    return AMCloudKeepMountedForOwnedAlert(mounted, visible,
+        self.cloudLibraryAlertSelectionGeneration == self.cloudSelectionGeneration);
+}
+
 - (UIAlertController *)busyAlert:(NSString *)title presenter:(UIViewController *)presenter {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
         message:@"\n" preferredStyle:UIAlertControllerStyleAlert];
@@ -4543,6 +4566,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
         [spinner.bottomAnchor constraintEqualToAnchor:alert.view.bottomAnchor constant:-18]
     ]];
     [spinner startAnimating];
+    [self rememberCloudLibraryAlert:alert];
     [AMCloudTopController(presenter) presentViewController:alert animated:YES completion:nil];
     return alert;
 }
@@ -4555,6 +4579,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault
                                             handler:nil]];
+    [self rememberCloudLibraryAlert:alert];
     [top presentViewController:alert animated:YES completion:nil];
 }
 
@@ -4994,6 +5019,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
                     }]];
                 [failure addAction:[UIAlertAction actionWithTitle:@"取消"
                     style:UIAlertActionStyleCancel handler:nil]];
+                [weakSelf rememberCloudLibraryAlert:failure];
                 [AMCloudTopController(presenter) presentViewController:failure
                     animated:YES completion:nil];
                 return;
@@ -6049,27 +6075,101 @@ void AMCloudSyncBeginUploadFile(NSURL *fileURL, NSString *projectTitle,
 NSNotificationName const AMCloudLibraryDidChangeNotification =
     @"AMCloudLibraryDidChangeNotification";
 
-static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
-    CGSize size = CGSizeMake(44, 44);
-    UIGraphicsImageRenderer *renderer =
-        [[UIGraphicsImageRenderer alloc] initWithSize:size];
-    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:
-            CGRectMake(0, 0, size.width, size.height) cornerRadius:10];
-        [[UIColor colorWithWhite:0.93 alpha:1] setFill];
-        [path fill];
-        NSString *initial = title.length ? [title substringToIndex:1] : @"AM";
-        NSDictionary *attributes = @{
-            NSFontAttributeName: [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold],
-            NSForegroundColorAttributeName: [UIColor colorWithWhite:0.42 alpha:1]
-        };
-        CGSize textSize = [initial sizeWithAttributes:attributes];
-        [initial drawAtPoint:CGPointMake((size.width - textSize.width) / 2.0,
-                                         (size.height - textSize.height) / 2.0)
-              withAttributes:attributes];
-        (void)context;
-    }];
+static NSString *AMCloudProjectFormat(NSDictionary *version) {
+    NSString *name = [version[@"filename"] isKindOfClass:NSString.class]
+        ? version[@"filename"] : nil;
+    NSString *extension = name.pathExtension.lowercaseString;
+    if ([extension isEqualToString:@"xml"]) return @"XML";
+    if ([extension isEqualToString:@"amproj"]) return @"AMPROJ";
+    return @"备份";
 }
+
+@interface AMCloudBackupCell : UITableViewCell
+@property(nonatomic, strong) UILabel *titleLabel;
+@property(nonatomic, strong) UILabel *kindLabel;
+@property(nonatomic, strong) UILabel *metadataLabel;
+@property(nonatomic, strong) UILabel *formatLabel;
+@property(nonatomic, strong) UIImageView *fileIcon;
+@property(nonatomic, strong) UIView *iconBackground;
+@end
+
+@implementation AMCloudBackupCell
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)identifier {
+    if (!(self = [super initWithStyle:style reuseIdentifier:identifier])) return nil;
+    self.backgroundColor = UIColor.clearColor;
+    self.selectionStyle = UITableViewCellSelectionStyleNone;
+    UIView *surface = [UIView new];
+    surface.backgroundColor = UIColor.whiteColor;
+    surface.layer.cornerRadius = 16;
+    surface.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentView addSubview:surface];
+
+    self.iconBackground = [UIView new];
+    self.iconBackground.layer.cornerRadius = 12;
+    self.fileIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
+    self.fileIcon.contentMode = UIViewContentModeScaleAspectFit;
+    self.titleLabel = [UILabel new];
+    self.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    self.titleLabel.adjustsFontForContentSizeCategory = YES;
+    self.titleLabel.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
+    self.titleLabel.numberOfLines = 2;
+    self.kindLabel = [UILabel new];
+    self.kindLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    self.kindLabel.adjustsFontForContentSizeCategory = YES;
+    self.kindLabel.textColor = UIColor.secondaryLabelColor;
+    self.metadataLabel = [UILabel new];
+    self.metadataLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption2];
+    self.metadataLabel.adjustsFontForContentSizeCategory = YES;
+    self.metadataLabel.textColor = UIColor.secondaryLabelColor;
+    self.formatLabel = [UILabel new];
+    self.formatLabel.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightSemibold];
+    self.formatLabel.textAlignment = NSTextAlignmentRight;
+    [self.formatLabel setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                                   forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *text = [[UIStackView alloc] initWithArrangedSubviews:
+        @[self.titleLabel, self.kindLabel, self.metadataLabel]];
+    text.axis = UILayoutConstraintAxisVertical;
+    text.spacing = 4;
+    UIImageView *chevron = [[UIImageView alloc] initWithImage:
+        [UIImage systemImageNamed:@"chevron.right"]];
+    chevron.tintColor = UIColor.tertiaryLabelColor;
+    chevron.contentMode = UIViewContentModeScaleAspectFit;
+    for (UIView *view in @[self.iconBackground, text, self.formatLabel, chevron]) {
+        view.translatesAutoresizingMaskIntoConstraints = NO;
+        [surface addSubview:view];
+    }
+    self.fileIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.iconBackground addSubview:self.fileIcon];
+    [NSLayoutConstraint activateConstraints:@[
+        [surface.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4],
+        [surface.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4],
+        [surface.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+        [surface.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+        [surface.heightAnchor constraintGreaterThanOrEqualToConstant:84],
+        [self.iconBackground.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor constant:14],
+        [self.iconBackground.centerYAnchor constraintEqualToAnchor:surface.centerYAnchor],
+        [self.iconBackground.widthAnchor constraintEqualToConstant:42],
+        [self.iconBackground.heightAnchor constraintEqualToConstant:46],
+        [self.fileIcon.centerXAnchor constraintEqualToAnchor:self.iconBackground.centerXAnchor],
+        [self.fileIcon.centerYAnchor constraintEqualToAnchor:self.iconBackground.centerYAnchor],
+        [self.fileIcon.widthAnchor constraintEqualToConstant:22],
+        [self.fileIcon.heightAnchor constraintEqualToConstant:24],
+        [text.leadingAnchor constraintEqualToAnchor:self.iconBackground.trailingAnchor constant:12],
+        [text.topAnchor constraintEqualToAnchor:surface.topAnchor constant:13],
+        [text.bottomAnchor constraintEqualToAnchor:surface.bottomAnchor constant:-13],
+        [text.trailingAnchor constraintEqualToAnchor:self.formatLabel.leadingAnchor constant:-8],
+        [self.formatLabel.topAnchor constraintEqualToAnchor:surface.topAnchor constant:16],
+        [self.formatLabel.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-8],
+        [chevron.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-14],
+        [chevron.centerYAnchor constraintEqualToAnchor:surface.centerYAnchor],
+        [chevron.widthAnchor constraintEqualToConstant:7],
+        [chevron.heightAnchor constraintEqualToConstant:12],
+    ]];
+    self.isAccessibilityElement = YES;
+    self.accessibilityTraits = UIAccessibilityTraitButton;
+    return self;
+}
+@end
 
 @interface AMCloudLibraryView () <UITableViewDataSource, UITableViewDelegate>
 @property(nonatomic, strong) UITableView *tableView;
@@ -6081,6 +6181,7 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 @property(nonatomic, strong) UIView *quotaBarFill;
 @property(nonatomic, strong) NSLayoutConstraint *quotaBarFillWidth;
 @property(nonatomic, strong) UILabel *stateLabel;
+@property(nonatomic, strong) UILabel *backupCountLabel;
 @property(nonatomic) BOOL loading;
 @property(nonatomic) BOOL contentLoaded;
 @property(nonatomic) CFTimeInterval lastSuccessfulLoad;
@@ -6105,26 +6206,28 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     UIView *card = [UIView new];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     card.backgroundColor = UIColor.whiteColor;
-    card.layer.cornerRadius = 14;
+    card.layer.cornerRadius = 18;
     [self addSubview:card];
 
     UILabel *caption = [UILabel new];
     caption.translatesAutoresizingMaskIntoConstraints = NO;
     caption.text = @"云空间";
-    caption.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    caption.textColor = UIColor.secondaryLabelColor;
+    caption.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    caption.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
 
     UILabel *value = [UILabel new];
     value.translatesAutoresizingMaskIntoConstraints = NO;
-    value.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold];
-    value.textColor = UIColor.labelColor;
+    value.font = [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
+    value.adjustsFontSizeToFitWidth = YES;
+    value.minimumScaleFactor = 0.75;
+    value.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
     value.text = @"--";
     self.quotaValueLabel = value;
 
     UIView *track = [UIView new];
     track.translatesAutoresizingMaskIntoConstraints = NO;
-    track.backgroundColor = [UIColor colorWithWhite:0.88 alpha:1];
-    track.layer.cornerRadius = 3;
+    track.backgroundColor = [UIColor colorWithWhite:0.94 alpha:1];
+    track.layer.cornerRadius = 2;
     track.clipsToBounds = YES;
 
     self.quotaBarFill = [UIView new];
@@ -6141,8 +6244,10 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 
     UIButton *upload = [UIButton buttonWithType:UIButtonTypeSystem];
     upload.translatesAutoresizingMaskIntoConstraints = NO;
-    [upload setTitle:@"上传备份" forState:UIControlStateNormal];
-    upload.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    [upload setTitle:@"＋ 上传备份" forState:UIControlStateNormal];
+    upload.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    upload.backgroundColor = [AMCloudBrandColor() colorWithAlphaComponent:0.08];
+    upload.layer.cornerRadius = 16;
     [upload setTitleColor:AMCloudBrandColor() forState:UIControlStateNormal];
     [upload addTarget:self action:@selector(onUpload) forControlEvents:UIControlEventTouchUpInside];
 
@@ -6152,21 +6257,23 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
                                        constant:12],
         [card.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
         [card.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
-        [card.heightAnchor constraintEqualToConstant:112],
+        [card.heightAnchor constraintEqualToConstant:104],
 
         [caption.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
         [caption.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [upload.centerYAnchor constraintEqualToAnchor:caption.centerYAnchor],
+        [upload.topAnchor constraintEqualToAnchor:card.topAnchor constant:8],
+        [upload.heightAnchor constraintEqualToConstant:44],
+        [upload.widthAnchor constraintEqualToConstant:92],
         [upload.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
 
         [value.topAnchor constraintEqualToAnchor:caption.bottomAnchor constant:6],
         [value.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [value.trailingAnchor constraintLessThanOrEqualToAnchor:card.trailingAnchor constant:-16],
+        [value.trailingAnchor constraintLessThanOrEqualToAnchor:upload.leadingAnchor constant:-8],
 
         [track.topAnchor constraintEqualToAnchor:value.bottomAnchor constant:10],
         [track.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
         [track.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
-        [track.heightAnchor constraintEqualToConstant:6],
+        [track.heightAnchor constraintEqualToConstant:4],
 
         [caption2.topAnchor constraintEqualToAnchor:track.bottomAnchor constant:8],
         [caption2.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
@@ -6182,13 +6289,26 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 }
 
 - (void)buildTable {
+    UILabel *heading = [UILabel new];
+    heading.text = @"云端备份";
+    heading.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    heading.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
+    UILabel *count = [UILabel new];
+    count.font = [UIFont systemFontOfSize:12];
+    count.textColor = UIColor.secondaryLabelColor;
+    self.backupCountLabel = count;
+    for (UILabel *label in @[heading, count]) {
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:label];
+    }
     UITableView *table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     table.translatesAutoresizingMaskIntoConstraints = NO;
     table.dataSource = self;
     table.delegate = self;
-    table.rowHeight = 68;
+    table.rowHeight = UITableViewAutomaticDimension;
+    table.estimatedRowHeight = 96;
     table.alwaysBounceVertical = YES;
-    table.separatorInset = UIEdgeInsetsMake(0, 76, 0, 0);
+    table.separatorStyle = UITableViewCellSeparatorStyleNone;
     table.tableFooterView = [UIView new];
     table.backgroundColor = UIColor.clearColor;
     [self addSubview:table];
@@ -6211,10 +6331,14 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 
     [NSLayoutConstraint activateConstraints:@[
         [table.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor
-                                        constant:136],
-        [table.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
-        [table.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+                                        constant:152],
+        [table.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
+        [table.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
         [table.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+        [heading.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor constant:132],
+        [heading.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:20],
+        [count.centerYAnchor constraintEqualToAnchor:heading.centerYAnchor],
+        [count.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-20],
         [state.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
         [state.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
         [state.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor
@@ -6282,7 +6406,10 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 - (void)applyUsage {
     long long used = [self.usage[@"usedBytes"] longLongValue];
     long long quota = [self.usage[@"quotaBytes"] longLongValue];
+    self.backupCountLabel.text = [NSString stringWithFormat:@"%lu 个备份",
+        (unsigned long)self.projects.count];
     if (quota <= 0) {
+        self.backupCountLabel.text = @"";
         self.quotaValueLabel.text = @"未开通";
         self.quotaCaptionLabel.text = @"当前账号未开通云空间";
         self.quotaBarFillWidth.constant = 0;
@@ -6294,9 +6421,8 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
     }
     self.quotaValueLabel.text = [NSString stringWithFormat:@"%@ / %@",
         AMCloudByteText(used), AMCloudByteText(quota)];
-    self.quotaCaptionLabel.text = [NSString stringWithFormat:@"剩余 %@ · %lu 个工程",
-        AMCloudByteText(quota > used ? quota - used : 0),
-        (unsigned long)self.projects.count];
+    self.quotaCaptionLabel.text = [NSString stringWithFormat:@"可用 %@",
+        AMCloudByteText(quota > used ? quota - used : 0)];
     CGFloat ratio = quota > 0 ? MIN(1.0, (double)used / (double)quota) : 0;
     CGFloat trackWidth = MAX(0, CGRectGetWidth(self.bounds) - 64);
     self.quotaBarFillWidth.constant = trackWidth * ratio;
@@ -6335,19 +6461,15 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
 - (UITableViewCell *)tableView:(UITableView *)tableView
          cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     static NSString *identifier = @"AMCloudLibraryCell";
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    AMCloudBackupCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
     if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+        cell = [[AMCloudBackupCell alloc] initWithStyle:UITableViewCellStyleDefault
                                       reuseIdentifier:identifier];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        cell.imageView.layer.cornerRadius = 10;
-        cell.imageView.clipsToBounds = YES;
     }
     NSDictionary *project = self.projects[(NSUInteger)indexPath.row];
     NSString *title = [project[@"title"] isKindOfClass:NSString.class]
         ? project[@"title"] : @"未命名工程";
-    cell.textLabel.text = title;
-    cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    cell.titleLabel.text = title;
     NSDictionary *version = [project[@"currentVersion"] isKindOfClass:NSDictionary.class]
         ? project[@"currentVersion"] : nil;
     long long size = [version[@"sizeBytes"] longLongValue];
@@ -6357,13 +6479,23 @@ static UIImage *AMCloudLibraryPlaceholderCover(NSString *title) {
             [NSDate dateWithTimeIntervalSince1970:created]
                                         dateStyle:NSDateFormatterMediumStyle
                                         timeStyle:NSDateFormatterShortStyle] : @"";
-    cell.detailTextLabel.text = version
-        ? [NSString stringWithFormat:@"v%@ · %@ · %@",
-            version[@"versionNumber"] ?: @1, AMCloudByteText(size), dateText]
-        : @"尚未上传项目包";
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
-    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
-    cell.imageView.image = AMCloudLibraryPlaceholderCover(title);
+    NSString *format = AMCloudProjectFormat(version);
+    BOOL XML = [format isEqualToString:@"XML"];
+    NSString *kind = XML ? @"仅工程" : [format isEqualToString:@"AMPROJ"] ? @"项目包" : @"备份";
+    cell.formatLabel.text = version ? format : @"";
+    UIColor *tint = XML ? AMCloudBrandColor()
+        : [UIColor colorWithRed:0.39 green:0.42 blue:0.65 alpha:1];
+    cell.formatLabel.textColor = tint;
+    cell.iconBackground.backgroundColor = [tint colorWithAlphaComponent:0.08];
+    cell.fileIcon.tintColor = tint;
+    cell.fileIcon.image = [UIImage systemImageNamed:XML ? @"doc.text" : @"shippingbox"];
+    cell.kindLabel.text = version
+        ? [NSString stringWithFormat:@"%@ · %@", kind, AMCloudByteText(size)]
+        : @"尚未上传备份";
+    cell.metadataLabel.text = version ? [NSString stringWithFormat:@"v%@ · %@",
+        version[@"versionNumber"] ?: @1, dateText] : @"";
+    cell.accessibilityLabel = [@[title, format, cell.kindLabel.text ?: @"", cell.metadataLabel.text ?: @""]
+        componentsJoinedByString:@"，"];
     return cell;
 }
 

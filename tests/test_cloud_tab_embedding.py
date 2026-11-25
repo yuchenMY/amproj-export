@@ -13,6 +13,27 @@ SOURCE = (ROOT / "AMProjExport/AMCloudSync.m").read_text(encoding="utf-8")
 
 
 class CloudTabEmbeddingTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Requires Objective-C/Foundation")
+    def test_owned_alert_preserves_only_current_mounted_cloud_library(self):
+        start = SOURCE.index("- (void)rememberCloudLibraryAlert:(UIAlertController *)alert {")
+        methods = SOURCE[start:SOURCE.index("- (UIAlertController *)busyAlert:", start)]
+        fixture = (ROOT / "tests/cloud_library_alert_smoke.m").read_text(encoding="utf-8")
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_ALERT_METHODS", methods)
+        refresh = SOURCE.split("- (void)refreshWindowCloudOverlayVisibility {", 1)[1]
+        self.assertLess(refresh.index("keepsLibraryBehindOwnedAlert"), refresh.index("AMCloudProjectsView()"))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)
+            source = path / "alert.m"
+            binary = path / "alert"
+            source.write_text(fixture, encoding="utf-8")
+            compiled = subprocess.run(["clang", "-fobjc-arc", "-framework", "Foundation",
+                "-I", str(ROOT / "AMProjExport"), str(source), "-o", str(binary)],
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("CLOUD_LIBRARY_ALERT_PASS", result.stdout)
+
     def test_actual_pixel_classifier_rejects_unselected_text(self):
         command = json.loads(os.environ["AMPROJ_POLICY_CC"]) if os.environ.get("AMPROJ_POLICY_CC") else None
         if command is None:

@@ -36,6 +36,10 @@ int main(int argc, const char *argv[]) {
         CHECK([AMCloudSafeFilename(@"a.amproj") isEqualToString:@"a.amproj"]);
         CHECK([AMCloudUploadHeaderFilename(@"测试工程.xml") isEqualToString:@"project.xml"]);
         CHECK([AMCloudUploadHeaderFilename(@"测试工程.amproj") isEqualToString:@"project.amproj"]);
+        CHECK([AMCloudProjectFormat(@{@"filename": @"new.XML", @"sizeBytes": @15000}) isEqualToString:@"XML"]);
+        CHECK([AMCloudProjectFormat(@{@"filename": @"old.amproj", @"sizeBytes": @15000}) isEqualToString:@"AMPROJ"]);
+        CHECK([AMCloudProjectFormat(@{@"filename": @"full.amproj", @"sizeBytes": @125383680}) isEqualToString:@"AMPROJ"]);
+        CHECK([AMCloudProjectFormat(@{@"filename": @"unknown.zip"}) isEqualToString:@"备份"]);
 
         NSURL *legacy = [testRoot URLByAppendingPathComponent:@"legacy.amproj"];
         CHECK(AMProjZIPWriteProjectArchive(legacy, XML, @{}, NULL, &error));

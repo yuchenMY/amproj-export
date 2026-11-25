@@ -5,6 +5,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* 自有弹窗遮住命中测试时，只保留同一次选页已挂载的云内容。 */
+static inline int AMCloudKeepMountedForOwnedAlert(int mounted, int alertVisible,
+                                                 int sameSelection) {
+    return mounted && alertVisible && sameSelection;
+}
+
 /* 只接受胶囊背景的连续实色区域，文字笔画不能充当选中状态。 */
 static inline int AMCloudSelectedPillGeometryRGBA(const uint8_t *pixels, size_t width,
     size_t height, size_t stride, size_t *rowTop, size_t *rowBottom,
