@@ -58,6 +58,16 @@ int main(int argc, const char *argv[]) {
             if ([key isEqualToString:@"manifest_count"]) changed[key] = @2;
             CHECK(!amproj_isLegacyCloudXMLBackup(@"cloud_download_865", changed));
         }
+        NSURL *vectorArchive = [testRoot URLByAppendingPathComponent:@"valid-vector-project.amproj"];
+        NSData *vectorXML = [@"<scene type=\"project\" title=\"Vectors\"/>"
+            dataUsingEncoding:NSUTF8StringEncoding];
+        CHECK(AMProjZIPWriteProjectArchive(vectorArchive, vectorXML, @{}, NULL, &error));
+        NSDictionary *vectorMetrics = nil;
+        CHECK(AMProjPrepareNativeImport(vectorArchive, testRoot, NULL, &vectorMetrics, &error));
+        CHECK([vectorMetrics[@"manifest_verified"] boolValue]);
+        CHECK([vectorMetrics[@"missing_reference_count"] unsignedIntegerValue] == 0);
+        CHECK([vectorMetrics[@"missing_media_signature_count"] unsignedIntegerValue] == 0);
+        CHECK(!amproj_isLegacyCloudXMLBackup(@"cloud_download_865", vectorMetrics));
         for (NSNumber *code in @[@(NSURLErrorNetworkConnectionLost), @(NSURLErrorTimedOut)]) {
             NSError *network = [NSError errorWithDomain:NSURLErrorDomain code:code.integerValue userInfo:nil];
             CHECK(AMCloudShouldRetryProjectDownload(network, 0));

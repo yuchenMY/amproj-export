@@ -6260,7 +6260,9 @@ static BOOL amproj_isLegacyCloudXMLBackup(NSString *source, NSDictionary *metric
         [metrics[@"manifest_count"] unsignedIntegerValue] == 1 &&
         [metrics[@"xml_count"] unsignedIntegerValue] == 1 &&
         [metrics[@"resource_count"] unsignedIntegerValue] == 0 &&
-        [metrics[@"manifest_entry_count"] unsignedIntegerValue] == 0;
+        [metrics[@"manifest_entry_count"] unsignedIntegerValue] == 0 &&
+        ([metrics[@"missing_reference_count"] unsignedIntegerValue] > 0 ||
+         [metrics[@"missing_media_signature_count"] unsignedIntegerValue] > 0);
 }
 
 static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
@@ -6344,8 +6346,8 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                     ? preparationMetrics[@"extraction_directory"] : nil;
                 if (prepared && amproj_isLegacyCloudXMLBackup(sourceSnapshot,
                                                                preparationMetrics)) {
-                    // 旧版仅工程备份只有一个 XML 和已验证的空清单，按 XML 通道读取。
-                    // 有素材、清单损坏、多 XML 或外部导入的包仍走完整项目包校验。
+                    // 只兼容空清单且实际缺失素材的旧云备份，按 XML 通道读取。
+                    // 合法零素材工程、有素材、多 XML 和外部导入均保持项目包通道。
                     NSString *XMLName = [preparationMetrics[@"xml_names"] firstObject];
                     NSURL *originalXML = extractionPath.length && XMLName.length
                         ? [[NSURL fileURLWithPath:extractionPath isDirectory:YES]
