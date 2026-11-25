@@ -1686,6 +1686,8 @@ static BOOL AMCloudLayoutProbeEnabled(void) {
 @property(nonatomic) NSUInteger cloudSelectionGeneration;
 @property(nonatomic, weak) UIAlertController *cloudLibraryAlert;
 @property(nonatomic) NSUInteger cloudLibraryAlertSelectionGeneration;
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *importResultNotices;
+@property(nonatomic) BOOL importResultRetryScheduled;
 + (instancetype)shared;
 - (void)installWithImportHandler:(AMCloudImportHandler)importHandler;
 - (void)installWithAsyncImportHandler:(AMCloudImportAsyncHandler)importHandler;
@@ -1724,6 +1726,8 @@ extern BOOL AMProjStartSelfCloudUploadWithMedia(BOOL includeMedia);
 - (UIAlertController *)busyAlert:(NSString *)title presenter:(UIViewController *)presenter;
 - (void)rememberCloudLibraryAlert:(UIAlertController *)alert;
 - (BOOL)keepsLibraryBehindOwnedAlert;
+- (void)enqueueImportResultTitle:(NSString *)title message:(NSString *)message;
+- (void)showNextImportResult;
 - (void)showCredentialsFrom:(UIViewController *)presenter registerAccount:(BOOL)registerAccount
                   completion:(dispatch_block_t)completion;
 - (void)chooseUploadTarget:(NSArray *)projects fileURL:(NSURL *)fileURL
@@ -4554,6 +4558,47 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
         self.cloudLibraryAlertSelectionGeneration == self.cloudSelectionGeneration);
 }
 
+- (void)enqueueImportResultTitle:(NSString *)title message:(NSString *)message {
+    if (!self.importResultNotices) self.importResultNotices = [NSMutableArray array];
+    [self.importResultNotices addObject:@{@"title": title, @"message": message}];
+    [self showNextImportResult];
+}
+
+- (void)showNextImportResult {
+    if (!self.importResultNotices.count || self.importResultRetryScheduled) return;
+    UIViewController *top = AMCloudTopController(nil);
+    // 不盖住授权、文件选择器或其他结果，也不通过 dismiss 抢走当前页面。
+    BOOL ready = UIApplication.sharedApplication.applicationState == UIApplicationStateActive &&
+        top.viewIfLoaded.window && !top.isBeingPresented && !top.isBeingDismissed &&
+        !top.presentedViewController && ![top isKindOfClass:UIAlertController.class] &&
+        ![top isKindOfClass:UIDocumentPickerViewController.class];
+    if (!ready) {
+        self.importResultRetryScheduled = YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            self.importResultRetryScheduled = NO;
+            [self showNextImportResult];
+        });
+        return;
+    }
+    NSDictionary *notice = self.importResultNotices.firstObject;
+    [self.importResultNotices removeObjectAtIndex:0];
+    [self refreshWindowCloudOverlayVisibility];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:notice[@"title"]
+        message:notice[@"message"] preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault
+        handler:^(__unused UIAlertAction *action) {
+            AMCloudAfterAlertAction(^{
+                [weakSelf refreshWindowCloudOverlayVisibility];
+                [weakSelf showNextImportResult];
+            });
+        }]];
+    [self rememberCloudLibraryAlert:alert];
+    [top presentViewController:alert animated:YES completion:nil];
+    AMCloudDiagnostic(@"cloud.import_result_presented", @{@"result": notice[@"title"]});
+}
+
 - (UIAlertController *)busyAlert:(NSString *)title presenter:(UIViewController *)presenter {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
         message:@"\n" preferredStyle:UIAlertControllerStyleAlert];
@@ -4997,6 +5042,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
     __weak typeof(self) weakSelf = self;
     [self.client downloadProject:project completion:^(NSDictionary *data, NSError *error) {
         [busy dismissViewControllerAnimated:YES completion:^{
+            [weakSelf refreshWindowCloudOverlayVisibility];
             if (!AMCloudValidateProjectDownloadContext(data, requestToken, requestGeneration)) {
                 [weakSelf showError:AMCloudError(401, @"账户已切换，请重新选择云工程")
                          presenter:presenter];
@@ -5069,15 +5115,14 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
                                           presenter:presenter];
                                 return;
                             }
-                            /* The verified copy is complete. Start cleanup off-main
-                             * and dismiss the account sheet without waiting for it. */
+                            // 交接只表示暂存完成；保留嵌入页，最终结果由本地导入引擎报告。
                             AMCloudDiagnostic(@"cloud.project_handoff_staged", @{
                                 @"filename": filename ?: @"project.amproj",
                                 @"source_removed": @NO,
                                 @"import_confirmed": @NO,
                                 @"cleanup_pending": @YES
                             });
-                            [presenter dismissViewControllerAnimated:YES completion:nil];
+                            [strongSelf refreshWindowCloudOverlayVisibility];
                             dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                                 NSError *cleanupError = nil;
                                 BOOL sourceRemoved = !cleanupURL ||
@@ -5157,7 +5202,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
                 @"import_confirmed": @NO,
                 @"cleanup_error": cleanupError.localizedDescription ?: @""
             });
-            [presenter dismissViewControllerAnimated:YES completion:nil];
+            [manager refreshWindowCloudOverlayVisibility];
         }];
     }];
 }
@@ -5662,6 +5707,12 @@ void AMCloudSyncInstall(AMCloudImportHandler importHandler) {
 
 void AMCloudSyncInstallAsync(AMCloudImportAsyncHandler importHandler) {
     [[AMCloudManager shared] installWithAsyncImportHandler:importHandler];
+}
+
+void AMCloudSyncShowImportResult(NSString *title, NSString *message) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[AMCloudManager shared] enqueueImportResultTitle:title message:message];
+    });
 }
 
 BOOL AMCloudSyncHasLoggedInAccount(void) {

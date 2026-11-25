@@ -12841,6 +12841,13 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                             @"AMProj · 导入完成：《%@》已加入%@，切换过去即可看到",
                             shownTitle, storeDestination],
                         NO, storeTransactionID);
+#if AMPROJ_CLOUD_SYNC
+                    if ([finished.source hasPrefix:@"cloud_download"]) {
+                        AMCloudSyncShowImportResult(@"导入完成",
+                            [NSString stringWithFormat:@"《%@》已加入本机「%@」。",
+                                shownTitle, storeDestination]);
+                    }
+#endif
                     amproj_releaseImportTransaction(storeTransactionID, YES);
                 } else {
                     amproj_retryImportURL = finished.archiveURL ?: storeURL;
@@ -13192,6 +13199,9 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
         });
         // A duplicate callback must not be treated as a completed import. The
         // owner transaction will consume the Inbox source after its own claim.
+        if (duplicate && [source hasPrefix:@"cloud_download"]) {
+            amproj_showImportStatus(@"相同文件正在处理或已接收，请到本机项目库查看", NO);
+        }
         return duplicate ? AMProjIncomingURLAccepted : AMProjIncomingURLFailed;
     }
     amproj_markImportTransactionState(transactionID, AMProjImportTransactionCopying);
@@ -13435,6 +13445,16 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
             } else {
                 amproj_releaseImportTransaction(transactionID, NO);
             }
+#if AMPROJ_CLOUD_SYNC
+            if (duplicateContent && [source hasPrefix:@"cloud_download"]) {
+                if (waitingForOwner) {
+                    amproj_showImportStatus(@"相同文件正在导入，请稍候", NO);
+                } else {
+                    AMCloudSyncShowImportResult(@"文件已存在",
+                        @"相同文件此前已导入，本次未重复创建。请到本机「项目」或「您的模板」查看。");
+                }
+            }
+#endif
             if (!duplicateContent && !silentErrors) {
                 NSString *message = importKind == AMProjImportKindXMLTemplate
                     ? @"XML 文件无法计算 SHA-256 指纹，已停止导入。"

@@ -22,6 +22,9 @@ typedef void (^AMCloudAuthorizationCompletion)(BOOL allowed,
 FOUNDATION_EXPORT void AMCloudSyncInstallPluginHooksEarly(void);
 FOUNDATION_EXPORT void AMCloudSyncInstall(AMCloudImportHandler importHandler);
 FOUNDATION_EXPORT void AMCloudSyncInstallAsync(AMCloudImportAsyncHandler importHandler);
+/// 展示本地导入引擎已确认的结果；可从任意线程调用，排队等待前台弹窗结束。
+/// 暂存/入队不构成成功，调用方只能在落盘校验完成或确认重复内容后调用。
+FOUNDATION_EXPORT void AMCloudSyncShowImportResult(NSString *title, NSString *message);
 FOUNDATION_EXPORT NSArray<UIActivity *> *AMCloudSyncUploadActivities(
     NSURL *fileURL, NSString *projectTitle, UIViewController *presenter);
 /// 仅判断当前设备是否保存了账户令牌，不检查会员、功能权限或设备授权。
