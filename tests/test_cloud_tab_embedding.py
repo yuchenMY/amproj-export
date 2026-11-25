@@ -15,10 +15,15 @@ SOURCE = (ROOT / "AMProjExport/AMCloudSync.m").read_text(encoding="utf-8")
 class CloudTabEmbeddingTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "Requires Objective-C/Foundation")
     def test_owned_alert_preserves_only_current_mounted_cloud_library(self):
-        start = SOURCE.index("- (void)rememberCloudLibraryAlert:(UIAlertController *)alert {")
-        methods = SOURCE[start:SOURCE.index("- (UIAlertController *)busyAlert:", start)]
+        methods = []
+        for signature in (
+            "- (void)rememberCloudLibraryAlert:(UIAlertController *)alert {",
+            "- (BOOL)keepsLibraryBehindOwnedAlert {",
+        ):
+            start = SOURCE.index(signature)
+            methods.append(SOURCE[start:SOURCE.index("\n}\n", start) + 3])
         fixture = (ROOT / "tests/cloud_library_alert_smoke.m").read_text(encoding="utf-8")
-        fixture = fixture.replace("// AMPROJ_PRODUCTION_ALERT_METHODS", methods)
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_ALERT_METHODS", "\n".join(methods))
         refresh = SOURCE.split("- (void)refreshWindowCloudOverlayVisibility {", 1)[1]
         self.assertLess(refresh.index("keepsLibraryBehindOwnedAlert"), refresh.index("AMCloudProjectsView()"))
         with tempfile.TemporaryDirectory() as temporary:
