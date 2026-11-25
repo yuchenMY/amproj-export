@@ -1460,8 +1460,8 @@ class CloudGateAndBannerV3Tests(unittest.TestCase):
         # 云端档位识别用 AM 自家 cloud_subtab_title 文案；读不到分段信息则降级常显
         self.assertIn('@"cloud_subtab_title"', CLOUD)
         # 未确认真实子标签选中态时，不能因为文案或临时埋点直接显示。
-        self.assertIn("NSInteger state = AMCloudDetectCloudPillSelected(header, &tabFrame);", CLOUD)
-        self.assertIn("if (!header || state != 1)", CLOUD)
+        self.assertIn("NSInteger state = AMCloudDetectCloudPillSelected(header, &tabFrame, &pillFrame);", CLOUD)
+        self.assertIn("if (!header || !AMCloudTabAllowsDisplay((int)state", CLOUD)
 
     def test_segment_observer_keeps_original_implementation(self):
         # 只观察不改行为：原 IMP 必须被保留并在 hook 里原样调用。
@@ -1616,7 +1616,7 @@ class NativeXMLScanR81Tests(unittest.TestCase):
         self.assertIn("AMCloudOfficialCloudContentOnScreen", CLOUD)
         self.assertIn('@"没有项目"', CLOUD)
         self.assertIn("AMCloudProjectContainerEligible(header)", CLOUD)
-        self.assertIn("constraintEqualToAnchor:header.topAnchor constant:CGRectGetMaxY(self.cloudSubTabFrame) + 8", CLOUD)
+        self.assertIn("constraintEqualToAnchor:header.topAnchor constant:CGRectGetMaxY(row) + 8", CLOUD)
         self.assertNotIn("[window addSubview:overlayView]", CLOUD)
         self.assertIn("AMCloudSegmentTitles", CLOUD)
 
@@ -1721,7 +1721,7 @@ class A11yDetectionR88Tests(unittest.TestCase):
 
     def test_other_channels_still_present(self):
         self.assertNotIn("signalRecent ||", CLOUD)
-        self.assertIn("AMCloudSelectedPillBoundsRGBA", CLOUD)
+        self.assertIn("AMCloudSelectedPillGeometryRGBA", CLOUD)
 
 
 class RuntimeReactivationR89Tests(unittest.TestCase):

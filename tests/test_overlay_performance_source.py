@@ -44,7 +44,7 @@ class OverlayPerformanceTests(unittest.TestCase):
 
     def test_screenshot_is_restricted_to_header(self):
         block = SOURCE.split(
-            "static NSInteger AMCloudDetectCloudPillSelected(UIView *header, CGRect *tabFrame) {", 1
+            "static NSInteger AMCloudDetectCloudPillSelected(UIView *header, CGRect *tabFrame, CGRect *pillFrame) {", 1
         )[1].split("static BOOL AMCloudProjectContainerEligible", 1)[0]
         self.assertIn("[header drawViewHierarchyInRect:", block)
         self.assertNotIn("[window drawViewHierarchy", block)

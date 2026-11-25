@@ -41,7 +41,7 @@ class CloudTabEmbeddingTests(unittest.TestCase):
         block = block.split("- (void)installCloudTabTapWatcher", 1)[0]
         self.assertNotIn("addChildViewController", block)
         self.assertIn("[header addSubview:view]", block)
-        self.assertIn("constraintEqualToAnchor:header.topAnchor constant:CGRectGetMaxY(self.cloudSubTabFrame) + 8", block)
+        self.assertIn("constraintEqualToAnchor:header.topAnchor constant:CGRectGetMaxY(row) + 8", block)
         self.assertIn("bottom = header.bottomAnchor", block)
         self.assertIn("UIUserInterfaceStyleLight", block)
         self.assertNotIn("rootViewController", block)
@@ -83,6 +83,27 @@ class CloudTabEmbeddingTests(unittest.TestCase):
         self.assertIn("presenter:AMCloudTopController(nil)", component)
         self.assertIn("removeObserver:self", component)
 
+    def test_verified_cloud_tap_mounts_synchronously_without_animation_or_cover(self):
+        block = SOURCE.split("- (void)refreshWindowCloudOverlayVisibility {", 1)[1]
+        block = block.split("- (void)installCloudTabTapWatcher", 1)[0]
+        self.assertIn("AMCloudTabAllowsDisplay((int)state", block)
+        self.assertNotIn("cloudTransitionCover", block)
+        self.assertIn("self.cachedLibraryAuthGeneration != authGeneration", block)
+        self.assertIn("[library refreshForPresentation]", block)
+        self.assertNotIn("animateWithDuration", block)
+        tap = SOURCE.split("- (void)handleCloudTabTap:", 1)[1].split("- (void)setCloudLibraryVisible:", 1)[0]
+        self.assertIn("[self showPreparedCloudLibraryInProjectsView:header row:verifiedRow]", tap)
+        self.assertIn("AMCloudRowForVerifiedPill(header, self.cloudPillFrame)", tap)
+        self.assertIn("!CGRectIsEmpty(manager.cloudSubTabFrame)", SOURCE)
+        self.assertIn("if (!CGRectIsEmpty(tabFrame) || self.cloudSubTabHost != header)", block)
+        self.assertIn("self.embeddedLibrary.superview == header", block)
+        self.assertLess(tap.index("showPreparedCloudLibraryInProjectsView"), tap.index("dispatch_after"))
+        self.assertIn("self.cloudTapTargetKnown = mainTab || knownPill", tap)
+        self.assertIn("CGRectEqualToRect(self.cloudPillHostBounds, header.bounds)", tap)
+        logout = SOURCE.split("- (void)pluginTokenChanged:", 1)[1].split("- (NSURL *)accountAvatarCacheURL", 1)[0]
+        self.assertIn("self.cachedLibrary = nil", logout)
+        self.assertIn("self.cloudSelectionGeneration++", logout)
+
     @unittest.skipUnless(sys.platform == "darwin", "Requires native CoreGraphics")
     def test_actual_image_readback_preserves_top_origin_for_content_boundary(self):
         implementation = "size_t width = CGImageGetWidth(image)" + SOURCE.split(
@@ -119,6 +140,25 @@ class CloudTabEmbeddingTests(unittest.TestCase):
                 capture_output=True, timeout=30)
             result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=10)
             self.assertIn("CLOUD_PROBE_BUDGET_PASS", result.stdout)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires native Objective-C/Foundation")
+    def test_actual_library_cache_refresh_and_old_account_response_rejection(self):
+        component = SOURCE.split("@implementation AMCloudLibraryView", 1)[1]
+        implementation = "- (void)reload {" + component.split("- (void)reload {", 1)[1].split(
+            "- (void)applyUsage", 1)[0]
+        fixture = (ROOT / "tests/cloud_library_refresh_smoke.m").read_text(encoding="utf-8")
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_LIBRARY_REFRESH", implementation)
+        layout = "- (void)layoutSubviews {" + component.split("- (void)layoutSubviews {", 1)[1].split(
+            "- (void)onUpload", 1)[0]
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_LIBRARY_LAYOUT", layout)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "refresh.m"
+            binary = Path(temporary) / "refresh"
+            source.write_text(fixture, encoding="utf-8")
+            subprocess.run(["clang", "-fobjc-arc", "-framework", "Foundation", str(source),
+                "-o", str(binary)], check=True, capture_output=True, timeout=30)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=10)
+            self.assertIn("CLOUD_LIBRARY_REFRESH_PASS", result.stdout)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,12 @@ typedef NSRect CGRect;
 typedef NSPoint CGPoint;
 #define CGRectContainsPoint(rect, point) NSPointInRect(point, rect)
 #define CGRectGetHeight NSHeight
+#define CGRectGetWidth NSWidth
+#define CGRectGetMinX NSMinX
+#define CGRectGetMinY NSMinY
+#define CGRectMake NSMakeRect
+#define CGRectZero NSZeroRect
+#define CGRectContainsRect NSContainsRect
 #define CGRectGetMaxY NSMaxY
 #define NSStringFromCGRect NSStringFromRect
 @interface UIResponder : NSObject
@@ -86,6 +92,10 @@ int main(void) {
         header.bounds = NSMakeRect(0, 0, 390, 727);
         assert(AMCloudProjectContainerEligible(header));
         assert(!AMCloudProjectContainerEligible(nil));
+        CGRect verifiedRow = AMCloudRowForVerifiedPill(header, NSMakeRect(276, 121, 64, 48));
+        assert(NSEqualRects(verifiedRow, NSMakeRect(0, 121, 390, 48)));
+        assert(NSEqualRects(AMCloudRowForVerifiedPill(header, NSZeroRect), NSZeroRect));
+        assert(NSEqualRects(AMCloudRowForVerifiedPill(header, NSMakeRect(276, 800, 64, 48)), NSZeroRect));
         CGRect row = NSMakeRect(0, 224, 390, 48);
         CGPoint tap = NSMakePoint(310, 240);
         UIView *library = [UIView new], *button = [UIView new];

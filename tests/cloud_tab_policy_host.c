@@ -26,7 +26,10 @@ int main(int argc, char **argv) {
         fclose(file);
         size_t top = 0, bottom = 0;
         int state = AMCloudSelectedPillBoundsRGBA(image, 390, count / (390 * 4), 1560, &top, &bottom);
-        printf("%d %zu %zu\n", state, top, bottom);
+        size_t left = 0, right = 0;
+        int cloud = state == 0 && AMCloudUnselectedCloudPillRGBA(image, 390,
+            count / (390 * 4), 1560, top, bottom, &left, &right);
+        printf("%d %zu %zu cloud=%d x=%zu..%zu\n", state, top, bottom, cloud, left, right);
         return 0;
     }
     assert(AMCloudSelectedPillRGBA(NULL, 390, 60, 1560) == -1);
@@ -59,9 +62,30 @@ int main(int argc, char **argv) {
     size_t top = 999, bottom = 999;
     assert(AMCloudSelectedPillBoundsRGBA(image, 390, 280, 1560, &top, &bottom) == 1);
     assert(top <= 125 && top >= 115 && bottom >= 165 && bottom <= 175);
+    size_t left = 0, right = 0;
+    assert(AMCloudSelectedPillGeometryRGBA(image, 390, 280, 1560, &top, &bottom, &left, &right) == 1);
+    assert(left == 276 && right == 340);
     memset(image, 255, sizeof(image));
     rectangle(276, 50, 64, 8, 30);
     assert(AMCloudSelectedPillBoundsRGBA(image, 390, 280, 1560, &top, &bottom) == -1);
+    /* 视频：切走后旧云端胶囊仍在动画中，不能把已卸下的列表重新显示。 */
+    assert(AMCloudTabAllowsDisplay(1, 0, 0));
+    assert(!AMCloudTabAllowsDisplay(1, 1, 0));
+    assert(!AMCloudTabAllowsDisplay(0, 1, 0));
+    assert(!AMCloudTabAllowsDisplay(-1, 0, 0));
+    assert(!AMCloudTabAllowsDisplay(0, 0, 0));
+    /* 真实小标签按钮已核验的点击同步显示，原生转场帧不再让列表闪退闪回。 */
+    assert(AMCloudTabAllowsDisplay(0, 1, 1));
+    assert(AMCloudTabAllowsDisplay(-1, 1, 1));
+    assert(AMCloudTabAllowsDisplay(1, 1, 1));
+    rectangle(0, 0, 390, 280, 246);
+    rectangle(16, 125, 64, 40, 35);
+    rectangle(276, 125, 64, 40, 255);
+    rectangle(289, 140, 38, 2, 35);
+    assert(AMCloudUnselectedCloudPillRGBA(image, 390, 280, 1560, 121, 169, &left, &right));
+    assert(left == 276 && right == 340);
+    rectangle(0, 0, 390, 280, 255);
+    assert(!AMCloudUnselectedCloudPillRGBA(image, 390, 280, 1560, 121, 169, &left, &right));
     puts("CLOUD_TAB_POLICY_PASS");
     return 0;
 }

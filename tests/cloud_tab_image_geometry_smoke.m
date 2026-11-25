@@ -5,7 +5,7 @@
 #include <assert.h>
 #include <stdio.h>
 
-static NSInteger classify(CGImageRef image, CGRect *tabFrame) {
+static NSInteger classify(CGImageRef image, CGRect *tabFrame, CGRect *pillFrame) {
 // AMPROJ_PRODUCTION_IMAGE_READBACK
     return state;
 }
@@ -26,7 +26,9 @@ int main(void) {
             stride, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
         CGImageRef image = CGBitmapContextCreateImage(context);
         CGRect frame = CGRectZero;
-        assert(classify(image, &frame) == 1);
+        CGRect pill = CGRectZero;
+        assert(classify(image, &frame, &pill) == 1);
+        assert(CGRectGetMinX(pill) == 276 && CGRectGetMaxX(pill) == 340);
         assert(CGRectGetMinY(frame) >= 115 && CGRectGetMinY(frame) <= 125);
         assert(CGRectGetMaxY(frame) >= 165 && CGRectGetMaxY(frame) <= 175);
         CGImageRelease(image);

@@ -6,8 +6,9 @@
 #include <stdint.h>
 
 /* 只接受胶囊背景的连续实色区域，文字笔画不能充当选中状态。 */
-static inline int AMCloudSelectedPillBoundsRGBA(const uint8_t *pixels, size_t width,
-    size_t height, size_t stride, size_t *rowTop, size_t *rowBottom) {
+static inline int AMCloudSelectedPillGeometryRGBA(const uint8_t *pixels, size_t width,
+    size_t height, size_t stride, size_t *rowTop, size_t *rowBottom,
+    size_t *pillLeft, size_t *pillRight) {
     if (!pixels || width < 80 || height < 20 || stride < width * 4) return -1;
     size_t bestStart = 0, bestLength = 0, bestTop = 0, bestBottom = 0;
     for (size_t top = 0; top + 6 <= height; top++) {
@@ -57,8 +58,54 @@ static inline int AMCloudSelectedPillBoundsRGBA(const uint8_t *pixels, size_t wi
     if (bestLength < 24 || bestLength > width / 2) return -1;
     if (rowTop) *rowTop = bestTop;
     if (rowBottom) *rowBottom = bestBottom;
+    if (pillLeft) *pillLeft = bestStart;
+    if (pillRight) *pillRight = bestStart + bestLength;
     double center = ((double)bestStart + (double)bestLength / 2) / (double)width;
     return center > 0.72 ? 1 : 0;
+}
+
+static inline int AMCloudSelectedPillBoundsRGBA(const uint8_t *pixels, size_t width,
+    size_t height, size_t stride, size_t *rowTop, size_t *rowBottom) {
+    return AMCloudSelectedPillGeometryRGBA(pixels, width, height, stride,
+        rowTop, rowBottom, NULL, NULL);
+}
+
+/* 已核验原生云端按钮的本次点击直接决定转场，后台事件仍核对实际选中态。 */
+static inline int AMCloudTabAllowsDisplay(int selected, int targetKnown, int targetCloud) {
+    return targetKnown ? targetCloud : selected == 1;
+}
+
+/* 在已识别的四标签行内找右侧白色胶囊，不把窗口右侧点击当云端路由。 */
+static inline int AMCloudUnselectedCloudPillRGBA(const uint8_t *pixels, size_t width,
+    size_t height, size_t stride, size_t rowTop, size_t rowBottom,
+    size_t *pillLeft, size_t *pillRight) {
+    if (!pixels || width < 80 || stride < width * 4 || rowBottom > height ||
+        rowBottom < rowTop + 20) return 0;
+    size_t bestStart = 0, bestLength = 0;
+    for (size_t y = rowTop + 6; y + 6 < rowBottom; y++) {
+        size_t start = 0, run = 0;
+        for (size_t x = 0; x <= width; x++) {
+            size_t white = 0;
+            if (x < width) for (size_t dy = 0; dy < 6; dy++) {
+                const uint8_t *p = pixels + (y + dy) * stride + x * 4;
+                if (p[3] > 220 && p[0] >= 248 && p[1] >= 248 && p[2] >= 248) white++;
+            }
+            if (x < width && white >= 5) {
+                if (!run) start = x;
+                run++;
+            } else {
+                if (run >= 32 && run <= width * 2 / 5 && run > bestLength &&
+                    ((double)start + (double)run / 2) / width > 0.72) {
+                    bestStart = start; bestLength = run;
+                }
+                run = 0;
+            }
+        }
+    }
+    if (!bestLength) return 0;
+    if (pillLeft) *pillLeft = bestStart;
+    if (pillRight) *pillRight = bestStart + bestLength;
+    return 1;
 }
 
 static inline int AMCloudSelectedPillRGBA(const uint8_t *pixels, size_t width,

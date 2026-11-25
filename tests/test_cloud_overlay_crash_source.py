@@ -55,7 +55,7 @@ class CloudOverlayCrashTests(unittest.TestCase):
     def test_unknown_selection_fails_closed_without_fallback_signals(self):
         block = SOURCE.split("- (void)refreshWindowCloudOverlayVisibility {", 1)[1]
         block = block.split("- (void)installCloudTabTapWatcher", 1)[0]
-        self.assertIn("if (!header || state != 1)", block)
+        self.assertIn("if (!header || !AMCloudTabAllowsDisplay((int)state", block)
         self.assertNotIn("AMCloudOfficialCloudContentOnScreen", block)
         self.assertNotIn("accessibility", block)
 
