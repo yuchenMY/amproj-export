@@ -4567,9 +4567,18 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 - (void)showNextImportResult {
     if (!self.importResultNotices.count || self.importResultRetryScheduled) return;
     UIViewController *top = AMCloudTopController(nil);
+    BOOL transitioning = NO;
+    UIViewController *container = top;
+    for (NSUInteger depth = 0; container && depth < 32; depth++) {
+        if (container.isBeingPresented || container.isBeingDismissed || container.transitionCoordinator) {
+            transitioning = YES;
+            break;
+        }
+        container = container.parentViewController ?: container.presentingViewController;
+    }
     // 不盖住授权、文件选择器或其他结果，也不通过 dismiss 抢走当前页面。
     BOOL ready = UIApplication.sharedApplication.applicationState == UIApplicationStateActive &&
-        top.viewIfLoaded.window && !top.isBeingPresented && !top.isBeingDismissed &&
+        top.viewIfLoaded.window && !transitioning &&
         !top.presentedViewController && ![top isKindOfClass:UIAlertController.class] &&
         ![top isKindOfClass:UIDocumentPickerViewController.class];
     if (!ready) {

@@ -21,6 +21,8 @@ enum { UIAlertControllerStyleAlert, UIAlertActionStyleDefault };
 @property(nonatomic, strong) UIView *viewIfLoaded;
 @property(nonatomic, strong) UIViewController *presentedViewController;
 @property(nonatomic, weak) UIViewController *presentingViewController;
+@property(nonatomic, strong) UIViewController *parentViewController;
+@property(nonatomic, strong) NSObject *transitionCoordinator;
 @property(nonatomic) BOOL isBeingPresented;
 @property(nonatomic) BOOL isBeingDismissed;
 @property(nonatomic) NSUInteger presentations;
@@ -110,7 +112,7 @@ static void acknowledge(UIViewController *host) {
 }
 int main(void) {
     @autoreleasepool {
-        for (NSUInteger state = 0; state < 7; state++) {
+        for (NSUInteger state = 0; state < 11; state++) {
             jobs = [NSMutableArray array];
             AMCloudManager *manager = [AMCloudManager new];
             UIApplication.sharedApplication.applicationState = UIApplicationStateActive;
@@ -122,6 +124,18 @@ int main(void) {
             if (state == 4) currentTop.isBeingDismissed = YES;
             if (state == 5) UIApplication.sharedApplication.applicationState = UIApplicationStateBackground;
             if (state == 6) currentTop.viewIfLoaded.window = nil;
+            if (state == 7) currentTop.transitionCoordinator = [NSObject new];
+            if (state == 8 || state == 9) {
+                currentTop.parentViewController = visibleController(UIViewController.class);
+                if (state == 8) currentTop.parentViewController.isBeingPresented = YES;
+                if (state == 9) currentTop.parentViewController.transitionCoordinator = [NSObject new];
+            }
+            UIViewController *presenting;
+            if (state == 10) {
+                presenting = visibleController(UIViewController.class);
+                presenting.isBeingDismissed = YES;
+                currentTop.presentingViewController = presenting;
+            }
             [manager enqueueImportResultTitle:@"文件已存在" message:@"未重复创建"];
             assert(manager.importResultNotices.count == 1 && jobs.count == 1);
             assert(currentTop.presentations == 0 && manager.refreshes == 0);
@@ -151,7 +165,7 @@ int main(void) {
         assert([((UIAlertController *)currentTop.presentedViewController).message isEqualToString:@"second"]);
         acknowledge(currentTop); runOne();
         assert(currentTop.presentations == 2 && manager.importResultNotices.count == 0);
-        assert(jobs.count == 0 && diagnostics == 9);
+        assert(jobs.count == 0 && diagnostics == 13);
         puts("CLOUD_IMPORT_FEEDBACK_PASS");
     }
 }

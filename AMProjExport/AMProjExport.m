@@ -3661,6 +3661,8 @@ typedef NS_ENUM(NSInteger, AMProjTemplateProbeCapability) {
 @property(nonatomic, copy) NSString *duplicateOfFingerprint;
 @property(nonatomic, copy) NSString *name;
 @property(nonatomic, copy) NSString *source;
+// 云端重复请求可等待已有事务；由真正完成落盘的 owner 统一报告结果。
+@property(nonatomic) BOOL cloudResultRequested;
 @property(nonatomic, strong) NSURL *archiveURL;
 @property(nonatomic, strong) NSURL *incomingURL;
 @property(nonatomic, strong) NSURL *incomingCleanupURL;
@@ -4118,6 +4120,7 @@ static BOOL amproj_claimImportTransaction(NSURL *URL, NSString *name,
         }
         if (existing && existing.state != AMProjImportTransactionFailed) {
             existing.updatedAt = now;
+            if ([source hasPrefix:@"cloud_download"]) existing.cloudResultRequested = YES;
             if (duplicate) *duplicate = YES;
             if (transactionID) *transactionID = existing.transactionID;
             return NO;
@@ -4127,6 +4130,7 @@ static BOOL amproj_claimImportTransaction(NSURL *URL, NSString *name,
         transaction.provisionalKey = key;
         transaction.name = name.length ? [name copy] : (URL.lastPathComponent ?: @"project.amproj");
         transaction.source = source ?: @"unknown";
+        transaction.cloudResultRequested = [source hasPrefix:@"cloud_download"];
         transaction.state = AMProjImportTransactionCaptured;
         transaction.updatedAt = now;
         amproj_importTransactions[transaction.transactionID] = transaction;
@@ -4190,6 +4194,9 @@ static BOOL amproj_claimImportFingerprint(NSString *transactionID, NSURL *archiv
             // would destroy the only retryable copy received from the provider.
             transaction.fingerprint = [fingerprint copy];
             transaction.duplicateOfFingerprint = [fingerprint copy];
+            if (transaction.cloudResultRequested) {
+                amproj_importTransactions[ownerID].cloudResultRequested = YES;
+            }
             transaction.archiveURL = archiveURL;
             transaction.stagedDirectoryURL = archiveURL.URLByDeletingLastPathComponent;
             transaction.state = AMProjImportTransactionValidating;
@@ -12842,7 +12849,7 @@ static void amproj_queuePreparedImport(NSURL *URL, NSString *originalName,
                             shownTitle, storeDestination],
                         NO, storeTransactionID);
 #if AMPROJ_CLOUD_SYNC
-                    if ([finished.source hasPrefix:@"cloud_download"]) {
+                    if (finished.cloudResultRequested) {
                         AMCloudSyncShowImportResult(@"导入完成",
                             [NSString stringWithFormat:@"《%@》已加入本机「%@」。",
                                 shownTitle, storeDestination]);

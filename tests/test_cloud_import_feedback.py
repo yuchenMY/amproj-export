@@ -31,7 +31,7 @@ class CloudImportFeedbackTests(unittest.TestCase):
         block = EXPORT[start:EXPORT.index("void (^storeDenied)", start)]
         success, failure = block.split("} else {", 1)
         self.assertIn("if (written)", success)
-        self.assertIn('[finished.source hasPrefix:@"cloud_download"]', success)
+        self.assertIn('if (finished.cloudResultRequested)', success)
         self.assertIn('AMCloudSyncShowImportResult(@"导入完成"', success)
         self.assertNotIn("AMCloudSyncShowImportResult", failure)
         duplicate_start = EXPORT.index("BOOL waitingForOwner = duplicateContent &&")
@@ -41,6 +41,15 @@ class CloudImportFeedbackTests(unittest.TestCase):
         self.assertIn("if (waitingForOwner)", waiting)
         self.assertNotIn("AMCloudSyncShowImportResult", waiting)
         self.assertIn('AMCloudSyncShowImportResult(@"文件已存在"', completed)
+
+    def test_cloud_waiter_requests_final_feedback_from_the_real_owner(self):
+        claim = function(EXPORT, "static BOOL amproj_claimImportTransaction(")
+        self.assertIn('transaction.cloudResultRequested = [source hasPrefix:@"cloud_download"]', claim)
+        self.assertIn('existing.cloudResultRequested = YES', claim)
+        fingerprint = function(EXPORT, "static BOOL amproj_claimImportFingerprint(")
+        owner_branch = fingerprint[fingerprint.index('if (ownerID && ![ownerID isEqualToString:transactionID])'):]
+        self.assertIn('if (transaction.cloudResultRequested)', owner_branch)
+        self.assertIn('amproj_importTransactions[ownerID].cloudResultRequested = YES', owner_branch)
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires Objective-C/Foundation")
     def test_actual_result_queue_waits_for_ui_and_preserves_order(self):
