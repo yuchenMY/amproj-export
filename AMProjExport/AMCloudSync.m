@@ -6088,10 +6088,11 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 @property(nonatomic, strong) UILabel *titleLabel;
 @property(nonatomic, strong) UILabel *kindLabel;
 @property(nonatomic, strong) UILabel *metadataLabel;
+@property(nonatomic, strong) UILabel *formatLabel;
+@property(nonatomic, strong) UIView *formatBadge;
 @property(nonatomic, strong) UIImageView *fileIcon;
 @property(nonatomic, strong) UIView *iconBackground;
 @property(nonatomic, strong) UIView *surface;
-@property(nonatomic, strong) UIView *divider;
 @end
 
 @implementation AMCloudBackupCell
@@ -6101,19 +6102,19 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     self.selectionStyle = UITableViewCellSelectionStyleNone;
     UIView *surface = [UIView new];
     surface.backgroundColor = UIColor.whiteColor;
-    surface.layer.cornerRadius = 18;
+    surface.layer.cornerRadius = 16;
     surface.clipsToBounds = YES;
     self.surface = surface;
     surface.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:surface];
 
     self.iconBackground = [UIView new];
-    self.iconBackground.layer.cornerRadius = 10;
+    self.iconBackground.layer.cornerRadius = 12;
     self.fileIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
     self.fileIcon.contentMode = UIViewContentModeScaleAspectFit;
     self.titleLabel = [UILabel new];
     self.titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleHeadline]
-        scaledFontForFont:[UIFont systemFontOfSize:16 weight:UIFontWeightMedium]];
+        scaledFontForFont:[UIFont systemFontOfSize:16 weight:UIFontWeightSemibold]];
     self.titleLabel.adjustsFontForContentSizeCategory = YES;
     self.titleLabel.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
     self.titleLabel.numberOfLines = 2;
@@ -6121,57 +6122,80 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     self.kindLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleFootnote]
         scaledFontForFont:[UIFont systemFontOfSize:12]];
     self.kindLabel.adjustsFontForContentSizeCategory = YES;
-    self.kindLabel.textColor = UIColor.secondaryLabelColor;
+    UIColor *secondary = [UIColor colorWithRed:0.45 green:0.46 blue:0.50 alpha:1];
+    self.kindLabel.textColor = secondary;
     self.metadataLabel = [UILabel new];
     self.metadataLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption2];
     self.metadataLabel.adjustsFontForContentSizeCategory = YES;
-    self.metadataLabel.textColor = UIColor.secondaryLabelColor;
-    UIStackView *text = [[UIStackView alloc] initWithArrangedSubviews:
-        @[self.titleLabel, self.kindLabel, self.metadataLabel]];
-    text.axis = UILayoutConstraintAxisVertical;
-    text.spacing = 3;
+    self.metadataLabel.textColor = secondary;
+    self.formatBadge = [UIView new];
+    self.formatBadge.backgroundColor = [UIColor colorWithRed:0.95 green:0.955 blue:0.965 alpha:1];
+    self.formatBadge.layer.cornerRadius = 4;
+    self.formatLabel = [UILabel new];
+    self.formatLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleCaption2]
+        scaledFontForFont:[UIFont systemFontOfSize:9 weight:UIFontWeightSemibold]];
+    self.formatLabel.adjustsFontForContentSizeCategory = YES;
+    self.formatLabel.textColor = [UIColor colorWithRed:0.41 green:0.43 blue:0.48 alpha:1];
+    self.formatLabel.textAlignment = NSTextAlignmentCenter;
+    [self.formatLabel setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                                   forAxis:UILayoutConstraintAxisHorizontal];
     UIImageView *chevron = [[UIImageView alloc] initWithImage:
         [UIImage systemImageNamed:@"chevron.right"]];
     chevron.tintColor = UIColor.tertiaryLabelColor;
     chevron.contentMode = UIViewContentModeScaleAspectFit;
-    self.divider = [UIView new];
-    self.divider.backgroundColor = [UIColor colorWithWhite:0.92 alpha:1];
-    for (UIView *view in @[self.iconBackground, text, chevron, self.divider]) {
+    for (UIView *view in @[self.iconBackground, self.titleLabel, self.kindLabel,
+                          self.metadataLabel, self.formatBadge, chevron]) {
         view.translatesAutoresizingMaskIntoConstraints = NO;
         [surface addSubview:view];
     }
     self.fileIcon.translatesAutoresizingMaskIntoConstraints = NO;
     [self.iconBackground addSubview:self.fileIcon];
+    self.formatLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.formatBadge addSubview:self.formatLabel];
     [NSLayoutConstraint activateConstraints:@[
-        [surface.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
-        [surface.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
+        [surface.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4],
+        [surface.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4],
         [surface.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
         [surface.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
-        [surface.heightAnchor constraintGreaterThanOrEqualToConstant:86],
-        [self.iconBackground.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor constant:16],
+        [surface.heightAnchor constraintGreaterThanOrEqualToConstant:80],
+        [self.iconBackground.leadingAnchor constraintEqualToAnchor:surface.leadingAnchor constant:14],
         [self.iconBackground.centerYAnchor constraintEqualToAnchor:surface.centerYAnchor],
-        [self.iconBackground.widthAnchor constraintEqualToConstant:38],
-        [self.iconBackground.heightAnchor constraintEqualToConstant:44],
+        [self.iconBackground.widthAnchor constraintEqualToConstant:42],
+        [self.iconBackground.heightAnchor constraintEqualToConstant:42],
         [self.fileIcon.centerXAnchor constraintEqualToAnchor:self.iconBackground.centerXAnchor],
         [self.fileIcon.centerYAnchor constraintEqualToAnchor:self.iconBackground.centerYAnchor],
-        [self.fileIcon.widthAnchor constraintEqualToConstant:22],
-        [self.fileIcon.heightAnchor constraintEqualToConstant:26],
-        [text.leadingAnchor constraintEqualToAnchor:self.iconBackground.trailingAnchor constant:12],
-        [text.topAnchor constraintEqualToAnchor:surface.topAnchor constant:14],
-        [text.bottomAnchor constraintEqualToAnchor:surface.bottomAnchor constant:-14],
-        [text.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-10],
-        [chevron.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-16],
-        [chevron.centerYAnchor constraintEqualToAnchor:surface.centerYAnchor],
+        [self.fileIcon.widthAnchor constraintEqualToConstant:23],
+        [self.fileIcon.heightAnchor constraintEqualToConstant:23],
+        [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.iconBackground.trailingAnchor constant:12],
+        [self.titleLabel.topAnchor constraintEqualToAnchor:surface.topAnchor constant:12],
+        [self.titleLabel.trailingAnchor constraintEqualToAnchor:self.formatBadge.leadingAnchor constant:-8],
+        [self.kindLabel.leadingAnchor constraintEqualToAnchor:self.titleLabel.leadingAnchor],
+        [self.kindLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:4],
+        [self.kindLabel.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-10],
+        [self.metadataLabel.leadingAnchor constraintEqualToAnchor:self.titleLabel.leadingAnchor],
+        [self.metadataLabel.topAnchor constraintEqualToAnchor:self.kindLabel.bottomAnchor constant:3],
+        [self.metadataLabel.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-10],
+        [self.metadataLabel.bottomAnchor constraintEqualToAnchor:surface.bottomAnchor constant:-12],
+        [self.formatBadge.topAnchor constraintEqualToAnchor:surface.topAnchor constant:14],
+        [self.formatBadge.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-14],
+        [self.formatBadge.heightAnchor constraintGreaterThanOrEqualToConstant:16],
+        [self.formatLabel.leadingAnchor constraintEqualToAnchor:self.formatBadge.leadingAnchor constant:5],
+        [self.formatLabel.trailingAnchor constraintEqualToAnchor:self.formatBadge.trailingAnchor constant:-5],
+        [self.formatLabel.topAnchor constraintEqualToAnchor:self.formatBadge.topAnchor constant:1],
+        [self.formatLabel.bottomAnchor constraintEqualToAnchor:self.formatBadge.bottomAnchor constant:-1],
+        [chevron.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-14],
+        [chevron.centerYAnchor constraintEqualToAnchor:self.kindLabel.centerYAnchor],
         [chevron.widthAnchor constraintEqualToConstant:7],
         [chevron.heightAnchor constraintEqualToConstant:12],
-        [self.divider.leadingAnchor constraintEqualToAnchor:text.leadingAnchor],
-        [self.divider.trailingAnchor constraintEqualToAnchor:surface.trailingAnchor constant:-16],
-        [self.divider.bottomAnchor constraintEqualToAnchor:surface.bottomAnchor],
-        [self.divider.heightAnchor constraintEqualToConstant:0.5],
     ]];
     self.isAccessibilityElement = YES;
     self.accessibilityTraits = UIAccessibilityTraitButton;
     return self;
+}
+- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
+    [super setHighlighted:highlighted animated:animated];
+    self.surface.backgroundColor = highlighted ? [UIColor colorWithWhite:0.98 alpha:1]
+                                              : UIColor.whiteColor;
 }
 @end
 
@@ -6180,7 +6204,6 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 @property(nonatomic, strong) UIRefreshControl *refreshControl;
 @property(nonatomic, strong) NSArray<NSDictionary *> *projects;
 @property(nonatomic, strong) NSDictionary *usage;
-@property(nonatomic, strong) UIView *quotaSurface;
 @property(nonatomic, strong) UILabel *quotaValueLabel;
 @property(nonatomic, strong) UILabel *quotaCaptionLabel;
 @property(nonatomic, strong) UIView *quotaBarFill;
@@ -6213,18 +6236,18 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     card.backgroundColor = UIColor.whiteColor;
     card.layer.cornerRadius = 18;
     card.clipsToBounds = YES;
-    self.quotaSurface = card;
     [self addSubview:card];
 
     UILabel *caption = [UILabel new];
     caption.translatesAutoresizingMaskIntoConstraints = NO;
     caption.text = @"云空间";
-    caption.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    caption.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
+    caption.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    UIColor *secondary = [UIColor colorWithRed:0.45 green:0.46 blue:0.50 alpha:1];
+    caption.textColor = secondary;
 
     UILabel *value = [UILabel new];
     value.translatesAutoresizingMaskIntoConstraints = NO;
-    value.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    value.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold];
     value.adjustsFontSizeToFitWidth = YES;
     value.minimumScaleFactor = 0.75;
     value.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
@@ -6246,30 +6269,21 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     UILabel *caption2 = [UILabel new];
     caption2.translatesAutoresizingMaskIntoConstraints = NO;
     caption2.font = [UIFont systemFontOfSize:11];
-    caption2.textColor = UIColor.secondaryLabelColor;
+    caption2.textColor = secondary;
     self.quotaCaptionLabel = caption2;
-
-    UILabel *count = [UILabel new];
-    count.translatesAutoresizingMaskIntoConstraints = NO;
-    count.font = [UIFont systemFontOfSize:11];
-    count.textColor = UIColor.secondaryLabelColor;
-    [count setContentCompressionResistancePriority:UILayoutPriorityRequired
-                                          forAxis:UILayoutConstraintAxisHorizontal];
-    self.backupCountLabel = count;
 
     UIButton *upload = [UIButton buttonWithType:UIButtonTypeSystem];
     upload.translatesAutoresizingMaskIntoConstraints = NO;
-    [upload setTitle:@" 上传备份" forState:UIControlStateNormal];
-    [upload setImage:[UIImage systemImageNamed:@"square.and.arrow.up"
-        withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:14
-            weight:UIImageSymbolWeightRegular]] forState:UIControlStateNormal];
-    upload.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    upload.tintColor = AMCloudBrandColor();
-    [upload setTitleColor:AMCloudBrandColor() forState:UIControlStateNormal];
+    [upload setTitle:@"上传备份" forState:UIControlStateNormal];
+    upload.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    upload.backgroundColor = [AMCloudBrandColor() colorWithAlphaComponent:0.08];
+    upload.layer.cornerRadius = 12;
+    [upload setTitleColor:[UIColor colorWithRed:0.04 green:0.47 blue:0.44 alpha:1]
+                forState:UIControlStateNormal];
     upload.accessibilityLabel = @"上传备份";
     [upload addTarget:self action:@selector(onUpload) forControlEvents:UIControlEventTouchUpInside];
 
-    for (UIView *view in @[caption, value, track, caption2, upload, count]) [card addSubview:view];
+    for (UIView *view in @[caption, value, track, caption2, upload]) [card addSubview:view];
     [NSLayoutConstraint activateConstraints:@[
         [card.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor
                                        constant:12],
@@ -6279,25 +6293,23 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 
         [caption.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
         [caption.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [upload.topAnchor constraintEqualToAnchor:card.topAnchor],
+        [upload.topAnchor constraintEqualToAnchor:card.topAnchor constant:8],
         [upload.heightAnchor constraintEqualToConstant:44],
-        [upload.widthAnchor constraintEqualToConstant:94],
-        [upload.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-10],
+        [upload.widthAnchor constraintEqualToConstant:92],
+        [upload.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
 
-        [value.topAnchor constraintEqualToAnchor:card.topAnchor constant:40],
+        [value.topAnchor constraintEqualToAnchor:card.topAnchor constant:35],
         [value.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [value.trailingAnchor constraintLessThanOrEqualToAnchor:card.trailingAnchor constant:-16],
+        [value.trailingAnchor constraintLessThanOrEqualToAnchor:upload.leadingAnchor constant:-8],
 
-        [track.topAnchor constraintEqualToAnchor:card.topAnchor constant:66],
+        [track.topAnchor constraintEqualToAnchor:card.topAnchor constant:72],
         [track.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
         [track.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
         [track.heightAnchor constraintEqualToConstant:4],
 
-        [caption2.topAnchor constraintEqualToAnchor:card.topAnchor constant:78],
+        [caption2.topAnchor constraintEqualToAnchor:card.topAnchor constant:84],
         [caption2.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [caption2.trailingAnchor constraintLessThanOrEqualToAnchor:count.leadingAnchor constant:-8],
-        [count.centerYAnchor constraintEqualToAnchor:caption2.centerYAnchor],
-        [count.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
+        [caption2.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
     ]];
     self.quotaBarFillWidth = [self.quotaBarFill.widthAnchor constraintEqualToConstant:0];
     self.quotaBarFillWidth.active = YES;
@@ -6309,12 +6321,24 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 }
 
 - (void)buildTable {
+    UILabel *heading = [UILabel new];
+    heading.text = @"云端备份";
+    heading.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    heading.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
+    UILabel *count = [UILabel new];
+    count.font = [UIFont systemFontOfSize:12];
+    count.textColor = [UIColor colorWithRed:0.45 green:0.46 blue:0.50 alpha:1];
+    self.backupCountLabel = count;
+    for (UILabel *label in @[heading, count]) {
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:label];
+    }
     UITableView *table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     table.translatesAutoresizingMaskIntoConstraints = NO;
     table.dataSource = self;
     table.delegate = self;
     table.rowHeight = UITableViewAutomaticDimension;
-    table.estimatedRowHeight = 86;
+    table.estimatedRowHeight = 88;
     table.alwaysBounceVertical = YES;
     table.separatorStyle = UITableViewCellSeparatorStyleNone;
     table.tableFooterView = [UIView new];
@@ -6339,10 +6363,14 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 
     [NSLayoutConstraint activateConstraints:@[
         [table.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor
-                                        constant:116],
+                                        constant:152],
         [table.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
         [table.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16],
         [table.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+        [heading.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor constant:132],
+        [heading.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:20],
+        [count.centerYAnchor constraintEqualToAnchor:heading.centerYAnchor],
+        [count.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-20],
         [state.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
         [state.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
         [state.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor
@@ -6412,11 +6440,9 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     long long quota = [self.usage[@"quotaBytes"] longLongValue];
     self.backupCountLabel.text = [NSString stringWithFormat:@"%lu 个备份",
         (unsigned long)self.projects.count];
-    // 有工程时与列表连成同一面板；空态保留容量区的完整圆角。
-    self.quotaSurface.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner |
-        ((quota <= 0 || !self.projects.count) ? kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner : 0);
     if (quota <= 0) {
         self.backupCountLabel.text = @"";
+        self.quotaValueLabel.attributedText = nil;
         self.quotaValueLabel.text = @"未开通";
         self.quotaCaptionLabel.text = @"当前账号未开通云空间";
         self.quotaBarFillWidth.constant = 0;
@@ -6426,8 +6452,15 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
         self.tableView.hidden = YES;
         return;
     }
-    self.quotaValueLabel.text = [NSString stringWithFormat:@"%@ / %@",
-        AMCloudByteText(used), AMCloudByteText(quota)];
+    NSMutableAttributedString *summary = [[NSMutableAttributedString alloc]
+        initWithString:AMCloudByteText(used) attributes:@{
+            NSFontAttributeName: [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold],
+            NSForegroundColorAttributeName: [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1]}];
+    [summary appendAttributedString:[[NSAttributedString alloc]
+        initWithString:[NSString stringWithFormat:@" / %@", AMCloudByteText(quota)] attributes:@{
+            NSFontAttributeName: [UIFont systemFontOfSize:13],
+            NSForegroundColorAttributeName: [UIColor colorWithRed:0.45 green:0.46 blue:0.50 alpha:1]}]];
+    self.quotaValueLabel.attributedText = summary;
     self.quotaCaptionLabel.text = [NSString stringWithFormat:@"可用 %@",
         AMCloudByteText(quota > used ? quota - used : 0)];
     CGFloat ratio = quota > 0 ? MIN(1.0, (double)used / (double)quota) : 0;
@@ -6489,19 +6522,18 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     NSString *format = AMCloudProjectFormat(version);
     BOOL XML = [format isEqualToString:@"XML"];
     NSString *kind = XML ? @"仅工程" : [format isEqualToString:@"AMPROJ"] ? @"项目包" : @"备份";
-    UIColor *tint = [UIColor colorWithRed:0.50 green:0.51 blue:0.56 alpha:1];
-    cell.iconBackground.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
+    UIColor *tint = [UIColor colorWithRed:0.40 green:0.43 blue:0.49 alpha:1];
+    cell.iconBackground.backgroundColor = [UIColor colorWithRed:0.95 green:0.955 blue:0.965 alpha:1];
     cell.fileIcon.tintColor = tint;
-    cell.fileIcon.image = [UIImage systemImageNamed:@"doc.text"];
-    BOOL last = (NSUInteger)indexPath.row + 1 == self.projects.count;
-    cell.surface.layer.maskedCorners = last ? kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner : 0;
-    cell.divider.hidden = last;
+    cell.fileIcon.image = [UIImage systemImageNamed:[format isEqualToString:@"AMPROJ"]
+        ? @"shippingbox" : @"doc.text"];
+    cell.formatLabel.text = version ? format : @"";
+    cell.formatBadge.hidden = !version;
     cell.kindLabel.text = version
-        ? [NSString stringWithFormat:@"%@ · %@", format, AMCloudByteText(size)]
+        ? [NSString stringWithFormat:@"%@ · v%@", AMCloudByteText(size), version[@"versionNumber"] ?: @1]
         : @"尚未上传备份";
-    cell.metadataLabel.text = version ? [NSString stringWithFormat:@"v%@ · %@",
-        version[@"versionNumber"] ?: @1, dateText] : @"";
-    cell.accessibilityLabel = [@[title, kind, cell.kindLabel.text ?: @"", cell.metadataLabel.text ?: @""]
+    cell.metadataLabel.text = version ? dateText : @"";
+    cell.accessibilityLabel = [@[title, kind, format, cell.kindLabel.text ?: @"", cell.metadataLabel.text ?: @""]
         componentsJoinedByString:@"，"];
     return cell;
 }
