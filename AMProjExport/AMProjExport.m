@@ -19187,8 +19187,7 @@ static void hooked_presentVC(id self, SEL _cmd, UIViewController *controller,
                 return;
             }
         }
-        // 新版导出完成页（ExportSuccessVC：白底"已保存到设备"）换成老版
-        // 深色"分享视频"复刻页；原生页面仅作取址来源，不再呈现。
+        // 当前完成页有明确输出时才换成深色分享页；无法确认时保留原生页。
         if ([NSStringFromClass(controller.class)
                 containsString:@"ExportSuccessVC"]) {
             UIViewController *replica = AMProjReplicaShareVideo(controller);
@@ -22135,7 +22134,7 @@ static NSString *AMProjReplicaDiagnosticReport(void);
     [self scheduleLateVideoResolutionAttempt:1];
 }
 
-// 导出成片/相册资产常常比完成页晚一步就位：分三档延迟再捞，捞到就换上去。
+// 仅重读当前完成页延迟提供的明确输出字段，不查询相册或历史导出缓存。
 - (void)scheduleLateVideoResolutionAttempt:(NSInteger)attempt {
     if (self.videoURL) return;
     if (attempt > 3) {
@@ -22419,389 +22418,79 @@ static NSString *AMProjReplicaDiagnosticReport(void);
 
 @end
 
-// 导出视频定位：只认"这一次导出"的产物，绝不退回"相册最新视频"。
-// 旧实现直接取相册最新一条视频，结果把用户自己的录屏当成导出成片播了
-// 出来（P3 实锤）。现在的顺序：
-//   ① ExportSuccessVC 上的属性 / ivar（真实字段名随版本变，用 runtime 兜底）
-//   ② 应用容器里 10 分钟内新写入的视频文件（官方流程是先落盘再存相册）
-//   ③ 10 分钟内新建的相册视频（官方刚存进去的那一条，时间窗卡死）
-// 三条都落空就返回 nil，由复刻页显示"已保存到设备"占位，宁缺毋滥。
-static const NSTimeInterval AMProjReplicaVideoMaxAge = 600;
+// 导出预览只读取本次完成页明确提供的输出地址。缓存新旧、文件大小和
+// 相册创建时间都不能证明视频属于这次导出；尤其纯色短片可能远小于 64 KB。
+// 无法确认地址时由原生完成页处理，不能拿历史视频供预览、再次保存或分享。
+static NSDictionary *AMProjReplicaLastVideoResolution = nil;
 
-static BOOL AMProjReplicaURLIsVideoFile(NSURL *URL) {
-    if (![URL isKindOfClass:NSURL.class] || !URL.isFileURL) return NO;
-    static NSSet<NSString *> *extensions = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        extensions = [NSSet setWithObjects:@"mp4", @"mov", @"m4v",
-                                               @"MP4", @"MOV", @"M4V", nil];
-    });
-    return [extensions containsObject:URL.pathExtension];
-}
-
-// App 调 Photos 保存视频时用的文件 URL：导出成片在那一刻还真实存在，
-// 之后可能被删掉——这是最可靠的一次抓取机会，先记下来。
-static NSURL *AMProjReplicaCapturedVideoURL = nil;
-static NSTimeInterval AMProjReplicaCapturedVideoAt = 0;
-static id (*AMProjReplicaOriginalCreationRequest)(id, SEL, NSURL *) = NULL;
-
-static void AMProjReplicaCaptureVideoURL(NSURL *URL) {
-    if (![URL isKindOfClass:NSURL.class] || !URL.isFileURL) return;
-    AMProjReplicaCapturedVideoURL = URL;
-    AMProjReplicaCapturedVideoAt = [NSDate date].timeIntervalSince1970;
-}
-
-static id AMProjReplicaSwizzledCreationRequest(id self, SEL _cmd, NSURL *URL) {
-    AMProjReplicaCaptureVideoURL(URL);
-    if (!AMProjReplicaOriginalCreationRequest) return nil;
-    return AMProjReplicaOriginalCreationRequest(self, _cmd, URL);
-}
-
-static void (*AMProjReplicaOriginalAddResource)(id, SEL, NSInteger, NSURL *, id) = NULL;
-
-// 现代写法走的是 PHAssetCreationRequest 的 addResource...，老接口
-// creationRequestForAssetFromVideoAtFileURL: 不一定被调用。两个都挂上，
-// 只要视频进了相册就能拿到它的真实文件地址。
-static void AMProjReplicaSwizzledAddResource(id self, SEL _cmd, NSInteger type,
-                                             NSURL *URL, id options) {
-    AMProjReplicaCaptureVideoURL(URL);
-    if (AMProjReplicaOriginalAddResource) {
-        AMProjReplicaOriginalAddResource(self, _cmd, type, URL, options);
+static NSURL *AMProjReplicaVerifiedVideoURL(id value) {
+    NSURL *URL = [value isKindOfClass:NSURL.class] ? value :
+        [value isKindOfClass:AVURLAsset.class] ? ((AVURLAsset *)value).URL : nil;
+    if (!URL.isFileURL) return nil;
+    URL = [URL.URLByResolvingSymlinksInPath URLByStandardizingPath];
+    NSNumber *regular = nil;
+    NSNumber *size = nil;
+    if (![URL getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil] ||
+        !regular.boolValue ||
+        ![URL getResourceValue:&size forKey:NSURLFileSizeKey error:nil] ||
+        size.unsignedLongLongValue == 0) return nil;
+    NSString *extension = URL.pathExtension.lowercaseString;
+    if (![@[@"mp4", @"mov", @"m4v"] containsObject:extension]) {
+        // 无后缀或未识别后缀的原生临时文件，检查 ISO-BMFF 文件头。
+        NSFileHandle *handle = [NSFileHandle fileHandleForReadingFromURL:URL error:nil];
+        if (!handle) return nil;
+        NSData *head = nil;
+        @try {
+            head = [handle readDataOfLength:12];
+        } @catch (NSException *exception) {
+            (void)exception;
+        } @finally {
+            [handle closeFile];
+        }
+        const uint8_t *bytes = head.bytes;
+        if (head.length < 12 || bytes[4] != 'f' || bytes[5] != 't' ||
+            bytes[6] != 'y' || bytes[7] != 'p') return nil;
     }
-}
-
-static void AMProjReplicaInstallPhotosCapture(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class requestClass = NSClassFromString(@"PHAssetChangeRequest");
-        SEL selector = NSSelectorFromString(@"creationRequestForAssetFromVideoAtFileURL:");
-        if (requestClass && [requestClass respondsToSelector:selector]) {
-            Method method = class_getClassMethod(requestClass, selector);
-            if (method) {
-                AMProjReplicaOriginalCreationRequest =
-                    (id (*)(id, SEL, NSURL *))method_getImplementation(method);
-                method_setImplementation(method, (IMP)AMProjReplicaSwizzledCreationRequest);
-            }
-        }
-        Class creationClass = NSClassFromString(@"PHAssetCreationRequest");
-        SEL addSelector = NSSelectorFromString(@"addResourceWithType:fileURL:options:");
-        if (creationClass && [creationClass instancesRespondToSelector:addSelector]) {
-            Method method = class_getInstanceMethod(creationClass, addSelector);
-            if (method) {
-                AMProjReplicaOriginalAddResource =
-                    (void (*)(id, SEL, NSInteger, NSURL *, id))method_getImplementation(method);
-                method_setImplementation(method, (IMP)AMProjReplicaSwizzledAddResource);
-            }
-        }
-    });
-}
-
-// 有些导出临时文件根本没有扩展名（AmprojExport-<uuid> 之类），只靠后缀
-// 会整片漏掉。这里读前 16 字节看有没有 ISO-BMFF 的 ftyp 盒。
-static BOOL AMProjReplicaLooksLikeMP4(NSURL *URL) {
-    NSFileHandle *handle = [NSFileHandle fileHandleForReadingFromURL:URL error:nil];
-    if (!handle) return NO;
-    NSData *head = [handle readDataOfLength:16];
-    [handle closeFile];
-    if (head.length < 12) return NO;
-    const uint8_t *bytes = head.bytes;
-    return bytes[4] == 'f' && bytes[5] == 't' && bytes[6] == 'y' && bytes[7] == 'p';
-}
-
-// App 真实导出目录：Library/Caches/export/<exportHash>/<项目名>.mp4，旁边
-// 有 meta.json。关键点：同一次导出被反复打开时，AM 只更新 meta.json 里的
-// shareDates，视频文件 mtime 一直停在最初那次导入——所以"按时间戳找"必然
-// 找不到。这里直接读 meta，谁最新就用谁的成片。
-static NSURL *AMProjReplicaExportCacheVideoURL(void) {
-    NSFileManager *manager = NSFileManager.defaultManager;
-    NSString *caches = [NSSearchPathForDirectoriesInDomains(
-        NSCachesDirectory, NSUserDomainMask, YES) firstObject];
-    if (!caches.length) return nil;
-    NSString *root = [caches stringByAppendingPathComponent:@"export"];
-    NSURL *bestVideo = nil;
-    NSTimeInterval bestStamp = 0;
-    for (NSString *name in [manager contentsOfDirectoryAtPath:root error:nil]) {
-        NSString *dir = [root stringByAppendingPathComponent:name];
-        NSNumber *isDirectory = nil;
-        if (![[NSURL fileURLWithPath:dir] getResourceValue:&isDirectory
-                                                    forKey:NSURLIsDirectoryKey
-                                                     error:nil] ||
-            !isDirectory.boolValue) continue;
-        NSData *metaData = [NSData dataWithContentsOfFile:
-            [dir stringByAppendingPathComponent:@"meta.json"]];
-        NSDictionary *meta = metaData.length
-            ? [NSJSONSerialization JSONObjectWithData:metaData options:0 error:nil] : nil;
-        NSTimeInterval stamp = 0;
-        if ([meta isKindOfClass:NSDictionary.class]) {
-            NSArray *shares = [meta[@"shareDates"] isKindOfClass:NSArray.class]
-                ? meta[@"shareDates"] : @[];
-            for (NSNumber *value in shares) {
-                if ([value isKindOfClass:NSNumber.class]) {
-                    stamp = MAX(stamp, value.doubleValue);
-                }
-            }
-            if ([meta[@"exportDate"] isKindOfClass:NSNumber.class]) {
-                stamp = MAX(stamp, [meta[@"exportDate"] doubleValue]);
-            }
-        }
-        for (NSString *file in [manager contentsOfDirectoryAtPath:dir error:nil]) {
-            NSURL *candidate = [NSURL fileURLWithPath:
-                [dir stringByAppendingPathComponent:file]];
-            if (!AMProjReplicaURLIsVideoFile(candidate)) continue;
-            NSNumber *size = nil;
-            [candidate getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-            if (size.longLongValue < 64 * 1024) continue;
-            if (!bestVideo || stamp >= bestStamp) {
-                bestVideo = candidate;
-                bestStamp = stamp;
-            }
-            break;
-        }
-    }
-    return bestVideo;
-}
-
-static NSURL *AMProjReplicaRecentContainerVideoURL(NSTimeInterval maxAge) {
-    NSFileManager *manager = NSFileManager.defaultManager;
-    NSString *home = NSHomeDirectory();
-    if (!home.length) return nil;
-    NSDate *threshold = [NSDate dateWithTimeIntervalSinceNow:-maxAge];
-    NSURL *best = nil;
-    NSDate *bestDate = nil;
-    NSUInteger visited = 0;
-    // 以前只扫 tmp/Documents，实测导出成片会落在别的目录（Library 下），
-    // 结果预览整块空白。这里整沙盒扫一遍，带访问上限防止卡主线程。
-    NSMutableArray<NSURL *> *stack = [NSMutableArray arrayWithObject:
-        [NSURL fileURLWithPath:home isDirectory:YES]];
-    while (stack.count && visited < 8000) {
-        NSURL *directory = stack.lastObject;
-        [stack removeLastObject];
-        NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:directory
-            includingPropertiesForKeys:@[NSURLIsDirectoryKey,
-                                         NSURLContentModificationDateKey,
-                                         NSURLFileSizeKey]
-            options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
-        for (NSURL *child in children) {
-            if (visited++ > 8000) break;
-            NSNumber *isDirectory = nil;
-            if (![child getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey
-                                   error:nil]) continue;
-            if (isDirectory.boolValue) {
-                NSString *name = child.lastPathComponent;
-                // 系统/第三方缓存目录里全是缩略图，跳过省时间
-                if ([name hasPrefix:@"com.apple."] ||
-                    [name isEqualToString:@"__MACOSX"]) continue;
-                [stack addObject:child];
-                continue;
-            }
-            NSDate *modified = nil;
-            NSNumber *size = nil;
-            [child getResourceValue:&modified
-                             forKey:NSURLContentModificationDateKey error:nil];
-            [child getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-            if (!modified ||
-                [modified compare:threshold] == NSOrderedAscending) continue;
-            if (size.longLongValue < 128 * 1024) continue;
-            if (!AMProjReplicaURLIsVideoFile(child) &&
-                !AMProjReplicaLooksLikeMP4(child)) continue;
-            if (!bestDate || [modified compare:bestDate] == NSOrderedDescending) {
-                best = child;
-                bestDate = modified;
-            }
-        }
-    }
-    return best;
-}
-
-static NSURL *AMProjReplicaRecentAlbumVideoURL(NSTimeInterval maxAge) {
-    PHFetchOptions *options = [PHFetchOptions new];
-    options.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate"
-                                                              ascending:NO]];
-    // 时间窗是这段代码的全部安全边界：只接受"刚刚"存进去的那一条，
-    // 历史视频（录屏等）一律不会被选中。
-    options.predicate = [NSPredicate predicateWithFormat:@"creationDate >= %@",
-        [NSDate dateWithTimeIntervalSinceNow:-maxAge]];
-    options.fetchLimit = 1;
-    PHFetchResult<PHAsset *> *result =
-        [PHAsset fetchAssetsWithMediaType:PHAssetMediaTypeVideo options:options];
-    PHAsset *asset = result.firstObject;
-    if (!asset) return nil;
-    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-    __block NSURL *resolved = nil;
-    [[PHImageManager defaultManager]
-        requestAVAssetForVideo:asset options:nil
-                 resultHandler:^(AVAsset *avAsset, AVAudioMix *audioMix,
-                                 NSDictionary *info) {
-        (void)audioMix;
-        (void)info;
-        if ([avAsset isKindOfClass:AVURLAsset.class]) {
-            resolved = ((AVURLAsset *)avAsset).URL;
-        }
-        dispatch_semaphore_signal(sema);
-    }];
-    dispatch_semaphore_wait(sema,
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
-    return resolved;
-}
-
-static NSDate *AMProjReplicaFileModifiedDate(NSURL *URL) {
-    if (!URL) return nil;
-    NSDate *date = nil;
-    [URL getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
-    return date;
+    return URL;
 }
 
 static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) {
-    NSURL *resolved = nil;
-    NSString *source = @"none";
-    AMProjReplicaInstallPhotosCapture();
-    for (NSString *key in @[@"videoURL", @"outputURL", @"savedURL", @"fileURL",
-                            @"exportURL", @"movieURL", @"url"]) {
+    NSMutableDictionary<NSString *, NSURL *> *outputs = [NSMutableDictionary dictionary];
+    NSString *field = @"";
+    // 只读完成页的明确输出字段，不扫描泛用 url/file ivar 或整个应用容器。
+    for (NSString *key in @[@"outputURL", @"exportURL", @"savedURL", @"videoURL",
+                            @"movieURL", @"outputFileURL", @"exportedVideoURL"]) {
         @try {
-            id value = [controller valueForKey:key];
-            if ([value isKindOfClass:NSURL.class] &&
-                [(NSURL *)value isFileURL]) {
-                resolved = value;
-                source = @"kvc";
-                break;
-            }
-            if ([value isKindOfClass:AVURLAsset.class]) {
-                resolved = ((AVURLAsset *)value).URL;
-                source = @"kvc_asset";
-                break;
-            }
+            NSURL *candidate = AMProjReplicaVerifiedVideoURL([controller valueForKey:key]);
+            if (!candidate) continue;
+            outputs[candidate.path] = candidate;
+            if (!field.length) field = key;
         } @catch (NSException *exception) {
+            (void)exception;
         }
     }
-    if (!resolved) {
-        // Swift 侧字段名和 KVC 名对不上时，按类型扫一遍 ivar 兜底。
-        unsigned int count = 0;
-        Ivar *ivars = class_copyIvarList([controller class], &count);
-        for (unsigned int index = 0; index < count && !resolved; index++) {
-            const char *name = ivar_getName(ivars[index]);
-            const char *type = ivar_getTypeEncoding(ivars[index]);
-            if (!name || !type || type[0] != '@') continue;
-            NSString *key = [@(name) lowercaseString];
-            if (![key containsString:@"url"] && ![key containsString:@"video"] &&
-                ![key containsString:@"movie"] && ![key containsString:@"file"]) {
-                continue;
-            }
-            @try {
-                id value = [controller valueForKey:@(name)];
-                if ([value isKindOfClass:NSURL.class] &&
-                    [(NSURL *)value isFileURL]) {
-                    resolved = value;
-                    source = @"ivar";
-                } else if ([value isKindOfClass:AVURLAsset.class]) {
-                    resolved = ((AVURLAsset *)value).URL;
-                    source = @"ivar_asset";
-                }
-            } @catch (NSException *exception) {
-            }
-        }
-        free(ivars);
-    }
-    if (!resolved) {
-        // 关键：相册钩子只会记住某一次保存的文件，后续导出若没再走那个接口，
-        // 它会一直返回第一次的成片（用户反馈的"永远导出第一条"）。所以这里
-        // 同时看 AM 自己的导出目录，并取文件更新时间更晚的那个。
-        NSURL *cacheURL = AMProjReplicaExportCacheVideoURL();
-        NSURL *hookURL = AMProjReplicaCapturedVideoURL;
-        NSTimeInterval hookAge = [NSDate date].timeIntervalSince1970 -
-            AMProjReplicaCapturedVideoAt;
-        if (!AMProjReplicaCapturedVideoURL || hookAge < 0 ||
-            hookAge > AMProjReplicaVideoMaxAge) {
-            hookURL = nil;
-        }
-        NSDate *cacheDate = AMProjReplicaFileModifiedDate(cacheURL);
-        NSDate *hookDate = AMProjReplicaFileModifiedDate(hookURL);
-        if (cacheURL && hookURL) {
-            BOOL hookNewer = hookDate && cacheDate &&
-                [hookDate compare:cacheDate] == NSOrderedDescending;
-            resolved = hookNewer ? hookURL : cacheURL;
-            source = hookNewer ? @"photos_save_hook" : @"export_cache";
-        } else if (cacheURL) {
-            resolved = cacheURL;
-            source = @"export_cache";
-        } else if (hookURL) {
-            resolved = hookURL;
-            source = @"photos_save_hook";
-        }
-    }
-    if (!resolved) {
-        resolved = AMProjReplicaRecentContainerVideoURL(AMProjReplicaVideoMaxAge);
-        if (resolved) source = @"container_recent";
-    }
-    if (!resolved) {
-        resolved = AMProjReplicaRecentAlbumVideoURL(AMProjReplicaVideoMaxAge);
-        if (resolved) source = @"album_recent";
-    }
-    amproj_logCriticalEvent(@"share.replica_video_source", @{
-        @"source": source,
+    // 多个不同地址也不能猜哪个是当前成片，交给持有导出上下文的原生页。
+    NSURL *resolved = outputs.count == 1 ? outputs.allValues.firstObject : nil;
+    NSDictionary *event = @{
+        @"source": resolved ? @"controller_output" : @"native_completion",
+        @"field": resolved ? field : @"",
         @"file": resolved.lastPathComponent ?: @"",
-        @"controller": NSStringFromClass(controller.class) ?: @""
-    });
+        @"controller": NSStringFromClass(controller.class) ?: @"",
+        @"candidate_count": @(outputs.count),
+        @"reason": resolved ? @"explicit_output" :
+            (outputs.count ? @"ambiguous_output" : @"missing_output")
+    };
+    // 本函数及诊断复制均由完成页主线程调用；此记录只供诊断，不参与选片。
+    AMProjReplicaLastVideoResolution = event;
+    amproj_logCriticalEvent(@"share.replica_video_source", event);
     return resolved;
 }
 
-// r99：临时诊断。设备端 AFC 读不到（Windows 配对 183），就改用"用户点一下
-// 复制"，把导出页到底扫到了什么原样带回来。
 static NSString *AMProjReplicaDiagnosticReport(void) {
-    NSMutableString *report = [NSMutableString string];
-    [report appendFormat:@"home=%@\n", NSHomeDirectory()];
-    [report appendFormat:@"photosHook=%@\n",
-        AMProjReplicaCapturedVideoURL.path ?: @"none"];
-    [report appendFormat:@"hookAge=%.0fs\n",
-        AMProjReplicaCapturedVideoURL
-            ? [NSDate date].timeIntervalSince1970 - AMProjReplicaCapturedVideoAt : -1.0];
-    NSMutableArray<NSDictionary *> *found = [NSMutableArray array];
-    NSFileManager *manager = NSFileManager.defaultManager;
-    NSDate *threshold = [NSDate dateWithTimeIntervalSinceNow:-3600];
-    NSMutableArray<NSURL *> *stack = [NSMutableArray arrayWithObject:
-        [NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES]];
-    NSUInteger visited = 0;
-    while (stack.count && visited < 8000) {
-        NSURL *directory = stack.lastObject;
-        [stack removeLastObject];
-        NSArray<NSURL *> *children = [manager contentsOfDirectoryAtURL:directory
-            includingPropertiesForKeys:@[NSURLIsDirectoryKey,
-                                         NSURLContentModificationDateKey,
-                                         NSURLFileSizeKey]
-            options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
-        for (NSURL *child in children) {
-            if (visited++ > 8000) break;
-            NSNumber *isDirectory = nil;
-            if (![child getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey
-                                   error:nil]) continue;
-            if (isDirectory.boolValue) {
-                if ([child.lastPathComponent hasPrefix:@"com.apple."]) continue;
-                [stack addObject:child];
-                continue;
-            }
-            NSDate *modified = nil;
-            NSNumber *size = nil;
-            [child getResourceValue:&modified
-                             forKey:NSURLContentModificationDateKey error:nil];
-            [child getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-            if (!modified || [modified compare:threshold] == NSOrderedAscending) continue;
-            if (size.longLongValue < 128 * 1024) continue;
-            if (!AMProjReplicaURLIsVideoFile(child) &&
-                !AMProjReplicaLooksLikeMP4(child)) continue;
-            [found addObject:@{ @"path": child.path ?: @"",
-                                @"size": size ?: @0,
-                                @"mtime": modified }];
-        }
-    }
-    [found sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-        return [b[@"mtime"] compare:a[@"mtime"]];
-    }];
-    [report appendFormat:@"candidates=%lu\n", (unsigned long)found.count];
-    for (NSUInteger index = 0; index < MIN(found.count, 8); index++) {
-        NSDictionary *item = found[index];
-        [report appendFormat:@"%@@%.0fKB %@\n",
-            item[@"mtime"], [item[@"size"] doubleValue] / 1024.0, item[@"path"]];
-    }
-    return report;
+    NSDictionary *event = AMProjReplicaLastVideoResolution ?: @{};
+    return [NSString stringWithFormat:@"source=%@\nfield=%@\nfile=%@\nreason=%@\n",
+        event[@"source"] ?: @"none", event[@"field"] ?: @"",
+        event[@"file"] ?: @"", event[@"reason"] ?: @""];
 }
 
 // 实测：App 自带的 ExportPreviewVC 是**白底**的那一版，用户要的是深色
@@ -22812,6 +22501,12 @@ static BOOL AMProjUseLegacyExportPage = NO;
 static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess) {
     @try {
         NSURL *videoURL = AMProjReplicaVideoURLFromController(exportSuccess);
+        if (!videoURL) {
+            amproj_logCriticalEvent(@"share.replica_native_fallback", @{
+                @"reason": @"current_output_unavailable"
+            });
+            return nil;
+        }
         NSString *title = amproj_currentProjectTitle(exportSuccess);
         if (AMProjUseLegacyExportPage) {
             NSString *reason = nil;
@@ -22823,7 +22518,7 @@ static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess
             });
             if (legacy) return legacy;
         }
-        // 兜底：复刻页（拿到 URL 时才有画面，否则显示占位）。
+        // 已确认输出地址后才建立复刻页；缺少地址时由原生完成页继续处理。
         AMProjShareVideoReplicaVC *replica = [AMProjShareVideoReplicaVC new];
         // 必须在 present 之前设，写在 viewDidLoad 里是无效的（这就是之前
         // 一直是"半屏卡片、圆角顶部"的原因）。

@@ -24,17 +24,7 @@ def _slice(text: str, start: str, end: str) -> str:
 class ReplicaVideoSourceR92Tests(unittest.TestCase):
     """导出页必须播"这一次导出"的视频，拿不到就不播，绝不拿相册最新视频顶。"""
 
-    def test_album_lookup_is_bounded_by_creation_time(self):
-        region = _slice(
-            EXPORT,
-            "static NSURL *AMProjReplicaRecentAlbumVideoURL",
-            "static NSURL *AMProjReplicaVideoURLFromController",
-        )
-        self.assertIn("options.predicate", region)
-        self.assertIn("creationDate >= %@", region)
-        self.assertIn("maxAge", region)
-
-    def test_no_unbounded_latest_album_video_fallback(self):
+    def test_resolver_never_guesses_from_album_or_container_recency(self):
         start = EXPORT.rindex(
             "static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) {"
         )
@@ -42,45 +32,27 @@ class ReplicaVideoSourceR92Tests(unittest.TestCase):
             "static UIViewController *AMProjReplicaShareVideo", start
         )
         region = EXPORT[start:share]
-        self.assertIn(
-            "AMProjReplicaRecentAlbumVideoURL(AMProjReplicaVideoMaxAge)", region
-        )
+        self.assertNotIn("AMProjReplicaRecentAlbumVideoURL", region)
+        self.assertNotIn("AMProjReplicaRecentContainerVideoURL", region)
+        self.assertNotIn("AMProjReplicaExportCacheVideoURL", region)
+        self.assertNotIn("AMProjReplicaCapturedVideoURL", region)
         self.assertNotIn("[PHAsset fetchAssetsWithMediaType", region)
 
-    def test_container_scan_only_accepts_fresh_video_files(self):
-        region = _slice(
-            EXPORT,
-            "static NSURL *AMProjReplicaRecentContainerVideoURL",
-            "static NSURL *AMProjReplicaRecentAlbumVideoURL",
-        )
-        self.assertIn("NSURLContentModificationDateKey", region)
-        self.assertIn("NSOrderedAscending", region)
-        self.assertIn("AMProjReplicaURLIsVideoFile", region)
-
-    def test_missing_source_degrades_to_placeholder(self):
-        self.assertIn("预览加载中", EXPORT)
-        self.assertIn(
-            "if (!self.videoURL) {\n        self.playButton.hidden = YES;", EXPORT
-        )
-        self.assertIn("视频已保存到相册，请在相册中分享", EXPORT)
+    def test_missing_source_keeps_native_completion(self):
+        start = EXPORT.index("static UIViewController *AMProjReplicaShareVideo(UIViewController *exportSuccess) {")
+        block = EXPORT[start:EXPORT.index("// ── 音量写回救援", start)]
+        guard = block.index("if (!videoURL)")
+        self.assertLess(block.index("return nil;", guard), block.index("AMProjBuildLegacyShareVideoPage"))
+        self.assertIn("share.replica_native_fallback", block)
 
     def test_resolution_result_is_logged_with_its_source(self):
-        self.assertIn("share.replica_video_source", EXPORT)
-        self.assertIn('@"source": source', EXPORT)
+        start = EXPORT.rindex("static NSURL *AMProjReplicaVideoURLFromController(UIViewController *controller) {")
+        block = EXPORT[start:EXPORT.index("static NSString *AMProjReplicaDiagnosticReport", start)]
+        self.assertIn('amproj_logCriticalEvent(@"share.replica_video_source", event)', block)
 
-    def test_video_url_capture_runs_through_the_photos_save_hook(self):
-        self.assertIn("photos_save_hook", EXPORT)
-        self.assertIn("creationRequestForAssetFromVideoAtFileURL:", EXPORT)
-
-    def test_container_scan_covers_the_whole_sandbox(self):
-        region = _slice(
-            EXPORT,
-            "static NSURL *AMProjReplicaRecentContainerVideoURL",
-            "static NSURL *AMProjReplicaRecentAlbumVideoURL",
-        )
-        self.assertIn("NSHomeDirectory()", region)
-        self.assertIn("AMProjReplicaLooksLikeMP4", region)
-        self.assertIn("visited < 8000", region)
+    def test_no_global_photos_interception_for_preview_resolution(self):
+        self.assertNotIn("AMProjReplicaInstallPhotosCapture", EXPORT)
+        self.assertNotIn("AMProjReplicaSwizzledAddResource", EXPORT)
 
 
 class ReplicaLayoutR92Tests(unittest.TestCase):
