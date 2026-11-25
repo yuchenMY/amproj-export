@@ -2635,6 +2635,16 @@ static NSURL* amproj_createOutputURL(NSString *title, NSError **error) {
     return [directory URLByAppendingPathComponent:filename];
 }
 
+#if AMPROJ_CLOUD_SYNC
+static NSURL *amproj_writeProjectOnlyXML(NSData *xmlData, NSString *title, NSError **error) {
+    NSURL *packageURL = amproj_createOutputURL(title, error);
+    NSURL *documentURL = [packageURL.URLByDeletingPathExtension
+        URLByAppendingPathExtension:@"xml"];
+    return documentURL && [xmlData writeToURL:documentURL
+                                   options:NSDataWritingAtomic error:error] ? documentURL : nil;
+}
+#endif
+
 static void amproj_finishDirectFailure(AMProjDirectRequest *request, NSError *error);
 
 // 外围导出拦截时 request.presenter 可能仍在呈现原生导出面板（ShareVC 的
@@ -3034,6 +3044,24 @@ static void amproj_writeDirectArchive(AMProjDirectRequest *request, NSData *xmlD
                 amproj_finishDirectFailure(request, error ?: amproj_directError(30, @"Project XML validation failed"));
                 return;
             }
+#if AMPROJ_CLOUD_SYNC
+            if (request.uploadToCloud && !request.includeMedia) {
+                // 仅工程保留原生 XML；不解析、改写或读取素材，也不生成缺件项目包。
+                NSString *title = [expected[@"title"] length] ? expected[@"title"] : validated.title;
+                NSURL *documentURL = amproj_writeProjectOnlyXML(xmlData, title, &error);
+                if (!documentURL) {
+                    amproj_finishDirectFailure(request,
+                        error ?: amproj_directError(42, @"Unable to write project XML"));
+                    return;
+                }
+                amproj_logCriticalEvent(@"direct.project_xml_ready", @{
+                    @"xml_bytes": @(xmlData.length), @"resource_count": @0,
+                    @"filename": documentURL.lastPathComponent ?: @"project.xml"
+                });
+                amproj_beginDirectCloudUpload(request, documentURL);
+                return;
+            }
+#endif
             amproj_setPersistentStage(@"resource_rewrite");
             NSDictionary *prepared = amproj_collectResourcesAndRewriteXML(xmlData, XMLURL, &error);
             if (!prepared) {
@@ -3042,10 +3070,6 @@ static void amproj_writeDirectArchive(AMProjDirectRequest *request, NSData *xmlD
             }
             NSData *rewrittenXML = prepared[@"xml"];
             NSDictionary<NSString *, NSURL *> *resources = prepared[@"resources"];
-            if (!request.includeMedia) {
-                // 仅工程备份：丢弃素材引用，包里只有场景 XML 和空 manifest。
-                resources = @{};
-            }
             if (!amproj_validateXMLAgainstScene(rewrittenXML, expected, NULL, &error)) {
                 amproj_finishDirectFailure(request, error ?: amproj_directError(31, @"Rewritten XML validation failed"));
                 return;
@@ -3347,7 +3371,7 @@ static void amproj_startDirectExportWithDestination(
                         }
                         UIAlertController *mediaChoice = [UIAlertController
                             alertControllerWithTitle:@"云端备份方式"
-                            message:@"完整备份包含全部素材，还原最完整；仅工程只保存工程结构，更省空间，导入后需要重新放置素材。"
+                            message:@"完整备份保存含素材的 .amproj 项目包；仅工程保存 XML，不含素材，导入后需要重新关联缺失素材。"
                             preferredStyle:UIAlertControllerStyleAlert];
                         [mediaChoice addAction:[UIAlertAction actionWithTitle:@"完整备份（含素材）"
                             style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
@@ -6229,6 +6253,16 @@ static void amproj_prepareCopiedXML(NSURL *XMLURL, NSURL *directoryURL,
     });
 }
 
+static BOOL amproj_isLegacyCloudXMLBackup(NSString *source, NSDictionary *metrics) {
+    BOOL cloudSource = [source isEqualToString:@"cloud_download_865"] ||
+        [source isEqualToString:@"cloud_download"];
+    return cloudSource && [metrics[@"manifest_verified"] boolValue] &&
+        [metrics[@"manifest_count"] unsignedIntegerValue] == 1 &&
+        [metrics[@"xml_count"] unsignedIntegerValue] == 1 &&
+        [metrics[@"resource_count"] unsignedIntegerValue] == 0 &&
+        [metrics[@"manifest_entry_count"] unsignedIntegerValue] == 0;
+}
+
 static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                                         NSString *originalName, NSString *source,
                                         BOOL silentErrors, NSString *transactionID) {
@@ -6308,6 +6342,37 @@ static void amproj_prepareCopiedArchive(NSURL *archiveURL, NSURL *directoryURL,
                 NSString *extractionPath = [preparationMetrics[@"extraction_directory"]
                     isKindOfClass:NSString.class]
                     ? preparationMetrics[@"extraction_directory"] : nil;
+                if (prepared && amproj_isLegacyCloudXMLBackup(sourceSnapshot,
+                                                               preparationMetrics)) {
+                    // 旧版仅工程备份只有一个 XML 和已验证的空清单，按 XML 通道读取。
+                    // 有素材、清单损坏、多 XML 或外部导入的包仍走完整项目包校验。
+                    NSString *XMLName = [preparationMetrics[@"xml_names"] firstObject];
+                    NSURL *originalXML = extractionPath.length && XMLName.length
+                        ? [[NSURL fileURLWithPath:extractionPath isDirectory:YES]
+                            URLByAppendingPathComponent:XMLName] : nil;
+                    NSURL *documentURL = [directorySnapshot
+                        URLByAppendingPathComponent:@"legacy-cloud-project.xml"];
+                    BOOL copied = originalXML && [NSFileManager.defaultManager
+                        copyItemAtURL:originalXML toURL:documentURL error:&preparationError];
+                    if (copied) {
+                        NSString *documentName = [nameSnapshot.stringByDeletingPathExtension
+                            stringByAppendingPathExtension:@"xml"];
+                        AMProjImportTransaction *transaction =
+                            amproj_importTransactionForID(transactionID);
+                        transaction.kind = AMProjImportKindXMLTemplate;
+                        transaction.name = documentName;
+                        amproj_debugEvent(@"import.legacy_cloud_xml", @{
+                            @"transaction_id": transactionID ?: @"",
+                            @"resource_count": @0, @"route": @"xml_minimal_package_offline"
+                        });
+                        [NSFileManager.defaultManager removeItemAtURL:
+                            [NSURL fileURLWithPath:extractionPath isDirectory:YES] error:nil];
+                        amproj_prepareCopiedXML(documentURL, directorySnapshot, documentName,
+                            sourceSnapshot, silentErrors, transactionID);
+                        return;
+                    }
+                    prepared = NO;
+                }
                 if (extractionPath.length) {
                     [NSFileManager.defaultManager removeItemAtURL:
                         [NSURL fileURLWithPath:extractionPath isDirectory:YES] error:nil];

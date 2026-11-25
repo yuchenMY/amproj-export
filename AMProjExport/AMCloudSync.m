@@ -878,7 +878,8 @@ static NSString *AMCloudSafeFilename(NSString *name) {
     if (!filename.length) filename = @"project.amproj";
     filename = [filename stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
     filename = [filename stringByReplacingOccurrencesOfString:@"\\" withString:@"_"];
-    if (![filename.pathExtension.lowercaseString isEqualToString:@"amproj"]) {
+    NSString *extension = filename.pathExtension.lowercaseString;
+    if (![extension isEqualToString:@"amproj"] && ![extension isEqualToString:@"xml"]) {
         filename = [filename stringByAppendingPathExtension:@"amproj"];
     }
     return filename;
@@ -887,7 +888,13 @@ static NSString *AMCloudSafeFilename(NSString *name) {
 static NSString *AMCloudUploadHeaderFilename(NSString *name) {
     NSString *filename = AMCloudSafeFilename(name);
     return [filename canBeConvertedToEncoding:NSASCIIStringEncoding]
-        ? filename : @"project.amproj";
+        ? filename : [@"project" stringByAppendingPathExtension:filename.pathExtension];
+}
+
+// 只重试幂等下载的瞬时断连；校验错误、HTTP 错误和取消均不自动重试。
+static BOOL AMCloudShouldRetryProjectDownload(NSError *error, NSUInteger attempt) {
+    return attempt == 0 && [error.domain isEqualToString:NSURLErrorDomain] &&
+        (error.code == NSURLErrorNetworkConnectionLost || error.code == NSURLErrorTimedOut);
 }
 
 static NSString *AMCloudByteText(long long bytes) {
@@ -1004,6 +1011,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 - (void)uploadFile:(NSURL *)fileURL projectID:(NSString *)projectID
           filename:(NSString *)filename completion:(AMCloudResult)completion;
 - (void)downloadProject:(NSDictionary *)project completion:(AMCloudResult)completion;
+- (void)downloadProject:(NSDictionary *)project request:(NSURLRequest *)request
+               attempt:(NSUInteger)attempt authToken:(NSString *)token
+            generation:(uint64_t)generation completion:(AMCloudResult)completion;
 - (void)loadVersions:(NSString *)projectID completion:(AMCloudResult)completion;
 - (void)restoreProject:(NSString *)projectID versionID:(NSString *)versionID
              completion:(AMCloudResult)completion;
@@ -1247,6 +1257,9 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         return;
     }
     NSString *path = [NSString stringWithFormat:@"/cloud/projects/%@/download", projectID];
+    NSString *token = nil;
+    uint64_t generation = 0;
+    AMCloudReadAuthContext(&token, &generation, NULL);
     NSError *requestError = nil;
     NSMutableURLRequest *request = [self requestMethod:@"GET" path:path body:nil
                                           authenticated:YES error:&requestError];
@@ -1254,12 +1267,41 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         AMCloudCompleteOnMain(completion, nil, requestError);
         return;
     }
+    [self downloadProject:project request:request attempt:0 authToken:token
+              generation:generation completion:completion];
+}
+
+- (void)downloadProject:(NSDictionary *)project request:(NSURLRequest *)request
+               attempt:(NSUInteger)attempt authToken:(NSString *)token
+            generation:(uint64_t)generation completion:(AMCloudResult)completion {
+    if (!AMCloudAuthMatches(token, generation)) {
+        AMCloudCompleteOnMain(completion, nil, AMCloudError(401, @"账户已切换，请重新下载"));
+        return;
+    }
+    NSDictionary *version = project[@"currentVersion"];
     [[self.session downloadTaskWithRequest:request
                          completionHandler:^(NSURL *temporaryURL, NSURLResponse *rawResponse,
                                              NSError *networkError) {
         NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
             ? (NSHTTPURLResponse *)rawResponse : nil;
+        if (!AMCloudAuthMatches(token, generation)) {
+            AMCloudCompleteOnMain(completion, nil, AMCloudError(401, @"账户已切换，请重新下载"));
+            return;
+        }
         if (networkError) {
+            AMCloudDiagnostic(@"cloud.project_download_failed", @{
+                @"domain": networkError.domain ?: @"", @"code": @(networkError.code),
+                @"attempt": @(attempt), @"stage": @"download"
+            });
+            if (AMCloudShouldRetryProjectDownload(networkError, attempt)) {
+                // 保持同一请求和身份快照，延迟重试前再次核对账户。
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC),
+                               dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    [self downloadProject:project request:request attempt:attempt + 1
+                                authToken:token generation:generation completion:completion];
+                });
+                return;
+            }
             AMCloudCompleteOnMain(completion, nil, networkError);
             return;
         }
@@ -4908,9 +4950,33 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 - (void)downloadAndImportProject:(NSDictionary *)project
                        presenter:(UIViewController *)presenter {
     UIAlertController *busy = [self busyAlert:@"正在下载项目包" presenter:presenter];
+    NSString *requestToken = nil;
+    uint64_t requestGeneration = 0;
+    AMCloudReadAuthContext(&requestToken, &requestGeneration, NULL);
     __weak typeof(self) weakSelf = self;
     [self.client downloadProject:project completion:^(NSDictionary *data, NSError *error) {
         [busy dismissViewControllerAnimated:YES completion:^{
+            if ([error.domain isEqualToString:NSURLErrorDomain]) {
+                UIAlertController *failure = [UIAlertController alertControllerWithTitle:@"下载未完成"
+                    message:@"网络连接中断或超时，工程尚未开始导入，请重试下载。"
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [failure addAction:[UIAlertAction actionWithTitle:@"重试下载"
+                    style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+                        AMCloudAfterAlertAction(^{
+                            if (!AMCloudAuthMatches(requestToken, requestGeneration)) {
+                                [weakSelf showError:AMCloudError(401, @"账户已切换，请重新选择云工程")
+                                         presenter:presenter];
+                                return;
+                            }
+                            [weakSelf downloadAndImportProject:project presenter:presenter];
+                        });
+                    }]];
+                [failure addAction:[UIAlertAction actionWithTitle:@"取消"
+                    style:UIAlertActionStyleCancel handler:nil]];
+                [AMCloudTopController(presenter) presentViewController:failure
+                    animated:YES completion:nil];
+                return;
+            }
             NSURL *URL = [data[@"url"] isKindOfClass:NSURL.class] ? data[@"url"] : nil;
             NSString *filename = [data[@"filename"] isKindOfClass:NSString.class]
                 ? data[@"filename"] : @"project.amproj";
