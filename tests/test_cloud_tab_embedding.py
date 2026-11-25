@@ -131,8 +131,9 @@ class CloudTabEmbeddingTests(unittest.TestCase):
             source = Path(temporary) / "schedule.m"
             binary = Path(temporary) / "schedule"
             source.write_text(fixture, encoding="utf-8")
-            subprocess.run(["clang", "-fobjc-arc", "-I", str(ROOT / "AMProjExport"), "-framework", "Foundation", str(source),
-                "-o", str(binary)], check=True, capture_output=True, timeout=30)
+            compiled = subprocess.run(["clang", "-fobjc-arc", "-I", str(ROOT / "AMProjExport"), "-framework", "Foundation", str(source),
+                "-o", str(binary)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
             result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=10)
             self.assertIn("CLOUD_TAP_SCHEDULE_PASS", result.stdout)
 

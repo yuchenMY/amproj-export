@@ -4,19 +4,19 @@
 #include <stdio.h>
 #include "AMCloudTabPolicy.h"
 static NSMutableArray *pending;
-static void Enqueue(void (^block)(void)) {
+static void AMCloudTestEnqueue(void (^block)(void)) {
     if (!pending) pending = [NSMutableArray array];
     [pending addObject:[block copy]];
 }
-static void Drain(void) {
+static void AMCloudTestDrain(void) {
     while (pending.count) {
         void (^block)(void) = pending.firstObject;
         [pending removeObjectAtIndex:0];
         block();
     }
 }
-#define dispatch_async(queue, ...) Enqueue(__VA_ARGS__)
-#define dispatch_after(when, queue, ...) Enqueue(__VA_ARGS__)
+#define dispatch_async(queue, ...) AMCloudTestEnqueue(__VA_ARGS__)
+#define dispatch_after(when, queue, ...) AMCloudTestEnqueue(__VA_ARGS__)
 @interface AMCloudManager : NSObject
 @property(nonatomic) NSUInteger cloudSelectionGeneration;
 @property(nonatomic) BOOL cloudTapTargetKnown;
@@ -50,7 +50,7 @@ int main(void) {
         manager.cloudSelectionGeneration = 1; manager.cloudTapTargetKnown = YES;
         manager.cloudTapTargetIsCloud = YES;
         [manager scheduleCloudTabReconciliationForGeneration:1 verifiedCloudTap:YES];
-        assert(pending.count == 2); Drain();
+        assert(pending.count == 2); AMCloudTestDrain();
         assert(manager.repairs == 2 && manager.snapshots == 0 && !manager.cloudTapTargetKnown);
         assert(manager.libraryVisible);
         manager.repairs = 0; manager.cloudSelectionGeneration = 2; manager.cloudTapTargetKnown = YES;
@@ -58,24 +58,24 @@ int main(void) {
         manager.libraryVisible = NO;
         /* 点击行间留白，原生仍是云端：一次真实状态确认必须恢复库。 */
         [manager scheduleCloudTabReconciliationForGeneration:2 verifiedCloudTap:NO];
-        assert(pending.count == 1); Drain();
+        assert(pending.count == 1); AMCloudTestDrain();
         assert(manager.repairs == 0 && manager.snapshots == 1 && !manager.cloudTapTargetKnown);
         assert(manager.libraryVisible);
         manager.cloudSelectionGeneration = 3; manager.cloudTapTargetKnown = YES;
         manager.nativeCloudSelected = NO;
-        [manager scheduleCloudTabReconciliationForGeneration:3 verifiedCloudTap:NO]; Drain();
+        [manager scheduleCloudTabReconciliationForGeneration:3 verifiedCloudTap:NO]; AMCloudTestDrain();
         assert(!manager.libraryVisible);
         manager.snapshots = 0; manager.cloudSelectionGeneration = 3; manager.cloudTapTargetKnown = YES;
         [manager scheduleCloudTabReconciliationForGeneration:3 verifiedCloudTap:YES];
         [manager scheduleCloudTabReconciliationForGeneration:3 verifiedCloudTap:NO];
-        manager.cloudSelectionGeneration = 4; Drain();
+        manager.cloudSelectionGeneration = 4; AMCloudTestDrain();
         assert(manager.repairs == 0 && manager.snapshots == 0 && manager.cloudTapTargetKnown);
         for (NSUInteger i = 0; i < 100; i++) {
             manager.cloudSelectionGeneration++;
             manager.cloudTapTargetKnown = YES;
             [manager scheduleCloudTabReconciliationForGeneration:manager.cloudSelectionGeneration verifiedCloudTap:i % 2];
         }
-        Drain();
+        AMCloudTestDrain();
         assert(manager.repairs == 2 && manager.snapshots == 0 && !manager.cloudTapTargetKnown);
         puts("CLOUD_TAP_SCHEDULE_PASS");
     }
