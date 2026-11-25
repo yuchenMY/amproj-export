@@ -27,7 +27,8 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # ARM 托管机容量不足时会在启动前取消；使用 Intel 主机交叉编译 iOS arm64。
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
