@@ -1,9 +1,16 @@
+// 猫鹤 AM · 验证云端 XML 原字节、旧包兼容边界与下载重试策略。
 #import <Foundation/Foundation.h>
+#include <stdio.h>
 #import "AMProjImportArchive.h"
 #import "AMProjZIPWriter.h"
 
 static NSURL *testRoot;
+static uint64_t testAuthGeneration = 1;
 static NSURL *amproj_directExportRoot(void) { return testRoot; }
+static NSURL *AMCloudProjectDownloadRootURL(void) { return testRoot; }
+static BOOL AMCloudAuthMatches(NSString *token, uint64_t generation) {
+    return generation == testAuthGeneration && [token isEqualToString:@"account-A"];
+}
 static NSString *amproj_safeFilename(NSString *title, NSString *fallback) {
     return title.length ? title : fallback;
 }
@@ -63,6 +70,18 @@ int main(int argc, const char *argv[]) {
         CHECK(!AMCloudShouldRetryProjectDownload([NSError errorWithDomain:@"integrity"
             code:NSURLErrorNetworkConnectionLost userInfo:nil], 0));
         CHECK(!AMCloudShouldRetryProjectDownload(nil, 0));
+        NSURL *download = [testRoot URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
+        CHECK([NSFileManager.defaultManager createDirectoryAtURL:download
+            withIntermediateDirectories:YES attributes:nil error:&error]);
+        NSDictionary *downloadResult = @{@"cleanupURL": download};
+        CHECK(AMCloudValidateProjectDownloadContext(downloadResult, @"account-A", 1));
+        CHECK([NSFileManager.defaultManager fileExistsAtPath:download.path]);
+        // 网络已成功，但散列/主队列延迟期间切号，不得继续交接旧下载。
+        testAuthGeneration = 2;
+        CHECK(!AMCloudValidateProjectDownloadContext(downloadResult, @"account-A", 1));
+        CHECK(![NSFileManager.defaultManager fileExistsAtPath:download.path]);
+        CHECK(!AMCloudValidateProjectDownloadContext(@{@"cleanupURL": document}, @"account-A", 1));
+        CHECK([NSFileManager.defaultManager fileExistsAtPath:document.path]);
         testRoot = document;
         error = nil;
         CHECK(!amproj_writeProjectOnlyXML(XML, @"blocked", &error) && error);

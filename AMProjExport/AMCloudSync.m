@@ -897,6 +897,18 @@ static BOOL AMCloudShouldRetryProjectDownload(NSError *error, NSUInteger attempt
         (error.code == NSURLErrorNetworkConnectionLost || error.code == NSURLErrorTimedOut);
 }
 
+// 下载校验和弹窗关闭都可能让出执行权；交给导入器前必须再次核对身份。
+static BOOL AMCloudValidateProjectDownloadContext(NSDictionary *download,
+                                                  NSString *token, uint64_t generation) {
+    if (AMCloudAuthMatches(token, generation)) return YES;
+    NSURL *directory = [download[@"cleanupURL"] isKindOfClass:NSURL.class]
+        ? download[@"cleanupURL"] : nil;
+    if (AMCloudProjectDownloadDirectoryIsDirectChild(directory)) {
+        [NSFileManager.defaultManager removeItemAtURL:directory error:nil];
+    }
+    return NO;
+}
+
 static NSString *AMCloudByteText(long long bytes) {
     NSByteCountFormatter *formatter = [NSByteCountFormatter new];
     formatter.countStyle = NSByteCountFormatterCountStyleFile;
@@ -1347,6 +1359,10 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
             sizeMismatch) {
             AMCloudCompleteOnMain(completion, nil,
                 hashError ?: AMCloudError(9, @"下载文件校验失败，请重新下载"));
+            return;
+        }
+        if (!AMCloudAuthMatches(token, generation)) {
+            AMCloudCompleteOnMain(completion, nil, AMCloudError(401, @"账户已切换，请重新下载"));
             return;
         }
         NSURL *support = [NSFileManager.defaultManager URLsForDirectory:
@@ -4956,6 +4972,11 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
     __weak typeof(self) weakSelf = self;
     [self.client downloadProject:project completion:^(NSDictionary *data, NSError *error) {
         [busy dismissViewControllerAnimated:YES completion:^{
+            if (!AMCloudValidateProjectDownloadContext(data, requestToken, requestGeneration)) {
+                [weakSelf showError:AMCloudError(401, @"账户已切换，请重新选择云工程")
+                         presenter:presenter];
+                return;
+            }
             if ([error.domain isEqualToString:NSURLErrorDomain]) {
                 UIAlertController *failure = [UIAlertController alertControllerWithTitle:@"下载未完成"
                     message:@"网络连接中断或超时，工程尚未开始导入，请重试下载。"

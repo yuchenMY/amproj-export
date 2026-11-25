@@ -6242,7 +6242,7 @@ static void amproj_prepareCopiedXML(NSURL *XMLURL, NSURL *directoryURL,
                 @"route": @"xml_minimal_package_offline"
             });
             amproj_showImportStatusForTransaction(
-                @"AMProj · 2/3 XML 校验通过，正在本地导入模板",
+                @"AMProj · 2/3 XML 校验通过，正在本地导入",
                 NO, transactionID);
             // Keep the XML bytes unchanged. In particular, do not call
             // AMProjNormalizeProjectArchive: adding type="project" would route
@@ -8339,7 +8339,7 @@ static void amproj_finishXMLTemplateImportInternal(NSString *transactionID,
         });
         amproj_releaseImportTransaction(transactionID, YES);
         amproj_showImportStatusForTransaction(
-            @"AMProj · 3/3 XML 已导入“您的模板”", NO, transactionID);
+            @"AMProj · 3/3 XML 已导入", NO, transactionID);
     } else {
         amproj_retryImportURL = transaction.archiveURL;
         amproj_retryImportName = [transaction.name copy];
@@ -10586,7 +10586,7 @@ static BOOL amproj_completeNativeXMLTemplateImport(
     amproj_visibleStatusTransactionID = nil;
     amproj_selectMainTab(NO, transactionID);
     amproj_showImportStatusForTransaction(
-        @"AMProj · 3/3 XML 已离线导入“您的模板”",
+        @"AMProj · 3/3 XML 已离线导入",
         NO, transactionID);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
@@ -10615,7 +10615,7 @@ static void amproj_failNativeXMLTemplateImport(
         return;
     }
     NSString *message = reason.length ? reason :
-        @"本地 PackageImporter 已返回，但没有确认 XML 模板已落库";
+        @"本地 PackageImporter 已返回，但没有确认 XML 已落库";
     NSString *fingerprint = [transaction.fingerprint copy];
     NSString *source = [transaction.source copy];
     NSURL *retryURL = transaction.archiveURL;

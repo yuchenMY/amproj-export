@@ -43,15 +43,19 @@ class CloudProjectDocumentTests(unittest.TestCase):
         start = CLOUD.index("- (void)downloadProject:(NSDictionary *)project request:",
                             CLOUD.index("@implementation AMCloudClient"))
         block = CLOUD[start:CLOUD.index("- (void)loadVersions:", start)]
-        self.assertEqual(block.count("AMCloudAuthMatches(token, generation)"), 2)
+        self.assertEqual(block.count("AMCloudAuthMatches(token, generation)"), 3)
         self.assertIn("AMCloudShouldRetryProjectDownload(networkError, attempt)", block)
         self.assertIn("attempt:attempt + 1", block)
         self.assertIn("authToken:token generation:generation completion:completion", block)
         self.assertLess(block.index("if (networkError)"), block.index("AMCloudSHA256(temporaryURL"))
         self.assertIn("caseInsensitiveCompare:expectedSHA", block)
         self.assertIn("sizeMismatch", block)
-        ui = CLOUD[CLOUD.index("- (void)downloadAndImportProject:(NSDictionary *)project\n") :]
+        ui = CLOUD[CLOUD.rindex("- (void)downloadAndImportProject:(NSDictionary *)project\n") :]
         self.assertIn("AMCloudAuthMatches(requestToken, requestGeneration)", ui)
+        guard = ui.index("if (!AMCloudValidateProjectDownloadContext(data, requestToken, requestGeneration))")
+        guard_end = ui.index("return;", guard)
+        self.assertLess(guard_end, ui.index("asyncHandler(URL"))
+        self.assertLess(guard_end, ui.index("importHandler(URL"))
         self.assertLess(ui.index('actionWithTitle:@"重试下载"'), ui.index("asyncHandler(URL"))
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires Objective-C/Foundation")
@@ -63,6 +67,8 @@ class CloudProjectDocumentTests(unittest.TestCase):
             function(CLOUD, "static NSString *AMCloudSafeFilename("),
             function(CLOUD, "static NSString *AMCloudUploadHeaderFilename("),
             function(CLOUD, "static BOOL AMCloudShouldRetryProjectDownload("),
+            function(CLOUD, "static BOOL AMCloudProjectDownloadDirectoryIsDirectChild("),
+            function(CLOUD, "static BOOL AMCloudValidateProjectDownloadContext("),
         ]
         fixture = (ROOT / "tests/cloud_project_documents_smoke.m").read_text(encoding="utf-8")
         fixture = fixture.replace("// AMPROJ_PRODUCTION_DOCUMENT_FUNCTIONS", "\n".join(functions))
