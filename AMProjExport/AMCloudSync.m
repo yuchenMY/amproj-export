@@ -6102,7 +6102,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     self.selectionStyle = UITableViewCellSelectionStyleNone;
     UIView *surface = [UIView new];
     surface.backgroundColor = UIColor.whiteColor;
-    surface.layer.cornerRadius = 16;
+    surface.layer.cornerRadius = 18;
     surface.clipsToBounds = YES;
     self.surface = surface;
     surface.translatesAutoresizingMaskIntoConstraints = NO;
@@ -6114,7 +6114,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     self.fileIcon.contentMode = UIViewContentModeScaleAspectFit;
     self.titleLabel = [UILabel new];
     self.titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleHeadline]
-        scaledFontForFont:[UIFont systemFontOfSize:16 weight:UIFontWeightSemibold]];
+        scaledFontForFont:[UIFont systemFontOfSize:15 weight:UIFontWeightSemibold]];
     self.titleLabel.adjustsFontForContentSizeCategory = YES;
     self.titleLabel.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
     self.titleLabel.numberOfLines = 2;
@@ -6129,13 +6129,11 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     self.metadataLabel.adjustsFontForContentSizeCategory = YES;
     self.metadataLabel.textColor = secondary;
     self.formatBadge = [UIView new];
-    self.formatBadge.backgroundColor = [UIColor colorWithRed:0.95 green:0.955 blue:0.965 alpha:1];
-    self.formatBadge.layer.cornerRadius = 4;
     self.formatLabel = [UILabel new];
     self.formatLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleCaption2]
-        scaledFontForFont:[UIFont systemFontOfSize:9 weight:UIFontWeightSemibold]];
+        scaledFontForFont:[UIFont systemFontOfSize:9 weight:UIFontWeightMedium]];
     self.formatLabel.adjustsFontForContentSizeCategory = YES;
-    self.formatLabel.textColor = [UIColor colorWithRed:0.41 green:0.43 blue:0.48 alpha:1];
+    self.formatLabel.textColor = secondary;
     self.formatLabel.textAlignment = NSTextAlignmentCenter;
     [self.formatLabel setContentCompressionResistancePriority:UILayoutPriorityRequired
                                                    forAxis:UILayoutConstraintAxisHorizontal];
@@ -6153,8 +6151,8 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     self.formatLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.formatBadge addSubview:self.formatLabel];
     [NSLayoutConstraint activateConstraints:@[
-        [surface.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4],
-        [surface.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4],
+        [surface.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:5],
+        [surface.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-5],
         [surface.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
         [surface.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
         [surface.heightAnchor constraintGreaterThanOrEqualToConstant:80],
@@ -6247,7 +6245,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
 
     UILabel *value = [UILabel new];
     value.translatesAutoresizingMaskIntoConstraints = NO;
-    value.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold];
+    value.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
     value.adjustsFontSizeToFitWidth = YES;
     value.minimumScaleFactor = 0.75;
     value.textColor = [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1];
@@ -6276,14 +6274,17 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     upload.translatesAutoresizingMaskIntoConstraints = NO;
     [upload setTitle:@"上传备份" forState:UIControlStateNormal];
     upload.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    upload.backgroundColor = [AMCloudBrandColor() colorWithAlphaComponent:0.08];
-    upload.layer.cornerRadius = 12;
     [upload setTitleColor:[UIColor colorWithRed:0.04 green:0.47 blue:0.44 alpha:1]
                 forState:UIControlStateNormal];
     upload.accessibilityLabel = @"上传备份";
     [upload addTarget:self action:@selector(onUpload) forControlEvents:UIControlEventTouchUpInside];
 
-    for (UIView *view in @[caption, value, track, caption2, upload]) [card addSubview:view];
+    UIView *uploadFill = [UIView new];
+    uploadFill.translatesAutoresizingMaskIntoConstraints = NO;
+    uploadFill.backgroundColor = [AMCloudBrandColor() colorWithAlphaComponent:0.08];
+    uploadFill.layer.cornerRadius = 10;
+    uploadFill.userInteractionEnabled = NO;
+    for (UIView *view in @[caption, value, track, caption2, uploadFill, upload]) [card addSubview:view];
     [NSLayoutConstraint activateConstraints:@[
         [card.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor
                                        constant:12],
@@ -6297,8 +6298,13 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
         [upload.heightAnchor constraintEqualToConstant:44],
         [upload.widthAnchor constraintEqualToConstant:92],
         [upload.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
+        // 视觉色块收薄，按钮仍保留 44pt 的完整点击范围。
+        [uploadFill.leadingAnchor constraintEqualToAnchor:upload.leadingAnchor],
+        [uploadFill.trailingAnchor constraintEqualToAnchor:upload.trailingAnchor],
+        [uploadFill.topAnchor constraintEqualToAnchor:upload.topAnchor constant:6],
+        [uploadFill.bottomAnchor constraintEqualToAnchor:upload.bottomAnchor constant:-6],
 
-        [value.topAnchor constraintEqualToAnchor:card.topAnchor constant:35],
+        [value.topAnchor constraintEqualToAnchor:card.topAnchor constant:36],
         [value.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
         [value.trailingAnchor constraintLessThanOrEqualToAnchor:upload.leadingAnchor constant:-8],
 
@@ -6338,7 +6344,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     table.dataSource = self;
     table.delegate = self;
     table.rowHeight = UITableViewAutomaticDimension;
-    table.estimatedRowHeight = 88;
+    table.estimatedRowHeight = 90;
     table.alwaysBounceVertical = YES;
     table.separatorStyle = UITableViewCellSeparatorStyleNone;
     table.tableFooterView = [UIView new];
@@ -6454,7 +6460,7 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     }
     NSMutableAttributedString *summary = [[NSMutableAttributedString alloc]
         initWithString:AMCloudByteText(used) attributes:@{
-            NSFontAttributeName: [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold],
+            NSFontAttributeName: [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold],
             NSForegroundColorAttributeName: [UIColor colorWithRed:0.13 green:0.14 blue:0.23 alpha:1]}];
     [summary appendAttributedString:[[NSAttributedString alloc]
         initWithString:[NSString stringWithFormat:@" / %@", AMCloudByteText(quota)] attributes:@{
@@ -6522,8 +6528,8 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     NSString *format = AMCloudProjectFormat(version);
     BOOL XML = [format isEqualToString:@"XML"];
     NSString *kind = XML ? @"仅工程" : [format isEqualToString:@"AMPROJ"] ? @"项目包" : @"备份";
-    UIColor *tint = [UIColor colorWithRed:0.40 green:0.43 blue:0.49 alpha:1];
-    cell.iconBackground.backgroundColor = [UIColor colorWithRed:0.95 green:0.955 blue:0.965 alpha:1];
+    UIColor *tint = [UIColor colorWithRed:0.34 green:0.36 blue:0.44 alpha:1];
+    cell.iconBackground.backgroundColor = [UIColor colorWithRed:0.945 green:0.95 blue:0.965 alpha:1];
     cell.fileIcon.tintColor = tint;
     cell.fileIcon.image = [UIImage systemImageNamed:[format isEqualToString:@"AMPROJ"]
         ? @"shippingbox" : @"doc.text"];
