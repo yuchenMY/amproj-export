@@ -26,10 +26,17 @@ node --check /path/to/staging/signer.js
 
 - `POST /api/app-update/link`：凭网站已完成的随机设备会话，关联当前安装身份。
 - `POST /api/app-update/prepare`：Bearer 更新授权 + 客户端固定 requestId，返回原有签名任务/OTA 地址。请求失败重试可继续原任务。
+- `POST /api/app-update/ready`：系统安装前重新核对应用库的当前包、设备授权和签名文件；包被替换或删除就停止旧任务的安装入口。
 
 签名器按 job ID 去重；启动时恢复 queued，已被重启中断的 running 标为失败并明确要求重试。审计暂时失败不阻断入队。
 
 网站默认包必须是带正确 `AMProjReleaseCode`、`AMProjReleaseChannel` 的新版本。正式版和 Beta 分别发布，正常更新不会因为设备拥有 Beta 资格而切换安装渠道。当前没有新包时，App 明确显示未发布或无需更新，不创建任务。
+
+## IPA 应用库同步
+
+`integrate-library.cjs WEBSITE_DIRECTORY STAGING_DIRECTORY` 在已接入更新模块的网站上应用第二阶段小补丁：同渠道上传成功就成为当前版本，原包留在历史列表；删除当前版本不会自动启用旧包。管理员仍可主动把历史包设为当前。客户端每次准备和系统安装前都读取此库，不维护另一份包列表；删除包及其签名文件沿用原有事务和清理逻辑。已有活动签名任务时删除仍返回明确的等待提示。
+
+`fixtures/library-routes-before.js` 由已核验的实际网站源码提取。`library.test.cjs` 对补丁后的真实上传/删除处理器执行 HTTP 行为测试，数据库使用替身，不等价真实 MySQL 并发验收。
 
 ## 验证边界
 

@@ -50,7 +50,7 @@ async function harness(t) {
         async get(...args) {
           if (sql.startsWith('SELECT * FROM udid_requests')) return args[0] === hashToken('a'.repeat(48)) ? { status: 'completed', udid: 'FIXTURE' } : null;
           if (sql.includes('FROM devices')) return (sql.includes('WHERE udid') ? args[0] === state.device.udid : args[0] === state.device.id) ? { ...state.device } : null;
-          if (sql.includes('FROM apps')) return args[0] === state.application.channel ? { ...state.application } : null;
+          if (sql.includes('FROM apps')) return state.application && args[0] === state.application.channel ? { ...state.application } : null;
           if (sql.includes('WHERE public_token_hash')) return state.jobs.find((job) => job.hash === args[0]);
           if (sql.includes('FROM sign_jobs') && sql.includes("status IN ('queued', 'running')")) return state.jobs.find((job) => ['queued','running'].includes(job.status) && job.device_id === args[0]);
           throw new Error('Unexpected query: ' + sql);
@@ -156,4 +156,21 @@ test('startup recovery fails interrupted jobs and re-enqueues durable queued job
   let failedRunning = false; const enqueued = [];
   await recoverSigningJobs({ prepare(sql) { return { run: async () => { assert.match(sql, /WHERE status = 'running'/); failedRunning = true; }, all: async () => { assert.match(sql, /WHERE status = 'queued'/); return [{ id: 9 }, { id: 10 }]; } }; } }, { enqueue: (id) => enqueued.push(id) });
   assert.equal(failedRunning, true); assert.deepEqual(enqueued, [9, 10]);
+});
+
+test('updates use the live website library; deleting or replacing a package invalidates prepared installs', async (t) => {
+  const { post, state, ipa } = await harness(t); const token = store.issue(identity); const body = { requestId: crypto.randomUUID() };
+  assert.equal((await post('prepare', body, token)).status, 200);
+  assert.equal((await post('ready', body, token)).status, 409);
+  state.jobs[0].status = 'succeeded'; state.jobs[0].output_path = ipa;
+  const ready = await post('ready', body, token); assert.equal(ready.status, 200); assert.match(ready.body.manifestUrl, /\/ota\/manifest\//);
+  state.application.id = 8; // Uploading another package changes the website's current package.
+  assert.equal((await post('ready', body, token)).status, 410); assert.equal((await post('prepare', body, token)).status, 410);
+  const next = { requestId: crypto.randomUUID() }; assert.equal((await post('prepare', next, token)).status, 200); assert.equal(state.jobs[1].app_id, 8);
+  state.application = null;
+  const removed = await post('prepare', next, token); assert.equal(removed.status, 404); assert.match(removed.body.error, /暂无可用安装包/);
+  assert.equal((await post('ready', next, token)).status, 404);
+  state.application = { id: 9, channel: 'production', ipa_path: ipa + '.missing', bundle_id: identity.bundleId };
+  assert.equal((await post('prepare', next, token)).status, 404);
+  assert.equal((await post('ready', body, 'forged')).status, 401);
 });

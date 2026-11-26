@@ -1,0 +1,10 @@
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { extractLibraryRoutes, extractOtaRoutes } = require('./integrate-library.cjs');
+const data = fs.readFileSync(process.argv[2]);
+if (crypto.createHash('sha256').update(data).digest('hex') !== 'a5f2ee41d710185561c7d3757eba61e41ef37c5bc9c401f74ba7c295dbf6a3a4') throw new Error('Unexpected website source snapshot');
+const directory = path.join(__dirname, 'fixtures'); fs.mkdirSync(directory, { recursive: true });
+fs.writeFileSync(path.join(directory, 'library-routes-before.js'), '// Generated from the verified website server snapshot a5f2ee41; do not edit manually.\n' + extractLibraryRoutes(data.toString().replace(/\r\n/g, '\n')));
+fs.writeFileSync(path.join(directory, 'ota-routes-before.js'), '// Generated from the verified website server snapshot a5f2ee41; do not edit manually.\n' + extractOtaRoutes(data.toString().replace(/\r\n/g, '\n')));

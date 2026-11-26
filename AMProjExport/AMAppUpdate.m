@@ -105,7 +105,7 @@ static NSString *AMUpdateProfileTeam(void) {
     if (body) {
         request.HTTPMethod = @"POST"; [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-        if (self.token.length && [url.path isEqual:@"/api/app-update/prepare"]) [request setValue:[@"Bearer " stringByAppendingString:self.token] forHTTPHeaderField:@"Authorization"];
+        if (self.token.length && ([@[@"/api/app-update/prepare",@"/api/app-update/ready"] containsObject:url.path])) [request setValue:[@"Bearer " stringByAppendingString:self.token] forHTTPHeaderField:@"Authorization"];
     }
     __weak typeof(self) weakSelf = self;
     self.task = [self.session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -170,6 +170,19 @@ static NSString *AMUpdateProfileTeam(void) {
 }
 - (void)install {
     if (self.busy || !AMAppUpdateTrustedURL(self.manifest, @"/ota/manifest/")) return;
+    [self setBusy:YES message:@"正在核对网站当前安装包…"];
+    [self request:[NSURL URLWithString:[AMUpdateOrigin stringByAppendingString:@"/api/app-update/ready"]] body:@{@"requestId":self.requestId ?: @""} completion:^(NSDictionary *data, NSInteger status, NSError *error) {
+        NSURL *manifest = [data[@"manifestUrl"] isKindOfClass:NSString.class] ? [NSURL URLWithString:data[@"manifestUrl"]] : nil;
+        if (error || status != 200 || !AMAppUpdateTrustedURL(manifest, @"/ota/manifest/")) {
+            self.manifest = nil;
+            if (status == 404 || status == 410) [NSUserDefaults.standardUserDefaults removeObjectForKey:self.pendingKey];
+            [self.action setTitle:@"重新检查更新" forState:UIControlStateNormal];
+            [self setBusy:NO message:[data[@"error"] isKindOfClass:NSString.class] ? data[@"error"] : @"暂时无法核对当前安装包，请检查网络后重试。"]; return;
+        }
+        self.manifest = manifest; [self requestSystemInstall];
+    }];
+}
+- (void)requestSystemInstall {
     NSURLComponents *components = [NSURLComponents componentsWithString:@"itms-services://"];
     components.queryItems = @[[NSURLQueryItem queryItemWithName:@"action" value:@"download-manifest"], [NSURLQueryItem queryItemWithName:@"url" value:self.manifest.absoluteString]];
     [self setBusy:YES message:@"正在请求系统安装确认…"];

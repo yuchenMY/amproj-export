@@ -87,6 +87,7 @@ function registerAppUpdates(app, services) {
     const device = await executor.prepare('SELECT * FROM devices WHERE id = ?').get(claim.deviceId);
     if (!device || !device.allowed || (claim.channel === 'beta' && !Number(device.beta_access))) throw Object.assign(new Error('设备安装授权已失效，请联系管理员'), { status: 403 });
     const application = await executor.prepare('SELECT * FROM apps WHERE channel = ? AND is_default = 1 ORDER BY id DESC LIMIT 1').get(claim.channel);
+    if (!application || !application.ipa_path || !fs.existsSync(application.ipa_path)) throw Object.assign(new Error('当前暂无可用安装包，请稍后再试或联系管理员'), { status: 404 });
     const check = await qualification(device, application);
     if (!check.ok) throw Object.assign(new Error(check.errors.join('；')), { status: 403 });
     if (!claim.teamId || !matchesIdentity(claim, updateIdentity(device, application, check, effectiveBundleId))) throw Object.assign(new Error('签名身份发生变化，无法直接覆盖更新，请先备份工程并联系管理员'), { status: 409 });
@@ -106,6 +107,7 @@ function registerAppUpdates(app, services) {
     if (!['production', 'beta'].includes(channel) || !Number.isSafeInteger(release) || release < 176) return fail(res, 400, '安装版本不支持应用内更新');
     try {
       const application = migration ? await db.prepare('SELECT * FROM apps WHERE channel = ? AND is_default = 1 ORDER BY id DESC LIMIT 1').get('production') : null;
+      if (migration && (!application || !application.ipa_path || !fs.existsSync(application.ipa_path))) return fail(res, 404, '当前暂无可用安装包，请稍后再试或联系管理员');
       const material = migration ? await qualification(device, application) : null;
       const claim = migration ? { ...updateIdentity(device || {}, application || {}, material || {}, effectiveBundleId), release: 0, migrationFrom: 'com.ayakameow.am.beta' } :
         { deviceId: Number(device?.id), channel, bundleId: req.body.bundleId, teamId: req.body.teamId, release };
@@ -134,6 +136,7 @@ function registerAppUpdates(app, services) {
         if (info.AMProjReleaseCode <= claim.release) return { current: true };
         const existing = await tx.prepare('SELECT * FROM sign_jobs WHERE public_token_hash = ?').get(hashToken(jobToken));
         if (existing) {
+          if (Number(existing.app_id) !== Number(application.id)) throw Object.assign(new Error('安装包已更新，请重新开始更新'), { status: 410 });
           if (existing.status === 'failed' || (existing.status === 'succeeded' && (!existing.output_path || !fs.existsSync(existing.output_path)))) throw Object.assign(new Error('上次更新任务已失效，请重新开始'), { status: 410 });
           return { id: existing.id, resumed: true, status: existing.status };
         }
@@ -149,6 +152,23 @@ function registerAppUpdates(app, services) {
       if (outcome.status === 'queued') signer.enqueue(outcome.id);
       if (!outcome.resumed) await audit('app-update', claim.deviceId, 'update_requested', { jobId: outcome.id, channel: claim.channel }).catch(() => console.error('[app-update] audit temporarily unavailable'));
       return res.json({ ok: true, statusUrl: `${publicBase(req)}/api/public/jobs/${jobToken}`, manifestUrl: `${publicBase(req)}/ota/manifest/${jobToken}` });
+    } catch (error) { return fail(res, error.code === 'ENOENT' ? 404 : error.status || 400, error.code === 'ENOENT' ? '当前暂无可用安装包，请稍后再试或联系管理员' : error.message); }
+  });
+
+  app.post('/api/app-update/ready', async (req, res) => {
+    const token = String(req.get('authorization') || '').replace(/^Bearer /, '');
+    const claim = capabilities.verify(token);
+    if (!claim) return fail(res, 401, '更新关联已失效，请重新关联设备');
+    const requestId = String(req.body?.requestId || '');
+    if (!/^[a-f0-9-]{36}$/i.test(requestId)) return fail(res, 400, '更新请求标识无效');
+    try {
+      const { application } = await context(claim);
+      const jobToken = capabilities.jobToken(token, requestId);
+      const job = await db.prepare('SELECT * FROM sign_jobs WHERE public_token_hash = ?').get(hashToken(jobToken));
+      if (!job || Number(job.app_id) !== Number(application.id)) return fail(res, 410, '安装包已更新或移除，请重新检查更新');
+      if (job.status !== 'succeeded') return fail(res, 409, '安装包尚未准备完成，请稍后重试');
+      if (!job.output_path || !fs.existsSync(job.output_path)) return fail(res, 410, '安装文件已失效，请重新开始更新');
+      return res.json({ ok: true, manifestUrl: `${publicBase(req)}/ota/manifest/${jobToken}` });
     } catch (error) { return fail(res, error.status || 400, error.message); }
   });
 }
@@ -159,4 +179,11 @@ async function recoverSigningJobs(db, signer) {
   for (const job of jobs) signer.enqueue(job.id);
 }
 
-module.exports = { capabilityStore, matchesIdentity, prepareUpdateIpa, registerAppUpdates, recoverSigningJobs, ipaMetadata };
+async function appUpdateJobIsCurrent(db, token, appId) {
+  // App-update job capabilities are 43-character HMACs; website job tokens remain 48 hex characters.
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return true;
+  const current = await db.prepare('SELECT id FROM apps WHERE channel = (SELECT channel FROM apps WHERE id = ?) AND is_default = 1 ORDER BY id DESC LIMIT 1').get(appId);
+  return Boolean(current) && Number(current.id) === Number(appId);
+}
+
+module.exports = { capabilityStore, matchesIdentity, prepareUpdateIpa, registerAppUpdates, recoverSigningJobs, appUpdateJobIsCurrent, ipaMetadata };

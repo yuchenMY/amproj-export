@@ -1,7 +1,7 @@
 {
   "name": "meow-in-app-update-contract",
   "private": true,
-  "scripts": { "test": "node --test in-app-update.test.cjs" },
+  "scripts": { "test": "node --test" },
   "dependencies": {
     "express": "5.1.0",
     "unzipper": "0.12.3",
