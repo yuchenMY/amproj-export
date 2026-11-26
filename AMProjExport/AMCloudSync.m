@@ -1685,6 +1685,7 @@ static BOOL AMCloudLayoutProbeEnabled(void) {
 @property(nonatomic) BOOL cloudTapTargetKnown;
 @property(nonatomic) BOOL cloudTapTargetIsCloud;
 @property(nonatomic) NSUInteger cloudSelectionGeneration;
+@property(nonatomic) BOOL cloudForegroundRecoveryPending;
 @property(nonatomic, weak) UIAlertController *cloudLibraryAlert;
 @property(nonatomic) NSUInteger cloudLibraryAlertSelectionGeneration;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *importResultNotices;
@@ -2511,7 +2512,7 @@ extern NSNotificationName const AMCloudLibraryDidChangeNotification;
     [NSNotificationCenter.defaultCenter
         addObserver:self selector:@selector(applicationDidBecomeActive:)
                name:UIApplicationDidBecomeActiveNotification object:nil];
-    // 后台先移除嵌入视图，轻量列表缓存按登录代际复用。
+    // 后台保留已挂载内容，回前台先显示缓存，再异步更新列表。
     [NSNotificationCenter.defaultCenter
         addObserver:self selector:@selector(applicationDidEnterBackground:)
         name:UIApplicationDidEnterBackgroundNotification object:nil];
@@ -2623,23 +2624,37 @@ static void AMCloudHideWindowOverlayIfNeeded(void) {
 }
 
 - (void)startCloudOverlayWatchdog {
-    // 只在返回前台时核对一次，不保留常驻轮询。
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!AMCloudOverlayWorkAllowed()) AMCloudHideWindowOverlayIfNeeded();
-        else [self refreshWindowCloudOverlayVisibility];
-    });
+    // 原生视图可能晚于前台通知恢复；只在本次恢复的一秒内重试，不常驻轮询。
+    self.cloudForegroundRecoveryPending = YES;
+    NSUInteger generation = self.cloudSelectionGeneration;
+    [self reconcileForegroundCloudLibrary];
+    for (NSNumber *delay in @[@0.12, @0.42, @1.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (generation != self.cloudSelectionGeneration ||
+                !self.cloudForegroundRecoveryPending ||
+                UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
+            if (delay.doubleValue == 1.0) self.cloudForegroundRecoveryPending = NO;
+            [self reconcileForegroundCloudLibrary];
+        });
+    }
 }
 
-static void AMCloudTeardownWindowOverlay(void) {
-    AMCloudManager *manager = [AMCloudManager shared];
-    manager.cloudSelectionGeneration++;
-    manager.cloudTapTargetKnown = NO;
-    [manager setCloudLibraryVisible:NO];
+- (void)reconcileForegroundCloudLibrary {
+    if ([self keepsLibraryBehindOwnedAlert]) return;
+    if (!AMCloudOverlayWorkAllowed()) AMCloudHideWindowOverlayIfNeeded();
+    else [self refreshWindowCloudOverlayVisibility];
 }
 
 - (void)applicationDidEnterBackground:(NSNotification *)notification {
     (void)notification;
-    AMCloudTeardownWindowOverlay();
+    // 取消旧点击回调，但不能卸下用户离开前正在看的云列表。
+    if (self.cloudLibraryAlertSelectionGeneration == self.cloudSelectionGeneration)
+        self.cloudLibraryAlertSelectionGeneration++;
+    self.cloudSelectionGeneration++;
+    self.cloudTapTargetKnown = NO;
+    self.cloudForegroundRecoveryPending = NO;
+    AMCloudDiagnostic(@"cloud.library.background", @{@"mounted": @(self.embeddedLibrary.superview != nil)});
     [self cancelPluginDownloadNotice];
 }
 
@@ -2649,9 +2664,9 @@ static void AMCloudTeardownWindowOverlay(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC),
         dispatch_get_main_queue(), ^{ AMCloudCaptureLayoutProbe(@"foreground", nil, -2); });
 #endif
+    [self startCloudOverlayWatchdog];
     AMCloudInstallProjectsHooks();
     AMCloudAttachVisibleProjectsControllers();
-    [self startCloudOverlayWatchdog];
     [self installCloudTabTapWatcher];
     [self showPluginDownloadNoticeIfPossible];
     [self syncPluginsNow:@"did_become_active"];
@@ -2667,6 +2682,7 @@ static void AMCloudTeardownWindowOverlay(void) {
 - (void)pluginTokenChanged:(NSNotification *)notification {
     (void)notification;
     self.cloudSelectionGeneration++;
+    self.cloudForegroundRecoveryPending = NO;
     [self setCloudLibraryVisible:NO];
     self.cachedLibrary = nil;
     self.cloudTapTargetKnown = NO;
@@ -4298,6 +4314,8 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 
 - (void)refreshWindowCloudOverlayVisibility {
     if (AMCloudUIKitDisabled()) { [self setCloudLibraryVisible:NO]; return; }
+    // 后台返回的头像/网络回调不能因找不到活动窗口而拆掉已挂载内容。
+    if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
     if ([self keepsLibraryBehindOwnedAlert]) return;
     if (self.cloudTapTargetKnown) {
         [self repairKnownCloudTabForGeneration:self.cloudSelectionGeneration];
@@ -4320,12 +4338,18 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
     AMCloudCaptureLayoutProbe(@"reconcile", header, state);
 #endif
     if (header && AMCloudProjectContainerEligible(header)) [self prepareCloudLibrary];
+    if (state < 0 && self.cloudForegroundRecoveryPending && header &&
+        self.embeddedHeader == header && self.embeddedLibrary.superview == header) return;
     if (!header || !AMCloudTabAllowsDisplay((int)state,
         self.cloudTapTargetKnown, self.cloudTapTargetIsCloud)) {
         [self setCloudLibraryVisible:NO];
         return;
     }
     [self showPreparedCloudLibraryInProjectsView:header row:self.cloudSubTabFrame];
+    if (self.cloudForegroundRecoveryPending && self.embeddedLibrary.superview == header) {
+        self.cloudForegroundRecoveryPending = NO;
+        AMCloudDiagnostic(@"cloud.library.foreground_restored", @{@"selected": @(state)});
+    }
 }
 
 - (AMCloudLibraryView *)prepareCloudLibrary {
@@ -4419,6 +4443,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
     CGRect rowInWindow = header ? [header convertRect:candidate toView:window] : CGRectZero;
     BOOL subTab = AMCloudIsNativeSubTabTap(header, hit, self.embeddedLibrary, rowInWindow, point);
     if (!mainTab && !subTab) return;
+    self.cloudForegroundRecoveryPending = NO;
     BOOL knownPill = subTab && self.cloudPillHost == header &&
         CGRectEqualToRect(self.cloudPillHostBounds, header.bounds) && !CGRectIsEmpty(self.cloudPillFrame);
     self.cloudTapTargetKnown = mainTab || knownPill;

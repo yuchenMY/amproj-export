@@ -14,6 +14,49 @@ SOURCE = (ROOT / "AMProjExport/AMCloudSync.m").read_text(encoding="utf-8")
 
 class CloudTabEmbeddingTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "Requires Objective-C/Foundation")
+    def test_actual_foreground_recovery_retains_content_and_bounds_retries(self):
+        start = SOURCE.index("- (void)startCloudOverlayWatchdog {")
+        implementation = SOURCE[start:SOURCE.index("- (void)applicationDidBecomeActive:", start)]
+        fixture = (ROOT / "tests/cloud_foreground_recovery_smoke.m").read_text(encoding="utf-8")
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_FOREGROUND_RECOVERY", implementation)
+        marker = "- (void)refreshWindowCloudOverlayVisibility {"
+        refresh = marker + SOURCE.split(marker, 1)[1].split(
+            "- (AMCloudLibraryView *)prepareCloudLibrary", 1)[0]
+        fixture = fixture.replace("// AMPROJ_PRODUCTION_FOREGROUND_REFRESH", refresh.replace(
+            marker, "- (void)actualRefreshWindowCloudOverlayVisibility {", 1))
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "foreground.m"
+            binary = Path(temporary) / "foreground"
+            source.write_text(fixture, encoding="utf-8")
+            compiled = subprocess.run(["clang", "-fobjc-arc", "-framework", "Foundation",
+                "-I", str(ROOT / "AMProjExport"), str(source), "-o", str(binary)],
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("CLOUD_FOREGROUND_RECOVERY_PASS", result.stdout)
+
+    def test_background_callbacks_cannot_unmount_cloud_content(self):
+        refresh = SOURCE.split("- (void)refreshWindowCloudOverlayVisibility {", 1)[1]
+        refresh = refresh.split("- (AMCloudLibraryView *)prepareCloudLibrary", 1)[0]
+        self.assertLess(refresh.index("applicationState != UIApplicationStateActive"),
+            refresh.index("AMCloudProjectsView()"))
+        self.assertIn("state < 0 && self.cloudForegroundRecoveryPending && header", refresh)
+        background = SOURCE.split("- (void)applicationDidEnterBackground:", 1)[1]
+        background = background.split("- (void)applicationDidBecomeActive:", 1)[0]
+        self.assertNotIn("setCloudLibraryVisible:NO", background)
+        active = SOURCE.split("- (void)applicationDidBecomeActive:", 1)[1]
+        active = active.split("- (void)pluginTokenChanged:", 1)[0]
+        self.assertLess(active.index("[self startCloudOverlayWatchdog]"),
+            active.index("AMCloudAttachVisibleProjectsControllers()"))
+        token = SOURCE.split("- (void)pluginTokenChanged:", 1)[1]
+        token = token.split("- (NSURL *)accountAvatarCacheURL", 1)[0]
+        self.assertIn("self.cloudForegroundRecoveryPending = NO", token)
+        tap = SOURCE.split("- (void)handleCloudTabTap:", 1)[1]
+        tap = tap.split("- (void)repairKnownCloudTabForGeneration:", 1)[0]
+        self.assertIn("self.cloudForegroundRecoveryPending = NO", tap)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires Objective-C/Foundation")
     def test_owned_alert_preserves_only_current_mounted_cloud_library(self):
         methods = []
         for signature in (
@@ -103,7 +146,7 @@ class CloudTabEmbeddingTests(unittest.TestCase):
         self.assertIn("[library removeFromSuperview]", block)
         self.assertIn("self.embeddedLibrary = nil", block)
         self.assertNotIn("removeFromParentViewController", block)
-        self.assertIn("manager.cloudSelectionGeneration++;", SOURCE)
+        self.assertIn("self.cloudSelectionGeneration++;", SOURCE)
         component = SOURCE.split("@implementation AMCloudLibraryView", 1)[1]
         self.assertNotIn("self.view", component)
         self.assertIn("presenter:AMCloudTopController(nil)", component)
