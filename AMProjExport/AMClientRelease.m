@@ -405,7 +405,7 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
 - (void)retry { self.statusLabel.text = @"正在检查版本…"; [self.manager check:YES]; }
 - (void)backup {
     if (self.backupBusy) return;
-    self.backupBusy = YES; self.backupButton.enabled = NO;
+    self.backupBusy = YES; self.backupButton.enabled = NO; self.updateButton.enabled = NO;
     self.statusLabel.text = @"正在生成本机工程和本地素材备份。外部链接素材不包含在内，请勿退出应用。";
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSError *error = nil; NSMutableDictionary *scenes = nil, *resources = nil;
@@ -419,7 +419,7 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!ready) {
                 [NSFileManager.defaultManager removeItemAtURL:directory error:nil];
-                self.backupBusy = NO; self.backupButton.enabled = YES;
+                self.backupBusy = NO; self.backupButton.enabled = YES; self.updateButton.enabled = YES;
                 self.statusLabel.text = error.localizedDescription ?: @"备份未完成，请保留原应用和工程后重试"; return;
             }
             self.backupDirectory = directory;
@@ -431,7 +431,7 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
 }
 - (void)finishBackup:(BOOL)saved {
     if (self.backupDirectory) [NSFileManager.defaultManager removeItemAtURL:self.backupDirectory error:nil];
-    self.backupDirectory = nil; self.backupBusy = NO; self.backupButton.enabled = YES;
+    self.backupDirectory = nil; self.backupBusy = NO; self.backupButton.enabled = YES; self.updateButton.enabled = YES;
     self.statusLabel.text = saved ? ([self.manager.policy[@"retired"] boolValue] ? @"工程已分别导出。请在正式版逐个导入并检查后，再删除 Beta。" : @"工程备份已导出，请保留原应用并覆盖安装更新。") : @"备份未全部确认保存，请保留原应用和工程。";
     [self.manager present];
 }
