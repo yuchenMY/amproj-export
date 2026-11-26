@@ -76,6 +76,7 @@ class CloudProjectDocumentTests(unittest.TestCase):
             function(CLOUD, "static BOOL AMCloudProjectDownloadDirectoryIsDirectChild("),
             function(CLOUD, "static BOOL AMCloudValidateProjectDownloadContext("),
             function(CLOUD, "static NSString *AMCloudProjectFormat("),
+            function(CLOUD, "static NSString *AMCloudProjectDownloadTitle(NSDictionary *project) {"),
         ]
         fixture = (ROOT / "tests/cloud_project_documents_smoke.m").read_text(encoding="utf-8")
         fixture = fixture.replace("// AMPROJ_PRODUCTION_DOCUMENT_FUNCTIONS", "\n".join(functions))

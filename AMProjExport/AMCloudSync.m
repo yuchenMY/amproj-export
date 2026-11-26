@@ -1606,6 +1606,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
 @end
 
 @class AMCloudManager;
+static NSString *AMCloudProjectDownloadTitle(NSDictionary *project);
 
 @interface AMCloudAccountViewController : UITableViewController
 @property(nonatomic, strong) AMCloudManager *manager;
@@ -5044,7 +5045,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 
 - (void)downloadAndImportProject:(NSDictionary *)project
                        presenter:(UIViewController *)presenter {
-    UIAlertController *busy = [self busyAlert:@"正在下载项目包" presenter:presenter];
+    UIAlertController *busy = [self busyAlert:AMCloudProjectDownloadTitle(project) presenter:presenter];
     NSString *requestToken = nil;
     uint64_t requestGeneration = 0;
     AMCloudReadAuthContext(&requestToken, &requestGeneration, NULL);
@@ -6142,6 +6143,15 @@ static NSString *AMCloudProjectFormat(NSDictionary *version) {
     if ([extension isEqualToString:@"xml"]) return @"XML";
     if ([extension isEqualToString:@"amproj"]) return @"AMPROJ";
     return @"备份";
+}
+
+static NSString *AMCloudProjectDownloadTitle(NSDictionary *project) {
+    NSDictionary *version = [project[@"currentVersion"] isKindOfClass:NSDictionary.class]
+        ? project[@"currentVersion"] : nil;
+    NSString *format = AMCloudProjectFormat(version);
+    if ([format isEqualToString:@"XML"]) return @"正在下载 XML";
+    if ([format isEqualToString:@"AMPROJ"]) return @"正在下载项目包";
+    return @"正在下载备份";
 }
 
 @interface AMCloudBackupCell : UITableViewCell

@@ -40,6 +40,14 @@ int main(int argc, const char *argv[]) {
         CHECK([AMCloudProjectFormat(@{@"filename": @"old.amproj", @"sizeBytes": @15000}) isEqualToString:@"AMPROJ"]);
         CHECK([AMCloudProjectFormat(@{@"filename": @"full.amproj", @"sizeBytes": @125383680}) isEqualToString:@"AMPROJ"]);
         CHECK([AMCloudProjectFormat(@{@"filename": @"unknown.zip"}) isEqualToString:@"备份"]);
+        CHECK([AMCloudProjectDownloadTitle(@{@"currentVersion": @{@"filename": @"工程.XML"}})
+            isEqualToString:@"正在下载 XML"]);
+        CHECK([AMCloudProjectDownloadTitle(@{@"currentVersion": @{@"filename": @"old.amproj", @"sizeBytes": @15000}})
+            isEqualToString:@"正在下载项目包"]);
+        CHECK([AMCloudProjectDownloadTitle(@{@"currentVersion": @{@"filename": @"unknown.zip"}})
+            isEqualToString:@"正在下载备份"]);
+        CHECK([AMCloudProjectDownloadTitle(@{@"currentVersion": NSNull.null}) isEqualToString:@"正在下载备份"]);
+        CHECK([AMCloudProjectDownloadTitle(@{}) isEqualToString:@"正在下载备份"]);
 
         NSURL *legacy = [testRoot URLByAppendingPathComponent:@"legacy.amproj"];
         CHECK(AMProjZIPWriteProjectArchive(legacy, XML, @{}, NULL, &error));
