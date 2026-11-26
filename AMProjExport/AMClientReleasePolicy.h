@@ -1,6 +1,12 @@
 // 猫鹤 AM · 更新策略输入校验与离线决策，供原生回归直接执行。
 #import <Foundation/Foundation.h>
 #include <math.h>
+static inline NSString *AMClientReleaseDisplayName(id date, NSString *channel) {
+    NSString *name = [channel isEqual:@"beta"] ? @"Beta 测试版" : @"正式版";
+    if (![date isKindOfClass:NSString.class] || [date length] != 8 ||
+        [date rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"0123456789"].invertedSet].location != NSNotFound) return name;
+    return [NSString stringWithFormat:@"当前 · %@ %@",[date substringFromIndex:4],name];
+}
 static inline BOOL AMClientReleaseInteger(id value, double maximum) {
     if (![value isKindOfClass:NSNumber.class]) return NO;
     double number = [value doubleValue];

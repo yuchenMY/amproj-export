@@ -12,6 +12,7 @@ dependency on the 6.2.55 packager.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -75,7 +76,7 @@ def sha256(data: bytes) -> str:
 def stamp_client_release(info: bytes, cloud: bytes) -> bytes:
     """Use compiled identity; discard stale identity when packaging older plugins."""
     plist = plistlib.loads(info)
-    for key in ('AMProjReleaseCode', 'AMProjReleaseChannel', 'AMProjReleaseBuild'):
+    for key in ('AMProjReleaseCode', 'AMProjReleaseChannel', 'AMProjReleaseBuild', 'AMProjReleaseDate', 'AMAppUpdate'):
         plist.pop(key, None)
     identities = set(re.findall(rb'AMCLIENT_RELEASE:([0-9]+):(stable|beta):([0-9a-f]{12})\x00', cloud))
     if b'AMCLIENT_RELEASE:' in cloud and len(identities) != 1:
@@ -86,6 +87,16 @@ def stamp_client_release(info: bytes, cloud: bytes) -> bytes:
         if not 0 < number <= 1000000000:
             raise RuntimeError('Cloud payload has invalid release code')
         plist.update(AMProjReleaseCode=number, AMProjReleaseChannel=channel.decode(), AMProjReleaseBuild=build.decode())
+        dates = set(re.findall(rb'AMCLIENT_RELEASE_DATE:([0-9]{8})\x00', cloud))
+        if b'AMCLIENT_RELEASE_DATE:' in cloud:
+            if len(dates) != 1:
+                raise RuntimeError('Cloud payload has invalid or ambiguous compiled release date')
+            date = dates.pop().decode()
+            try:
+                datetime.datetime.strptime(date, '%Y%m%d')
+            except ValueError as error:
+                raise RuntimeError('Cloud payload has invalid compiled release date') from error
+            plist['AMProjReleaseDate'] = date
     return plistlib.dumps(plist, sort_keys=False)
 
 

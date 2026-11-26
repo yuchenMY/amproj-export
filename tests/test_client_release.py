@@ -28,7 +28,7 @@ class ClientReleaseTests(unittest.TestCase):
             self.assertIn('CLIENT_RELEASE_PRESENTER_PASS',result.stdout)
 
     def test_packager_uses_compiled_identity_and_clears_stale_metadata(self):
-        info = plistlib.dumps({'AMProjReleaseCode':999,'AMProjReleaseChannel':'beta','name':'keep'})
+        info = plistlib.dumps({'AMProjReleaseCode':999,'AMProjReleaseChannel':'beta','AMProjReleaseDate':'20200101','AMAppUpdate':{'token':'stale-device-grant'},'name':'keep'})
         for channel in ('stable','beta'):
             marker = ('AMCLIENT_RELEASE:174:'+channel+':123456789abc\0').encode()
             value = plistlib.loads(stamp_client_release(info,marker))
@@ -36,6 +36,12 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertEqual(plistlib.loads(stamp_client_release(info,b'legacy')),{'name':'keep'})
         for marker in (b'AMCLIENT_RELEASE:0:beta:123456789abc\0',b'AMCLIENT_RELEASE:174:beta:unknown\0',b'AMCLIENT_RELEASE:174:beta:123456789abc\0AMCLIENT_RELEASE:175:beta:123456789abc\0'):
             with self.assertRaises(RuntimeError):stamp_client_release(info,marker)
+        marker = b'AMCLIENT_RELEASE:176:stable:123456789abc\0'
+        value = plistlib.loads(stamp_client_release(info, marker + b'AMCLIENT_RELEASE_DATE:20261126\0'))
+        self.assertEqual(value['AMProjReleaseDate'], '20261126')
+        self.assertNotIn('AMAppUpdate', value)
+        for date in (b'unknown', b'20260230', b'20261126\0AMCLIENT_RELEASE_DATE:20261127'):
+            with self.assertRaises(RuntimeError): stamp_client_release(info, marker + b'AMCLIENT_RELEASE_DATE:' + date + b'\0')
 
     @unittest.skipUnless(sys.platform=='darwin','Requires Objective-C/Foundation')
     def test_actual_policy_and_backup_collector(self):

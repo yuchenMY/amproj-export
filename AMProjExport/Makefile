@@ -8,9 +8,11 @@ LEGACY_862 ?= 0
 DIAGNOSTIC_BUILD_ID ?= $(shell git rev-parse --short=12 HEAD)-beta
 RELEASE_CODE ?= 176
 CLIENT_BUILD_ID ?= $(shell git rev-parse --short=12 HEAD)
+CLIENT_RELEASE_DATE ?= $(shell TZ=Asia/Shanghai date +%Y%m%d)
 CFLAGS = -arch arm64 -dynamiclib -isysroot $(SDK) \
          -miphoneos-version-min=14.0 -fobjc-arc -O2 \
-         -DAMPROJ_RELEASE_CODE=$(RELEASE_CODE) -DAMPROJ_CLIENT_BUILD_ID='"$(CLIENT_BUILD_ID)"'
+         -DAMPROJ_RELEASE_CODE=$(RELEASE_CODE) -DAMPROJ_CLIENT_BUILD_ID='"$(CLIENT_BUILD_ID)"' \
+         -DAMPROJ_CLIENT_RELEASE_DATE='"$(CLIENT_RELEASE_DATE)"'
 LOADER_CFLAGS = -arch arm64 -dynamiclib -isysroot $(SDK) \
                 -miphoneos-version-min=14.0 -O2
 LDLIBS = -framework Foundation -framework UIKit -framework QuartzCore \

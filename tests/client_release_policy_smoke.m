@@ -8,6 +8,9 @@
 // AMPROJ_PRODUCTION_BACKUP_COLLECTOR
 int main(void) {
  @autoreleasepool {
+  assert([AMClientReleaseDisplayName(@"20261126",@"stable") isEqual:@"当前 · 1126 正式版"]);
+  assert([AMClientReleaseDisplayName(@"20261126",@"beta") isEqual:@"当前 · 1126 Beta 测试版"]);
+  assert([AMClientReleaseDisplayName(@"unknown",@"stable") isEqual:@"正式版"]);
   NSMutableDictionary *p=[@{@"protocol":@1,@"channel":@"stable",@"revision":@1,@"serverNow":@1000,@"forceAfter":@2000,
    @"minimumRelease":@175,@"latestRelease":@180,@"enabled":@YES,@"retired":@NO,@"message":@"更新说明",@"downloadURL":@"https://example.test/update"} mutableCopy];
   assert(AMClientReleaseValidatedPolicy(p,@"stable"));assert(!AMClientReleaseValidatedPolicy(p,@"beta"));

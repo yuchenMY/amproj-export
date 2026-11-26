@@ -10,6 +10,9 @@
 #ifndef AMPROJ_CLIENT_BUILD_ID
 #define AMPROJ_CLIENT_BUILD_ID "unknown"
 #endif
+#ifndef AMPROJ_CLIENT_RELEASE_DATE
+#define AMPROJ_CLIENT_RELEASE_DATE "unknown"
+#endif
 #define AMCLIENT_STRING_VALUE(x) #x
 #define AMCLIENT_STRING(x) AMCLIENT_STRING_VALUE(x)
 #if AMPROJ_BETA_DIAGNOSTICS
@@ -19,6 +22,8 @@
 #endif
 __attribute__((used, visibility("default"))) const char AMProjClientReleaseIdentity[] =
     "AMCLIENT_RELEASE:" AMCLIENT_STRING(AMPROJ_RELEASE_CODE) ":" AMCLIENT_CHANNEL ":" AMPROJ_CLIENT_BUILD_ID;
+__attribute__((used, visibility("default"))) const char AMProjClientReleaseDateIdentity[] =
+    "AMCLIENT_RELEASE_DATE:" AMPROJ_CLIENT_RELEASE_DATE;
 static NSString *AMReleaseChannel(void) { return @AMCLIENT_CHANNEL; }
 static NSURL *AMReleaseCacheURL(void) {
     NSURL *root = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
@@ -397,8 +402,7 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
     NSString *message = self.manager.policy[@"message"];
     self.messageLabel.text = message.length ? message : @"当前版本已停止支持，请更新后继续使用。";
     self.hintLabel.text = retired ? @"请先备份工程，导入正式版并检查后再删除 Beta。" : @"请保留原应用，覆盖安装可保留本机工程。";
-    NSInteger target = MAX([self.manager.policy[@"latestRelease"] integerValue], [self.manager.policy[@"minimumRelease"] integerValue]);
-    self.versionLabel.text = target > AMPROJ_RELEASE_CODE ? [NSString stringWithFormat:@"r%d → r%ld · %@",AMPROJ_RELEASE_CODE,(long)target,[AMReleaseChannel() isEqual:@"beta"] ? @"Beta 测试版" : @"正式版"] : [NSString stringWithFormat:@"r%d · %@",AMPROJ_RELEASE_CODE,[AMReleaseChannel() isEqual:@"beta"] ? @"Beta 测试版" : @"正式版"];
+    self.versionLabel.text = AMClientReleaseDisplayName(@AMPROJ_CLIENT_RELEASE_DATE, AMReleaseChannel());
     [self.updateButton setTitle:retired ? @"前往安装正式版" : @"立即更新" forState:UIControlStateNormal];
 }
 - (void)update { AMAppUpdatePresent(self, [NSURL URLWithString:self.manager.policy[@"downloadURL"]], [self.manager.policy[@"retired"] boolValue]); }
