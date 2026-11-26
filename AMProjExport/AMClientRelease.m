@@ -43,7 +43,7 @@ static UIViewController *AMReleaseTopController(void) {
                 id tab = [top valueForKey:@"embedTBC"];
                 if ([tab isKindOfClass:UITabBarController.class]) next = tab;
                 else if ([tab isKindOfClass:UIViewController.class]) {
-                    id selected = [tab valueForKey:@"selectedViewController"];
+                    id selected = ((UIViewController *)tab).presentedViewController ?: [tab valueForKey:@"selectedViewController"];
                     if ([selected isKindOfClass:UIViewController.class]) next = selected;
                 }
             } @catch (__unused NSException *exception) { next = nil; }

@@ -16,6 +16,10 @@ enum { UISceneActivationStateForegroundActive = 0, UIWindowLevelNormal = 0 };
 @property(nonatomic,strong) UIViewController *selectedViewController;
 @end
 @implementation UITabBarController @end
+@interface CustomTabController : UIViewController
+@property(nonatomic,strong) UIViewController *selectedViewController;
+@end
+@implementation CustomTabController @end
 @interface MainVC : UIViewController
 @property(nonatomic,strong) UIViewController *embedTBC;
 @end
@@ -61,7 +65,12 @@ int main(void) { @autoreleasepool {
     assert(AMReleaseTopController()==editor && !AMClientReleaseSafePresenter(NSStringFromClass(AMReleaseTopController().class)));
     AMProjShareVideoReplicaVC *share=[AMProjShareVideoReplicaVC new];editor.presentedViewController=share;
     assert(AMReleaseTopController()==share && !AMClientReleaseSafePresenter(NSStringFromClass(AMReleaseTopController().class)));
-    home.presentedViewController=nil;main.embedTBC=[UIViewController new];
+    home.presentedViewController=nil;
+    CustomTabController *custom=[CustomTabController new];main.embedTBC=custom;custom.selectedViewController=home;
+    assert(AMReleaseTopController()==home);
+    custom.presentedViewController=share;
+    assert(AMReleaseTopController()==share && !AMClientReleaseSafePresenter(NSStringFromClass(AMReleaseTopController().class)));
+    main.embedTBC=[UIViewController new];
     assert(AMReleaseTopController()==main && !AMClientReleaseSafePresenter(NSStringFromClass(main.class)));
     puts("CLIENT_RELEASE_PRESENTER_PASS");
 } }
