@@ -43,7 +43,7 @@ static NSString *AMUpdateProfileTeam(void) {
 @property(nonatomic) NSString *bundle;
 @property(nonatomic) NSString *channel;
 @property(nonatomic) NSString *targetBundle;
-@property(nonatomic) NSInteger release;
+@property(nonatomic) NSInteger releaseCode;
 @property(nonatomic) NSString *pendingKey;
 @property(nonatomic) NSString *requestId;
 @property(nonatomic) NSURL *manifest;
@@ -58,9 +58,9 @@ static NSString *AMUpdateProfileTeam(void) {
     [super viewDidLoad]; self.title = @"更新猫鹤 AM"; self.view.backgroundColor = UIColor.systemBackgroundColor;
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:self action:@selector(close)];
     NSDictionary *info = NSBundle.mainBundle.infoDictionary;
-    self.bundle = NSBundle.mainBundle.bundleIdentifier; self.channel = info[@"AMProjReleaseChannel"]; self.release = [info[@"AMProjReleaseCode"] integerValue];
+    self.bundle = NSBundle.mainBundle.bundleIdentifier; self.channel = info[@"AMProjReleaseChannel"]; self.releaseCode = [info[@"AMProjReleaseCode"] integerValue];
     self.targetBundle = self.retiredBeta ? @"com.ayakameow.am" : self.bundle;
-    self.pendingKey = [NSString stringWithFormat:@"AMAppUpdateRequest-%@-%@-%ld",self.bundle,self.channel,(long)self.release];
+    self.pendingKey = [NSString stringWithFormat:@"AMAppUpdateRequest-%@-%@-%ld",self.bundle,self.channel,(long)self.releaseCode];
     self.status = [UILabel new]; self.status.numberOfLines = 0; self.status.font = [UIFont systemFontOfSize:16];
     self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     self.action = [UIButton buttonWithType:UIButtonTypeSystem]; self.action.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
@@ -84,7 +84,7 @@ static NSString *AMUpdateProfileTeam(void) {
     NSString *bundled = [info[@"AMAppUpdate"] isKindOfClass:NSDictionary.class] ? info[@"AMAppUpdate"][@"token"] : nil;
     NSString *team = AMUpdateProfileTeam();
     for (NSString *candidate in @[bundled ?: @"", AMUpdateSavedToken() ?: @""]) {
-        NSDictionary *claim = AMAppUpdateClaim(candidate, self.bundle, self.channel, self.release);
+        NSDictionary *claim = AMAppUpdateClaim(candidate, self.bundle, self.channel, self.releaseCode);
         if (claim && [claim[@"teamId"] isEqual:team]) { self.token = candidate; break; }
     }
     if (self.token.length && !self.retiredBeta) [self prepare]; else [self showAssociation];
@@ -207,9 +207,9 @@ static NSString *AMUpdateProfileTeam(void) {
     [self.web evaluateJavaScript:@"localStorage.getItem('meow_install_udid_request')" completionHandler:^(id session, NSError *scriptError) {
         if (self.stopped) return;
         if (scriptError || ![session isKindOfClass:NSString.class] || [session length] != 48) { [self setBusy:NO message:@"请先在下方完成设备登记，再继续更新。"]; return; }
-        [self request:[NSURL URLWithString:[AMUpdateOrigin stringByAppendingString:@"/api/app-update/link"]] body:@{@"websiteSession":session,@"bundleId":self.bundle,@"channel":self.channel ?: @"",@"release":@(self.release),@"teamId":team ?: @"",@"migration":@(self.retiredBeta)} completion:^(NSDictionary *data, NSInteger status, NSError *error) {
+        [self request:[NSURL URLWithString:[AMUpdateOrigin stringByAppendingString:@"/api/app-update/link"]] body:@{@"websiteSession":session,@"bundleId":self.bundle,@"channel":self.channel ?: @"",@"release":@(self.releaseCode),@"teamId":team ?: @"",@"migration":@(self.retiredBeta)} completion:^(NSDictionary *data, NSInteger status, NSError *error) {
             NSString *token = [data[@"token"] isKindOfClass:NSString.class] ? data[@"token"] : nil;
-            NSDictionary *claim = AMAppUpdateClaim(token, self.targetBundle, self.retiredBeta ? @"stable" : self.channel, self.retiredBeta ? 0 : self.release);
+            NSDictionary *claim = AMAppUpdateClaim(token, self.targetBundle, self.retiredBeta ? @"stable" : self.channel, self.retiredBeta ? 0 : self.releaseCode);
             if (error || status != 200 || !claim || (!self.retiredBeta && ![claim[@"teamId"] isEqual:team])) {
                 [self setBusy:NO message:[data[@"error"] isKindOfClass:NSString.class] ? data[@"error"] : @"设备关联未完成，请完成下方登记或联系管理员检查签名身份。"]; return;
             }
