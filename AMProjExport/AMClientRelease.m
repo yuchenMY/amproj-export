@@ -35,6 +35,19 @@ static UIViewController *AMReleaseTopController(void) {
         UIViewController *next = top.presentedViewController;
         if (!next && [top isKindOfClass:UINavigationController.class]) next = ((UINavigationController *)top).visibleViewController;
         if (!next && [top isKindOfClass:UITabBarController.class]) next = ((UITabBarController *)top).selectedViewController;
+        // Build 865 embeds its browsing tabs in MainVC rather than making them the root.
+        NSString *name = NSStringFromClass(top.class);
+        if (!next && ([name isEqual:@"MainVC"] || [name hasSuffix:@".MainVC"] ||
+            [name isEqual:@"_TtC12AlightMotion6MainVC"])) {
+            @try {
+                id tab = [top valueForKey:@"embedTBC"];
+                if ([tab isKindOfClass:UITabBarController.class]) next = tab;
+                else if ([tab isKindOfClass:UIViewController.class]) {
+                    id selected = [tab valueForKey:@"selectedViewController"];
+                    if ([selected isKindOfClass:UIViewController.class]) next = selected;
+                }
+            } @catch (__unused NSException *exception) { next = nil; }
+        }
         if (!next || next == top) break;
         top = next;
     }

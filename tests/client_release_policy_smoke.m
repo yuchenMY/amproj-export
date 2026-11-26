@@ -21,6 +21,7 @@ int main(void) {
   assert(AMClientReleaseValidatedPolicy(p,@"beta") && AMClientReleasePolicyBlocked(p,9999,3000));
   p[@"enabled"]=@NO;assert(!AMClientReleasePolicyBlocked(p,1,3000));
   assert(AMClientReleaseSafePresenter(@"AlightMotion.HomeVC"));
+  assert(AMClientReleaseSafePresenter(@"AMHomeUIController"));
   assert(!AMClientReleaseSafePresenter(@"AMProjShareVideoReplicaVC"));
   assert(!AMClientReleaseSafePresenter(@"AlightMotion.EditorVC"));
   NSURL *root=[[NSURL fileURLWithPath:NSTemporaryDirectory()] URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];

@@ -12,6 +12,21 @@ from build_865_migration_package import stamp_client_release
 ROOT = Path(__file__).resolve().parents[1]
 
 class ClientReleaseTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform=='darwin','Requires Objective-C/Foundation')
+    def test_actual_presenter_resolves_865_tabs_without_covering_editor_or_share(self):
+        code=(ROOT/'AMProjExport/AMClientRelease.m').read_text(encoding='utf-8')
+        start=code.index('static UIViewController *AMReleaseTopController(void) {')
+        resolver=code[start:code.index('// 只收集原生',start)]
+        fixture=(ROOT/'tests/client_release_presenter_smoke.m').read_text(encoding='utf-8').replace('// AMPROJ_PRODUCTION_TOP_CONTROLLER',resolver)
+        with tempfile.TemporaryDirectory() as temporary:
+            source=Path(temporary)/'presenter.m'; binary=Path(temporary)/'presenter'
+            source.write_text(fixture,encoding='utf-8')
+            built=subprocess.run(['clang','-fobjc-arc','-framework','Foundation','-I',str(ROOT/'AMProjExport'),str(source),'-o',str(binary)],capture_output=True,text=True,timeout=30)
+            self.assertEqual(built.returncode,0,built.stderr)
+            result=subprocess.run([str(binary)],capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertIn('CLIENT_RELEASE_PRESENTER_PASS',result.stdout)
+
     def test_packager_uses_compiled_identity_and_clears_stale_metadata(self):
         info = plistlib.dumps({'AMProjReleaseCode':999,'AMProjReleaseChannel':'beta','name':'keep'})
         for channel in ('stable','beta'):

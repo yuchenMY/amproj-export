@@ -54,6 +54,7 @@ static inline BOOL AMClientReleaseSaveCache(NSURL *url, NSDictionary *policy, NS
 }
 static inline BOOL AMClientReleaseSafePresenter(NSString *className) {
     // Only established browsing pages may interrupt the user with an update gate.
-    return [className hasSuffix:@"HomeVC"] || [className hasSuffix:@"ProjectsVC"] ||
+    return [className isEqual:@"AMHomeUIController"] ||
+        [className hasSuffix:@"HomeVC"] || [className hasSuffix:@"ProjectsVC"] ||
         [className hasSuffix:@"ProjectsListVC"] || [className isEqual:@"AMCloudAccountController"];
 }
