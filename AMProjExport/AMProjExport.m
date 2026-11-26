@@ -50,6 +50,7 @@
 
 #if AMPROJ_CLOUD_SYNC
 #import "AMCloudSync.h"
+#import "AMClientRelease.h"
 #endif
 
 static NSString *const kAMProjPluginVersion = @"44";
@@ -23830,6 +23831,7 @@ static void AMProjExportInit(void) {
         }
 #if AMPROJ_CLOUD_SYNC
         AMCloudSyncInstallPluginHooksEarly();
+        AMClientReleaseInstall();
 #endif
         amproj_restorePhotoAlbumMode();
         amproj_installIPAFireWindowHook();

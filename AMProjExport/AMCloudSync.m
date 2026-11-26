@@ -4,6 +4,8 @@
 #import "AMEditorCustomization.h"
 #import "AMProjV865ProjectFlow.h"
 #import "AMCloudTabPolicy.h"
+#import "AMClientRelease.h"
+#import "AMClientPackageIdentity.h"
 #if AMPROJ_BETA_DIAGNOSTICS
 #import "AMProjBetaDiagnostics.h"
 #import "AMProjPerformancePolicy.h"
@@ -1069,6 +1071,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
     }
     [request setValue:@"ios" forHTTPHeaderField:@"X-AM-Platform"];
     [request setValue:deviceIdentifier forHTTPHeaderField:@"X-AM-Device-ID"];
+    AMClientReleaseAddHeaders(request);
     if (authenticated) {
         NSString *token = AMCloudReadToken();
         if (!token.length) {
@@ -1109,6 +1112,7 @@ static NSDictionary *AMCloudEnvelope(NSData *data, NSHTTPURLResponse *response,
         }
         NSHTTPURLResponse *response = [rawResponse isKindOfClass:NSHTTPURLResponse.class]
             ? (NSHTTPURLResponse *)rawResponse : nil;
+        AMClientReleaseHandleResponse(rawResponse, data);
         NSError *responseError = nil;
         NSDictionary *payload = AMCloudEnvelope(data, response, &responseError);
         if (response.statusCode == 401 && authenticated) {
@@ -2222,6 +2226,8 @@ static NSString *AMCloudBackupTabStyleScript(void) {
          @"sessionStorage.setItem(k,'1');}}catch(e){}})();",
         bootstrapJSON];
     WKUserContentController *content = [WKUserContentController new];
+    [content addUserScript:[[WKUserScript alloc] initWithSource:AMClientPackageRequestScript()
+        injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [content addUserScript:[[WKUserScript alloc] initWithSource:source
                                                  injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                                               forMainFrameOnly:YES]];
@@ -4514,6 +4520,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 
 - (void)attachCloudBackupBannerToController:(UIViewController *)controller {
     if (!controller.viewIfLoaded.window) return;
+    AMClientReleaseBrowsingControllerVisible(controller);
     [self refreshWindowCloudOverlayVisibility];
 }
 
@@ -5716,6 +5723,7 @@ static void AMCloudQuietReauthAttempt(void) {
             return;
         }
         BOOL networkFailure = [error.domain isEqualToString:NSURLErrorDomain];
+        if ([error.domain isEqualToString:AMCloudErrorDomain] && error.code == 426) return;
         if (!networkFailure) {
             // 服务器明确拒绝（权限被停）：立刻锁，不等 TTL。
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -5799,6 +5807,7 @@ void AMCloudSubmitCrashTicket(NSString *title, NSString *summary, NSString *logP
     NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
 
     void (^addIdentity)(NSMutableURLRequest *) = ^(NSMutableURLRequest *request) {
+        AMClientReleaseAddHeaders(request);
         [request setValue:@"ios" forHTTPHeaderField:@"X-AM-Platform"];
         [request setValue:deviceIdentifier forHTTPHeaderField:@"X-AM-Device-ID"];
         [request setValue:[@"Bearer " stringByAppendingString:token]

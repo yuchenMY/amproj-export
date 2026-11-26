@@ -15,6 +15,7 @@
 //
 
 #import "AMProjCrashReporter.h"
+#import "AMClientPackageIdentity.h"
 #if AMPROJ_CLOUD_SYNC
 #import "AMCloudSync.h"
 #endif
@@ -119,7 +120,9 @@ static NSString *AMProjCrashBuildTag(void) {
         ? info[@"CFBundleShortVersionString"] : @"?";
     NSString *build = [info[@"CFBundleVersion"] isKindOfClass:NSString.class]
         ? info[@"CFBundleVersion"] : @"?";
-    return [NSString stringWithFormat:@"%@ (%@)", shortVersion, build];
+    NSDictionary *identity = AMClientPackageIdentity();
+    return [NSString stringWithFormat:@"%@ (%@) · r%@ · %@ · %@", shortVersion, build,
+        identity[@"release"], identity[@"channel"], identity[@"build"]];
 }
 
 static NSString *AMProjCrashDeviceSummary(void) {

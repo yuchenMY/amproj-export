@@ -1,0 +1,59 @@
+diff --git a/main.go b/main.go
+index 92e10b2..5cb3177 100644
+--- a/main.go
++++ b/main.go
+@@ -177,6 +177,13 @@ func (s *server) routes() http.Handler {
+ 			w.WriteHeader(http.StatusNoContent)
+ 			return
+ 		}
++		if path == "/ios/client-release" && r.Method == http.MethodGet {
++			s.publicClientRelease(w, r)
++			return
++		}
++		if s.clientReleaseBlocked(w, r, path) {
++			return
++		}
+ 		if path != "/health" && path != "/v1/hello" && path != "/v1/events" && s.maintenanceBlocked(w) {
+ 			return
+ 		}
+@@ -313,6 +320,8 @@ func (s *server) adminRouter(w http.ResponseWriter, r *http.Request) {
+ 		s.adminPluginIcon(w, r)
+ 	case "/system":
+ 		s.adminSystem(w, r)
++	case "/client-releases":
++		s.adminClientReleases(w, r)
+ 	case "/admins":
+ 		s.adminAdmins(w, r)
+ 	case "/diagnostics":
+diff --git a/admin_system_template.go b/admin_system_template.go
+index c6c3ede..65816f4 100644
+--- a/admin_system_template.go
++++ b/admin_system_template.go
+@@ -10,6 +10,7 @@ const systemManagementTpl = `{{with .Data}}
+   </div>
+ 
+   <nav class="af-glass f ic wrap mb16" style="padding:4px;overflow-x:auto" aria-label="系统管理分类">
++    <a class="af-btn af-btn-quiet" href="/admin/client-releases">版本管理</a>
+     <a class="af-btn {{if eq .Tab "overview"}}af-btn-primary{{else}}af-btn-quiet{{end}}" href="/admin/system?tab=overview">总览</a>
+     <a class="af-btn {{if eq .Tab "access"}}af-btn-primary{{else}}af-btn-quiet{{end}}" href="/admin/system?tab=access">注册与可用性</a>
+     <a class="af-btn {{if eq .Tab "features"}}af-btn-primary{{else}}af-btn-quiet{{end}}" href="/admin/system?tab=features">功能控制</a>
+diff --git a/support.go b/support.go
+index 8ea5d12..54ba7a0 100644
+--- a/support.go
++++ b/support.go
+@@ -229,6 +229,7 @@ func (s *server) supportCreateTicket(w http.ResponseWriter, r *http.Request) {
+ 		fail(w, errBad("内容太长了，最多 2000 字"))
+ 		return
+ 	}
++	content = clientReleaseTicketContent(content, r)
+ 	var openCount int
+ 	if err := s.db.QueryRow(
+ 		`SELECT COUNT(*) FROM support_tickets WHERE user_id=? AND status<>'closed'`, u.ID,
+@@ -510,6 +511,7 @@ func (s *server) supportTicketReply(w http.ResponseWriter, r *http.Request, tick
+ 		fail(w, errBad("回复太长了，最多 1000 字"))
+ 		return
+ 	}
++	content = clientReleaseTicketContent(content, r)
+ 	owned, status, err := s.supportOwnTicket(ticketID, u.ID)
+ 	if err != nil {
+ 		fail(w, err)

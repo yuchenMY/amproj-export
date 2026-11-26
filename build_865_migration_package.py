@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -69,6 +70,23 @@ DEFAULT_BUNDLE_NAME = "\u732b\u9e64AM"
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def stamp_client_release(info: bytes, cloud: bytes) -> bytes:
+    """Use compiled identity; discard stale identity when packaging older plugins."""
+    plist = plistlib.loads(info)
+    for key in ('AMProjReleaseCode', 'AMProjReleaseChannel', 'AMProjReleaseBuild'):
+        plist.pop(key, None)
+    identities = set(re.findall(rb'AMCLIENT_RELEASE:([0-9]+):(stable|beta):([0-9a-f]{12})\x00', cloud))
+    if b'AMCLIENT_RELEASE:' in cloud and len(identities) != 1:
+        raise RuntimeError('Cloud payload has invalid or ambiguous compiled release identity')
+    if identities:
+        code, channel, build = identities.pop()
+        number = int(code)
+        if not 0 < number <= 1000000000:
+            raise RuntimeError('Cloud payload has invalid release code')
+        plist.update(AMProjReleaseCode=number, AMProjReleaseChannel=channel.decode(), AMProjReleaseBuild=build.decode())
+    return plistlib.dumps(plist, sort_keys=False)
 
 
 def copy_zip_info(
@@ -454,6 +472,7 @@ def package(
             source_main, include_home_ui=supplied_home_ui is not None
         )
         prepared_info = prepare_info_plist(source_info, bundle_id, display_name)
+        prepared_info = stamp_client_release(prepared_info, cloud)
 
         intended = {MAIN_PATH, INFO_PATH, CLOUD_PATH, BUTTON_PATH, *categories}
         stale = {name for name in names if _is_signature_entry(name)}
