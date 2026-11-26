@@ -21,7 +21,7 @@ class ClientReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source=Path(temporary)/'presenter.m'; binary=Path(temporary)/'presenter'
             source.write_text(fixture,encoding='utf-8')
-            built=subprocess.run(['clang','-fobjc-arc','-framework','Foundation','-I',str(ROOT/'AMProjExport'),str(source),'-o',str(binary)],capture_output=True,text=True,timeout=30)
+            built=subprocess.run(['clang','-fobjc-arc','-framework','Foundation','-framework','CoreGraphics','-I',str(ROOT/'AMProjExport'),str(source),'-o',str(binary)],capture_output=True,text=True,timeout=30)
             self.assertEqual(built.returncode,0,built.stderr)
             result=subprocess.run([str(binary)],capture_output=True,text=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)

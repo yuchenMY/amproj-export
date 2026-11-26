@@ -6,7 +6,7 @@ SDK  = $(shell xcrun --sdk iphoneos --show-sdk-path)
 CC   = $(shell xcrun --sdk iphoneos -f clang)
 LEGACY_862 ?= 0
 DIAGNOSTIC_BUILD_ID ?= $(shell git rev-parse --short=12 HEAD)-beta
-RELEASE_CODE ?= 174
+RELEASE_CODE ?= 175
 CLIENT_BUILD_ID ?= $(shell git rev-parse --short=12 HEAD)
 CFLAGS = -arch arm64 -dynamiclib -isysroot $(SDK) \
          -miphoneos-version-min=14.0 -fobjc-arc -O2 \

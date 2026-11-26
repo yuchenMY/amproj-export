@@ -4319,6 +4319,7 @@ static void AMCloudCaptureLayoutProbe(NSString *phase, UIView *header, NSInteger
 #endif
 
 - (void)refreshWindowCloudOverlayVisibility {
+    AMClientReleasePresentIfNeeded();
     if (AMCloudUIKitDisabled()) { [self setCloudLibraryVisible:NO]; return; }
     // 后台返回的头像/网络回调不能因找不到活动窗口而拆掉已挂载内容。
     if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;

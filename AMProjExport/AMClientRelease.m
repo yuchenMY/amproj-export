@@ -4,7 +4,7 @@
 #import "AMProjZIPWriter.h"
 #import <QuartzCore/QuartzCore.h>
 #ifndef AMPROJ_RELEASE_CODE
-#define AMPROJ_RELEASE_CODE 174
+#define AMPROJ_RELEASE_CODE 175
 #endif
 #ifndef AMPROJ_CLIENT_BUILD_ID
 #define AMPROJ_CLIENT_BUILD_ID "unknown"
@@ -48,10 +48,63 @@ static UIViewController *AMReleaseTopController(void) {
                 }
             } @catch (__unused NSException *exception) { next = nil; }
         }
+        // SwiftUI's NodeHosting root embeds the native navigation container as a child.
+        if (!next) for (UIViewController *child in top.childViewControllers) {
+            if (([child isKindOfClass:UINavigationController.class] || [child isKindOfClass:UITabBarController.class]) &&
+                child.viewIfLoaded.window && !child.viewIfLoaded.hidden && child.viewIfLoaded.alpha > 0.01) {
+                next = child; break;
+            }
+        }
         if (!next || next == top) break;
         top = next;
     }
     return top;
+}
+static BOOL AMReleaseVisibleModalInTree(UIViewController *controller, NSUInteger depth, NSUInteger *remaining) {
+    if (!controller.viewIfLoaded.window || controller.viewIfLoaded.hidden || controller.viewIfLoaded.alpha <= 0.01) return NO;
+    if (depth > 16 || !*remaining) return YES;
+    (*remaining)--;
+    if (AMClientReleaseProtectedPresenter(NSStringFromClass(controller.class)) || controller.presentedViewController) return YES;
+    for (UIViewController *child in controller.childViewControllers)
+        if (AMReleaseVisibleModalInTree(child, depth + 1, remaining)) return YES;
+    return NO;
+}
+static BOOL AMReleaseVisibleBrowsingView(UIView *view, NSUInteger depth, NSUInteger *remaining, BOOL customOnly) {
+    if (!view.window || view.hidden || view.alpha <= 0.01 || depth > 18 || !*remaining) return NO;
+    (*remaining)--;
+    BOOL homepage = !customOnly && AMClientReleaseBrowsingViewClass(NSStringFromClass(view.class));
+    BOOL customHome = [NSStringFromClass(view.nextResponder.class) isEqual:@"AMHomeUIController"];
+    if ((homepage || customHome) && view.bounds.size.width > 80 && view.bounds.size.height > 80) {
+        BOOL exposed = YES;
+        // Native 865 home views extend beneath the persistent bottom tab bar.
+        for (NSNumber *fraction in @[@0.2,@0.45,@0.7]) {
+            CGPoint local = CGPointMake(view.bounds.origin.x + view.bounds.size.width * 0.5,
+                view.bounds.origin.y + view.bounds.size.height * fraction.doubleValue);
+            UIView *hit = [view.window hitTest:[view convertPoint:local toView:view.window] withEvent:nil];
+            if (!hit || !(hit == view || [hit isDescendantOfView:view])) { exposed = NO; break; }
+        }
+        if (exposed) return YES;
+    }
+    for (UIView *child in view.subviews)
+        if (AMReleaseVisibleBrowsingView(child, depth + 1, remaining, customOnly)) return YES;
+    return NO;
+}
+static BOOL AMReleaseControllerIsBrowsing(UIViewController *controller) {
+    if (!controller.viewIfLoaded.window || controller.viewIfLoaded.hidden || controller.viewIfLoaded.alpha <= 0.01) return NO;
+    NSUInteger remaining = 128;
+    if (AMReleaseVisibleModalInTree(controller, 0, &remaining)) return NO;
+    if (AMClientReleaseSafePresenter(NSStringFromClass(controller.class))) return YES;
+    remaining = 256;
+    if (AMReleaseVisibleBrowsingView(controller.viewIfLoaded, 0, &remaining, NO)) return YES;
+    // The custom home is a sibling of the selected native tab in MainVC's content view.
+    UIViewController *parent = controller.parentViewController;
+    for (NSUInteger depth = 0; parent && depth < 12; depth++, parent = parent.parentViewController) {
+        remaining = 128;
+        if (AMReleaseVisibleModalInTree(parent, 0, &remaining)) return NO;
+        remaining = 256;
+        if (AMReleaseVisibleBrowsingView(parent.viewIfLoaded, 0, &remaining, YES)) return YES;
+    }
+    return NO;
 }
 // 只收集原生 UUID 工程 XML 和项目素材目录，不导出账户、偏好或令牌。
 static BOOL AMReleaseCollectBackup(NSURL *library, NSMutableDictionary **scenesOut,
@@ -153,12 +206,15 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
 @property(nonatomic) NSTimeInterval lastCheck;
 @property(nonatomic, strong) AMReleaseController *gate;
 @property(nonatomic) NSUInteger presentationRetries;
-@property(nonatomic, weak) UIViewController *browsingController;
+@property(nonatomic) BOOL presentationRetryScheduled;
+@property(nonatomic) NSTimeInterval lastPresentationAttempt;
+@property(nonatomic, copy) NSString *lastPresentationState;
 + (instancetype)shared;
 - (void)check:(BOOL)force;
 - (void)present;
 - (void)accept:(NSDictionary *)policy;
 - (BOOL)blocked;
+- (void)recordPresentation:(NSString *)phase top:(UIViewController *)top;
 @end
 @implementation AMReleaseManager
 + (instancetype)shared {
@@ -186,6 +242,7 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
     [self present];
 }
 - (void)check:(BOOL)force {
+    self.presentationRetries = 0;
     [self present];
     NSTimeInterval now = NSDate.date.timeIntervalSince1970;
     if (self.checking || (!force && now - self.lastCheck < 60)) return;
@@ -215,20 +272,29 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
         }
         return;
     }
-    if (!self.policy || ![self.policy[@"enabled"] boolValue]) return;
+    if (!self.policy || ![self.policy[@"enabled"] boolValue]) { [self recordPresentation:@"inactive" top:nil]; return; }
+    if (!blocked && [self.policy[@"latestRelease"] integerValue] <= AMPROJ_RELEASE_CODE) {
+        [self recordPresentation:@"up_to_date" top:nil]; return;
+    }
     UIViewController *top = AMReleaseTopController();
-    NSString *name = NSStringFromClass(top.class);
-    if (!AMClientReleaseSafePresenter(name) && top != self.browsingController) return;
-    if (!top.viewIfLoaded.window || top.presentedViewController || top.transitionCoordinator ||
+    BOOL browsing = AMReleaseControllerIsBrowsing(top);
+    if (!browsing || !top.viewIfLoaded.window || top.presentedViewController || top.transitionCoordinator ||
         top.isBeingPresented || top.isBeingDismissed || [top isKindOfClass:UIAlertController.class]) {
-        if (blocked && self.presentationRetries++ < 10) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500*NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [self present]; });
+        [self recordPresentation:browsing ? @"waiting_transition" : @"waiting_browsing_page" top:top];
+        if (blocked && !self.presentationRetryScheduled && self.presentationRetries < 10) {
+            self.presentationRetries++; self.presentationRetryScheduled = YES;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500*NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+                self.presentationRetryScheduled = NO; [self present];
+            });
+        }
         return;
     }
     self.presentationRetries = 0;
     if (blocked) {
         self.gate = [AMReleaseController new]; self.gate.manager = self;
-        self.gate.modalPresentationStyle = UIModalPresentationFullScreen; self.gate.modalInPresentation = YES;
-        [top presentViewController:self.gate animated:NO completion:nil];
+        self.gate.modalPresentationStyle = UIModalPresentationOverFullScreen; self.gate.modalInPresentation = YES;
+        [self recordPresentation:@"presenting_dialog" top:top];
+        [top presentViewController:self.gate animated:NO completion:^{ [self recordPresentation:@"dialog_visible" top:top]; }];
     } else if ([self.policy[@"latestRelease"] integerValue] > AMPROJ_RELEASE_CODE) {
         NSString *key = [NSString stringWithFormat:@"AMReleaseNotice-%@-%@-%@",AMReleaseChannel(),self.policy[@"latestRelease"],self.policy[@"revision"]];
         if (NSDate.date.timeIntervalSince1970 - [NSUserDefaults.standardUserDefaults doubleForKey:key] < 86400) return;
@@ -241,6 +307,17 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
         }]];
         [top presentViewController:notice animated:YES completion:nil];
     }
+}
+- (void)recordPresentation:(NSString *)phase top:(UIViewController *)top {
+    NSString *name = top ? NSStringFromClass(top.class) : @"";
+    NSString *key = [NSString stringWithFormat:@"%@/%@/%@",phase,name,self.policy[@"revision"]];
+    if ([key isEqual:self.lastPresentationState]) return;
+    self.lastPresentationState = key;
+    NSURL *url = [AMReleaseCacheURL().URLByDeletingLastPathComponent URLByAppendingPathComponent:@"presentation.plist"];
+    [NSFileManager.defaultManager createDirectoryAtURL:url.URLByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+    [@{@"phase":phase,@"top":name,@"viewClass":top.viewIfLoaded ? NSStringFromClass(top.viewIfLoaded.class) : @"",
+        @"revision":self.policy[@"revision"] ?: @0,
+        @"release":@(AMPROJ_RELEASE_CODE),@"channel":AMReleaseChannel(),@"time":@(NSDate.date.timeIntervalSince1970)} writeToURL:url atomically:YES];
 }
 @end
 @implementation AMReleaseController
@@ -255,23 +332,38 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
-    self.view.backgroundColor = [UIColor colorWithWhite:0.98 alpha:1];
-    UILabel *title = [UILabel new]; title.text = @"请更新猫鹤 AM"; title.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
+    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.38];
+    UIView *card = [UIView new]; card.backgroundColor = UIColor.whiteColor;
+    card.layer.cornerRadius = 24; card.clipsToBounds = YES; card.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:card];
+    UILabel *title = [UILabel new]; title.text = @"请更新猫鹤 AM"; title.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+    title.numberOfLines = 0;
     UILabel *version = [UILabel new]; version.text = [NSString stringWithFormat:@"r%d · %@",AMPROJ_RELEASE_CODE,[AMReleaseChannel() isEqual:@"beta"] ? @"Beta 测试版" : @"正式版"];
     version.textColor = UIColor.secondaryLabelColor;
     self.messageLabel = [UILabel new]; self.messageLabel.numberOfLines = 0; self.messageLabel.font = [UIFont systemFontOfSize:16];
     self.statusLabel = [UILabel new]; self.statusLabel.numberOfLines = 0; self.statusLabel.textColor = UIColor.secondaryLabelColor; self.statusLabel.font = [UIFont systemFontOfSize:13];
+    for (UILabel *label in @[version,title,self.messageLabel,self.statusLabel])
+        [label setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];
     self.updateButton = [self button:@"立即更新" action:@selector(update) primary:YES];
     self.backupButton = [self button:@"导出本机工程备份" action:@selector(backup) primary:NO];
     UIButton *retry = [self button:@"重新检查版本" action:@selector(retry) primary:NO];
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[version,title,self.messageLabel,self.updateButton,self.backupButton,retry,self.statusLabel]];
-    stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 18; stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 14; stack.translatesAutoresizingMaskIntoConstraints = NO;
     UIScrollView *scroll = [UIScrollView new]; scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:scroll]; [scroll addSubview:stack];
+    [card addSubview:scroll]; [scroll addSubview:stack];
+    NSLayoutConstraint *naturalHeight = [scroll.heightAnchor constraintEqualToAnchor:stack.heightAnchor constant:48];
+    naturalHeight.priority = UILayoutPriorityDefaultHigh;
+    NSLayoutConstraint *preferredWidth = [card.widthAnchor constraintEqualToConstant:360];
+    preferredWidth.priority = UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[
-        [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:24],
-        [scroll.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
-        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor], [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [card.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [card.centerYAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.centerYAnchor], preferredWidth,
+        [card.widthAnchor constraintLessThanOrEqualToAnchor:self.view.widthAnchor constant:-48],
+        [card.topAnchor constraintGreaterThanOrEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:16],
+        [card.bottomAnchor constraintLessThanOrEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-16],
+        [scroll.topAnchor constraintEqualToAnchor:card.topAnchor], [scroll.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:card.leadingAnchor], [scroll.trailingAnchor constraintEqualToAnchor:card.trailingAnchor], naturalHeight,
+        [scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],
         [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:24],
         [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
         [stack.leadingAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.leadingAnchor constant:28],
@@ -339,12 +431,16 @@ void AMClientReleaseHandleResponse(NSURLResponse *response, NSData *data) {
     dispatch_async(dispatch_get_main_queue(), ^{ [[AMReleaseManager shared] accept:policy]; });
 }
 void AMClientReleasePresentIfNeeded(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{ [AMReleaseManager shared].presentationRetries = 0; [[AMReleaseManager shared] present]; });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        AMReleaseManager *manager = [AMReleaseManager shared];
+        NSTimeInterval now = CACurrentMediaTime();
+        if (now - manager.lastPresentationAttempt < 0.5) return;
+        manager.lastPresentationAttempt = now; [manager present];
+    });
 }
 void AMClientReleaseBrowsingControllerVisible(UIViewController *controller) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!controller.viewIfLoaded.window || controller.presentedViewController) return;
-        [AMReleaseManager shared].browsingController = controller;
         AMClientReleasePresentIfNeeded();
     });
 }

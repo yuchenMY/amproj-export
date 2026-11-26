@@ -58,3 +58,13 @@ static inline BOOL AMClientReleaseSafePresenter(NSString *className) {
         [className hasSuffix:@"HomeVC"] || [className hasSuffix:@"ProjectsVC"] ||
         [className hasSuffix:@"ProjectsListVC"] || [className isEqual:@"AMCloudAccountController"];
 }
+static inline BOOL AMClientReleaseBrowsingViewClass(NSString *name) {
+    return [name containsString:@"Homepage8HomeView_"] ||
+        [name containsString:@"Homepage15ProjectListView_"] ||
+        [name containsString:@"Homepage21TemplatesShowcaseView_"];
+}
+static inline BOOL AMClientReleaseProtectedPresenter(NSString *name) {
+    for (NSString *part in @[@"Editor",@"EditVC",@"Workbench",@"Export",@"Share",@"Picker",@"CreateVC"])
+        if ([name containsString:part]) return YES;
+    return NO;
+}
