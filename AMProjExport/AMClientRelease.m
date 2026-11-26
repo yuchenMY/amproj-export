@@ -1,10 +1,11 @@
 // 猫鹤 AM · 版本策略、更新入口和用户工程迁移备份。
 #import "AMClientRelease.h"
 #import "AMClientReleasePolicy.h"
+#import "AMAppUpdate.h"
 #import "AMProjZIPWriter.h"
 #import <QuartzCore/QuartzCore.h>
 #ifndef AMPROJ_RELEASE_CODE
-#define AMPROJ_RELEASE_CODE 175
+#define AMPROJ_RELEASE_CODE 176
 #endif
 #ifndef AMPROJ_CLIENT_BUILD_ID
 #define AMPROJ_CLIENT_BUILD_ID "unknown"
@@ -191,6 +192,8 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
 @property(nonatomic, weak) AMReleaseManager *manager;
 @property(nonatomic, strong) UILabel *messageLabel;
 @property(nonatomic, strong) UILabel *statusLabel;
+@property(nonatomic, strong) UILabel *versionLabel;
+@property(nonatomic, strong) UILabel *hintLabel;
 @property(nonatomic, strong) UIButton *updateButton;
 @property(nonatomic, strong) UIButton *backupButton;
 @property(nonatomic) BOOL backupBusy;
@@ -303,7 +306,9 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
         [notice addAction:[UIAlertAction actionWithTitle:@"稍后" style:UIAlertActionStyleCancel handler:nil]];
         NSString *download = self.policy[@"downloadURL"];
         [notice addAction:[UIAlertAction actionWithTitle:@"前往更新" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-            [UIApplication.sharedApplication openURL:[NSURL URLWithString:download] options:@{} completionHandler:nil];
+            [top dismissViewControllerAnimated:YES completion:^{
+                AMAppUpdatePresent(top, [NSURL URLWithString:download], [self.policy[@"retired"] boolValue]);
+            }];
         }]];
         [top presentViewController:notice animated:YES completion:nil];
     }
@@ -324,36 +329,53 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
 - (UIButton *)button:(NSString *)title action:(SEL)selector primary:(BOOL)primary {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     [button setTitle:title forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    button.backgroundColor = primary ? [UIColor colorWithRed:0.08 green:0.58 blue:0.55 alpha:1] : [UIColor colorWithWhite:0.94 alpha:1];
-    [button setTitleColor:primary ? UIColor.whiteColor : UIColor.labelColor forState:UIControlStateNormal];
-    button.layer.cornerRadius = 14; [button.heightAnchor constraintEqualToConstant:52].active = YES;
+    button.titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody] scaledFontForFont:[UIFont systemFontOfSize:primary ? 16 : 14 weight:UIFontWeightSemibold]];
+    button.titleLabel.adjustsFontForContentSizeCategory = YES;
+    button.backgroundColor = primary ? [UIColor colorWithRed:0.125 green:0.133 blue:0.22 alpha:1] : UIColor.clearColor;
+    [button setTitleColor:primary ? UIColor.whiteColor : [UIColor colorWithRed:0.36 green:0.38 blue:0.44 alpha:1] forState:UIControlStateNormal];
+    [button setTitleColor:[UIColor colorWithWhite:0.55 alpha:1] forState:UIControlStateDisabled];
+    button.layer.cornerRadius = 14; [button.heightAnchor constraintGreaterThanOrEqualToConstant:primary ? 50 : 44].active = YES;
+    button.contentEdgeInsets = UIEdgeInsetsMake(12, 10, 12, 10);
     [button addTarget:self action:selector forControlEvents:UIControlEventTouchUpInside]; return button;
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
-    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.38];
+    self.view.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.14 alpha:0.32];
     UIView *card = [UIView new]; card.backgroundColor = UIColor.whiteColor;
-    card.layer.cornerRadius = 24; card.clipsToBounds = YES; card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.layer.cornerRadius = 26; card.clipsToBounds = YES; card.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:card];
-    UILabel *title = [UILabel new]; title.text = @"请更新猫鹤 AM"; title.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+    UIColor *ink = [UIColor colorWithRed:0.125 green:0.133 blue:0.22 alpha:1];
+    UIView *iconHost = [UIView new]; iconHost.backgroundColor = [UIColor colorWithRed:0.90 green:0.97 blue:0.95 alpha:1]; iconHost.layer.cornerRadius = 14;
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.down.app" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:23 weight:UIImageSymbolWeightMedium]]];
+    icon.tintColor = [UIColor colorWithRed:0.07 green:0.56 blue:0.51 alpha:1]; icon.translatesAutoresizingMaskIntoConstraints = NO;
+    [iconHost addSubview:icon];
+    [NSLayoutConstraint activateConstraints:@[[iconHost.widthAnchor constraintEqualToConstant:48], [iconHost.heightAnchor constraintEqualToConstant:48], [icon.centerXAnchor constraintEqualToAnchor:iconHost.centerXAnchor], [icon.centerYAnchor constraintEqualToAnchor:iconHost.centerYAnchor]]];
+    UILabel *title = [UILabel new]; title.text = @"请更新猫鹤 AM";
+    title.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleHeadline] scaledFontForFont:[UIFont systemFontOfSize:20 weight:UIFontWeightBold]]; title.textColor = ink;
     title.numberOfLines = 0;
-    UILabel *version = [UILabel new]; version.text = [NSString stringWithFormat:@"r%d · %@",AMPROJ_RELEASE_CODE,[AMReleaseChannel() isEqual:@"beta"] ? @"Beta 测试版" : @"正式版"];
-    version.textColor = UIColor.secondaryLabelColor;
-    self.messageLabel = [UILabel new]; self.messageLabel.numberOfLines = 0; self.messageLabel.font = [UIFont systemFontOfSize:16];
-    self.statusLabel = [UILabel new]; self.statusLabel.numberOfLines = 0; self.statusLabel.textColor = UIColor.secondaryLabelColor; self.statusLabel.font = [UIFont systemFontOfSize:13];
-    for (UILabel *label in @[version,title,self.messageLabel,self.statusLabel])
+    self.versionLabel = [UILabel new]; self.versionLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1]; self.versionLabel.textColor = UIColor.secondaryLabelColor; self.versionLabel.numberOfLines = 0;
+    UIStackView *headings = [[UIStackView alloc] initWithArrangedSubviews:@[title,self.versionLabel]]; headings.axis = UILayoutConstraintAxisVertical; headings.spacing = 5;
+    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[iconHost,headings]]; header.axis = UILayoutConstraintAxisHorizontal; header.alignment = UIStackViewAlignmentCenter; header.spacing = 14;
+    self.messageLabel = [UILabel new]; self.messageLabel.numberOfLines = 0; self.messageLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    self.messageLabel.textColor = [UIColor colorWithRed:0.36 green:0.38 blue:0.44 alpha:1];
+    self.hintLabel = [UILabel new]; self.hintLabel.numberOfLines = 0; self.hintLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1]; self.hintLabel.textColor = UIColor.secondaryLabelColor;
+    self.statusLabel = [UILabel new]; self.statusLabel.numberOfLines = 0; self.statusLabel.textColor = UIColor.secondaryLabelColor; self.statusLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    for (UILabel *label in @[self.versionLabel,title,self.messageLabel,self.hintLabel,self.statusLabel]) {
+        label.adjustsFontForContentSizeCategory = YES;
         [label setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];
+    }
     self.updateButton = [self button:@"立即更新" action:@selector(update) primary:YES];
-    self.backupButton = [self button:@"导出本机工程备份" action:@selector(backup) primary:NO];
-    UIButton *retry = [self button:@"重新检查版本" action:@selector(retry) primary:NO];
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[version,title,self.messageLabel,self.updateButton,self.backupButton,retry,self.statusLabel]];
-    stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 14; stack.translatesAutoresizingMaskIntoConstraints = NO;
+    self.backupButton = [self button:@"备份工程" action:@selector(backup) primary:NO]; self.backupButton.accessibilityLabel = @"导出本机工程备份";
+    UIButton *retry = [self button:@"重新检查" action:@selector(retry) primary:NO]; retry.accessibilityLabel = @"重新检查版本";
+    UIStackView *secondary = [[UIStackView alloc] initWithArrangedSubviews:@[self.backupButton,retry]]; secondary.axis = UILayoutConstraintAxisHorizontal; secondary.distribution = UIStackViewDistributionFillEqually; secondary.spacing = 8;
+    UIView *line = [UIView new]; line.backgroundColor = [UIColor colorWithWhite:0.94 alpha:1]; [line.heightAnchor constraintEqualToConstant:1].active = YES;
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[header,self.messageLabel,self.hintLabel,self.updateButton,line,secondary,self.statusLabel]];
+    stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 16; [stack setCustomSpacing:4 afterView:line]; [stack setCustomSpacing:4 afterView:secondary]; stack.translatesAutoresizingMaskIntoConstraints = NO;
     UIScrollView *scroll = [UIScrollView new]; scroll.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:scroll]; [scroll addSubview:stack];
     NSLayoutConstraint *naturalHeight = [scroll.heightAnchor constraintEqualToAnchor:stack.heightAnchor constant:48];
     naturalHeight.priority = UILayoutPriorityDefaultHigh;
-    NSLayoutConstraint *preferredWidth = [card.widthAnchor constraintEqualToConstant:360];
+    NSLayoutConstraint *preferredWidth = [card.widthAnchor constraintEqualToConstant:332];
     preferredWidth.priority = UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[
         [card.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
@@ -366,18 +388,20 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
         [scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],
         [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:24],
         [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
-        [stack.leadingAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.leadingAnchor constant:28],
-        [stack.trailingAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.trailingAnchor constant:-28]]];
+        [stack.leadingAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.leadingAnchor constant:24],
+        [stack.trailingAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.trailingAnchor constant:-24]]];
     [self updateContent];
 }
 - (void)updateContent {
     BOOL retired = [self.manager.policy[@"retired"] boolValue];
     NSString *message = self.manager.policy[@"message"];
-    self.messageLabel.text = [NSString stringWithFormat:@"%@\n\n%@",message.length ? message : @"当前版本已停止支持，请安装新版本继续使用。",
-        retired ? @"Beta 测试已结束。请先导出工程，安装正式版后逐个导入并检查，最后再删除 Beta。" : @"请覆盖安装新版本并保留应用数据，也可以先导出工程备份。"];
+    self.messageLabel.text = message.length ? message : @"当前版本已停止支持，请更新后继续使用。";
+    self.hintLabel.text = retired ? @"请先备份工程，导入正式版并检查后再删除 Beta。" : @"请保留原应用，覆盖安装可保留本机工程。";
+    NSInteger target = MAX([self.manager.policy[@"latestRelease"] integerValue], [self.manager.policy[@"minimumRelease"] integerValue]);
+    self.versionLabel.text = target > AMPROJ_RELEASE_CODE ? [NSString stringWithFormat:@"r%d → r%ld · %@",AMPROJ_RELEASE_CODE,(long)target,[AMReleaseChannel() isEqual:@"beta"] ? @"Beta 测试版" : @"正式版"] : [NSString stringWithFormat:@"r%d · %@",AMPROJ_RELEASE_CODE,[AMReleaseChannel() isEqual:@"beta"] ? @"Beta 测试版" : @"正式版"];
     [self.updateButton setTitle:retired ? @"前往安装正式版" : @"立即更新" forState:UIControlStateNormal];
 }
-- (void)update { [UIApplication.sharedApplication openURL:[NSURL URLWithString:self.manager.policy[@"downloadURL"]] options:@{} completionHandler:nil]; }
+- (void)update { AMAppUpdatePresent(self, [NSURL URLWithString:self.manager.policy[@"downloadURL"]], [self.manager.policy[@"retired"] boolValue]); }
 - (void)retry { self.statusLabel.text = @"正在检查版本…"; [self.manager check:YES]; }
 - (void)backup {
     if (self.backupBusy) return;
@@ -408,7 +432,7 @@ static NSArray<NSURL *> *AMReleaseWriteBackup(NSURL *directory, NSDictionary *sc
 - (void)finishBackup:(BOOL)saved {
     if (self.backupDirectory) [NSFileManager.defaultManager removeItemAtURL:self.backupDirectory error:nil];
     self.backupDirectory = nil; self.backupBusy = NO; self.backupButton.enabled = YES;
-    self.statusLabel.text = saved ? @"工程已分别导出。请在正式版逐个导入并检查素材后，再删除 Beta。" : @"备份未全部确认保存，请保留原应用和工程。";
+    self.statusLabel.text = saved ? ([self.manager.policy[@"retired"] boolValue] ? @"工程已分别导出。请在正式版逐个导入并检查后，再删除 Beta。" : @"工程备份已导出，请保留原应用并覆盖安装更新。") : @"备份未全部确认保存，请保留原应用和工程。";
     [self.manager present];
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls { (void)controller; [self finishBackup:urls.count == self.backupCount && urls.count > 0]; }

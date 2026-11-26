@@ -1,0 +1,11 @@
+{
+  "name": "meow-in-app-update-contract",
+  "private": true,
+  "scripts": { "test": "node --test in-app-update.test.cjs" },
+  "dependencies": {
+    "express": "5.1.0",
+    "unzipper": "0.12.3",
+    "plist": "3.1.0",
+    "bplist-parser": "0.3.2"
+  }
+}

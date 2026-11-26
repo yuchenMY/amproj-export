@@ -37,6 +37,12 @@ jobs:
           python3 -m unittest discover -s tests -v
           python3 -m unittest debug_backend.test_server -v
 
+      - name: Test device-bound website update flow
+        working-directory: server_patches/in_app_update
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
       - name: Build release, debug, and standalone Home UI dylibs
         working-directory: AMProjExport
         run: make
