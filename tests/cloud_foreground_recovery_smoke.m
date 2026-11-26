@@ -44,6 +44,7 @@ static NSUInteger hides;
 static BOOL AMCloudOverlayWorkAllowed(void) { return allowed; }
 static void AMCloudHideWindowOverlayIfNeeded(void) { hides++; }
 static void AMCloudDiagnostic(NSString *name, NSDictionary *data) { (void)name; (void)data; }
+static void AMClientReleasePresentIfNeeded(void) {}
 @interface AMCloudManager : NSObject
 @property(nonatomic) NSUInteger cloudSelectionGeneration;
 @property(nonatomic) NSUInteger cloudLibraryAlertSelectionGeneration;
