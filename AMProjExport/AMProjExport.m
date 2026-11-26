@@ -171,6 +171,7 @@ static void amproj_presentImportDocumentPicker(void);
 static dispatch_queue_t amproj_importInboxQueue(void);
 static void amproj_scanLocalImportInboxes(NSString *source, NSString *requestID);
 static void amproj_installImportHook(void);
+static void amproj_installAppAttestCapabilityGuard(void);
 static void amproj_installPublic865ImportHooks(void);
 static void amproj_installPublic865SceneHooksForClass(Class cls);
 static void amproj_recordPublic865LaunchNativeRoute(
@@ -240,6 +241,7 @@ static void amproj_installCrashReporter(void) {
                                 object:nil
                                  queue:NSOperationQueue.mainQueue
                             usingBlock:^(__unused NSNotification *note) {
+                amproj_installAppAttestCapabilityGuard();
                 AMProjCrashReporterMarkForegrounded();
                 // 验收入口：没闪退的设备靠「三指双击」手动看提示长什么样。
                 AMProjCrashInstallDemoTrigger();
@@ -270,6 +272,51 @@ static BOOL amproj_runtimeIsBuild865(void) {
         isKindOfClass:NSString.class] ? info[@"CFBundleVersion"] : nil;
     return [shortVersion isEqualToString:@"6.2.58"] &&
         [buildVersion isEqualToString:@"865"];
+}
+
+// #27：只把已确认的 DeviceCheck 能力检测异常转为 NO，保留 SDK 原有失败分支。
+static BOOL (*amproj_originalAppAttestIsSupported)(id, SEL);
+
+static BOOL amproj_isKnownAppAttestCapabilityException(NSException *exception) {
+    return [exception.name isEqualToString:NSInvalidArgumentException] &&
+        [exception.reason hasPrefix:@"-[DCDeviceMetadataDaemonConnection appAttestType]: unrecognized selector sent to instance "];
+}
+
+static BOOL amproj_appAttestIsSupported(id receiver, SEL selector) {
+    @try {
+        return amproj_originalAppAttestIsSupported(receiver, selector);
+    } @catch (NSException *exception) {
+        if (!amproj_isKnownAppAttestCapabilityException(exception)) @throw;
+        AMProjCrashNote(@"app_attest.capability_exception: unsupported");
+        NSLog(@"[AMProjExport] app_attest.capability_exception: unsupported");
+        return NO;
+    }
+}
+
+static void amproj_installAppAttestCapabilityGuard(void) {
+    if (!amproj_runtimeIsBuild865()) return;
+    Class cls = NSClassFromString(@"DCAppAttestService");
+    if (!cls) return;
+    // 构造函数及前台通知均可调用；只安装一次，不改父类方法或其他检测 API。
+    @synchronized (cls) {
+        static BOOL installed = NO;
+        if (installed) return;
+        SEL selector = NSSelectorFromString(@"isSupported");
+        Method method = class_getInstanceMethod(cls, selector);
+        char returnType[16] = {0};
+        if (!method || method_getNumberOfArguments(method) != 2) return;
+        method_getReturnType(method, returnType, sizeof(returnType));
+        if (strcmp(returnType, @encode(BOOL)) != 0) return;
+        IMP original = method_getImplementation(method);
+        if (!original || original == (IMP)amproj_appAttestIsSupported) return;
+        amproj_originalAppAttestIsSupported = (BOOL (*)(id, SEL))original;
+        if (!class_addMethod(cls, selector, (IMP)amproj_appAttestIsSupported,
+            method_getTypeEncoding(method))) {
+            method_setImplementation(method, (IMP)amproj_appAttestIsSupported);
+        }
+        installed = YES;
+        NSLog(@"[AMProjExport] app_attest.capability_guard.installed");
+    }
 }
 
 static BOOL amproj_runtimeIsLegacy862(void) {
@@ -23732,6 +23779,7 @@ static void AMProjExportInit(void) {
     @autoreleasepool {
         // 崩溃日志最先装：之后任何一步崩了，下次启动都能看到「上次崩溃了」。
         amproj_installCrashReporter();
+        amproj_installAppAttestCapabilityGuard();
         // The repack's own crack module already auto-skips the intro flow
         // and its subscription step (handleIntroFlowHook* in the main
         // binary) - that is why the stock package never showed a wall.
