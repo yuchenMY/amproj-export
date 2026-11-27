@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,6 +398,20 @@ var clientReleaseTemplate = mustTpl("client-releases", `{{with .Data}}
 <section class="af-glass mt24" style="padding:20px"><h2 class="s16 mb12">当前表单的影响预览</h2><p class="s11 af-t3 mb12">按当前时间检查最新、最低、最低前一版及示例 r174；预览不会保存。编号对应猫鹤发布编号，不是 6.2.58 / 865。</p><table style="width:100%;text-align:left"><thead><tr><th>渠道</th><th>发布编号</th><th>处理方式</th></tr></thead><tbody>{{range .Preview}}<tr><td style="padding:10px 0">{{.Channel}}</td><td>{{.Code}}</td><td>{{.Result}}</td></tr>{{end}}</tbody></table></section>
 </div>{{end}}`)
 
+var legacyCrashSummaryLine = regexp.MustCompile(`^(异常退出|崩溃（信号）|崩溃（异常）|演示数据) · [0-9.]+ \([0-9]+\) · r[0-9]+ · (?:stable|beta) · [0-9a-f]{12}$`)
+
+// 只清理旧客户端自动生成的摘要，不改用户自由填写的正文；附件保留内部诊断标识。
+func clientReleaseCrashSummary(content, label string) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) >= 3 && lines[0] == "用户在 App 内点击“发送日志”。" && lines[2] == "日志见附件。" {
+		if match := legacyCrashSummaryLine.FindStringSubmatch(lines[1]); match != nil {
+			lines[1] = match[1] + " · " + label
+			return strings.Join(lines, "\n")
+		}
+	}
+	return content
+}
+
 func clientReleaseTicketContent(content string, r *http.Request) string {
 	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("X-AM-Platform")), "ios") {
 		return content
@@ -405,16 +420,16 @@ func clientReleaseTicketContent(content string, r *http.Request) string {
 	if code == 0 || (channel != "stable" && channel != "beta") {
 		return content + "\n\n[客户端：版本未上报，可能为旧版]"
 	}
-	build := strings.ToLower(r.Header.Get("X-AM-Release-Build"))
-	if len(build) != 12 {
-		build = "未上报"
-	} else {
-		for _, ch := range build {
-			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
-				build = "未上报"
-				break
-			}
+	label := "猫鹤AM · 正式版"
+	if channel == "beta" {
+		label = "猫鹤AM · 测试版"
+	}
+	date := strings.TrimSpace(r.Header.Get("X-AM-Release-Date"))
+	if parsed, err := time.Parse("20060102", date); err == nil && parsed.Format("20060102") == date {
+		label = "猫鹤AM · " + date[4:] + " 正式版"
+		if channel == "beta" {
+			label = "猫鹤AM · " + date[4:] + " 测试版"
 		}
 	}
-	return content + fmt.Sprintf("\n\n[客户端：r%d · %s · %s]", code, channel, build)
+	return clientReleaseCrashSummary(content, label) + "\n\n[客户端：" + label + "]"
 }

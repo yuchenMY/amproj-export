@@ -447,6 +447,7 @@ void AMClientReleaseAddHeaders(NSMutableURLRequest *request) {
     [request setValue:[NSString stringWithFormat:@"%d",AMPROJ_RELEASE_CODE] forHTTPHeaderField:@"X-AM-Release-Code"];
     [request setValue:AMReleaseChannel() forHTTPHeaderField:@"X-AM-Release-Channel"];
     [request setValue:@AMPROJ_CLIENT_BUILD_ID forHTTPHeaderField:@"X-AM-Release-Build"];
+    [request setValue:@AMPROJ_CLIENT_RELEASE_DATE forHTTPHeaderField:@"X-AM-Release-Date"];
 }
 NSDictionary *AMClientReleaseIdentity(void) {
     return @{@"release":@(AMPROJ_RELEASE_CODE),@"channel":AMReleaseChannel(),@"build":@AMPROJ_CLIENT_BUILD_ID};

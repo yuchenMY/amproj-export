@@ -1,5 +1,17 @@
 // 猫鹤 AM · 打包器从插件编译标识写入的发布信息，独立于原应用 865。
 #import <Foundation/Foundation.h>
+// 用户可见的版本只使用包内发布日期；未知日期不拿当前时间冒充。
+static inline NSString *AMClientPackageDisplayNameForInfo(NSDictionary *info) {
+    NSString *date = info[@"AMProjReleaseDate"];
+    NSString *channel = [info[@"AMProjReleaseChannel"] isEqual:@"beta"] ? @"测试版" : @"正式版";
+    if (![date isKindOfClass:NSString.class] || date.length != 8 ||
+        [date rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"0123456789"].invertedSet].location != NSNotFound)
+        return [NSString stringWithFormat:@"猫鹤AM · %@", channel];
+    return [NSString stringWithFormat:@"猫鹤AM · %@ %@", [date substringFromIndex:4], channel];
+}
+static inline NSString *AMClientPackageDisplayName(void) {
+    return AMClientPackageDisplayNameForInfo(NSBundle.mainBundle.infoDictionary ?: @{});
+}
 static inline NSDictionary *AMClientPackageIdentity(void) {
     NSDictionary *info = NSBundle.mainBundle.infoDictionary ?: @{};
     id code = info[@"AMProjReleaseCode"], channel = info[@"AMProjReleaseChannel"], build = info[@"AMProjReleaseBuild"];

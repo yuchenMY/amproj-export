@@ -164,8 +164,28 @@ func TestClientReleaseRetirementPreviewAndTicketIdentity(t *testing.T) {
 	r.Header.Set("X-AM-Release-Code", "174")
 	r.Header.Set("X-AM-Release-Channel", "beta")
 	r.Header.Set("X-AM-Release-Build", "123456789abc")
-	if !strings.Contains(clientReleaseTicketContent("text", r), "r174 · beta · 123456789abc") {
+	r.Header.Set("X-AM-Release-Date", "20261127")
+	if !strings.Contains(clientReleaseTicketContent("text", r), "猫鹤AM · 1127 测试版") {
 		t.Fatal("identity missing")
+	}
+	for _, hidden := range []string{"r174", "123456789abc", "beta"} {
+		if strings.Contains(clientReleaseTicketContent("text", r), hidden) {
+			t.Fatal("internal identity exposed", hidden)
+		}
+	}
+	generated := "用户在 App 内点击“发送日志”。\n异常退出 · 6.2.58 (865) · r174 · beta · 123456789abc\n日志见附件。"
+	if got := clientReleaseTicketContent(generated, r); strings.Contains(got, "r174") || !strings.Contains(got, "异常退出 · 猫鹤AM · 1127 测试版") {
+		t.Fatal("legacy generated summary exposed", got)
+	}
+	manual := "用户说 r174 有问题，编号 123456789abc"
+	if !strings.HasPrefix(clientReleaseTicketContent(manual, r), manual) {
+		t.Fatal("manual feedback changed")
+	}
+	for _, date := range []string{"", "20260230", "2026112", "20261127<script>"} {
+		r.Header.Set("X-AM-Release-Date", date)
+		if got := clientReleaseTicketContent("text", r); got != "text\n\n[客户端：猫鹤AM · 测试版]" {
+			t.Fatal("invalid date", got)
+		}
 	}
 	r.Header.Set("X-AM-Release-Build", "<script>bad</script>")
 	if strings.Contains(clientReleaseTicketContent("text", r), "<script>") {

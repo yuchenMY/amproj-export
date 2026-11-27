@@ -1,6 +1,7 @@
 // 猫鹤 AM · 实际策略校验和工程备份收集边界回归。
 #import <Foundation/Foundation.h>
 #import "AMClientReleasePolicy.h"
+#import "AMClientPackageIdentity.h"
 #import "AMProjZIPWriter.h"
 #import "AMProjImportArchive.h"
 #include <assert.h>
@@ -8,6 +9,11 @@
 // AMPROJ_PRODUCTION_BACKUP_COLLECTOR
 int main(void) {
  @autoreleasepool {
+  assert([AMClientPackageDisplayNameForInfo(@{@"AMProjReleaseDate":@"20261127",@"AMProjReleaseChannel":@"stable"}) isEqual:@"猫鹤AM · 1127 正式版"]);
+  assert([AMClientPackageDisplayNameForInfo(@{@"AMProjReleaseDate":@"20261127",@"AMProjReleaseChannel":@"beta"}) isEqual:@"猫鹤AM · 1127 测试版"]);
+  for (id date in @[@"unknown", @"1127", @"２０２６１１２７", NSNull.null]) {
+   assert([AMClientPackageDisplayNameForInfo(@{@"AMProjReleaseDate":date}) isEqual:@"猫鹤AM · 正式版"]);
+  }
   assert([AMClientReleaseDisplayName(@"20261126",@"stable") isEqual:@"当前 · 1126 正式版"]);
   assert([AMClientReleaseDisplayName(@"20261126",@"beta") isEqual:@"当前 · 1126 Beta 测试版"]);
   assert([AMClientReleaseDisplayName(@"unknown",@"stable") isEqual:@"正式版"]);

@@ -67,7 +67,8 @@ class ClientReleaseTests(unittest.TestCase):
 
     def test_actual_web_request_script_preserves_auth_and_external_requests(self):
         header=(ROOT/'AMProjExport/AMClientPackageIdentity.h').read_text(encoding='utf-8')
-        body=header.split('return [NSString stringWithFormat:',1)[1].split(',value];',1)[0]
+        script_function=header.split('static inline NSString *AMClientPackageRequestScript(void)',1)[1]
+        body=script_function.split('return [NSString stringWithFormat:',1)[1].split(',value];',1)[0]
         script=''.join(json.loads('"'+s+'"') for s in re.findall(r'@?"((?:\\.|[^"\\])*)"',body))
         script=script.replace('%@',json.dumps({'release':174,'channel':'beta','build':'123456789abc'}))
         fixture=(ROOT/'tests/client_release_web_smoke.cjs').read_text(encoding='utf-8')

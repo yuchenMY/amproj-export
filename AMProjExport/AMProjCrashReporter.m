@@ -483,7 +483,11 @@ static NSString *AMProjCrashSummaryLine(NSString *reportText) {
             break;
         }
     }
-    return [NSString stringWithFormat:@"%@ · %@", kind, AMProjCrashBuildTag()];
+    return [NSString stringWithFormat:@"%@ · %@", kind, AMClientPackageDisplayName()];
+}
+
+static BOOL AMProjCrashIsUnconfirmedExit(NSString *reportText) {
+    return [[reportText componentsSeparatedByString:@"\n"] containsObject:@"kind=unclean_exit"];
 }
 
 #pragma mark - 提示 UI：一行横幅 + 底部抽屉（浅色，克制版）
@@ -739,6 +743,7 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
 
 @interface AMProjCrashBanner : UIView
 @property (nonatomic, copy) void (^openHandler)(void);
+- (void)setUnconfirmedExit:(BOOL)unconfirmed;
 - (void)showInWindow:(UIWindow *)window;
 - (void)hide;
 @end
@@ -748,6 +753,10 @@ static void AMProjCrashUploadLog(AMProjCrashSheet *sheet, NSString *summary);
     UILabel *_actionLabel;
     UILabel *_chevronLabel;
     NSTimer *_autoHideTimer;
+}
+
+- (void)setUnconfirmedExit:(BOOL)unconfirmed {
+    _titleLabel.text = unconfirmed ? @"上次意外退出了" : @"上次崩溃了";
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -916,10 +925,14 @@ static void AMProjCrashPresentSheet(NSString *reportText, NSString *summary) {
     if (!presenter || presenter.presentedViewController) return;
 
     AMProjCrashSheet *sheet = [[AMProjCrashSheet alloc] init];
-    sheet.headline = @"上次崩溃了";
+    BOOL unconfirmed = AMProjCrashIsUnconfirmedExit(reportText);
+    sheet.headline = unconfirmed ? @"上次意外退出了" : @"上次崩溃了";
     sheet.meta = summary;
-    sheet.bodyText = @"崩溃时的状态已经记录下来了。发给我们，就能定位是哪一步出的问题。\n"
-                     @"只包含崩溃位置、机型和最近的操作，不含你的作品内容。";
+    sheet.bodyText = unconfirmed
+        ? @"上次运行没有正常结束，也可能与系统回收、手动关闭或覆盖更新有关，暂时不能确定是闪退。\n"
+          @"可以发送日志帮助排查，不含你的作品内容。"
+        : @"崩溃时的状态已经记录下来了。发送日志可以帮助我们排查问题。\n"
+          @"只包含崩溃位置、机型和最近的操作，不含你的作品内容。";
     sheet.primaryTitle = @"发送日志";
     sheet.secondaryTitle = @"以后再说";
 
@@ -1001,6 +1014,7 @@ void AMProjCrashReporterPresentPromptIfNeeded(void) {
 
     [gAMProjCrashBanner removeFromSuperview];
     AMProjCrashBanner *banner = [[AMProjCrashBanner alloc] initWithFrame:CGRectZero];
+    [banner setUnconfirmedExit:AMProjCrashIsUnconfirmedExit(reportText)];
     banner.openHandler = ^{
         AMProjCrashNote(@"prompt: 打开详情");
         AMProjCrashPresentSheet(reportText, summary);
