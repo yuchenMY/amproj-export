@@ -2,7 +2,7 @@
 #import <Foundation/Foundation.h>
 #import "AMAppUpdatePolicy.h"
 
-static void Require(BOOL value) { if (!value) abort(); }
+#define Require(value) do { if (!(value)) { fprintf(stderr, "UPDATE_POLICY_REQUIRE_FAILED:%d\n", __LINE__); abort(); } } while (0)
 static NSString *Token(NSDictionary *value) {
     NSString *body = [[NSJSONSerialization dataWithJSONObject:value options:0 error:nil] base64EncodedStringWithOptions:0];
     body = [[body stringByReplacingOccurrencesOfString:@"+" withString:@"-"] stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
@@ -16,7 +16,7 @@ int main(void) { @autoreleasepool {
     Require(job.length == 43);
     NSURL *manifest = [NSURL URLWithString:[@"https://am.ayakameow.cn/ota/manifest/" stringByAppendingString:job]];
     Require([AMAppUpdateInstallPage(manifest).absoluteString isEqual:[@"https://am.ayakameow.cn/install/" stringByAppendingString:job]]);
-    for (NSString *text in @[@"https://other.example/ota/manifest/", @"https://am.ayakameow.cn/ota/manifest/short", [manifest.absoluteString stringByAppendingString:@"/suffix"], [manifest.absoluteString stringByAppendingString:@"?redirect=1"], [manifest.absoluteString stringByAppendingString:@"#fragment"], [manifest.absoluteString stringByAppendingString:@"%2F"], [manifest.absoluteString stringByReplacingOccurrencesOfString:@"https:" withString:@"http:"]])
+    for (NSString *text in @[@"https://other.example/ota/manifest/", @"https://am.ayakameow.cn/ota/manifest/short", [manifest.absoluteString stringByAppendingString:@"/suffix"], [manifest.absoluteString stringByAppendingString:@"/"], [manifest.absoluteString stringByAppendingString:@"?redirect=1"], [manifest.absoluteString stringByAppendingString:@"#fragment"], [manifest.absoluteString stringByAppendingString:@"%2F"], [manifest.absoluteString stringByReplacingOccurrencesOfString:@"https:" withString:@"http:"]])
         Require(!AMAppUpdateInstallPage([NSURL URLWithString:text]));
     NSMutableDictionary *claim = [@{@"v":@1,@"bundleId":@"com.ayakameow.am",@"channel":@"production",@"release":@176,@"teamId":@"TESTTEAM",@"expires":@(NSDate.date.timeIntervalSince1970 + 60)} mutableCopy];
     Require(AMAppUpdateClaim(Token(claim), @"com.ayakameow.am", @"stable", 176) != nil);

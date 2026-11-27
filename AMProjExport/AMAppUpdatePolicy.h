@@ -19,7 +19,10 @@ static BOOL AMAppUpdateTrustedURL(NSURL *url, NSString *pathPrefix) {
 
 static NSURL *AMAppUpdateInstallPage(NSURL *manifest) {
     if (!AMAppUpdateTrustedURL(manifest, @"/ota/manifest/") || manifest.query.length || manifest.fragment.length) return nil;
-    NSString *token = [manifest.path substringFromIndex:@"/ota/manifest/".length];
+    // NSURL.path 会移除末尾分隔符；使用原始编码路径拒绝额外或编码的斜杠。
+    NSString *encodedPath = [NSURLComponents componentsWithURL:manifest resolvingAgainstBaseURL:NO].percentEncodedPath;
+    if (![encodedPath hasPrefix:@"/ota/manifest/"]) return nil;
+    NSString *token = [encodedPath substringFromIndex:@"/ota/manifest/".length];
     NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"];
     if (token.length != 43 || [token rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) return nil;
     return [NSURL URLWithString:[@"https://am.ayakameow.cn/install/" stringByAppendingString:token]];
