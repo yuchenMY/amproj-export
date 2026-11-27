@@ -36,7 +36,7 @@ def main():
             run("xcrun", "simctl", "status_bar", device, "override", "--time", "9:41", "--batteryState", "charged", "--batteryLevel", "100")
             run("xcrun", "simctl", "install", device, str(app))
             reports = {}
-            for name, args in [("install", []), ("preparing", ["--busy"]), ("large-text", ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])]:
+            for name, args in [("install", []), ("preparing", ["--busy"]), ("association", ["--association"]), ("large-text", ["--association", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])]:
                 if reports:
                     run("xcrun", "simctl", "terminate", device, BUNDLE)
                 container = Path(run("xcrun", "simctl", "get_app_container", device, BUNDLE, "data"))
@@ -47,8 +47,11 @@ def main():
                 while not report_file.exists() and time.monotonic() < deadline:
                     time.sleep(0.25)
                 report = json.loads(report_file.read_text())
-                assert report["lightAppearance"] and report["messageNotClipped"] and report["noHorizontalOverflow"], report
-                assert report["buttonHeight"] >= 44 and report["steps"] == 3 and report["associationHidden"], report
+                assert report["lightAppearance"] and report["messageNotClipped"] and report["buttonTextNotClipped"] and report["noHorizontalOverflow"], report
+                assert report["buttonHeight"] >= 44 and report["steps"] == 3, report
+                assert report["associationHidden"] == ("--association" not in args), report
+                if "--association" in args:
+                    assert report["associationHeight"] >= 320, report
                 assert report["buttonEnabled"] != report["busy"], report
                 if name == "large-text":
                     assert "AccessibilityXXXL" in report["contentSizeCategory"], report

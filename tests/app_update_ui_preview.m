@@ -10,9 +10,16 @@
 - (void)performAction {}
 - (void)renderPreview {
     BOOL busy = [NSProcessInfo.processInfo.arguments containsObject:@"--busy"];
-    [self setStage:busy ? 1 : 2 title:busy ? @"准备更新" : @"确认安装"];
-    [self.action setTitle:busy ? @"重试更新" : @"继续安装" forState:UIControlStateNormal];
+    BOOL association = [NSProcessInfo.processInfo.arguments containsObject:@"--association"];
+    [self setStage:association ? 0 : (busy ? 1 : 2) title:association ? @"关联此设备" : (busy ? @"准备更新" : @"确认安装")];
+    [self.action setTitle:association ? @"完成登记，继续更新" : (busy ? @"重试更新" : @"继续安装") forState:UIControlStateNormal];
     [self setBusy:busy message:busy ? @"正在为此设备签名并校验安装包，请稍候…" : @"安装包已准备好，请点“继续安装”，在安装页确认系统安装。安装完成后即可打开新版本。"];
+    if (association) {
+        [self setBusy:NO message:@"请先在下方完成一次设备登记，再点“完成登记，继续更新”。"];
+        self.webHost.hidden = NO;
+        self.web = [[WKWebView alloc] initWithFrame:self.webHost.bounds]; self.web.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [self.webHost addSubview:self.web];
+    }
 }
 @end
 
@@ -31,13 +38,17 @@
         [controller.view layoutIfNeeded];
         UIScrollView *scroll = (UIScrollView *)controller.view.subviews.firstObject;
         CGSize needed = [controller.status sizeThatFits:CGSizeMake(controller.status.bounds.size.width, CGFLOAT_MAX)];
+        CGFloat titleWidth = controller.action.bounds.size.width - controller.action.contentEdgeInsets.left - controller.action.contentEdgeInsets.right;
+        CGFloat titleHeight = [controller.action.titleLabel sizeThatFits:CGSizeMake(titleWidth, CGFLOAT_MAX)].height;
         NSDictionary *report = @{
             @"lightAppearance":@(controller.traitCollection.userInterfaceStyle == UIUserInterfaceStyleLight),
             @"buttonHeight":@(controller.action.bounds.size.height),
             @"messageNotClipped":@(controller.status.bounds.size.height + 1 >= needed.height),
+            @"buttonTextNotClipped":@(controller.action.bounds.size.height + 1 >= titleHeight + controller.action.contentEdgeInsets.top + controller.action.contentEdgeInsets.bottom),
             @"noHorizontalOverflow":@(scroll.contentSize.width <= scroll.bounds.size.width + 1),
             @"steps":@(controller.stepNames.count),
             @"associationHidden":@(controller.webHost.hidden),
+            @"associationHeight":@(controller.webHost.bounds.size.height),
             @"busy":@(controller.busy),
             @"buttonEnabled":@(controller.action.enabled),
             @"contentSizeCategory":controller.traitCollection.preferredContentSizeCategory

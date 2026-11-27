@@ -4,6 +4,7 @@
 #import <Security/Security.h>
 #import <WebKit/WebKit.h>
 #import <SafariServices/SafariServices.h>
+#import <math.h>
 
 static NSString *const AMUpdateOrigin = @"https://am.ayakameow.cn";
 static UIColor *AMUpdateInk(void) { return [UIColor colorWithRed:0.125 green:0.133 blue:0.22 alpha:1]; }
@@ -45,6 +46,7 @@ static NSString *AMUpdateProfileTeam(void) {
 @property(nonatomic) NSArray<UILabel *> *stepNames;
 @property(nonatomic) UIActivityIndicatorView *spinner;
 @property(nonatomic) UIButton *action;
+@property(nonatomic) NSLayoutConstraint *actionHeight;
 @property(nonatomic) WKWebView *web;
 @property(nonatomic) UIView *webHost;
 @property(nonatomic) NSURLSession *session;
@@ -106,9 +108,9 @@ static NSString *AMUpdateProfileTeam(void) {
     UIStackView *phase = [[UIStackView alloc] initWithArrangedSubviews:@[self.phaseTitle,self.spinner]]; phase.spacing = 12; phase.alignment = UIStackViewAlignmentCenter;
     [self.spinner setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     self.status = [UILabel new]; self.status.numberOfLines = 0; self.status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline]; self.status.textColor = AMUpdateMuted();
-    self.action = [UIButton buttonWithType:UIButtonTypeSystem]; self.action.titleLabel.font = AMUpdateFont(16, UIFontWeightSemibold, UIFontTextStyleBody); self.action.titleLabel.numberOfLines = 0; self.action.titleLabel.textAlignment = NSTextAlignmentCenter;
+    self.action = [UIButton buttonWithType:UIButtonTypeSystem]; self.action.titleLabel.font = AMUpdateFont(16, UIFontWeightSemibold, UIFontTextStyleBody); self.action.titleLabel.numberOfLines = 0; self.action.titleLabel.textAlignment = NSTextAlignmentCenter; self.action.titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
     self.action.contentEdgeInsets = UIEdgeInsetsMake(15, 16, 15, 16); self.action.layer.cornerRadius = 14;
-    [self.action.heightAnchor constraintGreaterThanOrEqualToConstant:52].active = YES;
+    self.actionHeight = [self.action.heightAnchor constraintGreaterThanOrEqualToConstant:52]; self.actionHeight.active = YES;
     [self.action setTitleColor:UIColor.whiteColor forState:UIControlStateNormal]; [self.action setTitleColor:AMUpdateAccent() forState:UIControlStateDisabled];
     [self.action setTitle:@"正在处理…" forState:UIControlStateDisabled];
     [self.action addTarget:self action:@selector(performAction) forControlEvents:UIControlEventTouchUpInside];
@@ -143,6 +145,14 @@ static NSString *AMUpdateProfileTeam(void) {
         number.backgroundColor = index <= stage ? [UIColor colorWithRed:0.90 green:0.97 blue:0.95 alpha:1] : [UIColor colorWithWhite:0.95 alpha:1];
         number.textColor = index <= stage ? AMUpdateAccent() : AMUpdateMuted(); name.textColor = index == stage ? AMUpdateInk() : AMUpdateMuted();
         name.accessibilityLabel = [NSString stringWithFormat:@"%@，%@",name.text,index < stage ? @"已完成" : (index == stage ? @"当前步骤" : @"待进行")];
+    }
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGFloat width = self.action.bounds.size.width - self.action.contentEdgeInsets.left - self.action.contentEdgeInsets.right;
+    if (width > 0) {
+        CGFloat height = MAX(52, ceil([self.action.titleLabel sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)].height) + self.action.contentEdgeInsets.top + self.action.contentEdgeInsets.bottom);
+        if (fabs(self.actionHeight.constant - height) > 0.5) self.actionHeight.constant = height;
     }
 }
 - (void)viewDidLoad {
