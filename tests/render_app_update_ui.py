@@ -11,8 +11,12 @@ OUTPUT = ROOT / "update-ui-preview"
 BUNDLE = "cn.ayakameow.update-preview"
 
 
-def run(*args):
-    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT, timeout=180).strip()
+def run(*args, timeout=180):
+    print("UI_RENDER_STEP", " ".join(args[:4]), flush=True)
+    try:
+        return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT, timeout=timeout).strip()
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(error.output) from error
 
 
 def main():
@@ -32,7 +36,7 @@ def main():
             run("xcrun", "--sdk", "iphonesimulator", "clang", "-fobjc-arc", "-isysroot", sdk, "-mios-simulator-version-min=14.0", "-framework", "UIKit", "-framework", "Foundation", "-framework", "Security", "-framework", "WebKit", "-framework", "SafariServices", str(ROOT / "tests/app_update_ui_preview.m"), "-o", str(app / "UpdatePreview"))
             run("codesign", "--force", "--sign", "-", str(app))
             run("xcrun", "simctl", "boot", device)
-            run("xcrun", "simctl", "bootstatus", device, "-b")
+            run("xcrun", "simctl", "bootstatus", device, "-b", timeout=360)
             run("xcrun", "simctl", "status_bar", device, "override", "--time", "9:41", "--batteryState", "charged", "--batteryLevel", "100")
             run("xcrun", "simctl", "install", device, str(app))
             reports = {}
