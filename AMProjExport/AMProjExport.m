@@ -3713,6 +3713,7 @@ typedef NS_ENUM(NSInteger, AMProjTemplateProbeCapability) {
 @property(nonatomic) BOOL cloudResultRequested;
 @property(nonatomic, strong) NSURL *archiveURL;
 @property(nonatomic, strong) NSURL *incomingURL;
+@property(nonatomic, copy) NSDictionary *incomingFileIdentity;
 @property(nonatomic, strong) NSURL *incomingCleanupURL;
 @property(nonatomic, strong) NSURL *stagedDirectoryURL;
 @property(nonatomic, copy) NSString *projectTitle;
@@ -4263,6 +4264,71 @@ static BOOL amproj_claimImportFingerprint(NSString *transactionID, NSURL *archiv
     }
 }
 
+// 自动收件箱扫描只尝试同一份失败文件一次；用户主动重试不受此记录限制。
+// 使用新鲜文件属性识别替换/修改，避免 NSURL 属性缓存把新文件误判为旧失败项。
+static NSDictionary *amproj_automaticImportFileIdentity(NSURL *URL) {
+    if (!URL.isFileURL) return nil;
+    NSString *path = URL.URLByStandardizingPath.path;
+    if (!path.length) return nil;
+    NSDictionary *attributes = [NSFileManager.defaultManager
+        attributesOfItemAtPath:path error:nil];
+    if (![attributes[NSFileType] isEqual:NSFileTypeRegular] ||
+        ![attributes[NSFileSize] isKindOfClass:NSNumber.class] ||
+        ![attributes[NSFileModificationDate] isKindOfClass:NSDate.class]) return nil;
+    return @{@"path": path, @"size": attributes[NSFileSize],
+        @"modified": attributes[NSFileModificationDate],
+        @"file_number": attributes[NSFileSystemFileNumber] ?: @0};
+}
+
+static BOOL amproj_shouldSkipFailedAutomaticImport(NSURL *URL,
+                                                   NSUserDefaults *defaults) {
+    NSDictionary *identity = amproj_automaticImportFileIdentity(URL);
+    if (!identity) return NO;
+    @synchronized (amproj_importDedupeLock()) {
+        NSDictionary *records = [defaults dictionaryForKey:@"amproj_import_failed_inbox_v1"];
+        NSDictionary *record = records[identity[@"path"]];
+        return [record isKindOfClass:NSDictionary.class] &&
+            [identity isEqual:record[@"identity"]];
+    }
+}
+
+static void amproj_rememberFailedAutomaticImport(NSDictionary *identity,
+                                                  NSUserDefaults *defaults) {
+    if (!identity) return;
+    @synchronized (amproj_importDedupeLock()) {
+        NSMutableDictionary *records = [[defaults dictionaryForKey:
+            @"amproj_import_failed_inbox_v1"] mutableCopy] ?: [NSMutableDictionary dictionary];
+        records[identity[@"path"]] = @{@"identity": identity, @"time": NSDate.date};
+        // 文件路径只保存在本机，最多保留 256 条，避免损坏文件堆积撑大偏好设置。
+        if (records.count > 256) {
+            NSArray *keys = [records keysSortedByValueUsingComparator:
+                ^NSComparisonResult(id left, id right) {
+                    NSDate *a = [left isKindOfClass:NSDictionary.class] &&
+                        [left[@"time"] isKindOfClass:NSDate.class] ? left[@"time"] : NSDate.distantPast;
+                    NSDate *b = [right isKindOfClass:NSDictionary.class] &&
+                        [right[@"time"] isKindOfClass:NSDate.class] ? right[@"time"] : NSDate.distantPast;
+                    return [a compare:b];
+                }];
+            [records removeObjectsForKeys:[keys subarrayWithRange:
+                NSMakeRange(0, records.count - 256)]];
+        }
+        [defaults setObject:records forKey:@"amproj_import_failed_inbox_v1"];
+    }
+}
+
+static void amproj_forgetFailedAutomaticImport(NSURL *URL,
+                                                NSUserDefaults *defaults) {
+    if (!URL.isFileURL) return;
+    @synchronized (amproj_importDedupeLock()) {
+        NSMutableDictionary *records = [[defaults dictionaryForKey:
+            @"amproj_import_failed_inbox_v1"] mutableCopy];
+        NSString *path = URL.URLByStandardizingPath.path;
+        if (!records[path]) return;
+        [records removeObjectForKey:path];
+        [defaults setObject:records forKey:@"amproj_import_failed_inbox_v1"];
+    }
+}
+
 static void amproj_releaseImportTransaction(NSString *transactionID, BOOL success) {
     if (!transactionID.length) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -4271,6 +4337,15 @@ static void amproj_releaseImportTransaction(NSString *transactionID, BOOL succes
         amproj_importTransactionStoreLocked();
         AMProjImportTransaction *transaction = amproj_importTransactions[transactionID];
         if (!transaction) return;
+        // 仅记下复制完成后的校验失败；文件授权、复制失败和等待中的任务仍可恢复。
+        if (!success && transaction.state == AMProjImportTransactionValidating &&
+            !transaction.packageIntegrityVerified) {
+            amproj_rememberFailedAutomaticImport(transaction.incomingFileIdentity,
+                NSUserDefaults.standardUserDefaults);
+        } else if (success) {
+            amproj_forgetFailedAutomaticImport(transaction.incomingURL,
+                NSUserDefaults.standardUserDefaults);
+        }
         transaction.state = success ? AMProjImportTransactionCompleted
                                     : AMProjImportTransactionFailed;
         transaction.updatedAt = now;
@@ -4379,6 +4454,7 @@ static void amproj_releaseImportTransactionForURL(NSURL *URL, NSString *name) {
 }
 
 static void amproj_clearImportSuppression(NSURL *URL, NSString *name) {
+    amproj_forgetFailedAutomaticImport(URL, NSUserDefaults.standardUserDefaults);
     NSString *key = amproj_importProvisionalKey(URL, name);
     if (!key.length) return;
     @synchronized (amproj_importDedupeLock()) {
@@ -13228,6 +13304,8 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
     }
     if (amproj_URLIsInDocumentsInbox(URL) &&
         ![options[@"AMProjInboxWorker"] boolValue] && !directStage) {
+        // 明确的文件打开事件可以再次尝试；纯生命周期扫描不会清除此记录。
+        amproj_forgetFailedAutomaticImport(URL, NSUserDefaults.standardUserDefaults);
         amproj_debugEvent(@"import.inbox_scheduled", @{
             @"source": source ?: @"",
             @"filename": URL.lastPathComponent ?: @"",
@@ -13270,6 +13348,8 @@ static AMProjIncomingURLResult amproj_handleIncomingProjectURLWithResult(
     @synchronized (amproj_importDedupeLock()) {
         claimedTransaction.kind = importKind;
         claimedTransaction.incomingURL = URL;
+        // 固定这次尝试读取的文件版本；校验期间原文件被替换时，不压住新文件。
+        claimedTransaction.incomingFileIdentity = amproj_automaticImportFileIdentity(URL);
         claimedTransaction.incomingCleanupURL =
             [options[@"AMProjIncomingCleanupURL"] isKindOfClass:NSURL.class]
                 ? options[@"AMProjIncomingCleanupURL"] : nil;
@@ -13706,6 +13786,15 @@ static BOOL amproj_scanDocumentsInboxNow(NSString *source) {
             (![extension isEqualToString:@"amproj"] &&
              ![extension isEqualToString:@"xml"])) continue;
 
+        if (amproj_shouldSkipFailedAutomaticImport(file,
+                NSUserDefaults.standardUserDefaults)) {
+            amproj_debugEvent(@"import.inbox_failure_skipped", @{
+                @"kind": @"documents", @"filename": file.lastPathComponent ?: @"",
+                @"reason": @"unchanged_failed_validation"
+            });
+            continue;
+        }
+
         BOOL prepared = NO;
         AMProjIncomingURLResult result = amproj_handleIncomingProjectURLSafely(
             file, source.length ? source : @"documents_inbox",
@@ -13725,8 +13814,7 @@ static BOOL amproj_scanDocumentsInboxNow(NSString *source) {
             amproj_debugEvent(@"import.inbox_failed", @{
                 @"filename": file.lastPathComponent ?: @""
             });
-            // Keep scanning later candidates; the failed source is suppressed
-            // briefly by its transaction tombstone and can be retried explicitly.
+            // 继续检查其它文件；校验失败项在后续自动扫描中跳过，主动重试仍放行。
             continue;
         }
     }
@@ -13845,6 +13933,14 @@ static BOOL amproj_scanShareInboxNow(NSString *source, NSString *requestedID) {
             continue;
         }
 
+        if (!requestedID.length && amproj_shouldSkipFailedAutomaticImport(payloadURL,
+                NSUserDefaults.standardUserDefaults)) {
+            amproj_debugEvent(@"import.inbox_failure_skipped", @{
+                @"kind": @"share", @"filename": originalName,
+                @"reason": @"unchanged_failed_validation"
+            });
+            continue;
+        }
         BOOL prepared = NO;
         NSDictionary *options = @{
             @"AMProjOriginalFilename": originalName,
