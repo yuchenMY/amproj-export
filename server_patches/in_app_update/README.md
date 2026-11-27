@@ -40,6 +40,10 @@ node --check /path/to/staging/signer.js
 
 ## 验证边界
 
+`integrate-registration.cjs SOURCE_APP_JS STAGED_APP_JS` 为现网登记页面增加 Safari 备用复制入口。链接始终复用当前页面已有的 48 位请求 token，安装描述文件后仍由原状态接口确认完成；不通过手填 UDID 跳过授权。剪贴板受限时保留可选中的链接，完成登记后移除备用入口。部署只替换核验和备份后的 `public/app.js`，无需更换 IPA。
+
+`udid-handoff.test.cjs` 验证复制与手动选择、轮询不重复创建、完成后移除及源码锚点；这些不等价 Safari 描述文件下载和实机安装验收。
+
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
 npm test
