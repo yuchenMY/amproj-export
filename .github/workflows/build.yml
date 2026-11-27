@@ -187,6 +187,9 @@ jobs:
               assert archive.read("manifest.txt") == b""
           PY
 
+      - name: Render and verify the native update interface
+        run: python3 tests/render_app_update_ui.py
+
       - name: Write build metadata
         run: |
           python3 - <<'PY'
@@ -230,6 +233,7 @@ jobs:
             AMProjExport/AMProjExportDebug.dylib
             AMProjExport/AMProjExportBeta.dylib
             AMProjExport/AMHomeUI.dylib
+            update-ui-preview/
 
       - name: Publish Cloud release asset
         if: github.ref_name == 'codex/feature-autfeng-cloud-project-export'

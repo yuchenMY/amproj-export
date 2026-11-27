@@ -6,6 +6,12 @@
 #import <SafariServices/SafariServices.h>
 
 static NSString *const AMUpdateOrigin = @"https://am.ayakameow.cn";
+static UIColor *AMUpdateInk(void) { return [UIColor colorWithRed:0.125 green:0.133 blue:0.22 alpha:1]; }
+static UIColor *AMUpdateAccent(void) { return [UIColor colorWithRed:0.07 green:0.56 blue:0.51 alpha:1]; }
+static UIColor *AMUpdateMuted(void) { return [UIColor colorWithRed:0.36 green:0.38 blue:0.44 alpha:1]; }
+static UIFont *AMUpdateFont(CGFloat size, UIFontWeight weight, UIFontTextStyle style) {
+    return [[UIFontMetrics metricsForTextStyle:style] scaledFontForFont:[UIFont systemFontOfSize:size weight:weight]];
+}
 
 static NSMutableDictionary *AMUpdateKeychainQuery(void) {
     return [@{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
@@ -34,6 +40,9 @@ static NSString *AMUpdateProfileTeam(void) {
 @property(nonatomic) NSURL *website;
 @property(nonatomic) BOOL retiredBeta;
 @property(nonatomic) UILabel *status;
+@property(nonatomic) UILabel *phaseTitle;
+@property(nonatomic) NSArray<UILabel *> *stepNumbers;
+@property(nonatomic) NSArray<UILabel *> *stepNames;
 @property(nonatomic) UIActivityIndicatorView *spinner;
 @property(nonatomic) UIButton *action;
 @property(nonatomic) WKWebView *web;
@@ -57,26 +66,93 @@ static NSString *AMUpdateProfileTeam(void) {
 @end
 
 @implementation AMAppUpdateController
+- (void)buildUpdateView {
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    self.view.backgroundColor = [UIColor colorWithRed:0.965 green:0.969 blue:0.973 alpha:1];
+    self.view.tintColor = AMUpdateAccent();
+    UINavigationBarAppearance *appearance = [UINavigationBarAppearance new];
+    [appearance configureWithOpaqueBackground]; appearance.backgroundColor = self.view.backgroundColor;
+    appearance.shadowColor = UIColor.clearColor; appearance.titleTextAttributes = @{NSForegroundColorAttributeName:AMUpdateInk()};
+    self.navigationItem.standardAppearance = appearance; self.navigationItem.scrollEdgeAppearance = appearance;
+
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.down.app" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:25 weight:UIImageSymbolWeightMedium]]];
+    icon.tintColor = AMUpdateAccent(); icon.contentMode = UIViewContentModeCenter;
+    icon.backgroundColor = [UIColor colorWithRed:0.90 green:0.97 blue:0.95 alpha:1]; icon.layer.cornerRadius = 16;
+    icon.accessibilityElementsHidden = YES;
+    [NSLayoutConstraint activateConstraints:@[[icon.widthAnchor constraintEqualToConstant:56], [icon.heightAnchor constraintEqualToConstant:56]]];
+    UILabel *title = [UILabel new]; title.text = @"更新猫鹤 AM"; title.textColor = AMUpdateInk(); title.numberOfLines = 0;
+    title.font = AMUpdateFont(24, UIFontWeightBold, UIFontTextStyleTitle2);
+    UILabel *subtitle = [UILabel new]; subtitle.text = @"完成下方步骤，继续使用最新功能。"; subtitle.textColor = AMUpdateMuted(); subtitle.numberOfLines = 0;
+    subtitle.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    UIStackView *headings = [[UIStackView alloc] initWithArrangedSubviews:@[title,subtitle]]; headings.axis = UILayoutConstraintAxisVertical; headings.spacing = 6;
+    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[icon,headings]]; header.spacing = 14; header.alignment = UIStackViewAlignmentCenter;
+
+    NSMutableArray *numbers = [NSMutableArray array], *names = [NSMutableArray array], *steps = [NSMutableArray array];
+    for (NSString *name in @[@"关联设备",@"准备更新",@"确认安装"]) {
+        UILabel *number = [UILabel new]; number.textAlignment = NSTextAlignmentCenter; number.layer.cornerRadius = 14; number.clipsToBounds = YES;
+        number.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]; number.accessibilityElementsHidden = YES;
+        [NSLayoutConstraint activateConstraints:@[[number.widthAnchor constraintEqualToConstant:28], [number.heightAnchor constraintEqualToConstant:28]]];
+        UILabel *caption = [UILabel new]; caption.text = name; caption.textAlignment = NSTextAlignmentCenter; caption.numberOfLines = 0;
+        caption.font = AMUpdateFont(12, UIFontWeightMedium, UIFontTextStyleCaption1);
+        UIStackView *step = [[UIStackView alloc] initWithArrangedSubviews:@[number,caption]]; step.axis = UILayoutConstraintAxisVertical; step.alignment = UIStackViewAlignmentCenter; step.spacing = 8;
+        [numbers addObject:number]; [names addObject:caption]; [steps addObject:step];
+    }
+    self.stepNumbers = numbers; self.stepNames = names;
+    UIStackView *stepper = [[UIStackView alloc] initWithArrangedSubviews:steps]; stepper.distribution = UIStackViewDistributionFillEqually; stepper.alignment = UIStackViewAlignmentTop; stepper.spacing = 8;
+    UIView *divider = [UIView new]; divider.backgroundColor = [UIColor colorWithWhite:0.94 alpha:1]; [divider.heightAnchor constraintEqualToConstant:1].active = YES;
+    self.phaseTitle = [UILabel new]; self.phaseTitle.font = AMUpdateFont(20, UIFontWeightSemibold, UIFontTextStyleHeadline); self.phaseTitle.textColor = AMUpdateInk(); self.phaseTitle.numberOfLines = 0;
+    self.phaseTitle.accessibilityTraits = UIAccessibilityTraitHeader;
+    self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium]; self.spinner.color = AMUpdateAccent(); self.spinner.hidesWhenStopped = YES;
+    UIStackView *phase = [[UIStackView alloc] initWithArrangedSubviews:@[self.phaseTitle,self.spinner]]; phase.spacing = 12; phase.alignment = UIStackViewAlignmentCenter;
+    [self.spinner setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    self.status = [UILabel new]; self.status.numberOfLines = 0; self.status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline]; self.status.textColor = AMUpdateMuted();
+    self.action = [UIButton buttonWithType:UIButtonTypeSystem]; self.action.titleLabel.font = AMUpdateFont(16, UIFontWeightSemibold, UIFontTextStyleBody); self.action.titleLabel.numberOfLines = 0; self.action.titleLabel.textAlignment = NSTextAlignmentCenter;
+    self.action.contentEdgeInsets = UIEdgeInsetsMake(15, 16, 15, 16); self.action.layer.cornerRadius = 14;
+    [self.action.heightAnchor constraintGreaterThanOrEqualToConstant:52].active = YES;
+    [self.action setTitleColor:UIColor.whiteColor forState:UIControlStateNormal]; [self.action setTitleColor:AMUpdateAccent() forState:UIControlStateDisabled];
+    [self.action setTitle:@"正在处理…" forState:UIControlStateDisabled];
+    [self.action addTarget:self action:@selector(performAction) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *card = [[UIStackView alloc] initWithArrangedSubviews:@[stepper,divider,phase,self.status,self.action]]; card.axis = UILayoutConstraintAxisVertical; card.spacing = 16;
+    card.layoutMarginsRelativeArrangement = YES; card.layoutMargins = UIEdgeInsetsMake(24, 20, 20, 20);
+    card.backgroundColor = UIColor.whiteColor; card.layer.cornerRadius = 24;
+    [card setCustomSpacing:24 afterView:stepper]; [card setCustomSpacing:24 afterView:divider]; [card setCustomSpacing:10 afterView:phase]; [card setCustomSpacing:24 afterView:self.status];
+    UILabel *hint = [UILabel new]; hint.text = self.retiredBeta ? @"正式版会单独安装。请先备份工程，导入正式版并检查后，再删除 Beta。" : @"请保留原应用，覆盖安装可保留本机工程。\n若证书临近到期或可能失效，建议提前备份重要工程。";
+    hint.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1]; hint.textColor = AMUpdateMuted(); hint.numberOfLines = 0;
+    for (UILabel *label in @[title,subtitle,self.phaseTitle,self.status,hint]) { label.adjustsFontForContentSizeCategory = YES; [label setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical]; }
+    for (UILabel *label in names) label.adjustsFontForContentSizeCategory = YES;
+    self.action.titleLabel.adjustsFontForContentSizeCategory = YES;
+    self.webHost = [UIView new]; self.webHost.hidden = YES; self.webHost.backgroundColor = UIColor.whiteColor; self.webHost.layer.cornerRadius = 20; self.webHost.clipsToBounds = YES;
+    NSLayoutConstraint *webHeight = [self.webHost.heightAnchor constraintEqualToConstant:420]; webHeight.priority = UILayoutPriorityDefaultHigh; webHeight.active = YES;
+    UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:@[header,card,hint,self.webHost]]; content.axis = UILayoutConstraintAxisVertical; content.spacing = 20; [content setCustomSpacing:28 afterView:header]; content.translatesAutoresizingMaskIntoConstraints = NO;
+    UIScrollView *scroll = [UIScrollView new]; scroll.translatesAutoresizingMaskIntoConstraints = NO; scroll.alwaysBounceVertical = YES;
+    [self.view addSubview:scroll]; [scroll addSubview:content];
+    NSLayoutConstraint *width = [content.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-40]; width.priority = UILayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor], [scroll.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor], [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [content.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20], [content.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-28],
+        [content.centerXAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.centerXAnchor], width, [content.widthAnchor constraintLessThanOrEqualToConstant:520],
+        [content.leadingAnchor constraintGreaterThanOrEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:20], [content.trailingAnchor constraintLessThanOrEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-20],
+        [scroll.contentLayoutGuide.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor]]];
+}
+- (void)setStage:(NSInteger)stage title:(NSString *)title {
+    self.phaseTitle.text = title;
+    for (NSUInteger index = 0; index < self.stepNumbers.count; index++) {
+        UILabel *number = self.stepNumbers[index], *name = self.stepNames[index];
+        number.text = index < stage ? @"✓" : [NSString stringWithFormat:@"%lu", (unsigned long)index + 1];
+        number.backgroundColor = index <= stage ? [UIColor colorWithRed:0.90 green:0.97 blue:0.95 alpha:1] : [UIColor colorWithWhite:0.95 alpha:1];
+        number.textColor = index <= stage ? AMUpdateAccent() : AMUpdateMuted(); name.textColor = index == stage ? AMUpdateInk() : AMUpdateMuted();
+        name.accessibilityLabel = [NSString stringWithFormat:@"%@，%@",name.text,index < stage ? @"已完成" : (index == stage ? @"当前步骤" : @"待进行")];
+    }
+}
 - (void)viewDidLoad {
-    [super viewDidLoad]; self.title = @"更新猫鹤 AM"; self.view.backgroundColor = UIColor.systemBackgroundColor;
+    [super viewDidLoad]; self.title = @"软件更新";
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:self action:@selector(close)];
     NSDictionary *info = NSBundle.mainBundle.infoDictionary;
     self.bundle = NSBundle.mainBundle.bundleIdentifier; self.channel = info[@"AMProjReleaseChannel"]; self.releaseCode = [info[@"AMProjReleaseCode"] integerValue];
     self.targetBundle = self.retiredBeta ? @"com.ayakameow.am" : self.bundle;
     self.pendingKey = [NSString stringWithFormat:@"AMAppUpdateRequest-%@-%@-%ld",self.bundle,self.channel,(long)self.releaseCode];
-    self.status = [UILabel new]; self.status.numberOfLines = 0; self.status.font = [UIFont systemFontOfSize:16];
-    self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    self.action = [UIButton buttonWithType:UIButtonTypeSystem]; self.action.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    [self.action addTarget:self action:@selector(performAction) forControlEvents:UIControlEventTouchUpInside];
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[self.status,self.spinner,self.action]];
-    stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 18; stack.translatesAutoresizingMaskIntoConstraints = NO;
-    self.webHost = [UIView new]; self.webHost.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:stack]; [self.view addSubview:self.webHost];
-    [NSLayoutConstraint activateConstraints:@[
-        [stack.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:28],
-        [stack.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:24], [stack.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-24],
-        [self.webHost.topAnchor constraintEqualToAnchor:stack.bottomAnchor constant:20], [self.webHost.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.webHost.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor], [self.webHost.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor]]];
+    [self buildUpdateView];
     NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     config.timeoutIntervalForRequest = 25; config.timeoutIntervalForResource = 40; config.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     self.session = [NSURLSession sessionWithConfiguration:config delegate:self delegateQueue:NSOperationQueue.mainQueue];
@@ -94,6 +170,7 @@ static NSString *AMUpdateProfileTeam(void) {
 }
 - (void)setBusy:(BOOL)busy message:(NSString *)message {
     self.busy = busy; self.action.enabled = !busy; self.status.text = message;
+    self.action.backgroundColor = busy ? [UIColor colorWithRed:0.90 green:0.97 blue:0.95 alpha:1] : AMUpdateInk();
     if (busy) [self.spinner startAnimating]; else [self.spinner stopAnimating];
 }
 - (void)close {
@@ -130,6 +207,7 @@ static NSString *AMUpdateProfileTeam(void) {
 }
 - (void)prepare {
     if (self.busy || self.stopped) return;
+    [self setStage:1 title:@"准备更新"];
     self.requestId = [NSUserDefaults.standardUserDefaults stringForKey:self.pendingKey];
     if (!self.requestId.length) { self.requestId = NSUUID.UUID.UUIDString; [NSUserDefaults.standardUserDefaults setObject:self.requestId forKey:self.pendingKey]; }
     [self.action setTitle:@"重试更新" forState:UIControlStateNormal];
@@ -187,6 +265,7 @@ static NSString *AMUpdateProfileTeam(void) {
     }];
 }
 - (void)requestSystemInstall {
+    [self setStage:2 title:@"确认安装"];
     if (self.useInstallPage) { [self showInstallPage]; return; }
     NSURLComponents *components = [NSURLComponents componentsWithString:@"itms-services://"];
     components.queryItems = @[[NSURLQueryItem queryItemWithName:@"action" value:@"download-manifest"], [NSURLQueryItem queryItemWithName:@"url" value:self.manifest.absoluteString]];
@@ -223,6 +302,7 @@ static NSString *AMUpdateProfileTeam(void) {
     return self.retiredBeta ? @"Beta 已结束。请先备份工程，在下方登记设备后安装正式版。正式版会单独安装，确认工程导入正常后再删除 Beta。" : @"本次安装尚未关联网站签名服务。请在下方完成一次设备登记，再点“完成登记，继续更新”。证书由服务器保管，之后可直接在 App 内更新。";
 }
 - (void)showAssociation {
+    [self setStage:0 title:@"关联此设备"];
     [self setBusy:NO message:[self associationMessage]];
     [self.action setTitle:self.retiredBeta ? @"完成登记，安装正式版" : @"完成登记，继续更新" forState:UIControlStateNormal];
     if (self.web) return;
@@ -231,6 +311,7 @@ static NSString *AMUpdateProfileTeam(void) {
     NSString *css = @"#install-button,#install-link,#job-status{display:none!important}";
     NSString *script = [NSString stringWithFormat:@"document.addEventListener('DOMContentLoaded',function(){var s=document.createElement('style');s.textContent='%@';document.head.appendChild(s);});",css];
     [configuration.userContentController addUserScript:[[WKUserScript alloc] initWithSource:script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
+    self.webHost.hidden = NO;
     self.web = [[WKWebView alloc] initWithFrame:self.webHost.bounds configuration:configuration];
     self.web.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.web.navigationDelegate = self; self.web.UIDelegate = self; [self.webHost addSubview:self.web];
@@ -271,7 +352,7 @@ static NSString *AMUpdateProfileTeam(void) {
                 [self setBusy:NO message:[data[@"error"] isKindOfClass:NSString.class] ? data[@"error"] : @"设备关联未完成，请完成下方登记或联系管理员检查签名身份。"]; return;
             }
             self.token = token; if (!self.retiredBeta) AMUpdateSaveToken(token); self.web.navigationDelegate = nil; self.web.UIDelegate = nil;
-            [self.web removeFromSuperview]; self.web = nil; self.busy = NO; [self prepare];
+            [self.web removeFromSuperview]; self.web = nil; self.webHost.hidden = YES; self.busy = NO; [self prepare];
         }];
     }];
 }
@@ -302,6 +383,7 @@ void AMAppUpdatePresent(UIViewController *presenter, NSURL *website, BOOL retire
     if (!presenter.viewIfLoaded.window || presenter.presentedViewController) return;
     AMAppUpdateController *update = [AMAppUpdateController new]; update.website = website; update.retiredBeta = retiredBeta;
     UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:update];
+    navigation.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
     navigation.modalPresentationStyle = UIModalPresentationFullScreen; navigation.modalInPresentation = YES;
     [presenter presentViewController:navigation animated:YES completion:nil];
 }
