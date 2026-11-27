@@ -1,6 +1,16 @@
 // 猫鹤 AM · 更新服务来源和本机授权元数据校验。
 #import <Foundation/Foundation.h>
 
+static NSString *AMAppUpdateAssociationRules(void) {
+    NSMutableArray *rules = [NSMutableArray array];
+    // WebKit 内容过滤器不支持正则分支，每个受限路径单独生成规则。
+    for (NSString *route in @[@"api/public/sign/", @"install/", @"ota/"]) {
+        [rules addObject:@{@"trigger":@{@"url-filter":[@"^https://am[.]ayakameow[.]cn/" stringByAppendingString:route]},
+                          @"action":@{@"type":@"block"}}];
+    }
+    return [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:rules options:0 error:nil] encoding:NSUTF8StringEncoding];
+}
+
 static BOOL AMAppUpdateTrustedURL(NSURL *url, NSString *pathPrefix) {
     return [url.scheme.lowercaseString isEqual:@"https"] && [url.host.lowercaseString isEqual:@"am.ayakameow.cn"] &&
         !url.user.length && !url.password.length && (!url.port || url.port.integerValue == 443) &&

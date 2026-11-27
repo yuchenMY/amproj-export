@@ -49,6 +49,7 @@ static NSString *AMUpdateProfileTeam(void) {
 @property(nonatomic) NSURL *manifest;
 @property(nonatomic) BOOL stopped;
 @property(nonatomic) BOOL busy;
+@property(nonatomic) BOOL associationRulesFailed;
 @property(nonatomic) NSDate *deadline;
 @property(nonatomic) id foregroundObserver;
 @end
@@ -120,7 +121,8 @@ static NSString *AMUpdateProfileTeam(void) {
     completionHandler(nil);
 }
 - (void)performAction {
-    if (self.manifest) [self install];
+    if (self.associationRulesFailed) [self loadAssociationPage];
+    else if (self.manifest) [self install];
     else if (self.web) [self associate];
     else [self prepare];
 }
@@ -190,8 +192,11 @@ static NSString *AMUpdateProfileTeam(void) {
         [self setBusy:NO message:opened ? (self.retiredBeta ? @"正式版安装请求已交给系统。请确认安装，之后将备份导入正式版并检查工程，再删除 Beta。" : @"安装请求已交给系统，请在系统提示中确认。下载和安装进度请返回桌面查看；应用可能在覆盖安装时被系统关闭。") : @"系统未打开安装请求，请重试。如果仍无提示，请联系管理员检查设备签名与安装服务。"];
     }];
 }
+- (NSString *)associationMessage {
+    return self.retiredBeta ? @"Beta 已结束。请先备份工程，在下方登记设备后安装正式版。正式版会单独安装，确认工程导入正常后再删除 Beta。" : @"本次安装尚未关联网站签名服务。请在下方完成一次设备登记，再点“完成登记，继续更新”。证书由服务器保管，之后可直接在 App 内更新。";
+}
 - (void)showAssociation {
-    [self setBusy:NO message:self.retiredBeta ? @"Beta 已结束。请先备份工程，在下方登记设备后安装正式版。正式版会单独安装，确认工程导入正常后再删除 Beta。" : @"本次安装尚未关联网站签名服务。请在下方完成一次设备登记，再点“完成登记，继续更新”。证书由服务器保管，之后可直接在 App 内更新。"];
+    [self setBusy:NO message:[self associationMessage]];
     [self.action setTitle:self.retiredBeta ? @"完成登记，安装正式版" : @"完成登记，继续更新" forState:UIControlStateNormal];
     if (self.web) return;
     WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
@@ -202,14 +207,26 @@ static NSString *AMUpdateProfileTeam(void) {
     self.web = [[WKWebView alloc] initWithFrame:self.webHost.bounds configuration:configuration];
     self.web.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.web.navigationDelegate = self; self.web.UIDelegate = self; [self.webHost addSubview:self.web];
+    [self loadAssociationPage];
+}
+- (void)loadAssociationPage {
+    if (self.stopped || self.busy || !self.web) return;
+    self.associationRulesFailed = NO;
+    [self setBusy:YES message:@"正在打开设备登记页…"];
     NSURL *url = AMAppUpdateTrustedURL(self.website, @"/") ? self.website : [NSURL URLWithString:AMUpdateOrigin];
-    NSString *rules = @"[{\"trigger\":{\"url-filter\":\"^https://am[.]ayakameow[.]cn/(api/public/sign/|install/|ota/)\"},\"action\":{\"type\":\"block\"}}]";
     __weak typeof(self) weakSelf = self;
-    [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@"AMUpdateAssociationOnly-v1" encodedContentRuleList:rules completionHandler:^(WKContentRuleList *list, NSError *error) {
+    [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@"AMUpdateAssociationOnly-v2" encodedContentRuleList:AMAppUpdateAssociationRules() completionHandler:^(WKContentRuleList *list, NSError *error) {
         if (weakSelf.stopped || !weakSelf) return;
-        if (error || !list) { [weakSelf setBusy:NO message:@"设备关联页面未能安全加载，请关闭后重试。"]; return; }
+        if (error || !list) {
+            NSLog(@"[AMAppUpdate] association rules failed: %@/%ld", error.domain, (long)error.code);
+            weakSelf.associationRulesFailed = YES;
+            [weakSelf.action setTitle:@"重新加载登记页" forState:UIControlStateNormal];
+            [weakSelf setBusy:NO message:@"设备登记页未能加载，请点击下方按钮重试。"]; return;
+        }
         [weakSelf.web.configuration.userContentController addContentRuleList:list];
         [weakSelf.web loadRequest:[NSURLRequest requestWithURL:url]];
+        [weakSelf.action setTitle:weakSelf.retiredBeta ? @"完成登记，安装正式版" : @"完成登记，继续更新" forState:UIControlStateNormal];
+        [weakSelf setBusy:NO message:[weakSelf associationMessage]];
     }];
 }
 - (void)associate {
