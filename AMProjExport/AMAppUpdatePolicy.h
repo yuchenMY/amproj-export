@@ -17,6 +17,14 @@ static BOOL AMAppUpdateTrustedURL(NSURL *url, NSString *pathPrefix) {
         [url.path hasPrefix:pathPrefix];
 }
 
+static NSURL *AMAppUpdateInstallPage(NSURL *manifest) {
+    if (!AMAppUpdateTrustedURL(manifest, @"/ota/manifest/") || manifest.query.length || manifest.fragment.length) return nil;
+    NSString *token = [manifest.path substringFromIndex:@"/ota/manifest/".length];
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"];
+    if (token.length != 43 || [token rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) return nil;
+    return [NSURL URLWithString:[@"https://am.ayakameow.cn/install/" stringByAppendingString:token]];
+}
+
 static NSString *AMAppUpdateProfileTeamFromData(NSData *data) {
     if (!data) return nil;
     NSData *start = [@"<?xml" dataUsingEncoding:NSUTF8StringEncoding], *end = [@"</plist>" dataUsingEncoding:NSUTF8StringEncoding];

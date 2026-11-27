@@ -12,6 +12,12 @@ int main(void) { @autoreleasepool {
     Require(AMAppUpdateTrustedURL([NSURL URLWithString:@"https://am.ayakameow.cn/ota/manifest/test"], @"/ota/manifest/"));
     for (NSString *text in @[@"http://am.ayakameow.cn/ota/manifest/test",@"https://am.ayakameow.cn.evil.example/ota/manifest/test",@"https://am.ayakameow.cn:444/ota/manifest/test",@"https://user@am.ayakameow.cn/ota/manifest/test",@"https://am.ayakameow.cn/not-a-manifest/test",@"itms-services://?url=https://am.ayakameow.cn/ota/manifest/test"])
         Require(!AMAppUpdateTrustedURL([NSURL URLWithString:text], @"/ota/manifest/"));
+    NSString *job = @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi012345_-";
+    Require(job.length == 43);
+    NSURL *manifest = [NSURL URLWithString:[@"https://am.ayakameow.cn/ota/manifest/" stringByAppendingString:job]];
+    Require([AMAppUpdateInstallPage(manifest).absoluteString isEqual:[@"https://am.ayakameow.cn/install/" stringByAppendingString:job]]);
+    for (NSString *text in @[@"https://other.example/ota/manifest/", @"https://am.ayakameow.cn/ota/manifest/short", [manifest.absoluteString stringByAppendingString:@"/suffix"], [manifest.absoluteString stringByAppendingString:@"?redirect=1"], [manifest.absoluteString stringByAppendingString:@"#fragment"], [manifest.absoluteString stringByAppendingString:@"%2F"], [manifest.absoluteString stringByReplacingOccurrencesOfString:@"https:" withString:@"http:"]])
+        Require(!AMAppUpdateInstallPage([NSURL URLWithString:text]));
     NSMutableDictionary *claim = [@{@"v":@1,@"bundleId":@"com.ayakameow.am",@"channel":@"production",@"release":@176,@"teamId":@"TESTTEAM",@"expires":@(NSDate.date.timeIntervalSince1970 + 60)} mutableCopy];
     Require(AMAppUpdateClaim(Token(claim), @"com.ayakameow.am", @"stable", 176) != nil);
     Require(AMAppUpdateClaim(Token(claim), @"com.ayakameow.am.beta", @"beta", 176) == nil);

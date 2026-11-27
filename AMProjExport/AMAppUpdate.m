@@ -3,6 +3,7 @@
 #import "AMAppUpdatePolicy.h"
 #import <Security/Security.h>
 #import <WebKit/WebKit.h>
+#import <SafariServices/SafariServices.h>
 
 static NSString *const AMUpdateOrigin = @"https://am.ayakameow.cn";
 
@@ -29,7 +30,7 @@ static NSString *AMUpdateProfileTeam(void) {
     return AMAppUpdateProfileTeamFromData(data);
 }
 
-@interface AMAppUpdateController : UIViewController <NSURLSessionTaskDelegate, WKNavigationDelegate, WKUIDelegate>
+@interface AMAppUpdateController : UIViewController <NSURLSessionTaskDelegate, WKNavigationDelegate, WKUIDelegate, SFSafariViewControllerDelegate>
 @property(nonatomic) NSURL *website;
 @property(nonatomic) BOOL retiredBeta;
 @property(nonatomic) UILabel *status;
@@ -50,6 +51,7 @@ static NSString *AMUpdateProfileTeam(void) {
 @property(nonatomic) BOOL stopped;
 @property(nonatomic) BOOL busy;
 @property(nonatomic) BOOL associationRulesFailed;
+@property(nonatomic) BOOL useInstallPage;
 @property(nonatomic) NSDate *deadline;
 @property(nonatomic) id foregroundObserver;
 @end
@@ -185,12 +187,37 @@ static NSString *AMUpdateProfileTeam(void) {
     }];
 }
 - (void)requestSystemInstall {
+    if (self.useInstallPage) { [self showInstallPage]; return; }
     NSURLComponents *components = [NSURLComponents componentsWithString:@"itms-services://"];
     components.queryItems = @[[NSURLQueryItem queryItemWithName:@"action" value:@"download-manifest"], [NSURLQueryItem queryItemWithName:@"url" value:self.manifest.absoluteString]];
     [self setBusy:YES message:@"正在请求系统安装确认…"];
     [UIApplication.sharedApplication openURL:components.URL options:@{} completionHandler:^(BOOL opened) {
-        [self setBusy:NO message:opened ? (self.retiredBeta ? @"正式版安装请求已交给系统。请确认安装，之后将备份导入正式版并检查工程，再删除 Beta。" : @"安装请求已交给系统，请在系统提示中确认。下载和安装进度请返回桌面查看；应用可能在覆盖安装时被系统关闭。") : @"系统未打开安装请求，请重试。如果仍无提示，请联系管理员检查设备签名与安装服务。"];
+        if (self.stopped) return;
+        if (!opened) {
+            NSLog(@"[AMAppUpdate] system install URL declined; using validated installation page");
+            self.useInstallPage = YES;
+            [self showInstallPage]; return;
+        }
+        [self setBusy:NO message:self.retiredBeta ? @"正式版安装请求已交给系统。请确认安装，之后将备份导入正式版并检查工程，再删除 Beta。" : @"安装请求已交给系统，请在系统提示中确认。下载和安装进度请返回桌面查看；应用可能在覆盖安装时被系统关闭。"];
     }];
+}
+- (void)showInstallPage {
+    NSURL *page = AMAppUpdateInstallPage(self.manifest);
+    if (self.stopped) return;
+    if (!page || self.presentedViewController || !self.viewIfLoaded.window) {
+        [self setBusy:NO message:@"暂时无法打开安装确认，请关闭此页后重新检查更新。"]; return;
+    }
+    // 仅复用刚通过 ready 校验的同一任务；登记页的 WebKit 限制保持独立。
+    SFSafariViewController *browser = [[SFSafariViewController alloc] initWithURL:page];
+    browser.delegate = self;
+    browser.preferredControlTintColor = [UIColor colorWithRed:0.06 green:0.57 blue:0.54 alpha:1];
+    [self.action setTitle:@"继续安装" forState:UIControlStateNormal];
+    [self setBusy:NO message:self.retiredBeta ? @"正式版已准备好，请在安装页点“安装到 iPhone”并确认。正式版单独安装，请先保留 Beta 和备份，确认工程导入正常后再删除 Beta。" : @"安装包已准备好，请在安装页点“安装到 iPhone”，再确认系统安装。正常覆盖更新会保留工程，请勿删除原应用。"];
+    [self presentViewController:browser animated:YES completion:nil];
+}
+- (void)safariViewControllerDidFinish:(SFSafariViewController *)controller {
+    [controller dismissViewControllerAnimated:YES completion:nil];
+    if (!self.stopped) [self setBusy:NO message:@"如已确认系统安装，请返回桌面查看进度；如未出现确认，可点“继续安装”重试。"];
 }
 - (NSString *)associationMessage {
     return self.retiredBeta ? @"Beta 已结束。请先备份工程，在下方登记设备后安装正式版。正式版会单独安装，确认工程导入正常后再删除 Beta。" : @"本次安装尚未关联网站签名服务。请在下方完成一次设备登记，再点“完成登记，继续更新”。证书由服务器保管，之后可直接在 App 内更新。";
